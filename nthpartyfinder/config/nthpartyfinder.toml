@@ -1,0 +1,324 @@
+# =============================================================================
+# nthpartyfinder Configuration
+# =============================================================================
+# This file contains all configurable settings for nthpartyfinder.
+# Location: ./config/nthpartyfinder.toml
+#
+# Docker usage: Mount this directory as a volume
+#   docker run -v /host/config:/app/config nthpartyfinder ...
+# =============================================================================
+
+# =============================================================================
+# HTTP Client Settings
+# =============================================================================
+[http]
+# User-Agent header sent with all HTTP requests
+user_agent = "nthpartyfinder/1.0 (Security Research Tool)"
+
+# Default timeout for HTTP requests in seconds
+request_timeout_secs = 30
+
+# =============================================================================
+# DNS Configuration
+# =============================================================================
+[dns]
+
+# DNS-over-HTTPS servers (tried in order until one succeeds)
+# These are used for secure, encrypted DNS lookups
+
+[[dns.doh_servers]]
+name = "Cloudflare DoH"
+url = "https://cloudflare-dns.com/dns-query"
+timeout_secs = 3
+
+[[dns.doh_servers]]
+name = "Google DoH"
+url = "https://dns.google/dns-query"
+timeout_secs = 3
+
+[[dns.doh_servers]]
+name = "Quad9 DoH"
+url = "https://dns.quad9.net/dns-query"
+timeout_secs = 4
+
+[[dns.doh_servers]]
+name = "OpenDNS DoH"
+url = "https://doh.opendns.com/dns-query"
+timeout_secs = 4
+
+# Traditional DNS servers (fallback when DoH fails)
+# Format: "ip:port"
+
+[[dns.dns_servers]]
+name = "Cloudflare"
+address = "1.1.1.1:53"
+timeout_secs = 2
+
+[[dns.dns_servers]]
+name = "Google"
+address = "8.8.8.8:53"
+timeout_secs = 2
+
+[[dns.dns_servers]]
+name = "Quad9"
+address = "9.9.9.9:53"
+timeout_secs = 3
+
+[[dns.dns_servers]]
+name = "OpenDNS"
+address = "208.67.222.222:53"
+timeout_secs = 3
+
+# =============================================================================
+# Regex Patterns for Dynamic TXT Record Parsing
+# =============================================================================
+# These patterns extract vendor names from unknown/new verification records.
+# They enable discovery of new vendors without requiring code changes.
+# All patterns use Rust regex syntax.
+
+[patterns.regex]
+
+# Strips SPF macro variables (e.g., %{ir}.%{v}.domain.com -> domain.com)
+spf_macro_strip = '%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?'
+
+# Matches: {provider}-domain-verification= or {provider}-verification=
+# Captures: provider name (group 1)
+domain_verification = '([a-zA-Z0-9]+)(?:-domain)?-verification='
+
+# Matches: verification-{provider}=
+# Captures: provider name (group 1)
+verification_prefix = 'verification-([a-zA-Z0-9]+)='
+
+# Matches: {provider}-site-verification=
+# Captures: provider name (group 1)
+site_verification = '([a-zA-Z0-9]+)-site-verification='
+
+# Matches: {PROVIDER}_verify_ (e.g., ZOOM_verify_)
+# Captures: provider name (group 1)
+provider_verify = '([A-Z0-9]+)_verify_'
+
+# Validates extracted domain format
+domain_validation = '^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$'
+
+# =============================================================================
+# Static Verification Patterns
+# =============================================================================
+# Maps known TXT record prefixes directly to vendor domains.
+# Used for exact-match lookups (faster than regex for known vendors).
+# Format: "pattern" = "domain"
+#
+# The pattern is matched against the beginning of TXT records.
+# When matched, the record is attributed to the specified domain.
+
+[patterns.verification]
+# Major platforms
+"google-site-verification=" = "google.com"
+"facebook-domain-verification=" = "facebook.com"
+"MS=" = "microsoft.com"
+"apple-domain-verification=" = "apple.com"
+"adobe-idp-site-verification=" = "adobe.com"
+
+# Payment & Finance
+"stripe-verification=" = "stripe.com"
+"docusign=" = "docusign.com"
+
+# Security & Certificates
+"globalsign-domain-verification=" = "globalsign.com"
+"have-i-been-pwned-verification=" = "haveibeenpwned.com"
+
+# Cloud & Infrastructure
+"dropbox-domain-verification=" = "dropbox.com"
+"heroku-domain-verification=" = "heroku.com"
+"atlassian-domain-verification=" = "atlassian.com"
+
+# Communication & Collaboration
+"ZOOM_verify_" = "zoom.us"
+"zoom-domain-verification=" = "zoom.us"
+"slack-domain-verification=" = "slack.com"
+"webex-domain-verification=" = "webex.com"
+"teamviewer-sso-verification=" = "teamviewer.com"
+"notion-domain-verification=" = "notion.so"
+"wework-site-verification=" = "wework.com"
+
+# Developer Tools
+"browserstack-domain-verification=" = "browserstack.com"
+"cursor-domain-verification" = "cursor.com"
+"postman-domain-verification=" = "postman.com"
+"jetbrains-domain-verification=" = "jetbrains.com"
+
+# Marketing & Analytics
+"hubspot-domain-verification=" = "hubspot.com"
+"klaviyo-site-verification=" = "klaviyo.com"
+"drift-domain-verification=" = "drift.com"
+"canva-site-verification=" = "canva.com"
+
+# AI & ML
+"openai-domain-verification=" = "openai.com"
+"anthropic-domain-verification" = "anthropic.com"
+"gc-ai-domain-verification" = "gc-ai.com"
+
+# Privacy & Compliance
+"onetrust-domain-verification=" = "onetrust.com"
+"datadome-domain-verify=" = "datadome.co"
+
+# Email Services
+"mgverify=" = "mailgun.com"
+
+# Device Management
+"jamf-site-verification=" = "jamf.com"
+
+# Other Services
+"intacct-esk=" = "sage.com"
+"neat-pulse-domain-verification" = "neat.co"
+"<whimsical=" = "whimsical.com"
+
+# =============================================================================
+# Provider Name to Domain Mappings
+# =============================================================================
+# Used by dynamic regex extraction: when a regex captures a provider name
+# (e.g., "anthropic" from "anthropic-domain-verification=xyz"), this mapping
+# resolves it to the vendor's actual domain (e.g., "anthropic.com").
+#
+# Format: provider_name = "domain"
+# Provider names should be lowercase.
+
+[patterns.provider_mappings]
+# Major platforms
+google = "google.com"
+microsoft = "microsoft.com"
+apple = "apple.com"
+facebook = "facebook.com"
+adobe = "adobe.com"
+
+# Cloud providers (aliases)
+aws = "amazon.com"
+gcp = "google.com"
+azure = "microsoft.com"
+
+# Payment & Finance
+stripe = "stripe.com"
+docusign = "docusign.com"
+
+# Security & Certificates
+globalsign = "globalsign.com"
+
+# Cloud & Infrastructure
+dropbox = "dropbox.com"
+heroku = "heroku.com"
+atlassian = "atlassian.com"
+salesforce = "salesforce.com"
+shopify = "shopify.com"
+
+# Communication & Collaboration
+zoom = "zoom.us"
+slack = "slack.com"
+webex = "webex.com"
+teamviewer = "teamviewer.com"
+notion = "notion.so"
+wework = "wework.com"
+whimsical = "whimsical.com"
+
+# Developer Tools
+browserstack = "browserstack.com"
+cursor = "cursor.com"
+postman = "postman.com"
+jetbrains = "jetbrains.com"
+
+# Marketing & Analytics
+hubspot = "hubspot.com"
+klaviyo = "klaviyo.com"
+drift = "drift.com"
+canva = "canva.com"
+zendesk = "zendesk.com"
+
+# AI & ML
+openai = "openai.com"
+anthropic = "anthropic.com"
+
+# Privacy & Compliance
+onetrust = "onetrust.com"
+datadome = "datadome.co"
+
+# Email Services
+mailgun = "mailgun.com"
+
+# Device Management
+jamf = "jamf.com"
+
+# Other Services
+intacct = "sage.com"
+neat = "neat.co"
+
+# =============================================================================
+# Analysis Resource Management
+# =============================================================================
+# Controls how nthpartyfinder manages resources during recursive vendor analysis.
+# These settings prevent overwhelming target servers and local system resources.
+
+[analysis]
+# Resource management strategy
+# Options:
+#   "unlimited" - Process ALL vendors at every depth (uses concurrency/rate limiting)
+#   "limits"    - Apply hard vendor count limits per depth (original behavior)
+#   "budget"    - Stop after processing a total number of vendors across all depths
+strategy = "unlimited"
+
+# Maximum concurrent vendor analyses at each depth level
+# Lower values = less resource usage but slower execution
+# Format: [depth_1, depth_2, depth_3, depth_4_plus]
+# Example: [50, 20, 10, 5] means 50 concurrent at depth 1, 20 at depth 2, etc.
+concurrency_per_depth = [50, 20, 10, 5]
+
+# Delay between starting new vendor analyses (milliseconds)
+# Helps prevent overwhelming target servers and reduces local resource spikes
+# Set to 0 for no delay (fastest but most resource-intensive)
+request_delay_ms = 100
+
+# Only used when strategy = "limits"
+# Maximum vendors to process at each depth level (0 = no limit for that depth)
+# Format: [depth_1, depth_2, depth_3, depth_4_plus]
+vendor_limits_per_depth = [0, 20, 10, 5]
+
+# Only used when strategy = "budget"
+# Maximum total vendors to process across ALL depth levels combined
+# Once this limit is reached, no new vendors are processed
+total_vendor_budget = 200
+
+# =============================================================================
+# Discovery Features
+# =============================================================================
+# Optional features for discovering additional vendor relationships through
+# subdomain enumeration and SaaS tenant probing.
+
+[discovery]
+# Enable subdomain discovery via subfinder
+# When enabled, runs subfinder against discovered vendor domains to find
+# additional subdomains that may reveal more third-party relationships
+# Default: false (disabled)
+subdomain_enabled = false
+
+# Path to the subfinder binary
+# Can be an absolute path or just "subfinder" if it's in your PATH
+# Default: "subfinder"
+subfinder_path = "subfinder"
+
+# Timeout for subfinder execution in seconds
+# Subfinder can take a while for domains with many subdomains
+# Default: 300 (5 minutes)
+subfinder_timeout_secs = 300
+
+# Enable SaaS tenant discovery
+# When enabled, probes known SaaS platforms to discover if the target
+# organization has active tenants (e.g., checking for okta.com/mycompany)
+# Default: false (disabled)
+saas_tenant_enabled = false
+
+# Timeout for tenant probe HTTP requests in seconds
+# Each probe makes an HTTP request to check for tenant existence
+# Default: 10
+tenant_probe_timeout_secs = 10
+
+# Maximum concurrent tenant probe requests
+# Higher values speed up probing but use more resources
+# Default: 20
+tenant_probe_concurrency = 20
