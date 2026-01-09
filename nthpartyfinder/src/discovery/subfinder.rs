@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::io::{BufReader, AsyncBufReadExt};
-use tracing::{debug, warn};
+use tracing::{debug, warn, info};
 
 pub struct SubfinderDiscovery {
     binary_path: PathBuf,
@@ -33,6 +33,102 @@ impl SubfinderDiscovery {
 
     pub fn is_available(&self) -> bool {
         self.binary_path.exists() || which::which(&self.binary_path).is_ok()
+    }
+
+    /// Get installation instructions for subfinder
+    pub fn get_installation_instructions() -> String {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+
+        let mut instructions = String::new();
+        instructions.push_str("\n╔══════════════════════════════════════════════════════════════════╗\n");
+        instructions.push_str("║           Subfinder Installation Required                        ║\n");
+        instructions.push_str("╚══════════════════════════════════════════════════════════════════╝\n\n");
+        instructions.push_str("Subfinder is a subdomain discovery tool by Project Discovery.\n");
+        instructions.push_str("Install it using one of these methods:\n\n");
+
+        // Go install (cross-platform)
+        instructions.push_str("📦 Using Go (recommended if Go is installed):\n");
+        instructions.push_str("   go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\n\n");
+
+        // Platform-specific instructions
+        match os {
+            "windows" => {
+                instructions.push_str("📦 Using Scoop (Windows):\n");
+                instructions.push_str("   scoop install subfinder\n\n");
+                instructions.push_str("📦 Using Chocolatey (Windows):\n");
+                instructions.push_str("   choco install subfinder\n\n");
+                instructions.push_str("📦 Direct Download (Windows):\n");
+                let download_arch = if arch == "x86_64" { "amd64" } else { arch };
+                instructions.push_str(&format!(
+                    "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_windows_{}.zip\n\n",
+                    "2.6.7", download_arch
+                ));
+            }
+            "macos" | "darwin" => {
+                instructions.push_str("📦 Using Homebrew (macOS):\n");
+                instructions.push_str("   brew install subfinder\n\n");
+                instructions.push_str("📦 Direct Download (macOS):\n");
+                let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
+                instructions.push_str(&format!(
+                    "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_darwin_{}.zip\n\n",
+                    "2.6.7", download_arch
+                ));
+            }
+            "linux" => {
+                instructions.push_str("📦 Using apt (Debian/Ubuntu with ProjectDiscovery repo):\n");
+                instructions.push_str("   sudo apt install subfinder\n\n");
+                instructions.push_str("📦 Direct Download (Linux):\n");
+                let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
+                instructions.push_str(&format!(
+                    "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_linux_{}.zip\n\n",
+                    "2.6.7", download_arch
+                ));
+            }
+            _ => {
+                instructions.push_str("📦 Direct Download:\n");
+                instructions.push_str("   https://github.com/projectdiscovery/subfinder/releases/latest\n\n");
+            }
+        }
+
+        instructions.push_str("🔗 Project Homepage: https://github.com/projectdiscovery/subfinder\n");
+        instructions.push_str("📚 Documentation: https://docs.projectdiscovery.io/tools/subfinder\n\n");
+        instructions.push_str("After installation, ensure subfinder is in your PATH or specify\n");
+        instructions.push_str("the path using --subfinder-path <path>\n");
+
+        instructions
+    }
+
+    /// Check if Go is installed
+    pub fn is_go_installed() -> bool {
+        std::process::Command::new("go")
+            .arg("version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Attempt to install subfinder using `go install`
+    pub async fn install_via_go() -> Result<bool> {
+        if !Self::is_go_installed() {
+            return Err(anyhow!("Go is not installed"));
+        }
+
+        info!("Installing subfinder via 'go install'...");
+
+        let output = tokio::process::Command::new("go")
+            .args(["install", "-v", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"])
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to run go install: {}", e))?;
+
+        if output.status.success() {
+            info!("Subfinder installed successfully!");
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!("go install failed: {}", stderr))
+        }
     }
 
     pub async fn discover(&self, domain: &str) -> Result<Vec<SubdomainResult>> {

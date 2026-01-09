@@ -201,16 +201,63 @@ async fn main() -> Result<()> {
         || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled) {
         let path = args.subfinder_path.clone()
             .unwrap_or_else(|| _app_config.discovery.subfinder_path.clone());
-        let discovery = SubfinderDiscovery::new(
-            PathBuf::from(path),
+        let mut discovery = SubfinderDiscovery::new(
+            PathBuf::from(path.clone()),
             std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
         );
         if discovery.is_available() {
             logger.info("Subdomain discovery enabled (subfinder found)");
             Some(discovery)
         } else {
-            logger.warn("Subdomain discovery requested but subfinder not found");
-            None
+            // Subfinder not found - show installation instructions
+            eprintln!("{}", SubfinderDiscovery::get_installation_instructions());
+
+            // Check if Go is installed and offer auto-installation
+            if SubfinderDiscovery::is_go_installed() {
+                eprintln!("Go is installed on your system. Would you like to install subfinder now?");
+                eprint!("Install subfinder via 'go install'? [y/N]: ");
+
+                let mut input = String::new();
+                if io::stdin().read_line(&mut input).is_ok() {
+                    let input = input.trim().to_lowercase();
+                    if input == "y" || input == "yes" {
+                        match SubfinderDiscovery::install_via_go().await {
+                            Ok(true) => {
+                                logger.info("Subfinder installed successfully!");
+                                // Re-check availability after installation
+                                // Try common Go binary paths
+                                let subfinder_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+                                let go_bin = dirs::home_dir()
+                                    .map(|h| h.join("go").join("bin").join(subfinder_name))
+                                    .unwrap_or_else(|| PathBuf::from(subfinder_name));
+                                discovery = SubfinderDiscovery::new(
+                                    go_bin,
+                                    std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                                );
+                                if discovery.is_available() {
+                                    logger.info("Subdomain discovery enabled (subfinder installed)");
+                                    Some(discovery)
+                                } else {
+                                    logger.warn("Subfinder was installed but not found in PATH. You may need to add ~/go/bin to your PATH.");
+                                    None
+                                }
+                            }
+                            Ok(false) | Err(_) => {
+                                logger.warn("Failed to install subfinder. Please install manually.");
+                                None
+                            }
+                        }
+                    } else {
+                        logger.info("Skipping subdomain discovery (subfinder not installed)");
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                logger.warn("Subdomain discovery requested but subfinder not found. See instructions above.");
+                None
+            }
         }
     } else {
         None
