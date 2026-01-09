@@ -1,0 +1,3206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nth Party Analysis Report - {{ summary.root_domain }}</title>
+    <link rel="stylesheet" href="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.css">
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --secondary-color: #1e40af;
+            --accent-color: #3b82f6;
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+            --dark-bg: #1f2937;
+            --dark-bg-secondary: #374151;
+            --light-bg: #f9fafb;
+            --text-primary: #111827;
+            --text-secondary: #6b7280;
+            --border-color: #e5e7eb;
+            --shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: var(--text-primary);
+            background-color: var(--light-bg);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding: 2rem;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            border-radius: 1rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+
+        .header .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            margin-bottom: 1rem;
+        }
+
+        .header .domain-info {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            backdrop-filter: blur(10px);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 3rem;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            box-shadow: var(--shadow);
+            text-align: center;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--primary-color);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .section {
+            background: white;
+            margin-bottom: 2rem;
+            border-radius: 1rem;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .section-header {
+            background: var(--primary-color);
+            color: white;
+            padding: 1.5rem;
+            position: relative;
+        }
+
+        .section-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .section-description {
+            opacity: 0.9;
+        }
+
+        .section-content {
+            padding: 2rem;
+        }
+
+        .graph-container {
+            height: 600px;
+            border: 2px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: white;
+            position: relative;
+        }
+
+        .graph-controls {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            z-index: 1000;
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 0.375rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 0.875rem;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--secondary-color);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--light-bg);
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .data-table th {
+            background: var(--light-bg);
+            font-weight: 600;
+            color: var(--text-primary);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.2s ease;
+        }
+
+        .data-table th:hover {
+            background: var(--border-color);
+        }
+
+        .data-table th.sortable::after {
+            content: ' ↕️';
+            opacity: 0.5;
+        }
+
+        .data-table th.sorted-asc::after {
+            content: ' ↑';
+            opacity: 1;
+        }
+
+        .data-table th.sorted-desc::after {
+            content: ' ↓';
+            opacity: 1;
+        }
+
+        .data-table tbody tr:hover {
+            background: var(--light-bg);
+        }
+
+        .data-table td code {
+            max-width: 300px;
+            display: inline-block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+
+        .data-table td code:hover {
+            max-width: none;
+            white-space: normal;
+            word-break: break-all;
+        }
+
+        .data-table td strong {
+            cursor: pointer;
+            color: var(--primary-color);
+            transition: color 0.2s ease;
+        }
+
+        .data-table td strong:hover {
+            color: var(--secondary-color);
+            text-decoration: underline;
+        }
+
+        .layer-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: white;
+        }
+
+        .layer-1 { background: var(--success-color); }
+        .layer-2 { background: var(--warning-color); }
+        .layer-3 { background: var(--danger-color); }
+        .layer-4 { background: var(--dark-bg); }
+        .layer-default { background: var(--text-secondary); }
+
+        .record-type-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: white;
+        }
+
+        .record-type-DNS\:\:TXT\:\:SPF { background: #8b5cf6; }
+        .record-type-DNS\:\:TXT\:\:VERIFICATION { background: #06b6d4; }
+        .record-type-DNS\:\:TXT\:\:DMARC { background: #ec4899; }
+        .record-type-DNS\:\:SUBDOMAIN { background: #f97316; }
+        .record-type-HTTP\:\:SUBPROCESSOR { background: #dc2626; }
+        .record-type-default { background: var(--text-secondary); }
+
+        .search-box {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid var(--border-color);
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            transition: border-color 0.2s ease;
+        }
+
+        .search-box:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .filters {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .filter-label {
+            font-weight: 500;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .filter-select {
+            padding: 0.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid var(--border-color);
+            margin-bottom: 1.5rem;
+        }
+
+        .tab {
+            padding: 1rem 1.5rem;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-weight: 500;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+            border-bottom: 2px solid transparent;
+        }
+
+        .tab.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+        }
+
+        .tab:hover {
+            color: var(--primary-color);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .legend {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+
+        .legend-color {
+            width: 1rem;
+            height: 1rem;
+            border-radius: 0.25rem;
+        }
+        
+        .expandable-hint {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 0.25rem;
+            font-size: 0.875rem;
+            z-index: 100;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 3rem;
+            padding: 2rem;
+            color: var(--text-secondary);
+            border-top: 1px solid var(--border-color);
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 1rem;
+            }
+            
+            .graph-container {
+                height: 400px;
+            }
+            
+            .filters {
+                flex-direction: column;
+            }
+        }
+
+        .tooltip {
+            position: absolute;
+            background: var(--dark-bg);
+            color: white;
+            padding: 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            z-index: 1000;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 2rem;
+            height: 2rem;
+            border: 2px solid var(--border-color);
+            border-top: 2px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .table-loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s ease;
+        }
+
+        .table-loading-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .table-container {
+            position: relative;
+        }
+
+        .filter-result-count {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: var(--light-bg);
+            border-radius: 0.25rem;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--light-bg);
+            border-radius: 0.5rem;
+        }
+
+        .pagination-btn {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--border-color);
+            background: white;
+            border-radius: 0.375rem;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s ease;
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .pagination-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination-btn.active {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .pagination-info {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin: 0 1rem;
+        }
+
+        .pagination-select {
+            padding: 0.375rem 0.5rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+            margin-left: 0.5rem;
+        }
+
+        .export-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--success-color);
+            color: white;
+            border: none;
+            border-radius: 0.375rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-left: auto;
+        }
+
+        .export-btn:hover {
+            background: #059669;
+        }
+
+        .table-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .table-toolbar .search-box {
+            flex: 1;
+            min-width: 200px;
+            margin-bottom: 0;
+        }
+
+        /* Evidence Modal Styles */
+        .evidence-modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+
+        .evidence-modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .evidence-modal {
+            background: white;
+            border-radius: 1rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+            max-width: 800px;
+            width: 90%;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            transform: scale(0.95) translateY(20px);
+            transition: transform 0.3s ease;
+        }
+
+        .evidence-modal-overlay.active .evidence-modal {
+            transform: scale(1) translateY(0);
+        }
+
+        .evidence-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            border-radius: 1rem 1rem 0 0;
+            color: white;
+        }
+
+        .evidence-modal-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .evidence-modal-close {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            transition: background 0.2s ease;
+        }
+
+        .evidence-modal-close:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .evidence-modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .evidence-section {
+            margin-bottom: 1.5rem;
+        }
+
+        .evidence-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .evidence-section-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .evidence-content {
+            background: var(--light-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+
+        .evidence-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .evidence-meta-item {
+            background: var(--light-bg);
+            padding: 0.75rem 1rem;
+            border-radius: 0.5rem;
+            border-left: 3px solid var(--primary-color);
+        }
+
+        .evidence-meta-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .evidence-meta-value {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-top: 0.25rem;
+        }
+
+        /* Validation Commands Section */
+        .validation-section {
+            border-top: 1px solid var(--border-color);
+            padding-top: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .validation-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .validation-tab {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border-color);
+            border-radius: 0.5rem;
+            background: white;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .validation-tab:hover {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+
+        .validation-tab.active {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+        }
+
+        .validation-tab-icon {
+            font-size: 1rem;
+        }
+
+        .validation-command-container {
+            background: #1f2937;
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+
+        .validation-command-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 1rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .validation-command-label {
+            color: #9ca3af;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .validation-copy-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: #9ca3af;
+            padding: 0.375rem 0.75rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+        }
+
+        .validation-copy-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+
+        .validation-copy-btn.copied {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .validation-command-code {
+            padding: 1rem;
+            color: #e5e7eb;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .validation-explanation {
+            padding: 1rem;
+            background: rgba(59, 130, 246, 0.1);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            color: #93c5fd;
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+
+        .validation-explanation code {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 0.125rem 0.375rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+        }
+
+        /* Evidence Cell Buttons */
+        .evidence-cell {
+            display: flex;
+            gap: 0.375rem;
+            align-items: center;
+        }
+
+        .evidence-preview {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .evidence-btn {
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.7rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: 1px solid;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .evidence-btn-reveal {
+            background: #eff6ff;
+            color: #2563eb;
+            border-color: #bfdbfe;
+        }
+
+        .evidence-btn-reveal:hover {
+            background: #2563eb;
+            color: white;
+            border-color: #2563eb;
+        }
+
+
+        /* Run in Browser Section */
+        .browser-validation {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: #fef3c7;
+            border: 1px solid #fcd34d;
+            border-radius: 0.5rem;
+        }
+
+        .browser-validation-title {
+            font-weight: 600;
+            color: #92400e;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .browser-validation-btn {
+            background: #f59e0b;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s ease;
+            margin-top: 0.5rem;
+        }
+
+        .browser-validation-btn:hover {
+            background: #d97706;
+        }
+
+        .browser-validation-result {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: white;
+            border-radius: 0.5rem;
+            font-family: monospace;
+            font-size: 0.875rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .browser-validation-code {
+            margin-top: 0.75rem;
+            padding: 0.75rem;
+            background: #1f2937;
+            border-radius: 0.375rem;
+            color: #e5e7eb;
+            font-family: monospace;
+            font-size: 0.75rem;
+            display: none;
+        }
+
+        .browser-validation-code.visible {
+            display: block;
+        }
+
+        .inspect-code-btn {
+            background: transparent;
+            border: 1px solid #d97706;
+            color: #92400e;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.75rem;
+            cursor: pointer;
+            margin-left: 0.5rem;
+        }
+
+        .inspect-code-btn:hover {
+            background: #fef3c7;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Nth Party Analysis Report</h1>
+            <div class="subtitle">Vendor Relationship Discovery & Risk Assessment</div>
+            <div class="domain-info">
+                <strong>{{ summary.root_domain }}</strong> ({{ summary.root_organization }})
+                <div style="margin-top: 0.5rem; font-size: 0.9rem; opacity: 0.8;">
+                    Generated on {{ summary.generated_at }}
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value">{{ summary.total_relationships }}</div>
+                <div class="stat-label">Total Relationships</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ summary.max_depth }}</div>
+                <div class="stat-label">Maximum Depth</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ summary.unique_domains }}</div>
+                <div class="stat-label">Unique Domains</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ summary.unique_organizations }}</div>
+                <div class="stat-label">Unique Organizations</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">📈 Analysis Insights</div>
+                <div class="section-description">Key findings from vendor relationship analysis</div>
+            </div>
+            <div class="section-content" id="insights-section">
+                <p class="loading">Analyzing relationships...</p>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">🌐 Interactive Vendor Relationship Graph</div>
+                <div class="section-description">Click on nodes to expand and explore vendor relationships. Drag to pan, scroll to zoom.</div>
+            </div>
+            <div class="section-content">
+                <div class="graph-controls">
+                    <button class="btn btn-primary" onclick="resetGraph()">Reset View</button>
+                    <button class="btn btn-secondary" onclick="expandAll()">Expand All</button>
+                    <button class="btn btn-secondary" onclick="collapseAll()">Collapse All</button>
+                    <button class="btn btn-secondary" onclick="togglePhysics()">Toggle Physics</button>
+                    <button class="btn btn-secondary" onclick="exportGraph()">Export PNG</button>
+                </div>
+                <div id="network-graph" class="graph-container">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading graph visualization...
+                    </div>
+                    <div class="expandable-hint" id="graph-hint">
+                        💡 Click on nodes with "▼" to expand vendors
+                    </div>
+                </div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #10b981;"></div>
+                        Root Domain
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #3b82f6;"></div>
+                        3rd Party Vendor
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #f59e0b;"></div>
+                        4th Party Vendor
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: #ef4444;"></div>
+                        5th+ Party Vendor
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">📊 Vendor Relationships Data</div>
+                <div class="section-description">Sortable and searchable table of all discovered vendor relationships</div>
+            </div>
+            <div class="section-content">
+                <div class="tabs" role="tablist" aria-label="Data view tabs">
+                    <button class="tab active" role="tab" aria-selected="true" aria-controls="all-tab" id="tab-all" onclick="showTab('all', event)" onkeydown="handleTabKeydown(event, 'all')">All Relationships</button>
+                    <button class="tab" role="tab" aria-selected="false" aria-controls="spf-tab" id="tab-spf" onclick="showTab('spf', event)" onkeydown="handleTabKeydown(event, 'spf')">Email Providers (SPF)</button>
+                    <button class="tab" role="tab" aria-selected="false" aria-controls="verification-tab" id="tab-verification" onclick="showTab('verification', event)" onkeydown="handleTabKeydown(event, 'verification')">Verified Services</button>
+                    <button class="tab" role="tab" aria-selected="false" aria-controls="subprocessors-tab" id="tab-subprocessors" onclick="showTab('subprocessors', event)" onkeydown="handleTabKeydown(event, 'subprocessors')">Subprocessors</button>
+                    <button class="tab" role="tab" aria-selected="false" aria-controls="summary-tab" id="tab-summary" onclick="showTab('summary', event)" onkeydown="handleTabKeydown(event, 'summary')">Summary by Organization</button>
+                </div>
+
+                <div id="all-tab" class="tab-content active" role="tabpanel" aria-labelledby="tab-all">
+                    <input type="text" class="search-box" id="search-all" placeholder="Search all relationships..." aria-label="Search all relationships" onkeyup="applyFilters('all-table')">
+                    <div class="filters">
+                        <div class="filter-group">
+                            <label class="filter-label">Layer:</label>
+                            <select class="filter-select" id="filter-layer-all" onchange="applyFilters('all-table')">
+                                <option value="">All Layers</option>
+                                {% for layer in 1..=summary.max_depth %}
+                                <option value="{{ layer }}">Layer {{ layer }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Record Type:</label>
+                            <select class="filter-select" id="filter-type-all" onchange="applyFilters('all-table')">
+                                <option value="">All Types</option>
+                                <option value="DNS::TXT::SPF">DNS::TXT::SPF</option>
+                                <option value="DNS::TXT::VERIFICATION">DNS::TXT::VERIFICATION</option>
+                                <option value="DNS::TXT::DMARC">DNS::TXT::DMARC</option>
+                                <option value="DNS::SUBDOMAIN">DNS::SUBDOMAIN</option>
+                                <option value="HTTP::SUBPROCESSOR">HTTP::SUBPROCESSOR</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="all-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" onclick="sortTable('all-table', 0)">Vendor Domain</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 1)">Organization</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 2)">Layer</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 3)">Record Type</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 4)">Customer</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 5)">Record Value</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 6)">Evidence</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for rel in relationships %}
+                                <tr data-layer="{{ rel.nth_party_layer }}" data-type="{{ rel.nth_party_record_type.as_hierarchy_string() }}">
+                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
+                                    <td>{{ rel.nth_party_organization }}</td>
+                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
+                                    <td><span class="record-type-badge record-type-{{ rel.nth_party_record_type.as_hierarchy_string() }}">{{ rel.nth_party_record_type.as_hierarchy_string() }}</span></td>
+                                    <td>{{ rel.nth_party_customer_domain }}</td>
+                                    <td><code>{{ rel.nth_party_record }}</code></td>
+                                    <td class="evidence-cell">
+                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="spf-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-spf">
+                    <input type="text" class="search-box" id="search-spf" placeholder="Search email providers..." aria-label="Search email providers" onkeyup="filterTable('spf-table', this.value)">
+                    <div class="table-container">
+                        <table class="data-table" id="spf-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" onclick="sortTable('spf-table', 0)">Email Provider</th>
+                                    <th class="sortable" onclick="sortTable('spf-table', 1)">Organization</th>
+                                    <th class="sortable" onclick="sortTable('spf-table', 2)">Layer</th>
+                                    <th class="sortable" onclick="sortTable('spf-table', 3)">Customer Domain</th>
+                                    <th class="sortable" onclick="sortTable('spf-table', 4)">SPF Record</th>
+                                    <th class="sortable" onclick="sortTable('spf-table', 5)">Evidence</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {%- for rel in relationships -%}
+                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "DNS::TXT::SPF" %}
+                                <tr>
+                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
+                                    <td>{{ rel.nth_party_organization }}</td>
+                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
+                                    <td>{{ rel.nth_party_customer_domain }}</td>
+                                    <td><code>{{ rel.nth_party_record }}</code></td>
+                                    <td class="evidence-cell">
+                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
+                                    </td>
+                                </tr>
+                                {%- endif -%}
+                                {%- endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="verification-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-verification">
+                    <input type="text" class="search-box" id="search-verification" placeholder="Search verified services..." aria-label="Search verified services" onkeyup="filterTable('verification-table', this.value)">
+                    <div class="table-container">
+                        <table class="data-table" id="verification-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" onclick="sortTable('verification-table', 0)">Service Provider</th>
+                                    <th class="sortable" onclick="sortTable('verification-table', 1)">Organization</th>
+                                    <th class="sortable" onclick="sortTable('verification-table', 2)">Layer</th>
+                                    <th class="sortable" onclick="sortTable('verification-table', 3)">Customer Domain</th>
+                                    <th class="sortable" onclick="sortTable('verification-table', 4)">Verification Record</th>
+                                    <th class="sortable" onclick="sortTable('verification-table', 5)">Evidence</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {%- for rel in relationships -%}
+                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "DNS::TXT::VERIFICATION" %}
+                                <tr>
+                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
+                                    <td>{{ rel.nth_party_organization }}</td>
+                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
+                                    <td>{{ rel.nth_party_customer_domain }}</td>
+                                    <td><code>{{ rel.nth_party_record }}</code></td>
+                                    <td class="evidence-cell">
+                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
+                                    </td>
+                                </tr>
+                                {%- endif -%}
+                                {%- endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="subprocessors-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-subprocessors">
+                    <input type="text" class="search-box" id="search-subprocessors" placeholder="Search subprocessors..." aria-label="Search subprocessors" onkeyup="filterTable('subprocessors-table', this.value)">
+                    <div class="filters">
+                        <div class="filter-group">
+                            <label class="filter-label">Layer:</label>
+                            <select class="filter-select" onchange="filterSubprocessorsByLayer('subprocessors-table', this.value)">
+                                <option value="">All Layers</option>
+                                {% for layer in 1..=summary.max_depth %}
+                                <option value="{{ layer }}">Layer {{ layer }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="filter-group">
+                            <label class="filter-label">Show Only:</label>
+                            <select class="filter-select" onchange="filterSubprocessorsByType('subprocessors-table', this.value)">
+                                <option value="">All Subprocessors</option>
+                                <option value="direct">Direct Subprocessors (from root domain)</option>
+                                <option value="nested">Nested Subprocessors (from 3rd+ parties)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table" id="subprocessors-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 0)">Subprocessor</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 1)">Organization</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 2)">Layer</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 3)">Parent Domain</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 4)">Parent Organization</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 5)">Subprocessor URL</th>
+                                    <th class="sortable" onclick="sortTable('subprocessors-table', 6)">Evidence</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {%- for rel in relationships -%}
+                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "HTTP::SUBPROCESSOR" %}
+                                <tr data-layer="{{ rel.nth_party_layer }}" data-parent-domain="{{ rel.nth_party_customer_domain }}" data-subprocessor-type="{% if rel.nth_party_layer == 1 %}direct{% else %}nested{% endif %}">
+                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
+                                    <td>{{ rel.nth_party_organization }}</td>
+                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
+                                    <td>{{ rel.nth_party_customer_domain }}</td>
+                                    <td>{{ rel.nth_party_customer_organization }}</td>
+                                    <td><code>{{ rel.nth_party_record }}</code></td>
+                                    <td class="evidence-cell">
+                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
+                                    </td>
+                                </tr>
+                                {%- endif -%}
+                                {%- endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="summary-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-summary">
+                    <input type="text" class="search-box" id="search-summary" placeholder="Search organizations..." aria-label="Search organizations" onkeyup="filterTable('summary-table', this.value)">
+                    <div class="table-container">
+                        <table class="data-table" id="summary-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" onclick="sortTable('summary-table', 0)">Organization</th>
+                                    <th class="sortable" onclick="sortTable('summary-table', 1)">Total Relationships</th>
+                                    <th class="sortable" onclick="sortTable('summary-table', 2)">Deepest Layer</th>
+                                    <th class="sortable" onclick="sortTable('summary-table', 3)">Record Types</th>
+                                    <th class="sortable" onclick="sortTable('summary-table', 4)">Domains</th>
+                                </tr>
+                            </thead>
+                            <tbody id="summary-tbody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Report generated by <strong>nthpartyfinder</strong> - A tool for discovering vendor relationships through DNS analysis</p>
+        </div>
+    </div>
+
+    <div class="tooltip" id="tooltip"></div>
+
+    <script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+    <script>
+        // Data from Rust
+        const relationshipsData = {{ relationships_json|safe }};
+        const summary = {{ summary_json|safe }};
+        
+        let network;
+        let physicsEnabled = true;
+        let currentSortColumn = {};
+
+        // Loading state management
+        function initializeLoadingOverlays() {
+            document.querySelectorAll('.table-container').forEach(container => {
+                if (!container.querySelector('.table-loading-overlay')) {
+                    const overlay = document.createElement('div');
+                    overlay.className = 'table-loading-overlay';
+                    overlay.innerHTML = '<div class="spinner"></div><span>Processing...</span>';
+                    container.appendChild(overlay);
+                }
+            });
+        }
+
+        function showTableLoading(tableId) {
+            const table = document.getElementById(tableId);
+            if (table) {
+                const container = table.closest('.table-container');
+                if (container) {
+                    const overlay = container.querySelector('.table-loading-overlay');
+                    if (overlay) overlay.classList.add('active');
+                }
+            }
+        }
+
+        function hideTableLoading(tableId) {
+            const table = document.getElementById(tableId);
+            if (table) {
+                const container = table.closest('.table-container');
+                if (container) {
+                    const overlay = container.querySelector('.table-loading-overlay');
+                    if (overlay) overlay.classList.remove('active');
+                }
+            }
+        }
+
+        function updateFilterCount(tableId) {
+            const table = document.getElementById(tableId);
+            if (!table) return;
+
+            const rows = table.querySelectorAll('tbody tr');
+            const visibleCount = Array.from(rows).filter(r => r.style.display !== 'none').length;
+            const totalCount = rows.length;
+
+            const container = table.closest('.table-container');
+            let countEl = container.parentElement.querySelector('.filter-result-count');
+
+            if (visibleCount < totalCount) {
+                if (!countEl) {
+                    countEl = document.createElement('div');
+                    countEl.className = 'filter-result-count';
+                    container.parentElement.insertBefore(countEl, container.nextSibling);
+                }
+                countEl.textContent = `Showing ${visibleCount} of ${totalCount} results`;
+            } else if (countEl) {
+                countEl.remove();
+            }
+        }
+
+        // Pagination system
+        const paginationState = {};
+        const DEFAULT_PAGE_SIZE = 50;
+
+        function initializePagination(tableId) {
+            const table = document.getElementById(tableId);
+            if (!table) return;
+
+            const rows = table.querySelectorAll('tbody tr');
+            const totalRows = rows.length;
+
+            // Only paginate if more than page size
+            if (totalRows <= DEFAULT_PAGE_SIZE) return;
+
+            paginationState[tableId] = {
+                currentPage: 1,
+                pageSize: DEFAULT_PAGE_SIZE,
+                totalRows: totalRows
+            };
+
+            createPaginationControls(tableId);
+            applyPagination(tableId);
+        }
+
+        function createPaginationControls(tableId) {
+            const table = document.getElementById(tableId);
+            const container = table.closest('.table-container');
+            const parent = container.parentElement;
+
+            // Remove existing pagination if present
+            const existingPagination = parent.querySelector('.pagination');
+            if (existingPagination) existingPagination.remove();
+
+            const state = paginationState[tableId];
+            const totalPages = Math.ceil(state.totalRows / state.pageSize);
+
+            const paginationDiv = document.createElement('div');
+            paginationDiv.className = 'pagination';
+            paginationDiv.id = `pagination-${tableId}`;
+
+            // Previous button
+            const prevBtn = document.createElement('button');
+            prevBtn.className = 'pagination-btn';
+            prevBtn.textContent = '← Previous';
+            prevBtn.onclick = () => goToPage(tableId, state.currentPage - 1);
+            paginationDiv.appendChild(prevBtn);
+
+            // Page numbers
+            const pageNumbers = document.createElement('span');
+            pageNumbers.className = 'pagination-info';
+            pageNumbers.id = `page-info-${tableId}`;
+            paginationDiv.appendChild(pageNumbers);
+
+            // Next button
+            const nextBtn = document.createElement('button');
+            nextBtn.className = 'pagination-btn';
+            nextBtn.textContent = 'Next →';
+            nextBtn.onclick = () => goToPage(tableId, state.currentPage + 1);
+            paginationDiv.appendChild(nextBtn);
+
+            // Page size selector
+            const sizeLabel = document.createElement('span');
+            sizeLabel.className = 'pagination-info';
+            sizeLabel.textContent = ' | Rows per page:';
+            paginationDiv.appendChild(sizeLabel);
+
+            const sizeSelect = document.createElement('select');
+            sizeSelect.className = 'pagination-select';
+            [25, 50, 100, 200].forEach(size => {
+                const option = document.createElement('option');
+                option.value = size;
+                option.textContent = size;
+                if (size === state.pageSize) option.selected = true;
+                sizeSelect.appendChild(option);
+            });
+            sizeSelect.onchange = (e) => changePageSize(tableId, parseInt(e.target.value));
+            paginationDiv.appendChild(sizeSelect);
+
+            parent.appendChild(paginationDiv);
+            updatePaginationControls(tableId);
+        }
+
+        function updatePaginationControls(tableId) {
+            const state = paginationState[tableId];
+            if (!state) return;
+
+            const paginationDiv = document.getElementById(`pagination-${tableId}`);
+            if (!paginationDiv) return;
+
+            const totalPages = Math.ceil(state.totalRows / state.pageSize);
+            const buttons = paginationDiv.querySelectorAll('.pagination-btn');
+            const pageInfo = document.getElementById(`page-info-${tableId}`);
+
+            // Update prev/next buttons
+            if (buttons[0]) buttons[0].disabled = state.currentPage <= 1;
+            if (buttons[1]) buttons[1].disabled = state.currentPage >= totalPages;
+
+            // Update page info
+            if (pageInfo) {
+                const start = (state.currentPage - 1) * state.pageSize + 1;
+                const end = Math.min(state.currentPage * state.pageSize, state.totalRows);
+                pageInfo.textContent = `Page ${state.currentPage} of ${totalPages} (${start}-${end} of ${state.totalRows})`;
+            }
+        }
+
+        function goToPage(tableId, page) {
+            const state = paginationState[tableId];
+            if (!state) return;
+
+            const totalPages = Math.ceil(state.totalRows / state.pageSize);
+            if (page < 1 || page > totalPages) return;
+
+            state.currentPage = page;
+            applyPagination(tableId);
+            updatePaginationControls(tableId);
+        }
+
+        function changePageSize(tableId, newSize) {
+            const state = paginationState[tableId];
+            if (!state) return;
+
+            state.pageSize = newSize;
+            state.currentPage = 1;
+            applyPagination(tableId);
+            updatePaginationControls(tableId);
+        }
+
+        function applyPagination(tableId) {
+            const state = paginationState[tableId];
+            if (!state) return;
+
+            const table = document.getElementById(tableId);
+            const rows = table.querySelectorAll('tbody tr');
+
+            const start = (state.currentPage - 1) * state.pageSize;
+            const end = start + state.pageSize;
+
+            rows.forEach((row, index) => {
+                // Only apply pagination to rows not hidden by filters
+                if (row.getAttribute('data-filtered-out') === 'true') {
+                    row.style.display = 'none';
+                } else {
+                    row.style.display = (index >= start && index < end) ? '' : 'none';
+                }
+            });
+        }
+
+        // CSV Export functionality
+        function exportTableToCSV(tableId, filename) {
+            const table = document.getElementById(tableId);
+            if (!table) return;
+
+            const rows = [];
+
+            // Get headers
+            const headers = [];
+            table.querySelectorAll('thead th').forEach(th => {
+                headers.push(escapeCSVField(th.textContent.trim().replace(/[↕️↑↓]/g, '').trim()));
+            });
+            rows.push(headers.join(','));
+
+            // Get visible data rows
+            table.querySelectorAll('tbody tr').forEach(tr => {
+                // Skip hidden rows (filtered out)
+                if (tr.style.display === 'none') return;
+
+                const cells = [];
+                tr.querySelectorAll('td').forEach(td => {
+                    cells.push(escapeCSVField(td.textContent.trim()));
+                });
+                rows.push(cells.join(','));
+            });
+
+            // Create and download the CSV
+            const csvContent = rows.join('\n');
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+
+            const link = document.createElement('a');
+            link.setAttribute('href', url);
+            link.setAttribute('download', filename || 'export.csv');
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+
+        function escapeCSVField(field) {
+            if (field === null || field === undefined) return '';
+            const str = String(field);
+            // If contains comma, quote, or newline, wrap in quotes and escape quotes
+            if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                return '"' + str.replace(/"/g, '""') + '"';
+            }
+            return str;
+        }
+
+        function addExportButton(tableId, tabId, exportFilename) {
+            const tab = document.getElementById(tabId);
+            if (!tab) return;
+
+            const searchBox = tab.querySelector('.search-box');
+            if (!searchBox) return;
+
+            // Create toolbar wrapper if it doesn't exist
+            let toolbar = tab.querySelector('.table-toolbar');
+            if (!toolbar) {
+                toolbar = document.createElement('div');
+                toolbar.className = 'table-toolbar';
+                searchBox.parentNode.insertBefore(toolbar, searchBox);
+                toolbar.appendChild(searchBox);
+            }
+
+            // Add export button
+            const exportBtn = document.createElement('button');
+            exportBtn.className = 'export-btn';
+            exportBtn.innerHTML = '📥 Export CSV';
+            exportBtn.onclick = () => exportTableToCSV(tableId, exportFilename);
+            toolbar.appendChild(exportBtn);
+        }
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', function() {
+            // Wait a bit for vis.js to load
+            setTimeout(function() {
+                initializeLoadingOverlays();
+                generateInsights();
+                initializeGraph();
+                generateSummaryTable();
+                setupTableInteractions();
+
+                // Initialize pagination for large tables
+                initializePagination('all-table');
+                initializePagination('spf-table');
+                initializePagination('verification-table');
+                initializePagination('subprocessors-table');
+                initializePagination('summary-table');
+
+                // Add export buttons to each tab
+                addExportButton('all-table', 'all-tab', 'all-relationships.csv');
+                addExportButton('spf-table', 'spf-tab', 'email-providers.csv');
+                addExportButton('verification-table', 'verification-tab', 'verified-services.csv');
+                addExportButton('subprocessors-table', 'subprocessors-tab', 'subprocessors.csv');
+                addExportButton('summary-table', 'summary-tab', 'organization-summary.csv');
+            }, 100);
+        });
+
+        function generateInsights() {
+            const insightsContainer = document.getElementById('insights-section');
+            insightsContainer.textContent = '';
+
+            // Calculate statistics
+            const orgCounts = {};
+            const vendorsByLayer = {};
+            const spfVendors = [];
+            const verificationVendors = [];
+            const subprocessorVendors = [];
+
+            relationshipsData.forEach(rel => {
+                orgCounts[rel.nth_party_organization] = (orgCounts[rel.nth_party_organization] || 0) + 1;
+                vendorsByLayer[rel.nth_party_layer] = (vendorsByLayer[rel.nth_party_layer] || 0) + 1;
+
+                // Check for both enum variant names (DnsTxtSpf) and hierarchy strings (DNS::TXT::SPF)
+                const recordType = rel.nth_party_record_type;
+                if (recordType === 'DnsTxtSpf' || recordType === 'DNS::TXT::SPF') {
+                    spfVendors.push(rel.nth_party_domain);
+                } else if (recordType === 'DnsTxtVerification' || recordType === 'DNS::TXT::VERIFICATION') {
+                    verificationVendors.push(rel.nth_party_domain);
+                } else if (recordType === 'HttpSubprocessor' || recordType === 'HTTP::SUBPROCESSOR') {
+                    subprocessorVendors.push(rel.nth_party_domain);
+                }
+            });
+
+            // Find most common vendor
+            const mostCommonVendor = Object.entries(orgCounts).sort((a, b) => b[1] - a[1])[0];
+
+            // Find deepest chain
+            const deepestLayer = Math.max(...Object.keys(vendorsByLayer).map(Number));
+
+            // Create insights
+            const insightsGrid = document.createElement('div');
+            insightsGrid.style.display = 'grid';
+            insightsGrid.style.gridTemplateColumns = 'repeat(auto-fit, minmax(250px, 1fr))';
+            insightsGrid.style.gap = '1rem';
+
+            const insights = [
+                {
+                    icon: '🏆',
+                    title: 'Most Common Vendor',
+                    value: mostCommonVendor ? mostCommonVendor[0] : 'N/A',
+                    subtitle: mostCommonVendor ? `${mostCommonVendor[1]} relationships` : ''
+                },
+                {
+                    icon: '🔗',
+                    title: 'Deepest Vendor Chain',
+                    value: `${deepestLayer} layers`,
+                    subtitle: `${vendorsByLayer[deepestLayer] || 0} vendors at this depth`
+                },
+                {
+                    icon: '📧',
+                    title: 'Email Service Providers',
+                    value: new Set(spfVendors).size,
+                    subtitle: 'Unique SPF domains'
+                },
+                {
+                    icon: '✅',
+                    title: 'Verified Services',
+                    value: new Set(verificationVendors).size,
+                    subtitle: 'Domain verifications'
+                }
+            ];
+
+            if (subprocessorVendors.length > 0) {
+                insights.push({
+                    icon: '🔄',
+                    title: 'Subprocessors',
+                    value: new Set(subprocessorVendors).size,
+                    subtitle: 'From subprocessor pages'
+                });
+            }
+
+            insights.forEach(insight => {
+                const card = document.createElement('div');
+                card.style.background = 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)';
+                card.style.padding = '1.5rem';
+                card.style.borderRadius = '0.5rem';
+                card.style.borderLeft = '4px solid var(--primary-color)';
+
+                const iconDiv = document.createElement('div');
+                iconDiv.style.fontSize = '2rem';
+                iconDiv.style.marginBottom = '0.5rem';
+                iconDiv.textContent = insight.icon;
+
+                const titleDiv = document.createElement('div');
+                titleDiv.style.fontSize = '0.875rem';
+                titleDiv.style.color = 'var(--text-secondary)';
+                titleDiv.style.fontWeight = '500';
+                titleDiv.style.marginBottom = '0.25rem';
+                titleDiv.textContent = insight.title;
+
+                const valueDiv = document.createElement('div');
+                valueDiv.style.fontSize = '1.5rem';
+                valueDiv.style.fontWeight = '700';
+                valueDiv.style.color = 'var(--primary-color)';
+                valueDiv.style.marginBottom = '0.25rem';
+                valueDiv.textContent = insight.value;
+
+                const subtitleDiv = document.createElement('div');
+                subtitleDiv.style.fontSize = '0.75rem';
+                subtitleDiv.style.color = 'var(--text-secondary)';
+                subtitleDiv.textContent = insight.subtitle;
+
+                card.appendChild(iconDiv);
+                card.appendChild(titleDiv);
+                card.appendChild(valueDiv);
+                card.appendChild(subtitleDiv);
+
+                insightsGrid.appendChild(card);
+            });
+
+            insightsContainer.appendChild(insightsGrid);
+        }
+
+        function initializeGraph() {
+            const container = document.getElementById('network-graph');
+            const loadingIndicator = container.querySelector('.loading');
+            
+            try {
+                console.log('Starting graph initialization...');
+                console.log('relationshipsData:', relationshipsData ? relationshipsData.length : 'undefined');
+                console.log('summary:', summary);
+                
+                // Check if vis is loaded with multiple attempts
+                if (typeof vis === 'undefined') {
+                    console.error('vis.js library not loaded, attempting fallback...');
+                    
+                    // Try loading from different CDNs
+                    const cdnUrls = [
+                        'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js',
+                        'https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js',
+                        'https://unpkg.com/vis@4.21.0/dist/vis.min.js'
+                    ];
+                    
+                    let attempts = 0;
+                    function tryLoadVis() {
+                        if (attempts >= cdnUrls.length) {
+                            loadingIndicator.innerHTML = '<div style="color: orange; text-align: center; padding: 2rem;"><h3>📊 Network Visualization Unavailable</h3><p>The interactive graph requires an internet connection to load the visualization library.</p><p style="margin-top: 1rem;"><strong>Don\'t worry!</strong> All the data is still available in the sortable tables below.</p><button class="btn btn-primary" onclick="location.reload()" style="margin-top: 1rem;">🔄 Try Again</button></div>';
+                            return;
+                        }
+                        
+                        loadingIndicator.innerHTML = '<div class="spinner"></div>Loading visualization library... (attempt ' + (attempts + 1) + ')';
+                        
+                        const script = document.createElement('script');
+                        script.src = cdnUrls[attempts];
+                        script.onload = function() {
+                            console.log('vis.js loaded from:', cdnUrls[attempts]);
+                            setTimeout(initializeGraph, 100); // Retry initialization
+                        };
+                        script.onerror = function() {
+                            attempts++;
+                            setTimeout(tryLoadVis, 1000); // Try next CDN after 1 second
+                        };
+                        document.head.appendChild(script);
+                    }
+                    
+                    tryLoadVis();
+                    return;
+                }
+
+                // Check if data is available
+                if (!relationshipsData || !summary) {
+                    console.error('Data not available');
+                    loadingIndicator.innerHTML = '<div style="color: red;">Error: Data not available</div>';
+                    return;
+                }
+
+                console.log('Initializing graph with', relationshipsData.length, 'relationships');
+                
+                // Prepare nodes and edges datasets
+                console.log('Creating data structures...');
+                window.allNodes = new vis.DataSet();
+                window.allEdges = new vis.DataSet();
+                window.visibleNodes = new vis.DataSet();
+                window.visibleEdges = new vis.DataSet();
+                window.expandedNodes = new Set();
+
+                // Per-layer vendor display limits (defaults: layer 1 = 100, layer 2 = 10, layer 3+ = 5)
+                window.LAYER_LIMITS = { 1: 100, 2: 10, 3: 5, default: 5 };
+
+                // Track how many vendors are currently shown per parent node
+                // Key: parentId, Value: { shown: number, total: number }
+                window.vendorVisibility = {};
+
+                console.log('Data structures created successfully');
+                
+                // Store all relationship data organized by parent
+                window.relationshipsByParent = {};
+                relationshipsData.forEach(function(rel) {
+                    if (!window.relationshipsByParent[rel.nth_party_customer_domain]) {
+                        window.relationshipsByParent[rel.nth_party_customer_domain] = [];
+                    }
+                    window.relationshipsByParent[rel.nth_party_customer_domain].push(rel);
+                });
+                
+                // Add root node
+                const rootChildCount = window.relationshipsByParent[summary.root_domain] ? window.relationshipsByParent[summary.root_domain].length : 0;
+                const rootNode = {
+                    id: summary.root_domain,
+                    label: summary.root_domain + '\n(' + summary.root_organization + ')' + (rootChildCount > 0 ? '\n▼ ' + rootChildCount + ' vendors' : ''),
+                    group: 'root',
+                    level: 0,
+                    title: 'Root Domain: ' + summary.root_domain + '<br>Organization: ' + summary.root_organization + (rootChildCount > 0 ? '<br><br>Click to expand ' + rootChildCount + ' vendors ▼' : ''),
+                    hasChildren: rootChildCount > 0,
+                    expanded: false
+                };
+                
+                window.allNodes.add(rootNode);
+                window.visibleNodes.add(rootNode);
+                console.log('Root node created:', rootNode.id, 'with', rootChildCount, 'children');
+                
+                // Build complete node and edge datasets (but don't show them yet)
+                const addedNodes = new Set([summary.root_domain]);
+                
+                relationshipsData.forEach(function(rel, index) {
+                    // Add vendor node if not already added
+                    if (!addedNodes.has(rel.nth_party_domain)) {
+                        // Count only direct children of this node (consistent with expand logic)
+                        const directChildren = relationshipsData.filter(function(r) {
+                            return r.nth_party_customer_domain === rel.nth_party_domain;
+                        });
+                        const childCount = directChildren.length;
+                        const hasChildren = childCount > 0;
+                        const nodeData = {
+                            id: rel.nth_party_domain,
+                            label: rel.nth_party_domain + '\n(' + rel.nth_party_organization + ')' + (hasChildren ? '\n▼ ' + childCount + ' vendors' : ''),
+                            group: 'layer' + rel.nth_party_layer,
+                            level: rel.nth_party_layer,
+                            title: 'Domain: ' + rel.nth_party_domain + '<br>Organization: ' + rel.nth_party_organization + '<br>Layer: ' + rel.nth_party_layer + (hasChildren ? '<br><br>Click to expand ' + childCount + ' vendors ▼' : ''),
+                            hasChildren: hasChildren,
+                            expanded: false
+                        };
+                        window.allNodes.add(nodeData);
+                        addedNodes.add(rel.nth_party_domain);
+                    }
+                    
+                    // Add customer node if not already added and it's not the root
+                    if (!addedNodes.has(rel.nth_party_customer_domain) && rel.nth_party_customer_domain !== summary.root_domain) {
+                        const customerLevel = rel.nth_party_layer - 1;
+                        const hasChildren = !!(window.relationshipsByParent[rel.nth_party_customer_domain] && window.relationshipsByParent[rel.nth_party_customer_domain].length > 0);
+                        const nodeData = {
+                            id: rel.nth_party_customer_domain,
+                            label: rel.nth_party_customer_domain,
+                            group: customerLevel === 0 ? 'root' : 'layer' + customerLevel,
+                            level: customerLevel,
+                            title: 'Customer Domain: ' + rel.nth_party_customer_domain + (hasChildren ? '<br><br>Click to expand vendors ▼' : ''),
+                            hasChildren: hasChildren,
+                            expanded: false
+                        };
+                        window.allNodes.add(nodeData);
+                        addedNodes.add(rel.nth_party_customer_domain);
+                    }
+                    
+                    // Add edge to complete dataset with unique ID including index
+                    window.allEdges.add({
+                        id: rel.nth_party_customer_domain + '->' + rel.nth_party_domain + '-' + rel.nth_party_record_type + '-' + index,
+                        from: rel.nth_party_customer_domain,
+                        to: rel.nth_party_domain,
+                        label: rel.nth_party_record_type,
+                        color: getEdgeColor(rel.nth_party_record_type),
+                        title: rel.nth_party_record_type + ': ' + rel.nth_party_record,
+                        arrows: 'to',
+                        layer: rel.nth_party_layer
+                    });
+                });
+                
+                const data = { nodes: window.visibleNodes, edges: window.visibleEdges };
+                
+                const options = {
+                    groups: {
+                        root: { color: { background: '#10b981', border: '#047857' }, font: { color: 'white' } },
+                        layer1: { color: { background: '#3b82f6', border: '#1d4ed8' }, font: { color: 'white' } },
+                        layer2: { color: { background: '#f59e0b', border: '#d97706' }, font: { color: 'white' } },
+                        layer3: { color: { background: '#ef4444', border: '#dc2626' }, font: { color: 'white' } },
+                        layer4: { color: { background: '#6b7280', border: '#374151' }, font: { color: 'white' } },
+                        loadMore: {
+                            color: { background: '#8b5cf6', border: '#7c3aed' },
+                            font: { color: 'white' },
+                            shape: 'ellipse',
+                            borderWidth: 3,
+                            borderDashes: [5, 5]
+                        }
+                    },
+                    nodes: {
+                        shape: 'box',
+                        margin: { top: 10, right: 10, bottom: 10, left: 10 },
+                        widthConstraint: { minimum: 120, maximum: 250 },
+                        heightConstraint: { minimum: 40 },
+                        font: { 
+                            size: 11, 
+                            face: 'Arial, sans-serif',
+                            color: 'white',
+                            strokeWidth: 1,
+                            strokeColor: 'rgba(0,0,0,0.3)'
+                        },
+                        borderWidth: 2,
+                        shadow: { enabled: true, size: 3, x: 2, y: 2 },
+                        chosen: {
+                            node: function(values, id, selected, hovering) {
+                                if (hovering) {
+                                    values.shadow = true;
+                                    values.shadowSize = 8;
+                                    values.shadowX = 3;
+                                    values.shadowY = 3;
+                                }
+                            }
+                        }
+                    },
+                    edges: {
+                        font: { 
+                            size: 9, 
+                            strokeWidth: 3, 
+                            strokeColor: 'white',
+                            face: 'Arial, sans-serif'
+                        },
+                        arrows: { to: { enabled: true, scaleFactor: 0.8 } },
+                        smooth: { 
+                            enabled: true, 
+                            type: 'cubicBezier',
+                            forceDirection: 'vertical',
+                            roundness: 0.4
+                        },
+                        width: 2,
+                        selectionWidth: 4,
+                        hoverWidth: 3,
+                        shadow: { enabled: false }
+                    },
+                    physics: {
+                        enabled: true,
+                        hierarchicalRepulsion: {
+                            centralGravity: 0.1,
+                            springLength: 200,
+                            springConstant: 0.005,
+                            nodeDistance: 150,
+                            damping: 0.3
+                        },
+                        maxVelocity: 30,
+                        minVelocity: 0.1,
+                        solver: 'hierarchicalRepulsion',
+                        stabilization: {
+                            enabled: true,
+                            iterations: 100,
+                            updateInterval: 25
+                        }
+                    },
+                    layout: {
+                        hierarchical: {
+                            enabled: true,
+                            levelSeparation: 200,
+                            nodeSpacing: 150,
+                            treeSpacing: 300,
+                            blockShifting: true,
+                            edgeMinimization: true,
+                            parentCentralization: true,
+                            direction: 'UD', // Top-Down for better readability
+                            sortMethod: 'directed',
+                            shakeTowards: 'leaves'
+                        }
+                    },
+                    interaction: {
+                        dragNodes: true,
+                        dragView: true,
+                        zoomView: true
+                    }
+                };
+                
+                network = new vis.Network(container, data, options);
+                
+                // Add event handlers
+                network.on('click', function(params) {
+                    if (params.nodes.length > 0) {
+                        const nodeId = params.nodes[0];
+                        expandOrCollapseNode(nodeId);
+                    }
+                });
+
+                network.on('stabilizationProgress', function(params) {
+                    const progress = Math.round((params.iterations / params.total) * 100);
+                    loadingIndicator.innerHTML = '<div class="spinner"></div>Layouting graph... ' + progress + '%';
+                });
+
+                network.on('stabilizationIterationsDone', function() {
+                    console.log('Graph stabilization complete');
+                    loadingIndicator.style.display = 'none';
+                });
+                
+                console.log('Graph initialized successfully');
+                console.log('Total nodes:', window.allNodes.length, 'Visible nodes:', window.visibleNodes.length);
+                console.log('Total edges:', window.allEdges.length, 'Visible edges:', window.visibleEdges.length);
+                
+            } catch (error) {
+                console.error('Error initializing graph:', error);
+                console.error('Stack trace:', error.stack);
+                loadingIndicator.innerHTML = '<div style="color: red;">Error loading graph: ' + error.message + '</div>';
+            }
+        }
+        
+        function getEdgeColor(recordType) {
+            switch (recordType) {
+                case 'DnsTxtSpf':
+                case 'DNS::TXT::SPF':
+                    return '#8b5cf6';
+                case 'DnsTxtVerification':
+                case 'DNS::TXT::VERIFICATION':
+                    return '#06b6d4';
+                case 'DnsSubdomain':
+                case 'DNS::SUBDOMAIN':
+                    return '#f97316';
+                case 'HttpSubprocessor':
+                case 'HTTP::SUBPROCESSOR':
+                    return '#22c55e';
+                case 'SubfinderDiscovery':
+                    return '#ec4899';
+                case 'SaasTenantProbe':
+                    return '#eab308';
+                default:
+                    return '#6b7280';
+            }
+        }
+        
+        function expandOrCollapseNode(nodeId) {
+            // Hide the hint on first interaction
+            const hint = document.getElementById('graph-hint');
+            if (hint) {
+                hint.style.display = 'none';
+            }
+
+            const node = window.allNodes.get(nodeId);
+            if (!node) {
+                return;
+            }
+
+            // Handle "load more" node clicks
+            if (node.isLoadMore) {
+                loadMoreVendors(nodeId);
+                return;
+            }
+
+            if (!node.hasChildren) {
+                // If no children, just focus on the node
+                network.focus(nodeId, { animation: true });
+                return;
+            }
+
+            if (window.expandedNodes.has(nodeId)) {
+                // Collapse node
+                collapseNode(nodeId);
+            } else {
+                // Expand node
+                expandNode(nodeId);
+            }
+        }
+        
+        function getLayerLimit(layer) {
+            return window.LAYER_LIMITS[layer] || window.LAYER_LIMITS.default;
+        }
+
+        function getLoadMoreNodeId(parentId) {
+            return 'loadMore_' + parentId;
+        }
+
+        function createOrUpdateLoadMoreNode(parentId, remainingCount, layer) {
+            const loadMoreId = getLoadMoreNodeId(parentId);
+            const existingNode = window.allNodes.get(loadMoreId);
+
+            if (remainingCount <= 0) {
+                // Remove load more node if no more vendors to show
+                if (existingNode) {
+                    window.allNodes.remove(loadMoreId);
+                    window.visibleNodes.remove(loadMoreId);
+                    // Remove the edge to load more node
+                    const edgeId = parentId + '->loadMore';
+                    window.allEdges.remove(edgeId);
+                    window.visibleEdges.remove(edgeId);
+                }
+                return;
+            }
+
+            const layerLimit = getLayerLimit(layer);
+            const nodeData = {
+                id: loadMoreId,
+                label: '+ ' + remainingCount + ' more\nvendors',
+                group: 'loadMore',
+                level: layer,
+                title: 'Click to load ' + Math.min(remainingCount, layerLimit) + ' more vendors<br>(Layer ' + layer + ', ' + remainingCount + ' total remaining)',
+                hasChildren: false,
+                expanded: false,
+                isLoadMore: true,
+                parentId: parentId,
+                remainingCount: remainingCount
+            };
+
+            if (existingNode) {
+                window.allNodes.update(nodeData);
+                if (window.visibleNodes.get(loadMoreId)) {
+                    window.visibleNodes.update(nodeData);
+                }
+            } else {
+                window.allNodes.add(nodeData);
+                window.visibleNodes.add(nodeData);
+
+                // Add edge from parent to load more node
+                const edgeData = {
+                    id: parentId + '->loadMore',
+                    from: parentId,
+                    to: loadMoreId,
+                    color: { color: '#8b5cf6', opacity: 0.6 },
+                    dashes: true,
+                    arrows: 'to',
+                    width: 1,
+                    layer: layer
+                };
+                window.allEdges.add(edgeData);
+                window.visibleEdges.add(edgeData);
+            }
+        }
+
+        function expandNode(nodeId) {
+            console.log('Expanding node:', nodeId);
+            const relationships = window.relationshipsByParent[nodeId] || [];
+
+            // Filter to show ONLY direct children (where this nodeId is the immediate parent)
+            const directChildren = relationships.filter(function(rel) {
+                return rel.nth_party_customer_domain === nodeId;
+            });
+
+            const totalChildren = directChildren.length;
+            console.log(`Found ${totalChildren} direct children for ${nodeId}`);
+
+            // Determine the layer for children (parent layer + 1, or 1 if root)
+            const parentNode = window.allNodes.get(nodeId);
+            const childLayer = (parentNode && parentNode.level !== undefined) ? parentNode.level + 1 : 1;
+            const layerLimit = getLayerLimit(childLayer);
+
+            // Initialize visibility tracking for this parent if not exists
+            if (!window.vendorVisibility[nodeId]) {
+                window.vendorVisibility[nodeId] = { shown: 0, total: totalChildren };
+            }
+
+            const visibility = window.vendorVisibility[nodeId];
+            const startIndex = visibility.shown;
+            const endIndex = Math.min(startIndex + layerLimit, totalChildren);
+            const vendorsToShow = directChildren.slice(startIndex, endIndex);
+
+            console.log(`Showing vendors ${startIndex} to ${endIndex - 1} (limit: ${layerLimit} for layer ${childLayer})`);
+
+            // Show limited vendors
+            vendorsToShow.forEach(function(rel) {
+                // Add vendor node if not already visible
+                const vendorNode = window.allNodes.get(rel.nth_party_domain);
+                if (vendorNode && !window.visibleNodes.get(rel.nth_party_domain)) {
+                    console.log(`Adding direct child: ${rel.nth_party_domain}`);
+                    window.visibleNodes.add(vendorNode);
+                }
+
+                // Add edge if not already visible - need to find edge with matching from/to
+                const matchingEdges = window.allEdges.get().filter(function(edge) {
+                    return edge.from === rel.nth_party_customer_domain && edge.to === rel.nth_party_domain;
+                });
+                matchingEdges.forEach(function(edge) {
+                    if (!window.visibleEdges.get(edge.id)) {
+                        window.visibleEdges.add(edge);
+                    }
+                });
+            });
+
+            // Update visibility tracking
+            visibility.shown = endIndex;
+
+            // Create or update "load more" collapsed node if there are remaining vendors
+            const remainingCount = totalChildren - visibility.shown;
+            createOrUpdateLoadMoreNode(nodeId, remainingCount, childLayer);
+
+            // Mark as expanded and update node appearance with better indicator
+            window.expandedNodes.add(nodeId);
+            const node = window.allNodes.get(nodeId);
+            const shownText = visibility.shown < totalChildren
+                ? `[${visibility.shown}/${totalChildren} vendors]`
+                : `[${totalChildren} vendors]`;
+            const updatedNode = {
+                ...node,
+                title: node.title.replace('Click to expand vendors ▼', `Click to collapse ${totalChildren} vendors ▲`),
+                expanded: true,
+                label: node.label.includes('[') ? node.label.replace(/\[.*vendors\]/, shownText) : node.label + `\n${shownText}`
+            };
+            window.allNodes.update(updatedNode);
+            window.visibleNodes.update(updatedNode);
+
+            // Fit the view to show new nodes
+            setTimeout(function() {
+                network.fit({ animation: { duration: 1000, easingFunction: 'easeInOutQuad' } });
+            }, 100);
+        }
+
+        function loadMoreVendors(loadMoreNodeId) {
+            const loadMoreNode = window.allNodes.get(loadMoreNodeId);
+            if (!loadMoreNode || !loadMoreNode.isLoadMore) {
+                return;
+            }
+
+            const parentId = loadMoreNode.parentId;
+            console.log('Loading more vendors for parent:', parentId);
+
+            // Remove the current load more node from visible set (will be recreated if needed)
+            window.visibleNodes.remove(loadMoreNodeId);
+            window.visibleEdges.remove(parentId + '->loadMore');
+
+            // Expand will add more vendors and recreate load more node if needed
+            expandNode(parentId);
+        }
+        
+        function collapseNode(nodeId) {
+            console.log('Collapsing node:', nodeId);
+            const relationships = window.relationshipsByParent[nodeId] || [];
+
+            // Collect nodes to hide (and their descendants)
+            const nodesToHide = new Set();
+            const edgesToHide = new Set();
+
+            function collectDescendants(parentId) {
+                const childRelationships = window.relationshipsByParent[parentId] || [];
+                // Filter to get only direct children of this parent
+                const directChildren = childRelationships.filter(function(rel) {
+                    return rel.nth_party_customer_domain === parentId;
+                });
+
+                directChildren.forEach(function(rel) {
+                    nodesToHide.add(rel.nth_party_domain);
+
+                    // Find all edges that go to this domain and mark them for hiding
+                    const matchingEdges = window.allEdges.get().filter(function(edge) {
+                        return edge.from === rel.nth_party_customer_domain && edge.to === rel.nth_party_domain;
+                    });
+                    matchingEdges.forEach(function(edge) {
+                        edgesToHide.add(edge.id);
+                    });
+
+                    // Recursively collect descendants if the child is also expanded
+                    if (window.expandedNodes.has(rel.nth_party_domain)) {
+                        collectDescendants(rel.nth_party_domain);
+                        window.expandedNodes.delete(rel.nth_party_domain);
+                        // Reset visibility tracking for descendant
+                        delete window.vendorVisibility[rel.nth_party_domain];
+                    }
+                });
+
+                // Also collect "load more" node for this parent if it exists
+                const loadMoreId = getLoadMoreNodeId(parentId);
+                if (window.allNodes.get(loadMoreId)) {
+                    nodesToHide.add(loadMoreId);
+                    edgesToHide.add(parentId + '->loadMore');
+                    // Remove from allNodes as well since it's dynamic
+                    window.allNodes.remove(loadMoreId);
+                    window.allEdges.remove(parentId + '->loadMore');
+                }
+            }
+
+            collectDescendants(nodeId);
+
+            // Remove nodes and edges from visible sets
+            window.visibleNodes.remove(Array.from(nodesToHide));
+            window.visibleEdges.remove(Array.from(edgesToHide));
+
+            // Reset visibility tracking for this node
+            delete window.vendorVisibility[nodeId];
+
+            // Mark as collapsed and update node appearance
+            window.expandedNodes.delete(nodeId);
+            const node = window.allNodes.get(nodeId);
+            // Count only direct children
+            const directChildren = relationships.filter(function(rel) {
+                return rel.nth_party_customer_domain === nodeId;
+            });
+            const childCount = directChildren.length;
+            // Remove any vendor count text from label (handles both [X vendors] and [X/Y vendors] formats)
+            const cleanLabel = node.label.replace(/\n\[[\d\/]+ vendors\]/, '');
+            const updatedNode = {
+                ...node,
+                title: node.title.replace(`Click to collapse ${childCount} vendors ▲`, 'Click to expand vendors ▼'),
+                expanded: false,
+                label: cleanLabel
+            };
+            window.allNodes.update(updatedNode);
+            window.visibleNodes.update(updatedNode);
+
+            // Stabilize the network
+            network.stabilize();
+        }
+        
+        function resetGraph() {
+            network.fit({ animation: true });
+            network.unselectAll();
+        }
+        
+        function expandAll() {
+            console.log('Expanding all nodes...');
+            // Get all nodes that have children but are not expanded
+            const nodesToExpand = window.allNodes.get().filter(function(node) {
+                return node.hasChildren && !window.expandedNodes.has(node.id);
+            });
+            
+            nodesToExpand.forEach(function(node) {
+                expandNode(node.id);
+            });
+            
+            setTimeout(function() {
+                network.fit({ animation: true });
+            }, 1000);
+        }
+        
+        function collapseAll() {
+            console.log('Collapsing all nodes...');
+            // Start from root and collapse everything
+            const expandedNodesList = Array.from(window.expandedNodes);
+            expandedNodesList.forEach(function(nodeId) {
+                if (nodeId === summary.root_domain) {
+                    collapseNode(nodeId);
+                }
+            });
+            
+            setTimeout(function() {
+                network.fit({ animation: true });
+            }, 1000);
+        }
+        
+        function togglePhysics() {
+            physicsEnabled = !physicsEnabled;
+            network.setOptions({ physics: { enabled: physicsEnabled } });
+        }
+        
+        function exportGraph() {
+            const canvas = network.canvas.frame.canvas;
+            const link = document.createElement('a');
+            link.download = summary.root_domain + '_vendor_graph.png';
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+        
+        function generateSummaryTable() {
+            const orgSummary = {};
+
+            relationshipsData.forEach(rel => {
+                if (!orgSummary[rel.nth_party_organization]) {
+                    orgSummary[rel.nth_party_organization] = {
+                        count: 0,
+                        maxLayer: 0,
+                        recordTypes: new Set(),
+                        domains: new Set()
+                    };
+                }
+
+                orgSummary[rel.nth_party_organization].count++;
+                orgSummary[rel.nth_party_organization].maxLayer = Math.max(
+                    orgSummary[rel.nth_party_organization].maxLayer,
+                    rel.nth_party_layer
+                );
+                orgSummary[rel.nth_party_organization].recordTypes.add(rel.nth_party_record_type);
+                orgSummary[rel.nth_party_organization].domains.add(rel.nth_party_domain);
+            });
+
+            const tbody = document.getElementById('summary-tbody');
+            tbody.textContent = '';
+
+            // Sort by count descending
+            const sortedEntries = Object.entries(orgSummary).sort((a, b) => b[1].count - a[1].count);
+
+            sortedEntries.forEach(([org, data]) => {
+                const row = document.createElement('tr');
+
+                // Organization cell
+                const orgCell = document.createElement('td');
+                const orgStrong = document.createElement('strong');
+                orgStrong.textContent = org;
+                orgCell.appendChild(orgStrong);
+                row.appendChild(orgCell);
+
+                // Count cell
+                const countCell = document.createElement('td');
+                countCell.textContent = data.count;
+                row.appendChild(countCell);
+
+                // Layer cell
+                const layerCell = document.createElement('td');
+                const layerBadge = document.createElement('span');
+                layerBadge.className = `layer-badge layer-${data.maxLayer}`;
+                layerBadge.textContent = `Layer ${data.maxLayer}`;
+                layerCell.appendChild(layerBadge);
+                row.appendChild(layerCell);
+
+                // Record types cell
+                const typesCell = document.createElement('td');
+                Array.from(data.recordTypes).forEach(type => {
+                    const typeBadge = document.createElement('span');
+                    typeBadge.className = `record-type-badge record-type-${type}`;
+                    typeBadge.textContent = type;
+                    typesCell.appendChild(typeBadge);
+                    typesCell.appendChild(document.createTextNode(' '));
+                });
+                row.appendChild(typesCell);
+
+                // Domains cell
+                const domainsCell = document.createElement('td');
+                domainsCell.textContent = Array.from(data.domains).join(', ');
+                row.appendChild(domainsCell);
+
+                tbody.appendChild(row);
+            });
+        }
+        
+        const TAB_ORDER = ['all', 'spf', 'verification', 'subprocessors', 'summary'];
+
+        function showTab(tabName, event) {
+            // Hide all tabs and update ARIA
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab[role="tab"]').forEach(tab => {
+                tab.classList.remove('active');
+                tab.setAttribute('aria-selected', 'false');
+                tab.setAttribute('tabindex', '-1');
+            });
+
+            // Show selected tab and update ARIA
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            const selectedTab = document.getElementById(`tab-${tabName}`);
+            if (selectedTab) {
+                selectedTab.classList.add('active');
+                selectedTab.setAttribute('aria-selected', 'true');
+                selectedTab.setAttribute('tabindex', '0');
+                selectedTab.focus();
+            } else if (event) {
+                event.currentTarget.classList.add('active');
+            }
+        }
+
+        function handleTabKeydown(event, currentTab) {
+            const currentIndex = TAB_ORDER.indexOf(currentTab);
+            let newIndex = currentIndex;
+
+            switch (event.key) {
+                case 'ArrowLeft':
+                case 'ArrowUp':
+                    event.preventDefault();
+                    newIndex = currentIndex > 0 ? currentIndex - 1 : TAB_ORDER.length - 1;
+                    break;
+                case 'ArrowRight':
+                case 'ArrowDown':
+                    event.preventDefault();
+                    newIndex = currentIndex < TAB_ORDER.length - 1 ? currentIndex + 1 : 0;
+                    break;
+                case 'Home':
+                    event.preventDefault();
+                    newIndex = 0;
+                    break;
+                case 'End':
+                    event.preventDefault();
+                    newIndex = TAB_ORDER.length - 1;
+                    break;
+                default:
+                    return;
+            }
+
+            const newTab = TAB_ORDER[newIndex];
+            showTab(newTab);
+        }
+        
+        function sortTable(tableId, columnIndex) {
+            const table = document.getElementById(tableId);
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+
+            // Show loading for large tables
+            const showLoading = rows.length > 100;
+            if (showLoading) {
+                showTableLoading(tableId);
+            }
+
+            // Use requestAnimationFrame to allow UI to update
+            requestAnimationFrame(() => {
+                const currentSort = currentSortColumn[tableId];
+                const isAscending = currentSort?.column !== columnIndex || currentSort?.direction === 'desc';
+
+                rows.sort((a, b) => {
+                    const aVal = a.children[columnIndex].textContent.trim();
+                    const bVal = b.children[columnIndex].textContent.trim();
+
+                    // Handle numeric values
+                    const aNum = parseFloat(aVal);
+                    const bNum = parseFloat(bVal);
+                    if (!isNaN(aNum) && !isNaN(bNum)) {
+                        return isAscending ? aNum - bNum : bNum - aNum;
+                    }
+
+                    // Handle string values
+                    return isAscending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                });
+
+                // Update sort indicators
+                table.querySelectorAll('th').forEach(th => {
+                    th.classList.remove('sorted-asc', 'sorted-desc');
+                });
+
+                const targetHeader = table.querySelectorAll('th')[columnIndex];
+                targetHeader.classList.add(isAscending ? 'sorted-asc' : 'sorted-desc');
+
+                currentSortColumn[tableId] = {
+                    column: columnIndex,
+                    direction: isAscending ? 'asc' : 'desc'
+                };
+
+                // Re-append sorted rows
+                rows.forEach(row => tbody.appendChild(row));
+
+                if (showLoading) {
+                    hideTableLoading(tableId);
+                }
+            });
+        }
+        
+        function applyFilters(tableId) {
+            const table = document.getElementById(tableId);
+            const rows = table.querySelectorAll('tbody tr');
+
+            // Show loading for large tables
+            const showLoading = rows.length > 100;
+            if (showLoading) {
+                showTableLoading(tableId);
+            }
+
+            // Get filter values
+            const searchBox = document.getElementById('search-' + tableId.replace('-table', ''));
+            const searchValue = searchBox ? searchBox.value.toLowerCase() : '';
+            const layerFilter = document.getElementById('filter-layer-' + tableId.replace('-table', ''));
+            const layerValue = layerFilter ? layerFilter.value : '';
+            const typeFilter = document.getElementById('filter-type-' + tableId.replace('-table', ''));
+            const typeValue = typeFilter ? typeFilter.value : '';
+
+            // Use requestAnimationFrame to allow UI to update
+            requestAnimationFrame(() => {
+                rows.forEach(row => {
+                    let show = true;
+
+                    // Apply search filter
+                    if (searchValue) {
+                        const text = row.textContent.toLowerCase();
+                        if (!text.includes(searchValue)) {
+                            show = false;
+                        }
+                    }
+
+                    // Apply layer filter
+                    if (show && layerValue) {
+                        if (row.getAttribute('data-layer') !== layerValue) {
+                            show = false;
+                        }
+                    }
+
+                    // Apply type filter
+                    if (show && typeValue) {
+                        if (row.getAttribute('data-type') !== typeValue) {
+                            show = false;
+                        }
+                    }
+
+                    row.style.display = show ? '' : 'none';
+                });
+
+                // Update filter count and hide loading
+                updateFilterCount(tableId);
+                if (showLoading) {
+                    hideTableLoading(tableId);
+                }
+            });
+        }
+
+        function filterTable(tableId, searchValue) {
+            applyFilters(tableId);
+        }
+
+        function filterByLayer(tableId, layer) {
+            applyFilters(tableId);
+        }
+
+        function filterByType(tableId, type) {
+            applyFilters(tableId);
+        }
+        
+        function filterSubprocessorsByLayer(tableId, layer) {
+            const table = document.getElementById(tableId);
+            const rows = table.querySelectorAll('tbody tr');
+            
+            rows.forEach(row => {
+                if (!layer || row.getAttribute('data-layer') === layer) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+        
+        function filterSubprocessorsByType(tableId, subprocessorType) {
+            const table = document.getElementById(tableId);
+            const rows = table.querySelectorAll('tbody tr');
+            
+            rows.forEach(row => {
+                if (!subprocessorType || row.getAttribute('data-subprocessor-type') === subprocessorType) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+        
+        function setupTableInteractions() {
+            // Add hover tooltips for table cells
+            document.querySelectorAll('.data-table td').forEach(cell => {
+                cell.addEventListener('mouseenter', function(e) {
+                    if (this.scrollWidth > this.clientWidth) {
+                        showTooltip(e, this.textContent);
+                    }
+                });
+
+                cell.addEventListener('mouseleave', hideTooltip);
+            });
+
+            // Add click handlers to vendor names to focus in graph
+            document.querySelectorAll('.data-table td strong').forEach(vendorName => {
+                vendorName.addEventListener('click', function() {
+                    const domain = this.textContent.trim();
+                    focusVendorInGraph(domain);
+                });
+            });
+        }
+
+        function focusVendorInGraph(domain) {
+            if (!network || !window.allNodes) {
+                alert('Graph not yet initialized. Please wait for the graph to load.');
+                return;
+            }
+
+            const node = window.allNodes.get(domain);
+            if (!node) {
+                alert(`Vendor "${domain}" not found in graph. It may be hidden.`);
+                return;
+            }
+
+            // Scroll to graph section
+            document.getElementById('network-graph').scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            // Wait for scroll to finish, then focus
+            setTimeout(function() {
+                // Expand parent nodes if needed to make this node visible
+                ensureNodeVisible(domain);
+
+                // Focus on the node
+                network.focus(domain, {
+                    scale: 1.5,
+                    animation: {
+                        duration: 1000,
+                        easingFunction: 'easeInOutQuad'
+                    }
+                });
+
+                // Select the node to highlight it
+                network.selectNodes([domain]);
+            }, 500);
+        }
+
+        function ensureNodeVisible(nodeId) {
+            // If node is not visible, we need to expand its parent
+            if (!window.visibleNodes.get(nodeId)) {
+                // Find the parent in relationships
+                const parentRel = relationshipsData.find(rel => rel.nth_party_domain === nodeId);
+                if (parentRel && parentRel.nth_party_customer_domain) {
+                    // Recursively ensure parent is visible
+                    ensureNodeVisible(parentRel.nth_party_customer_domain);
+                    // Then expand parent to show this node
+                    if (!window.expandedNodes.has(parentRel.nth_party_customer_domain)) {
+                        expandNode(parentRel.nth_party_customer_domain);
+                    }
+                }
+            }
+        }
+        
+        function showTooltip(event, text) {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.textContent = text;
+            tooltip.style.left = (event.clientX + window.scrollX + 10) + 'px';
+            tooltip.style.top = (event.clientY + window.scrollY - 30) + 'px';
+            tooltip.style.opacity = '1';
+        }
+        
+        function hideTooltip() {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.style.opacity = '0';
+        }
+
+        // Evidence Modal Functions - Using safe DOM methods
+        function createTextElement(tag, text, className) {
+            const el = document.createElement(tag);
+            el.textContent = text;
+            if (className) el.className = className;
+            return el;
+        }
+
+        function openEvidenceModal(relationshipIndex) {
+            const rel = relationshipsData[relationshipIndex];
+            if (!rel) return;
+
+            const modal = document.getElementById('evidence-modal-overlay');
+            const body = document.getElementById('evidence-modal-body');
+
+            // Clear previous content safely
+            while (body.firstChild) {
+                body.removeChild(body.firstChild);
+            }
+
+            // Build content using safe DOM methods
+            const metaGrid = document.createElement('div');
+            metaGrid.className = 'evidence-meta';
+
+            const metaItems = [
+                { label: 'Vendor Domain', value: rel.nth_party_domain },
+                { label: 'Organization', value: rel.nth_party_organization },
+                { label: 'Record Type', value: getReadableRecordType(rel.nth_party_record_type) },
+                { label: 'Customer Domain', value: rel.nth_party_customer_domain }
+            ];
+
+            metaItems.forEach(item => {
+                const metaItem = document.createElement('div');
+                metaItem.className = 'evidence-meta-item';
+                const label = createTextElement('div', item.label, 'evidence-meta-label');
+                const value = createTextElement('div', item.value, 'evidence-meta-value');
+                metaItem.appendChild(label);
+                metaItem.appendChild(value);
+                metaGrid.appendChild(metaItem);
+            });
+            body.appendChild(metaGrid);
+
+            // Evidence section
+            const evidenceSection = document.createElement('div');
+            evidenceSection.className = 'evidence-section';
+            const evidenceTitle = createTextElement('div', '📋 Full Evidence', 'evidence-section-title');
+            const evidenceContent = createTextElement('div', rel.evidence, 'evidence-content');
+            evidenceSection.appendChild(evidenceTitle);
+            evidenceSection.appendChild(evidenceContent);
+            body.appendChild(evidenceSection);
+
+            // Record value section
+            const recordSection = document.createElement('div');
+            recordSection.className = 'evidence-section';
+            const recordTitle = createTextElement('div', '📄 Record Value', 'evidence-section-title');
+            const recordContent = createTextElement('div', rel.nth_party_record, 'evidence-content');
+            recordSection.appendChild(recordTitle);
+            recordSection.appendChild(recordContent);
+            body.appendChild(recordSection);
+
+            // Validation section
+            const validationSection = document.createElement('div');
+            validationSection.className = 'validation-section';
+            const validationTitle = createTextElement('div', '🔍 Validate This Evidence', 'evidence-section-title');
+            validationSection.appendChild(validationTitle);
+
+            const validationDesc = createTextElement('p', 'Verify this finding yourself using the commands below. Select your platform:');
+            validationDesc.style.cssText = 'margin-bottom: 1rem; color: var(--text-secondary); font-size: 0.875rem;';
+            validationSection.appendChild(validationDesc);
+
+            // Tabs
+            const tabsContainer = document.createElement('div');
+            tabsContainer.className = 'validation-tabs';
+
+            const platforms = [
+                { id: 'browser', icon: '🌐', label: 'Browser', active: true },
+                { id: 'macos', icon: '🍎', label: 'macOS', active: false },
+                { id: 'windows', icon: '🪟', label: 'Windows', active: false },
+                { id: 'linux', icon: '🐧', label: 'Linux', active: false }
+            ];
+
+            platforms.forEach(platform => {
+                const tab = document.createElement('button');
+                tab.className = 'validation-tab' + (platform.active ? ' active' : '');
+                tab.onclick = function() { showValidationTab(this, platform.id + '-' + relationshipIndex); };
+                const iconSpan = createTextElement('span', platform.icon, 'validation-tab-icon');
+                tab.appendChild(iconSpan);
+                tab.appendChild(document.createTextNode(' ' + platform.label));
+                tabsContainer.appendChild(tab);
+            });
+            validationSection.appendChild(tabsContainer);
+
+            // Generate and add command containers
+            const commands = generateValidationCommands(rel, relationshipIndex);
+            platforms.forEach(platform => {
+                const contentDiv = document.createElement('div');
+                contentDiv.id = platform.id + '-' + relationshipIndex;
+                contentDiv.className = 'validation-content';
+                contentDiv.style.display = platform.active ? 'block' : 'none';
+                contentDiv.appendChild(commands[platform.id]);
+                validationSection.appendChild(contentDiv);
+            });
+
+            body.appendChild(validationSection);
+
+            modal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeEvidenceModal() {
+            const modal = document.getElementById('evidence-modal-overlay');
+            modal.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        function showValidationTab(button, tabId) {
+            const tabs = button.parentElement.querySelectorAll('.validation-tab');
+            tabs.forEach(t => t.classList.remove('active'));
+            button.classList.add('active');
+
+            const section = button.closest('.validation-section');
+            const contents = section.querySelectorAll('.validation-content');
+            contents.forEach(c => c.style.display = 'none');
+            document.getElementById(tabId).style.display = 'block';
+        }
+
+        function getReadableRecordType(type) {
+            const types = {
+                'DnsTxtSpf': 'DNS TXT SPF Record',
+                'DnsTxtVerification': 'DNS TXT Verification Record',
+                'DnsTxtDmarc': 'DNS TXT DMARC Record',
+                'DnsTxtDkim': 'DNS TXT DKIM Record',
+                'DnsSubdomain': 'DNS Subdomain',
+                'DnsCname': 'DNS CNAME Record',
+                'DnsMx': 'DNS MX Record',
+                'HttpSubprocessor': 'HTTP Subprocessor Page',
+                'SubfinderDiscovery': 'Subdomain Discovery (Subfinder)',
+                'SaasTenantProbe': 'SaaS Tenant Discovery',
+                'DNS::TXT::SPF': 'DNS TXT SPF Record',
+                'DNS::TXT::VERIFICATION': 'DNS TXT Verification Record',
+                'HTTP::SUBPROCESSOR': 'HTTP Subprocessor Page'
+            };
+            return types[type] || type;
+        }
+
+        function createCommandContainer(labelText, command, explanation) {
+            const container = document.createElement('div');
+            container.className = 'validation-command-container';
+
+            const header = document.createElement('div');
+            header.className = 'validation-command-header';
+
+            const label = createTextElement('span', labelText, 'validation-command-label');
+            header.appendChild(label);
+
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'validation-copy-btn';
+            copyBtn.textContent = '📋 Copy';
+            copyBtn.onclick = function() { copyCommand(this); };
+            header.appendChild(copyBtn);
+
+            container.appendChild(header);
+
+            const codeDiv = createTextElement('div', command, 'validation-command-code');
+            container.appendChild(codeDiv);
+
+            if (explanation) {
+                const explDiv = document.createElement('div');
+                explDiv.className = 'validation-explanation';
+                const strong = document.createElement('strong');
+                strong.textContent = 'How it works: ';
+                explDiv.appendChild(strong);
+                explDiv.appendChild(document.createTextNode(explanation));
+                container.appendChild(explDiv);
+            }
+
+            return container;
+        }
+
+        function createBrowserValidation(domain, searchPattern, isSubprocessor, subprocessorUrl, orgName) {
+            const container = document.createElement('div');
+            container.className = 'browser-validation';
+
+            const title = document.createElement('div');
+            title.className = 'browser-validation-title';
+            title.textContent = '🌐 Validate in Browser';
+
+            if (!isSubprocessor) {
+                const inspectBtn = document.createElement('button');
+                inspectBtn.className = 'inspect-code-btn';
+                inspectBtn.textContent = 'Inspect Code';
+                inspectBtn.onclick = function() { toggleInspectCode(this); };
+                title.appendChild(inspectBtn);
+            }
+            container.appendChild(title);
+
+            const desc = document.createElement('p');
+            desc.style.cssText = 'color: #92400e; font-size: 0.875rem; margin-bottom: 0.75rem;';
+
+            if (isSubprocessor) {
+                desc.textContent = 'Visit the subprocessor page directly to verify ' + domain + ' is listed:';
+                container.appendChild(desc);
+
+                if (subprocessorUrl) {
+                    const link = document.createElement('a');
+                    link.href = subprocessorUrl;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.className = 'browser-validation-btn';
+                    link.style.cssText = 'text-decoration: none; display: inline-block;';
+                    link.textContent = '🔗 Open Subprocessor Page';
+                    container.appendChild(link);
+                } else {
+                    const noUrl = createTextElement('p', 'No URL found in evidence.');
+                    noUrl.style.color = '#dc2626';
+                    container.appendChild(noUrl);
+                }
+
+                const tip = document.createElement('p');
+                tip.style.cssText = 'color: #92400e; font-size: 0.8rem; margin-top: 0.75rem;';
+                tip.textContent = '💡 Search for "' + orgName + '" on the page to find this vendor.';
+                container.appendChild(tip);
+            } else {
+                desc.textContent = 'Click the button below to query DNS TXT records for ' + domain + ' directly from this page.';
+                container.appendChild(desc);
+
+                const runBtn = document.createElement('button');
+                runBtn.className = 'browser-validation-btn';
+                runBtn.textContent = '🔍 Run DNS Lookup';
+                runBtn.onclick = function() { runBrowserDnsLookup(domain, searchPattern, this); };
+                container.appendChild(runBtn);
+
+                const codeBlock = document.createElement('div');
+                codeBlock.className = 'browser-validation-code';
+                codeBlock.textContent = '// This code uses Google\'s DNS-over-HTTPS API\nasync function lookupDnsTxt(domain) {\n    const response = await fetch(\n        `https://dns.google/resolve?name=${domain}&type=TXT`\n    );\n    const data = await response.json();\n    return data.Answer || [];\n}';
+                container.appendChild(codeBlock);
+
+                const resultDiv = document.createElement('div');
+                resultDiv.className = 'browser-validation-result';
+                resultDiv.style.display = 'none';
+                container.appendChild(resultDiv);
+            }
+
+            return container;
+        }
+
+        function generateValidationCommands(rel, relationshipIndex) {
+            const domain = rel.nth_party_customer_domain;
+            const recordType = rel.nth_party_record_type;
+            const record = rel.nth_party_record;
+            const evidence = rel.evidence;
+
+            const isSpf = recordType === 'DnsTxtSpf' || recordType === 'DNS::TXT::SPF';
+            const isVerification = recordType === 'DnsTxtVerification' || recordType === 'DNS::TXT::VERIFICATION';
+            const isSubprocessor = recordType === 'HttpSubprocessor' || recordType === 'HTTP::SUBPROCESSOR';
+            const isDmarc = recordType === 'DnsTxtDmarc' || recordType === 'DNS::TXT::DMARC';
+            const isSubfinder = recordType === 'SubfinderDiscovery';
+            const isSaasTenant = recordType === 'SaasTenantProbe';
+
+            let commands = {};
+            const searchPattern = record.substring(0, Math.min(50, record.length));
+
+            if (isSpf || isVerification || isDmarc) {
+                commands.browser = createBrowserValidation(domain, searchPattern, false, null, null);
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    'dig TXT ' + domain + ' +short | grep -i "' + searchPattern + '"',
+                    'dig TXT queries DNS TXT records, +short gives concise output, and grep filters for the specific record pattern.'
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    'Resolve-DnsName -Name ' + domain + ' -Type TXT | Select-Object -ExpandProperty Strings | Select-String "' + searchPattern + '"',
+                    'Resolve-DnsName queries DNS, -Type TXT gets TXT records, and Select-String filters for the pattern.'
+                );
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    'dig TXT ' + domain + ' +short | grep -i "' + searchPattern + '"',
+                    'dig TXT queries DNS TXT records, +short gives concise output, and grep -i does case-insensitive pattern matching.'
+                );
+            } else if (isSubprocessor) {
+                const urlMatch = evidence.match(/https?:\/\/[^\s)]+/);
+                const subprocessorUrl = urlMatch ? urlMatch[0] : '';
+
+                commands.browser = createBrowserValidation(rel.nth_party_domain, null, true, subprocessorUrl, rel.nth_party_organization);
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    'curl -s "' + (subprocessorUrl || 'URL_HERE') + '" | grep -i "' + rel.nth_party_organization + '"',
+                    'curl -s fetches the page silently, and grep -i searches for the organization name (case-insensitive).'
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    '(Invoke-WebRequest -Uri "' + (subprocessorUrl || 'URL_HERE') + '").Content | Select-String "' + rel.nth_party_organization + '"',
+                    'Invoke-WebRequest fetches the webpage, and Select-String searches for the organization name.'
+                );
+                commands.linux = commands.macos;
+            } else if (isSubfinder) {
+                // Subdomain discovery - validate the subdomain exists
+                const subdomainMatch = evidence.match(/Subdomain:\s*([^\s(]+)/);
+                const subdomain = subdomainMatch ? subdomainMatch[1] : rel.nth_party_domain;
+
+                const subfinderDiv = document.createElement('div');
+                subfinderDiv.className = 'browser-validation';
+                const subfinderTitle = createTextElement('div', '🔍 Subdomain Discovery Validation', 'browser-validation-title');
+                subfinderDiv.appendChild(subfinderTitle);
+                const subfinderDesc = createTextElement('p', 'This vendor was discovered via subdomain enumeration. The subdomain "' + subdomain + '" points to or is hosted by this vendor.');
+                subfinderDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
+                subfinderDiv.appendChild(subfinderDesc);
+                commands.browser = subfinderDiv;
+
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    'dig ' + subdomain + ' +short && dig ' + rel.nth_party_domain + ' +short',
+                    'Resolve the subdomain and vendor domain to verify the relationship.'
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    'Resolve-DnsName -Name ' + subdomain + '; Resolve-DnsName -Name ' + rel.nth_party_domain,
+                    'Resolve both the subdomain and vendor domain to verify they are related.'
+                );
+                commands.linux = commands.macos;
+            } else if (isSaasTenant) {
+                // SaaS tenant discovery - validate the tenant URL
+                const tenantUrlMatch = evidence.match(/Tenant URL:\s*([^\s(]+)/);
+                const tenantUrl = tenantUrlMatch ? tenantUrlMatch[1] : '';
+
+                const tenantDiv = document.createElement('div');
+                tenantDiv.className = 'browser-validation';
+                const tenantTitle = createTextElement('div', '🏢 SaaS Tenant Discovery Validation', 'browser-validation-title');
+                tenantDiv.appendChild(tenantTitle);
+                const tenantDesc = createTextElement('p', 'This vendor was discovered by probing SaaS tenant URLs. Visit the tenant URL to verify the organization uses this service.');
+                tenantDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
+                tenantDiv.appendChild(tenantDesc);
+                if (tenantUrl) {
+                    const tenantLink = document.createElement('a');
+                    tenantLink.href = tenantUrl;
+                    tenantLink.target = '_blank';
+                    tenantLink.textContent = tenantUrl;
+                    tenantLink.style.cssText = 'color: #3b82f6; text-decoration: underline; word-break: break-all;';
+                    tenantDiv.appendChild(tenantLink);
+                }
+                commands.browser = tenantDiv;
+
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    'curl -sI "' + (tenantUrl || 'TENANT_URL_HERE') + '" | head -20',
+                    'Fetch HTTP headers from the tenant URL to verify it exists and responds.'
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    'Invoke-WebRequest -Uri "' + (tenantUrl || 'TENANT_URL_HERE') + '" -Method Head | Select-Object StatusCode, StatusDescription',
+                    'Send a HEAD request to verify the tenant URL exists.'
+                );
+                commands.linux = commands.macos;
+            } else {
+                const manualDiv = document.createElement('div');
+                manualDiv.className = 'browser-validation';
+                const manualTitle = createTextElement('div', '🌐 Manual Validation Required', 'browser-validation-title');
+                manualDiv.appendChild(manualTitle);
+                const manualDesc = createTextElement('p', 'This record type (' + getReadableRecordType(recordType) + ') requires manual investigation. Review the evidence and record value above.');
+                manualDesc.style.cssText = 'color: #92400e; font-size: 0.875rem;';
+                manualDiv.appendChild(manualDesc);
+                commands.browser = manualDiv;
+
+                const genericCmd = createCommandContainer(
+                    'General DNS Lookup',
+                    'dig ANY ' + domain + ' +short',
+                    'Query all DNS records for the domain to investigate.'
+                );
+                commands.macos = genericCmd;
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    'Resolve-DnsName -Name ' + domain,
+                    'Query DNS records for the domain.'
+                );
+                commands.linux = genericCmd.cloneNode(true);
+            }
+
+            return commands;
+        }
+
+        async function runBrowserDnsLookup(domain, searchPattern, button) {
+            const container = button.closest('.browser-validation');
+            const resultDiv = container.querySelector('.browser-validation-result');
+
+            button.disabled = true;
+            button.textContent = '⏳ Looking up...';
+            resultDiv.style.display = 'block';
+            resultDiv.textContent = 'Querying DNS records...';
+
+            try {
+                const response = await fetch('https://dns.google/resolve?name=' + encodeURIComponent(domain) + '&type=TXT');
+                const data = await response.json();
+
+                // Clear result div safely
+                while (resultDiv.firstChild) {
+                    resultDiv.removeChild(resultDiv.firstChild);
+                }
+
+                if (data.Answer && data.Answer.length > 0) {
+                    const matchingRecords = data.Answer.filter(r =>
+                        r.data.toLowerCase().includes(searchPattern.toLowerCase())
+                    );
+
+                    if (matchingRecords.length > 0) {
+                        const successMsg = createTextElement('p', '✅ Record Found!');
+                        successMsg.style.cssText = 'color: #16a34a; font-weight: 600; margin-bottom: 0.5rem;';
+                        resultDiv.appendChild(successMsg);
+
+                        const matchLabel = createTextElement('p', 'Matching records:');
+                        matchLabel.style.cssText = 'font-size: 0.8rem; color: #666; margin-bottom: 0.5rem;';
+                        resultDiv.appendChild(matchLabel);
+
+                        const pre = document.createElement('pre');
+                        pre.style.cssText = 'background: #f0fdf4; padding: 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; overflow-x: auto;';
+                        pre.textContent = matchingRecords.map(r => r.data).join('\n');
+                        resultDiv.appendChild(pre);
+
+                        const countMsg = createTextElement('p', 'Found ' + data.Answer.length + ' total TXT record(s)');
+                        countMsg.style.cssText = 'font-size: 0.75rem; color: #666; margin-top: 0.5rem;';
+                        resultDiv.appendChild(countMsg);
+                    } else {
+                        const warnMsg = createTextElement('p', '⚠️ Pattern Not Found');
+                        warnMsg.style.cssText = 'color: #d97706; font-weight: 600; margin-bottom: 0.5rem;';
+                        resultDiv.appendChild(warnMsg);
+
+                        const allLabel = createTextElement('p', 'The specific pattern wasn\'t found, but here are all TXT records:');
+                        allLabel.style.cssText = 'font-size: 0.8rem; color: #666; margin-bottom: 0.5rem;';
+                        resultDiv.appendChild(allLabel);
+
+                        const pre = document.createElement('pre');
+                        pre.style.cssText = 'background: #fffbeb; padding: 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; overflow-x: auto; max-height: 150px;';
+                        pre.textContent = data.Answer.map(r => r.data).join('\n');
+                        resultDiv.appendChild(pre);
+                    }
+                } else {
+                    const errorMsg = createTextElement('p', '❌ No TXT Records Found');
+                    errorMsg.style.cssText = 'color: #dc2626; font-weight: 600;';
+                    resultDiv.appendChild(errorMsg);
+
+                    const errorDesc = createTextElement('p', 'No DNS TXT records were returned for this domain.');
+                    errorDesc.style.cssText = 'font-size: 0.8rem; color: #666;';
+                    resultDiv.appendChild(errorDesc);
+                }
+            } catch (error) {
+                while (resultDiv.firstChild) {
+                    resultDiv.removeChild(resultDiv.firstChild);
+                }
+
+                const errorMsg = createTextElement('p', '❌ Lookup Failed');
+                errorMsg.style.cssText = 'color: #dc2626; font-weight: 600;';
+                resultDiv.appendChild(errorMsg);
+
+                const errorDesc = createTextElement('p', error.message);
+                errorDesc.style.cssText = 'font-size: 0.8rem; color: #666;';
+                resultDiv.appendChild(errorDesc);
+
+                const fallback = createTextElement('p', 'Try using the terminal commands instead.');
+                fallback.style.cssText = 'font-size: 0.75rem; color: #666; margin-top: 0.5rem;';
+                resultDiv.appendChild(fallback);
+            }
+
+            button.disabled = false;
+            button.textContent = '🔍 Run DNS Lookup Again';
+        }
+
+        function toggleInspectCode(button) {
+            const codeBlock = button.closest('.browser-validation').querySelector('.browser-validation-code');
+            codeBlock.classList.toggle('visible');
+            button.textContent = codeBlock.classList.contains('visible') ? 'Hide Code' : 'Inspect Code';
+        }
+
+        function copyCommand(button) {
+            const container = button.closest('.validation-command-container');
+            const code = container.querySelector('.validation-command-code').textContent.trim();
+
+            navigator.clipboard.writeText(code).then(function() {
+                button.classList.add('copied');
+                button.textContent = '✅ Copied!';
+                setTimeout(function() {
+                    button.classList.remove('copied');
+                    button.textContent = '📋 Copy';
+                }, 2000);
+            }).catch(function(err) {
+                console.error('Failed to copy:', err);
+                button.textContent = '❌ Failed';
+            });
+        }
+
+        // Close modal on overlay click
+        document.addEventListener('DOMContentLoaded', function() {
+            const overlay = document.getElementById('evidence-modal-overlay');
+            if (overlay) {
+                overlay.addEventListener('click', function(e) {
+                    if (e.target === overlay) {
+                        closeEvidenceModal();
+                    }
+                });
+            }
+        });
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeEvidenceModal();
+            }
+        });
+    </script>
+
+    <!-- Evidence Modal -->
+    <div id="evidence-modal-overlay" class="evidence-modal-overlay">
+        <div class="evidence-modal">
+            <div class="evidence-modal-header">
+                <div class="evidence-modal-title">🔍 Evidence Details</div>
+                <button class="evidence-modal-close" onclick="closeEvidenceModal()">✕</button>
+            </div>
+            <div class="evidence-modal-body" id="evidence-modal-body">
+                <!-- Content populated by JavaScript using safe DOM methods -->
+            </div>
+        </div>
+    </div>
+</body>
+</html>
