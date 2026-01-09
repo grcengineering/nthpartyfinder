@@ -23,6 +23,8 @@ use cli::Args;
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
 use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
+use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus};
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -193,7 +195,50 @@ async fn main() -> Result<()> {
     if subprocessor_analyzer.is_some() {
         logger.debug("Initialized subprocessor analyzer with persistent cache");
     }
-    
+
+    // Initialize discovery modules if enabled
+    let subdomain_discovery = if args.enable_subdomain_discovery
+        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled) {
+        let path = args.subfinder_path.clone()
+            .unwrap_or_else(|| _app_config.discovery.subfinder_path.clone());
+        let discovery = SubfinderDiscovery::new(
+            PathBuf::from(path),
+            std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+        );
+        if discovery.is_available() {
+            logger.info("Subdomain discovery enabled (subfinder found)");
+            Some(discovery)
+        } else {
+            logger.warn("Subdomain discovery requested but subfinder not found");
+            None
+        }
+    } else {
+        None
+    };
+
+    let saas_tenant_discovery = if args.enable_saas_tenant_discovery
+        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled) {
+        let mut discovery = SaasTenantDiscovery::new(
+            std::time::Duration::from_secs(_app_config.discovery.tenant_probe_timeout_secs),
+            _app_config.discovery.tenant_probe_concurrency,
+        );
+        let platforms_path = Path::new("config/saas_platforms.json");
+        if platforms_path.exists() {
+            if let Err(e) = discovery.load_platforms(platforms_path) {
+                logger.warn(&format!("Failed to load SaaS platforms: {}", e));
+                None
+            } else {
+                logger.info("SaaS tenant discovery enabled");
+                Some(discovery)
+            }
+        } else {
+            logger.warn("SaaS tenant discovery requested but platforms file not found");
+            None
+        }
+    } else {
+        None
+    };
+
     // Configure concurrency based on analysis config
     // For recursive processing, use depth-1 concurrency as initial limit (CLI --parallel-jobs can override)
     let recursive_limit = _app_config.analysis.get_concurrency_for_depth(1).min(args.parallel_jobs);
@@ -219,6 +264,8 @@ async fn main() -> Result<()> {
         logger.clone(),
         subprocessor_analyzer.as_ref(),
         &_app_config.analysis,
+        subdomain_discovery.as_ref(),
+        saas_tenant_discovery.as_ref(),
     ).await?;
     
     let unique_vendors = results.iter()
@@ -322,6 +369,8 @@ async fn discover_nth_parties(
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     analysis_config: &AnalysisConfig,
+    subdomain_discovery: Option<&SubfinderDiscovery>,
+    saas_tenant_discovery: Option<&SaasTenantDiscovery>,
 ) -> Result<Vec<VendorRelationship>> {
     // Check if we've already processed this domain
     {
@@ -411,7 +460,67 @@ async fn discover_nth_parties(
                     }
                 }
             }
-            
+
+            // Run discovery methods at depth 1 only (for the root domain)
+            if current_depth == 1 {
+                // Subdomain discovery via subfinder
+                if let Some(subfinder) = subdomain_discovery {
+                    logger.info("Running subdomain discovery via subfinder...");
+                    match subfinder.discover(domain).await {
+                        Ok(subdomains) => {
+                            if !subdomains.is_empty() {
+                                logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
+                                for sub in subdomains {
+                                    // Extract base domain from subdomain
+                                    let sub_base = domain_utils::extract_base_domain(&sub.subdomain);
+                                    let domain_base = domain_utils::extract_base_domain(domain);
+                                    // Only add if it's a different domain (third-party)
+                                    if sub_base != domain_base {
+                                        all_vendor_domains.push(dns::VendorDomain {
+                                            domain: sub_base,
+                                            source_type: RecordType::SubfinderDiscovery,
+                                            raw_record: format!("Subdomain: {} (source: {})", sub.subdomain, sub.source),
+                                        });
+                                    }
+                                }
+                            } else {
+                                logger.debug("Subfinder found no subdomains");
+                            }
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("Subdomain discovery failed: {}", e));
+                        }
+                    }
+                }
+
+                // SaaS tenant discovery
+                if let Some(tenant_disc) = saas_tenant_discovery {
+                    logger.info("Running SaaS tenant discovery...");
+                    match tenant_disc.probe(domain).await {
+                        Ok(tenants) => {
+                            let confirmed_tenants: Vec<_> = tenants.iter()
+                                .filter(|t| matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely))
+                                .collect();
+                            if !confirmed_tenants.is_empty() {
+                                logger.info(&format!("Found {} likely/confirmed SaaS tenants", confirmed_tenants.len()));
+                                for tenant in confirmed_tenants {
+                                    all_vendor_domains.push(dns::VendorDomain {
+                                        domain: tenant.vendor_domain.clone(),
+                                        source_type: RecordType::SaasTenantProbe,
+                                        raw_record: format!("Tenant URL: {} ({:?})", tenant.tenant_url, tenant.status),
+                                    });
+                                }
+                            } else {
+                                logger.debug("No SaaS tenants discovered");
+                            }
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("SaaS tenant discovery failed: {}", e));
+                        }
+                    }
+                }
+            }
+
             // Initialize progress bar based on total work units found (only for root domain at depth 1)
             if current_depth == 1 {
                 let total_work_units = all_vendor_domains.len() as u64;
@@ -693,6 +802,7 @@ async fn process_vendor_domain(
     let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain);
     
     // Recursive analysis for deeper levels
+    // Note: Discovery methods (subdomain/SaaS tenant) only run at depth 1, so we pass None here
     match discover_nth_parties(
         &lookup_domain,
         max_depth,
@@ -709,6 +819,8 @@ async fn process_vendor_domain(
         logger.clone(),
         subprocessor_analyzer,
         analysis_config,
+        None,  // subdomain_discovery - only runs at depth 1
+        None,  // saas_tenant_discovery - only runs at depth 1
     ).await {
         Ok(sub_results) => {
             results.extend(sub_results);
