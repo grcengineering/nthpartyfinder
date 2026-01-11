@@ -18,12 +18,15 @@ mod domain_utils;
 mod verification_logger;
 mod subprocessor;
 mod logger;
+mod known_vendors;
+mod web_org;
+mod ner_org;
 
 use cli::Args;
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
 use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
-use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus};
+use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -72,6 +75,48 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    // Initialize known vendors database for reliable org lookups
+    match known_vendors::init() {
+        Ok(()) => {
+            if let Some(kv) = known_vendors::get() {
+                let stats = kv.stats();
+                if stats.base_count > 0 {
+                    eprintln!("✅ Known vendors database loaded: {} vendors", stats.base_count);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠️  Failed to load known vendors database: {}", e);
+            eprintln!("   Lookup will fall back to WHOIS and domain inference");
+            // Continue without known vendors - will fall back to WHOIS
+        }
+    }
+
+    // Initialize embedded NER for organization extraction (if feature enabled)
+    #[cfg(feature = "embedded-ner")]
+    {
+        if !args.disable_slm {  // Reuse the disable flag for backward compatibility
+            match ner_org::init_with_config(0.6) {
+                Ok(()) => {
+                    eprintln!("✅ NER organization extraction initialized (embedded GLiNER model)");
+                }
+                Err(e) => {
+                    if args.enable_slm {
+                        eprintln!("⚠️  NER init failed: {}", e);
+                    }
+                    // Not critical - continue without NER
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    {
+        if args.enable_slm {
+            eprintln!("⚠️  Embedded NER not available (compile with --features embedded-ner)");
+        }
+    }
 
     // Initialize new logging system
     let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
@@ -163,11 +208,18 @@ async fn main() -> Result<()> {
     }
     
     let mut discovered_vendors = HashMap::new();
+    let mut unverified_orgs: Vec<UnverifiedOrgMapping> = Vec::new();
 
     // Get initial organization for the root domain
-    if let Ok(root_org) = whois::get_organization(domain).await {
-        discovered_vendors.insert(domain.clone(), root_org);
+    if let Ok(org_result) = whois::get_organization_with_status(domain).await {
+        discovered_vendors.insert(domain.clone(), org_result.name.clone());
         logger.log_whois_lookup(domain, true);
+        if !org_result.is_verified {
+            unverified_orgs.push(UnverifiedOrgMapping {
+                domain: domain.clone(),
+                inferred_org: org_result.name,
+            });
+        }
     } else {
         logger.log_whois_lookup(domain, false);
     }
@@ -176,8 +228,9 @@ async fn main() -> Result<()> {
     let root_customer_org = discovered_vendors.get(domain)
         .unwrap_or(domain)
         .clone();
-    
+
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
+    let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
     let processed_domains = Arc::new(Mutex::new(HashSet::new()));
     let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
     
@@ -187,13 +240,15 @@ async fn main() -> Result<()> {
         _app_config.dns.doh_servers.len(), _app_config.dns.dns_servers.len()));
     
     // Create shared SubprocessorAnalyzer with persistent cache
-    let subprocessor_analyzer = if args.enable_subprocessor_analysis {
+    let subprocessor_enabled = args.enable_subprocessor_analysis
+        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled);
+    let subprocessor_analyzer = if subprocessor_enabled {
         Some(Arc::new(subprocessor::SubprocessorAnalyzer::new().await))
     } else {
         None
     };
     if subprocessor_analyzer.is_some() {
-        logger.debug("Initialized subprocessor analyzer with persistent cache");
+        logger.info("Subprocessor web page analysis enabled");
     }
 
     // Initialize discovery modules if enabled
@@ -209,54 +264,177 @@ async fn main() -> Result<()> {
             logger.info("Subdomain discovery enabled (subfinder found)");
             Some(discovery)
         } else {
-            // Subfinder not found - show installation instructions
-            eprintln!("{}", SubfinderDiscovery::get_installation_instructions());
+            // Subfinder not found - show interactive installation menu
+            eprintln!();
+            eprintln!("╔══════════════════════════════════════════════════════════════════╗");
+            eprintln!("║           Subfinder Not Found                                    ║");
+            eprintln!("╚══════════════════════════════════════════════════════════════════╝");
+            eprintln!();
+            eprintln!("Subfinder is required for subdomain discovery.");
+            eprintln!("It's a subdomain enumeration tool by Project Discovery.");
+            eprintln!();
 
-            // Check if Go is installed and offer auto-installation
-            if SubfinderDiscovery::is_go_installed() {
-                eprintln!("Go is installed on your system. Would you like to install subfinder now?");
-                eprint!("Install subfinder via 'go install'? [y/N]: ");
+            // Get available installation options for this platform
+            let options = SubfinderDiscovery::get_available_install_options();
 
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_ok() {
-                    let input = input.trim().to_lowercase();
-                    if input == "y" || input == "yes" {
-                        match SubfinderDiscovery::install_via_go().await {
-                            Ok(true) => {
-                                logger.info("Subfinder installed successfully!");
-                                // Re-check availability after installation
-                                // Try common Go binary paths
-                                let subfinder_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
-                                let go_bin = dirs::home_dir()
-                                    .map(|h| h.join("go").join("bin").join(subfinder_name))
-                                    .unwrap_or_else(|| PathBuf::from(subfinder_name));
-                                discovery = SubfinderDiscovery::new(
-                                    go_bin,
-                                    std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
-                                );
-                                if discovery.is_available() {
-                                    logger.info("Subdomain discovery enabled (subfinder installed)");
-                                    Some(discovery)
-                                } else {
-                                    logger.warn("Subfinder was installed but not found in PATH. You may need to add ~/go/bin to your PATH.");
-                                    None
-                                }
-                            }
-                            Ok(false) | Err(_) => {
-                                logger.warn("Failed to install subfinder. Please install manually.");
+            eprintln!("Would you like to install subfinder now?");
+            eprintln!();
+            for (i, option) in options.iter().enumerate() {
+                eprintln!("  [{}] {}", i + 1, option.display_name());
+            }
+            eprintln!();
+            eprint!("Select option [1-{}]: ", options.len());
+
+            let mut input = String::new();
+            let selected_option = if io::stdin().read_line(&mut input).is_ok() {
+                input.trim().parse::<usize>()
+                    .ok()
+                    .and_then(|n| if n >= 1 && n <= options.len() { Some(options[n - 1]) } else { None })
+            } else {
+                None
+            };
+
+            match selected_option {
+                Some(InstallOption::AutoDownload) => {
+                    eprintln!();
+                    eprintln!("Downloading subfinder...");
+                    match SubfinderDiscovery::download_and_install().await {
+                        Ok(install_path) => {
+                            logger.info(&format!("Subfinder installed to: {}", install_path.display()));
+                            discovery = SubfinderDiscovery::new(
+                                install_path,
+                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                            );
+                            if discovery.is_available() {
+                                logger.info("Subdomain discovery enabled (subfinder downloaded)");
+                                Some(discovery)
+                            } else {
+                                logger.warn("Subfinder was downloaded but failed verification");
                                 None
                             }
                         }
-                    } else {
-                        logger.info("Skipping subdomain discovery (subfinder not installed)");
-                        None
+                        Err(e) => {
+                            logger.warn(&format!("Failed to download subfinder: {}", e));
+                            eprintln!("Download failed: {}", e);
+                            eprintln!("You can try one of the other installation methods.");
+                            None
+                        }
                     }
-                } else {
+                }
+                Some(InstallOption::Skip) => {
+                    logger.info("Skipping subdomain discovery (subfinder not installed)");
                     None
                 }
-            } else {
-                logger.warn("Subdomain discovery requested but subfinder not found. See instructions above.");
-                None
+                Some(InstallOption::ManualDownload) => {
+                    let url = SubfinderDiscovery::get_download_url();
+                    eprintln!();
+                    eprintln!("Opening download page: {}", url);
+                    // Try to open the URL in the default browser
+                    #[cfg(target_os = "windows")]
+                    let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(url).spawn();
+                    #[cfg(target_os = "linux")]
+                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+
+                    eprintln!("After installing, run nthpartyfinder again.");
+                    logger.info("User chose manual download - continuing without subdomain discovery");
+                    None
+                }
+                Some(InstallOption::Go) => {
+                    eprintln!();
+                    eprintln!("Installing subfinder via 'go install'...");
+                    match SubfinderDiscovery::install_via_go().await {
+                        Ok(true) => {
+                            logger.info("Subfinder installed successfully!");
+                            // Re-check availability after installation
+                            let subfinder_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+                            let go_bin = dirs::home_dir()
+                                .map(|h| h.join("go").join("bin").join(subfinder_name))
+                                .unwrap_or_else(|| PathBuf::from(subfinder_name));
+                            discovery = SubfinderDiscovery::new(
+                                go_bin,
+                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                            );
+                            if discovery.is_available() {
+                                logger.info("Subdomain discovery enabled (subfinder installed)");
+                                Some(discovery)
+                            } else {
+                                logger.warn("Subfinder was installed but not found in PATH. You may need to add ~/go/bin to your PATH.");
+                                None
+                            }
+                        }
+                        Ok(false) => {
+                            logger.warn("Failed to install subfinder");
+                            None
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("Failed to install subfinder: {}", e));
+                            None
+                        }
+                    }
+                }
+                Some(InstallOption::Docker) => {
+                    eprintln!();
+                    eprintln!("Pulling subfinder Docker image...");
+                    match SubfinderDiscovery::install_via_docker().await {
+                        Ok(true) => {
+                            eprintln!();
+                            eprintln!("Docker image pulled successfully!");
+                            eprintln!();
+                            eprintln!("Note: Docker-based subfinder requires running via docker command.");
+                            eprintln!("nthpartyfinder cannot use Docker-based subfinder directly.");
+                            eprintln!();
+                            eprintln!("To use subfinder with Docker, run manually:");
+                            eprintln!("  docker run -it projectdiscovery/subfinder:latest -d <domain>");
+                            eprintln!();
+                            eprintln!("For native integration, install subfinder via Go or download the binary.");
+                            logger.info("Docker image pulled - continuing without subdomain discovery");
+                            None
+                        }
+                        Ok(false) => {
+                            logger.warn("Failed to pull subfinder Docker image");
+                            None
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("Failed to pull subfinder Docker image: {}", e));
+                            None
+                        }
+                    }
+                }
+                Some(InstallOption::Homebrew) => {
+                    eprintln!();
+                    eprintln!("Installing subfinder via Homebrew...");
+                    match SubfinderDiscovery::install_via_homebrew().await {
+                        Ok(true) => {
+                            logger.info("Subfinder installed successfully via Homebrew!");
+                            discovery = SubfinderDiscovery::new(
+                                PathBuf::from("subfinder"),
+                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                            );
+                            if discovery.is_available() {
+                                logger.info("Subdomain discovery enabled (subfinder installed)");
+                                Some(discovery)
+                            } else {
+                                logger.warn("Subfinder was installed but not found. You may need to restart your terminal.");
+                                None
+                            }
+                        }
+                        Ok(false) => {
+                            logger.warn("Failed to install subfinder via Homebrew");
+                            None
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("Failed to install subfinder via Homebrew: {}", e));
+                            None
+                        }
+                    }
+                }
+                None => {
+                    eprintln!("Invalid selection. Continuing without subdomain discovery.");
+                    logger.info("Skipping subdomain discovery (invalid selection)");
+                    None
+                }
             }
         }
     } else {
@@ -310,6 +488,7 @@ async fn main() -> Result<()> {
         &args,
         logger.clone(),
         subprocessor_analyzer.as_ref(),
+        subprocessor_enabled,
         &_app_config.analysis,
         subdomain_discovery.as_ref(),
         saas_tenant_discovery.as_ref(),
@@ -340,6 +519,36 @@ async fn main() -> Result<()> {
         let pending = analyzer.get_pending_mappings().await;
         if !pending.is_empty() {
             confirm_pending_mappings(&pending, analyzer, &logger).await?;
+        }
+    }
+
+    // Prompt user to confirm any organizations that were inferred from domain names
+    // Also detect additional inferred orgs by checking for the " Inc." pattern
+    {
+        let vendors = discovered_vendors.lock().await;
+        let mut all_unverified = unverified_orgs.lock().await.clone();
+
+        // Detect additional inferred organizations by pattern matching
+        for (domain, org) in vendors.iter() {
+            // Skip domains that are in the known vendors database (they're verified)
+            if known_vendors::lookup(domain).is_some() {
+                continue;
+            }
+            // Check if org looks like it was inferred from domain (e.g., "Myklpages Inc." from myklpages.com)
+            if is_likely_inferred_org(domain, org) {
+                // Check if not already tracked
+                if !all_unverified.iter().any(|u| u.domain == *domain) {
+                    all_unverified.push(UnverifiedOrgMapping {
+                        domain: domain.clone(),
+                        inferred_org: org.clone(),
+                    });
+                }
+            }
+        }
+        drop(vendors);
+
+        if !all_unverified.is_empty() {
+            confirm_unverified_organizations(&all_unverified, &discovered_vendors, &logger).await?;
         }
     }
 
@@ -415,6 +624,7 @@ async fn discover_nth_parties(
     args: &Args,
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    subprocessor_enabled: bool,
     analysis_config: &AnalysisConfig,
     subdomain_discovery: Option<&SubfinderDiscovery>,
     saas_tenant_discovery: Option<&SaasTenantDiscovery>,
@@ -474,7 +684,7 @@ async fn discover_nth_parties(
             }
             
             // Subprocessor web page analysis (if enabled)
-            if args.enable_subprocessor_analysis && subprocessor_analyzer.is_some() {
+            if subprocessor_enabled && subprocessor_analyzer.is_some() {
                 logger.debug(&format!("Starting subprocessor web page analysis for {}", domain));
                 
                 match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), subprocessor_analyzer.unwrap()).await {
@@ -517,18 +727,77 @@ async fn discover_nth_parties(
                         Ok(subdomains) => {
                             if !subdomains.is_empty() {
                                 logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
-                                for sub in subdomains {
-                                    // Extract base domain from subdomain
-                                    let sub_base = domain_utils::extract_base_domain(&sub.subdomain);
-                                    let domain_base = domain_utils::extract_base_domain(domain);
-                                    // Only add if it's a different domain (third-party)
-                                    if sub_base != domain_base {
-                                        all_vendor_domains.push(dns::VendorDomain {
-                                            domain: sub_base,
-                                            source_type: RecordType::SubfinderDiscovery,
-                                            raw_record: format!("Subdomain: {} (source: {})", sub.subdomain, sub.source),
-                                        });
+
+                                // Analyze TXT and CNAME records for each subdomain with concurrency limiting
+                                let subdomain_concurrency = 10; // Limit concurrent DNS queries
+                                let subdomain_chunks: Vec<_> = subdomains.chunks(subdomain_concurrency).collect();
+                                let mut subdomain_txt_vendors_found = 0;
+                                let mut subdomain_cname_vendors_found = 0;
+                                let domain_base = domain_utils::extract_base_domain(domain);
+
+                                for chunk in subdomain_chunks {
+                                    let chunk_futures: Vec<_> = chunk.iter().map(|sub| {
+                                        let subdomain = sub.subdomain.clone();
+                                        let source = sub.source.clone();
+                                        let dns_pool = dns_pool.clone();
+                                        let domain_base = domain_base.clone();
+                                        async move {
+                                            let mut txt_vendors = Vec::new();
+                                            let mut cname_vendors = Vec::new();
+
+                                            // Query TXT records for this subdomain
+                                            if let Ok(txt_records) = dns::get_txt_records_with_pool(&subdomain, &dns_pool).await {
+                                                if !txt_records.is_empty() {
+                                                    txt_vendors = dns::extract_vendor_domains_with_source(&txt_records);
+                                                }
+                                            }
+
+                                            // Query CNAME records to find third-party infrastructure
+                                            if let Ok(cname_records) = dns::get_cname_records_with_pool(&subdomain, &dns_pool).await {
+                                                for cname in cname_records {
+                                                    let cname_base = domain_utils::extract_base_domain(&cname);
+                                                    // Only add if CNAME points to different infrastructure
+                                                    if cname_base != domain_base {
+                                                        cname_vendors.push((cname.clone(), cname_base));
+                                                    }
+                                                }
+                                            }
+
+                                            (subdomain, source, txt_vendors, cname_vendors)
+                                        }
+                                    }).collect();
+
+                                    let chunk_results = futures::future::join_all(chunk_futures).await;
+
+                                    for (subdomain, source, txt_vendors, cname_vendors) in chunk_results {
+                                        // Add TXT-derived vendors
+                                        for vd in txt_vendors {
+                                            let vd_base = domain_utils::extract_base_domain(&vd.domain);
+                                            if vd_base != domain_base {
+                                                subdomain_txt_vendors_found += 1;
+                                                all_vendor_domains.push(dns::VendorDomain {
+                                                    domain: vd.domain,
+                                                    source_type: vd.source_type,
+                                                    raw_record: format!("Via subdomain {} (subfinder:{}): {}", subdomain, source, vd.raw_record),
+                                                });
+                                            }
+                                        }
+
+                                        // Add CNAME-derived vendors (third-party infrastructure)
+                                        for (cname_target, cname_base) in cname_vendors {
+                                            subdomain_cname_vendors_found += 1;
+                                            all_vendor_domains.push(dns::VendorDomain {
+                                                domain: cname_base,
+                                                source_type: RecordType::DnsCname,
+                                                raw_record: format!("Subdomain {} CNAMEs to {} (subfinder:{})", subdomain, cname_target, source),
+                                            });
+                                        }
                                     }
+                                }
+
+                                if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0 {
+                                    logger.info(&format!("Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
+                                        subdomain_txt_vendors_found, subdomain_cname_vendors_found));
                                 }
                             } else {
                                 logger.debug("Subfinder found no subdomains");
@@ -660,6 +929,7 @@ async fn discover_nth_parties(
                             args_ref,
                             logger_clone.clone(),
                             subprocessor_analyzer,
+                            subprocessor_enabled,
                             &analysis_config_inner,
                         ).await;
                         
@@ -744,6 +1014,7 @@ async fn process_vendor_domain(
     args: &Args,
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    subprocessor_enabled: bool,
     analysis_config: &AnalysisConfig,
 ) -> Vec<VendorRelationship> {
     let mut results = Vec::new();
@@ -763,11 +1034,11 @@ async fn process_vendor_domain(
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&base_domain) {
             drop(vendors);
-            match whois::get_organization(&base_domain).await {
-                Ok(org_name) => {
+            match whois::get_organization_with_status(&base_domain).await {
+                Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(base_domain.clone(), org_name);
-                    logger.log_whois_lookup(&base_domain, true);
+                    vendors.insert(base_domain.clone(), org_result.name);
+                    logger.log_whois_lookup(&base_domain, org_result.is_verified);
                 },
                 Err(e) => {
                     logger.debug(&format!("Failed to get organization for {}: {}", base_domain, e));
@@ -778,17 +1049,17 @@ async fn process_vendor_domain(
             }
         }
     }
-    
+
     // Ensure we have organization info for the customer domain
     {
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&customer_base_domain) {
             drop(vendors);
-            match whois::get_organization(&customer_base_domain).await {
-                Ok(org_name) => {
+            match whois::get_organization_with_status(&customer_base_domain).await {
+                Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(customer_base_domain.clone(), org_name);
-                    logger.log_whois_lookup(&customer_base_domain, true);
+                    vendors.insert(customer_base_domain.clone(), org_result.name);
+                    logger.log_whois_lookup(&customer_base_domain, org_result.is_verified);
                 },
                 Err(e) => {
                     logger.debug(&format!("Failed to get organization for customer {}: {}", customer_base_domain, e));
@@ -865,6 +1136,7 @@ async fn process_vendor_domain(
         args,
         logger.clone(),
         subprocessor_analyzer,
+        subprocessor_enabled,
         analysis_config,
         None,  // subdomain_discovery - only runs at depth 1
         None,  // saas_tenant_discovery - only runs at depth 1
@@ -916,6 +1188,7 @@ async fn discover_nth_parties_by_layers(
     args: &Args,
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    subprocessor_enabled: bool,
 ) -> Result<Vec<VendorRelationship>> {
     let mut all_results = Vec::new();
     let mut current_layer_domains = vec![domain.to_string()];
@@ -985,6 +1258,7 @@ async fn discover_nth_parties_by_layers(
                     args,
                     logger.clone(),
                     subprocessor_analyzer,
+                    subprocessor_enabled,
                 ).await {
                     Ok((domain_results, next_domains)) => {
                         logger.debug(&format!("✅ Layer {} - Domain {} produced {} results, {} next domains", 
@@ -1076,6 +1350,7 @@ async fn discover_single_domain(
     args: &Args,
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    subprocessor_enabled: bool,
 ) -> Result<(Vec<VendorRelationship>, Vec<String>)> {
     // Check if we've already processed this domain
     {
@@ -1121,7 +1396,7 @@ async fn discover_single_domain(
             }
             
             // Subprocessor analysis (if enabled)
-            if args.enable_subprocessor_analysis && subprocessor_analyzer.is_some() {
+            if subprocessor_enabled && subprocessor_analyzer.is_some() {
                 match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), subprocessor_analyzer.unwrap()).await {
                     Ok(subprocessor_domains) => {
                         let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains.into_iter()
@@ -1154,11 +1429,11 @@ async fn discover_single_domain(
                     let vendors = discovered_vendors.lock().await;
                     vendors.contains_key(&base_domain)
                 } {
-                    match whois::get_organization(&base_domain).await {
-                        Ok(org_name) => {
+                    match whois::get_organization_with_status(&base_domain).await {
+                        Ok(org_result) => {
                             let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(base_domain.clone(), org_name);
-                            logger.log_whois_lookup(&base_domain, true);
+                            vendors.insert(base_domain.clone(), org_result.name);
+                            logger.log_whois_lookup(&base_domain, org_result.is_verified);
                         }
                         Err(_) => {
                             let mut vendors = discovered_vendors.lock().await;
@@ -1353,6 +1628,215 @@ async fn confirm_pending_mappings(
 
     // Clear pending mappings
     analyzer.clear_pending_mappings().await;
+
+    println!();
+    Ok(())
+}
+
+/// Represents an organization that was inferred from domain name (not verified via WHOIS)
+#[derive(Debug, Clone)]
+pub struct UnverifiedOrgMapping {
+    /// The vendor domain
+    pub domain: String,
+    /// The inferred organization name (e.g., "Myklpages Inc." from myklpages.com)
+    pub inferred_org: String,
+}
+
+/// Check if an organization name was likely inferred from the domain name
+/// Returns true for patterns like "Myklpages Inc." from myklpages.com
+fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
+    // Extract the base domain name (without TLD)
+    let base = domain.split('.').next().unwrap_or(domain).to_lowercase();
+
+    // Check if org matches the pattern "{Base} Inc." where Base is the domain name with first letter capitalized
+    let org_lower = org.to_lowercase();
+
+    // Pattern 1: "{domain} inc." (e.g., "myklpages inc." from myklpages.com)
+    if org_lower == format!("{} inc.", base) {
+        return true;
+    }
+
+    // Pattern 2: Just the domain name (no " Inc." suffix) - also inferred
+    if org_lower == base {
+        return true;
+    }
+
+    // Pattern 3: Org is the domain itself (fallback when everything fails)
+    if org_lower == domain.to_lowercase() {
+        return true;
+    }
+
+    // Check if org contains only the domain base with common suffixes
+    let common_inferred_patterns = [
+        format!("{} inc", base),
+        format!("{} inc.", base),
+        format!("{}, inc", base),
+        format!("{}, inc.", base),
+        format!("{} llc", base),
+        format!("{} corp", base),
+        format!("{} corporation", base),
+        format!("{} company", base),
+        format!("{} co", base),
+        format!("{} ltd", base),
+    ];
+
+    common_inferred_patterns.iter().any(|pattern| org_lower == *pattern)
+}
+
+/// Prompt the user to confirm organizations that were inferred from domain names
+/// These organizations couldn't be verified via WHOIS (due to privacy, errors, etc.)
+async fn confirm_unverified_organizations(
+    unverified: &[UnverifiedOrgMapping],
+    discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,
+    logger: &AnalysisLogger,
+) -> Result<()> {
+    use std::io::Write;
+
+    if unverified.is_empty() {
+        return Ok(());
+    }
+
+    // Deduplicate by domain
+    let mut unique: HashMap<String, String> = HashMap::new();
+    for mapping in unverified {
+        unique.entry(mapping.domain.clone()).or_insert(mapping.inferred_org.clone());
+    }
+
+    if unique.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║         UNVERIFIED ORGANIZATION NAMES DETECTED                 ║");
+    println!("╠════════════════════════════════════════════════════════════════╣");
+    println!("║ The following organizations were inferred from domain names    ║");
+    println!("║ because WHOIS data was unavailable or protected by privacy.    ║");
+    println!("║ You may specify correct organization names to improve accuracy.║");
+    println!("║                                                                ║");
+    println!("║ Confirmed names are saved locally for future runs.             ║");
+    println!("╚════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let mut domains: Vec<_> = unique.iter().collect();
+    domains.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (idx, (domain, inferred_org)) in domains.iter().enumerate() {
+        println!("  [{}] {} → \"{}\"", idx + 1, domain, inferred_org);
+    }
+    println!();
+
+    println!("Options:");
+    println!("  [A] Accept ALL inferred names and save for future runs");
+    println!("  [R] Review each domain and specify correct organization names");
+    println!("  [S] Skip - use inferred names without saving");
+    println!();
+    print!("Your choice (A/R/S): ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim().to_uppercase();
+
+    match choice.as_str() {
+        "A" => {
+            // Save all inferred names as local overrides for future runs
+            let mut saved_count = 0;
+            if let Some(kv) = known_vendors::get() {
+                for (domain, inferred_org) in &domains {
+                    if let Err(e) = kv.add_override(domain, inferred_org) {
+                        logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+                    } else {
+                        saved_count += 1;
+                    }
+                }
+            }
+            println!("✅ Accepted all {} inferred organization names", unique.len());
+            if saved_count > 0 {
+                println!("   💾 Saved {} names to local database for future runs", saved_count);
+            }
+        }
+        "R" => {
+            println!();
+            println!("📋 Reviewing inferred organizations:");
+            println!("─────────────────────────────────────────────────────────────────");
+
+            let mut vendors = discovered_vendors.lock().await;
+            let mut updated_count = 0;
+            let mut saved_count = 0;
+
+            for (domain, inferred_org) in &domains {
+                println!();
+                println!("  Domain: {}", domain);
+                println!("  Inferred: \"{}\"", inferred_org);
+                print!("  [Y] Accept  [C] Custom name  [S] Skip: ");
+                io::stdout().flush()?;
+
+                let mut response = String::new();
+                io::stdin().read_line(&mut response)?;
+                let resp = response.trim().to_uppercase();
+
+                match resp.as_str() {
+                    "C" => {
+                        print!("    Enter correct organization name: ");
+                        io::stdout().flush()?;
+                        let mut custom = String::new();
+                        io::stdin().read_line(&mut custom)?;
+                        let custom_org = custom.trim();
+                        if !custom_org.is_empty() {
+                            vendors.insert(domain.to_string(), custom_org.to_string());
+
+                            // Save to local overrides for future runs
+                            if let Some(kv) = known_vendors::get() {
+                                if let Err(e) = kv.add_override(domain, custom_org) {
+                                    logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+                                } else {
+                                    saved_count += 1;
+                                }
+                            }
+
+                            logger.info(&format!("Updated organization for {}: {} -> {}", domain, inferred_org, custom_org));
+                            println!("    ✅ Updated: {} → \"{}\" (saved for future runs)", domain, custom_org);
+                            updated_count += 1;
+                        } else {
+                            println!("    ⏭️  Kept inferred name (empty input)");
+                        }
+                    }
+                    "Y" | "" => {
+                        // Accept inferred name and save for future runs
+                        if let Some(kv) = known_vendors::get() {
+                            if let Err(e) = kv.add_override(domain, inferred_org) {
+                                logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+                            } else {
+                                saved_count += 1;
+                            }
+                        }
+                        println!("    ✅ Accepted: \"{}\" (saved for future runs)", inferred_org);
+                    }
+                    _ => {
+                        println!("    ⏭️  Skipped (not saved)");
+                    }
+                }
+            }
+
+            if updated_count > 0 || saved_count > 0 {
+                println!();
+                if updated_count > 0 {
+                    println!("✅ Updated {} organization name{}", updated_count, if updated_count == 1 { "" } else { "s" });
+                }
+                if saved_count > 0 {
+                    println!("💾 Saved {} name{} to local database for future runs",
+                             saved_count, if saved_count == 1 { "" } else { "s" });
+                }
+                if updated_count > 0 {
+                    println!("   Note: Re-run analysis to regenerate reports with corrected names");
+                }
+            }
+        }
+        _ => {
+            println!("⏭️  Skipped - using inferred organization names (not saved)");
+        }
+    }
 
     println!();
     Ok(())

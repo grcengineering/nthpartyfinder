@@ -43,8 +43,12 @@ pub struct Args {
     pub log_verification_failures: bool,
 
     /// Enable subprocessor web page analysis for enhanced vendor discovery
-    #[arg(long, default_value = "false")]
+    #[arg(long)]
     pub enable_subprocessor_analysis: bool,
+
+    /// Disable subprocessor analysis (overrides config)
+    #[arg(long)]
+    pub disable_subprocessor_analysis: bool,
 
     /// Enable subdomain discovery via subfinder
     #[arg(long)]
@@ -73,6 +77,15 @@ pub struct Args {
     /// Export execution logs to a file (specify file path)
     #[arg(long)]
     pub log_file: Option<String>,
+
+    /// Enable NER (Named Entity Recognition) for organization name extraction
+    /// Requires compilation with --features embedded-ner
+    #[arg(long)]
+    pub enable_slm: bool,
+
+    /// Disable NER organization extraction (overrides config)
+    #[arg(long)]
+    pub disable_slm: bool,
 }
 
 impl Args {
