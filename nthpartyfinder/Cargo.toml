@@ -53,10 +53,11 @@ which = "6"
 zip = "0.6"
 # Embedded NER for organization extraction (replaces Ollama SLM)
 gline-rs = { version = "1.0", optional = true }
+orp = { version = "0.9.2", optional = true }
 
 [features]
 default = []
-embedded-ner = ["gline-rs"]
+embedded-ner = ["gline-rs", "orp"]
 
 [dev-dependencies]
 tokio-test = "0.4"

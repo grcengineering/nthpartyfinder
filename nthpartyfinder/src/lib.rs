@@ -9,5 +9,9 @@ pub mod domain_utils;
 pub mod subprocessor;
 pub mod verification_logger;
 pub mod logger;
+pub mod known_vendors;
+pub mod web_org;
+pub mod slm_org;
+pub mod ner_org;
 
 pub use vendor::VendorRelationship;

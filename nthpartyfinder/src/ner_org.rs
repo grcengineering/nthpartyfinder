@@ -1,0 +1,258 @@
+//! Embedded NER-based organization extraction
+//!
+//! This module uses GLiNER (via gline-rs) to extract organization names
+//! from web page content. The model is embedded in the binary at compile time.
+
+#[cfg(feature = "embedded-ner")]
+use anyhow::{Result, anyhow};
+#[cfg(feature = "embedded-ner")]
+use tracing::{debug, info};
+#[cfg(feature = "embedded-ner")]
+use std::io::Write;
+#[cfg(feature = "embedded-ner")]
+use std::sync::OnceLock;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::GLiNER;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::pipeline::span::SpanMode;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::params::Parameters;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::input::text::TextInput;
+#[cfg(feature = "embedded-ner")]
+use orp::params::RuntimeParameters;
+
+/// Model bytes embedded at compile time
+#[cfg(feature = "embedded-ner")]
+static MODEL_BYTES: &[u8] = include_bytes!("../models/gliner_small.onnx");
+
+#[cfg(feature = "embedded-ner")]
+static TOKENIZER_BYTES: &[u8] = include_bytes!("../models/tokenizer.json");
+
+#[cfg(feature = "embedded-ner")]
+static CONFIG_BYTES: &[u8] = include_bytes!("../models/config.json");
+
+/// Result of NER organization extraction
+#[derive(Debug, Clone)]
+pub struct NerOrgResult {
+    /// The extracted organization name
+    pub organization: String,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f32,
+}
+
+/// Global NER extractor instance
+#[cfg(feature = "embedded-ner")]
+static NER_EXTRACTOR: OnceLock<NerOrganizationExtractor> = OnceLock::new();
+
+/// NER organization extractor using embedded GLiNER model
+#[cfg(feature = "embedded-ner")]
+pub struct NerOrganizationExtractor {
+    model: GLiNER<SpanMode>,
+    min_confidence: f32,
+}
+
+#[cfg(feature = "embedded-ner")]
+impl NerOrganizationExtractor {
+    /// Create a new NER extractor by writing embedded model files to temp directory
+    pub fn new() -> Result<Self> {
+        Self::with_min_confidence(0.5)
+    }
+
+    /// Create a new NER extractor with custom minimum confidence threshold
+    pub fn with_min_confidence(min_confidence: f32) -> Result<Self> {
+        // Create temp directory for model files
+        let temp_dir = std::env::temp_dir().join("nthpartyfinder_ner");
+        std::fs::create_dir_all(&temp_dir)?;
+
+        let model_path = temp_dir.join("gliner_small.onnx");
+        let tokenizer_path = temp_dir.join("tokenizer.json");
+        let config_path = temp_dir.join("config.json");
+
+        // Write embedded files to temp directory (gline-rs needs file paths)
+        Self::write_if_missing(&model_path, MODEL_BYTES)?;
+        Self::write_if_missing(&tokenizer_path, TOKENIZER_BYTES)?;
+        Self::write_if_missing(&config_path, CONFIG_BYTES)?;
+
+        debug!("Model files written to {:?}", temp_dir);
+
+        // Initialize GLiNER model
+        // GLiNER models can be SpanMode or TokenMode - using SpanMode for small model
+        let model = GLiNER::<SpanMode>::new(
+            Parameters::default(),
+            RuntimeParameters::default(),
+            tokenizer_path.to_str().ok_or_else(|| anyhow!("Invalid tokenizer path"))?,
+            model_path.to_str().ok_or_else(|| anyhow!("Invalid model path"))?,
+        ).map_err(|e| anyhow!("Failed to initialize GLiNER model: {}", e))?;
+
+        info!("NER model initialized successfully");
+
+        Ok(Self {
+            model,
+            min_confidence,
+        })
+    }
+
+    /// Write bytes to file if it doesn't already exist
+    fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        if !path.exists() {
+            let mut file = std::fs::File::create(path)?;
+            file.write_all(bytes)?;
+            debug!("Wrote model file: {:?}", path);
+        }
+        Ok(())
+    }
+
+    /// Extract organization name from text content
+    pub fn extract_organization(&self, text: &str) -> Result<Option<NerOrgResult>> {
+        // Truncate text if too long to avoid performance issues
+        let text = if text.len() > 4000 {
+            &text[..4000]
+        } else {
+            text
+        };
+
+        // Create input for organization entity extraction
+        let input = TextInput::from_str(
+            &[text],
+            &["organization", "company"],
+        ).map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+
+        // Run inference
+        let output = self.model.inference(input)
+            .map_err(|e| anyhow!("NER inference failed: {}", e))?;
+
+        // Find the highest confidence organization entity
+        let mut best_match: Option<NerOrgResult> = None;
+
+        for spans in &output.spans {
+            for span in spans {
+                let entity_type = span.class().to_lowercase();
+                if entity_type == "organization" || entity_type == "company" {
+                    let confidence = span.probability();
+                    if confidence >= self.min_confidence {
+                        if best_match.is_none() || confidence > best_match.as_ref().unwrap().confidence {
+                            let org_name = span.text().trim().to_string();
+                            if !org_name.is_empty() {
+                                best_match = Some(NerOrgResult {
+                                    organization: org_name,
+                                    confidence,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ref result) = best_match {
+            debug!("NER extracted organization: {} (confidence: {:.2})",
+                   result.organization, result.confidence);
+        }
+
+        Ok(best_match)
+    }
+
+    /// Extract organization from domain and optional page content
+    pub fn extract_from_domain(&self, domain: &str, page_content: Option<&str>) -> Result<Option<NerOrgResult>> {
+        // Build context text for NER
+        let text = if let Some(content) = page_content {
+            format!("Website: {}. {}", domain, content)
+        } else {
+            format!("Website: {}", domain)
+        };
+
+        self.extract_organization(&text)
+    }
+}
+
+// ============================================================================
+// Module-level functions (mirror slm_org.rs interface)
+// ============================================================================
+
+/// Initialize the global NER extractor
+#[cfg(feature = "embedded-ner")]
+pub fn init() -> anyhow::Result<()> {
+    init_with_config(0.5)
+}
+
+/// Initialize the global NER extractor with custom minimum confidence
+#[cfg(feature = "embedded-ner")]
+pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
+    let extractor = NerOrganizationExtractor::with_min_confidence(min_confidence)?;
+    NER_EXTRACTOR.set(extractor)
+        .map_err(|_| anyhow::anyhow!("NER extractor already initialized"))?;
+    Ok(())
+}
+
+/// Check if NER is available (model loaded successfully)
+#[cfg(feature = "embedded-ner")]
+pub fn is_available() -> bool {
+    NER_EXTRACTOR.get().is_some()
+}
+
+/// Get the global NER extractor
+#[cfg(feature = "embedded-ner")]
+pub fn get() -> Option<&'static NerOrganizationExtractor> {
+    NER_EXTRACTOR.get()
+}
+
+/// Extract organization using the global NER extractor
+#[cfg(feature = "embedded-ner")]
+pub fn extract_organization(domain: &str, page_content: Option<&str>) -> anyhow::Result<Option<NerOrgResult>> {
+    match NER_EXTRACTOR.get() {
+        Some(extractor) => extractor.extract_from_domain(domain, page_content),
+        None => Ok(None),
+    }
+}
+
+// ============================================================================
+// Stub implementations when embedded-ner feature is disabled
+// ============================================================================
+
+/// Stub: Initialize the global NER extractor (no-op when disabled)
+#[cfg(not(feature = "embedded-ner"))]
+pub fn init() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Stub: Initialize with config (no-op when disabled)
+#[cfg(not(feature = "embedded-ner"))]
+pub fn init_with_config(_min_confidence: f32) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Stub: Check if NER is available (always false when disabled)
+#[cfg(not(feature = "embedded-ner"))]
+pub fn is_available() -> bool {
+    false
+}
+
+/// Stub: Extract organization (always returns None when disabled)
+#[cfg(not(feature = "embedded-ner"))]
+pub fn extract_organization(_domain: &str, _page_content: Option<&str>) -> anyhow::Result<Option<NerOrgResult>> {
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ner_org_result() {
+        let result = NerOrgResult {
+            organization: "Acme Corporation".to_string(),
+            confidence: 0.95,
+        };
+        assert_eq!(result.organization, "Acme Corporation");
+        assert!((result.confidence - 0.95).abs() < 0.001);
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_functions() {
+        assert!(!is_available());
+        let result = extract_organization("example.com", None).unwrap();
+        assert!(result.is_none());
+    }
+}
