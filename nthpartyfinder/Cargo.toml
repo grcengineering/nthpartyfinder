@@ -50,6 +50,13 @@ headless_chrome = "1.0"
 fancy-regex = "0.13"
 rayon = "1.8"
 which = "6"
+zip = "0.6"
+# Embedded NER for organization extraction (replaces Ollama SLM)
+gline-rs = { version = "1.0", optional = true }
+
+[features]
+default = []
+embedded-ner = ["gline-rs"]
 
 [dev-dependencies]
 tokio-test = "0.4"
