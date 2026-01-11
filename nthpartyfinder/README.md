@@ -1,0 +1,264 @@
+# Nth Party Finder (nthpartyfinder)
+
+[![Build Status](https://github.com/your-org/nthpartyfinder/workflows/Build%20and%20Test/badge.svg)](https://github.com/your-org/nthpartyfinder/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A high-performance, cross-platform command line tool for identifying Nth party vendor relationships through DNS analysis. Built in Rust for security, performance, and memory safety.
+
+## Problem Statement
+
+Security GRC teams responsible for third-party cyber risk management struggle to understand the full scope of their vendor risk surface. Much of this risk is inherited through vendor-to-vendor relationships that are complex to identify, map, and assess. Without a holistic picture of all vendor relationships to the Nth degree (beyond just 4th and 5th party), Security GRC teams cannot successfully understand which third parties pose the greatest risk.
+
+## Features
+
+🔍 **Comprehensive Analysis**: Analyzes DNS TXT records (SPF, domain verification) to identify vendor relationships
+
+🌐 **Cross-Platform**: Runs on Windows, macOS, and Linux with optimized performance
+
+🔄 **Recursive Discovery**: Configurable depth analysis or automatic discovery until common denominators
+
+📊 **Multiple Export Formats**: CSV (default) and JSON output with detailed relationship mapping
+
+⚡ **High Performance**: Built in Rust with async processing and intelligent caching
+
+🛡️ **Security-First**: Memory-safe implementation with comprehensive error handling
+
+🧠 **Embedded NER**: Optional GLiNER model for intelligent organization name extraction (offline capable)
+
+## Installation
+
+### Option 1: Docker (Recommended)
+
+Pull the pre-built image with embedded NER:
+
+```bash
+docker pull ghcr.io/your-org/nthpartyfinder:latest
+```
+
+Or build locally:
+
+```bash
+docker build -t nthpartyfinder .
+```
+
+Run analysis:
+
+```bash
+docker run -v $(pwd)/output:/output nthpartyfinder -d example.com -r 2 -f json -o /output/results
+```
+
+### Option 2: Pre-built Binaries
+
+Download from [Releases](https://github.com/your-org/nthpartyfinder/releases):
+
+- **Full version** (`nthpartyfinder-full`): Includes embedded NER (~150MB)
+- **Slim version** (`nthpartyfinder`): No NER, smaller size (~15MB)
+
+Platform-specific binaries:
+
+- **Windows**: `nthpartyfinder-windows-x86_64.exe`
+- **macOS (Intel)**: `nthpartyfinder-macos-x86_64`
+- **macOS (Apple Silicon)**: `nthpartyfinder-macos-aarch64`
+- **Linux**: `nthpartyfinder-linux-x86_64`
+
+### Option 3: Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/nthpartyfinder.git
+cd nthpartyfinder
+
+# Build without embedded NER (faster, smaller)
+cargo build --release
+
+# Build with embedded NER (requires model files)
+./scripts/download-model.sh  # or .ps1 on Windows
+cargo build --release --features embedded-ner
+```
+
+### Prerequisites
+
+- **WHOIS command**: Most systems have this installed by default
+  - **Ubuntu/Debian**: `sudo apt-get install whois`
+  - **macOS**: `brew install whois`
+  - **Windows**: Download from SysInternals or use WSL
+
+## Usage
+
+### Basic Usage
+
+```bash
+# Analyze a domain with default settings (CSV output)
+nthpartyfinder --domain example.com
+
+# Specify output format and file
+nthpartyfinder --domain example.com --output-format json --output results.json
+
+# Limit recursion depth
+nthpartyfinder --domain example.com --depth 3
+```
+
+### Command Line Options
+
+```
+Usage: nthpartyfinder [OPTIONS] --domain <DOMAIN>
+
+Options:
+  -d, --domain <DOMAIN>          Domain name to analyze for Nth party relationships
+  -r, --depth <DEPTH>            Maximum recursion depth (if not specified, recurses until no more vendors found)
+  -f, --output-format <FORMAT>   Output format: 'csv' (default) or 'json'
+  -o, --output <FILE>            Output file path [default: nth_parties.csv]
+  -v, --verbose                  Verbose logging
+  -h, --help                     Print help
+  -V, --version                  Print version
+```
+
+### Examples
+
+#### Example 1: Basic Analysis
+```bash
+nthpartyfinder --domain github.com
+```
+
+Output:
+```
+=== Analysis Summary ===
+Total vendor relationships found: 12
+Maximum depth reached: 3 layers
+Unique vendor domains: 8
+Unique vendor organizations: 6
+  Layer 1 vendors: 4
+  Layer 2 vendors: 5
+  Layer 3 vendors: 3
+========================
+
+Analysis complete. Results exported to: nth_parties.csv
+```
+
+#### Example 2: Limited Depth Analysis
+```bash
+nthpartyfinder --domain company.com --depth 2 --output-format json --output company_vendors.json
+```
+
+#### Example 3: Comprehensive Analysis
+```bash
+nthpartyfinder --domain startup.io --verbose
+```
+
+## Output Format
+
+### CSV Output
+
+The CSV output includes the following columns:
+
+| Column | Description |
+|--------|-------------|
+| Nth Party Domain | The vendor domain identified |
+| Nth Party Organization | Organization name from WHOIS lookup |
+| Nth Party Layer | Relationship depth (1st, 2nd, 3rd party, etc.) |
+| Nth Party Customer Domain | The domain that references this vendor |
+| Nth Party Customer Organization | Customer organization name |
+| Nth Party Record | The actual DNS record containing the reference |
+| Nth Party Record Type | Type of DNS record (TXT, SPF, etc.) |
+
+### JSON Output
+
+The JSON output provides the same data in a structured format with additional summary information:
+
+```json
+{
+  "summary": {
+    "total_relationships": 12,
+    "max_depth": 3,
+    "unique_domains": 8,
+    "unique_organizations": 6
+  },
+  "relationships": [
+    {
+      "nth_party_domain": "vendor.com",
+      "nth_party_organization": "Vendor Inc.",
+      "nth_party_layer": 1,
+      "nth_party_customer_domain": "example.com",
+      "nth_party_customer_organization": "Example Corp",
+      "nth_party_record": "vendor.com",
+      "nth_party_record_type": "TXT"
+    }
+  ]
+}
+```
+
+## How It Works
+
+1. **DNS Analysis**: Queries TXT records for the target domain
+2. **Vendor Extraction**: Parses SPF records and domain verification strings
+3. **Organization Lookup**: Uses WHOIS to identify organization names
+4. **Recursive Discovery**: Repeats the process for each discovered vendor
+5. **Termination**: Stops at configured depth or common denominators
+6. **Export**: Generates comprehensive relationship mapping
+
+### Common Denominators
+
+The tool automatically identifies common infrastructure providers to prevent infinite recursion:
+
+- Amazon Web Services (AWS)
+- Microsoft Azure/Office 365
+- Google Cloud Platform
+- Cloudflare
+- Fastly
+- Akamai
+
+### Embedded NER Organization Extraction
+
+When compiled with `--features embedded-ner`, the tool includes a GLiNER model
+for intelligent organization name extraction. This provides several advantages:
+
+- **No External Services**: Works completely offline without API dependencies
+- **Improved Accuracy**: Machine learning-based extraction identifies organization names more reliably than regex patterns
+- **Subprocessor Detection**: Better identification of vendor names from privacy policies and subprocessor lists
+
+The NER model is approximately 175MB and is embedded directly in the binary.
+To use the slim version without NER, build without the `embedded-ner` feature.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/nthpartyfinder.git
+cd nthpartyfinder
+
+# Run tests
+cargo test
+
+# Run with verbose logging
+cargo run -- --domain example.com --verbose
+
+# Build release version
+cargo build --release
+```
+
+## Future Enhancements
+
+- **Website Analysis**: DOM and XHR request analysis for hosted content
+- **Additional DNS Records**: SOA, MX, CNAME analysis
+- **Subdomain Discovery**: Integration with tools like subfinder
+- **Risk Scoring**: Automated vendor risk assessment
+- **API Integration**: REST API for programmatic access
+- **Visualization**: Graph-based relationship visualization
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Security
+
+This tool is designed for legitimate security and GRC purposes only. Please use responsibly and in accordance with applicable laws and regulations.
+
+## Support
+
+- 📖 Documentation: [Wiki](https://github.com/your-org/nthpartyfinder/wiki)
+- 🐛 Bug Reports: [Issues](https://github.com/your-org/nthpartyfinder/issues)
+- 💬 Discussions: [GitHub Discussions](https://github.com/your-org/nthpartyfinder/discussions)
