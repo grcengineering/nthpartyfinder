@@ -291,11 +291,17 @@ total_vendor_budget = 200
 # subdomain enumeration and SaaS tenant probing.
 
 [discovery]
+# Enable subprocessor web page analysis for enhanced vendor discovery
+# When enabled, fetches and analyzes vendor subprocessor/third-party pages
+# to discover additional vendor relationships not visible in DNS records
+# Default: true (enabled)
+subprocessor_enabled = true
+
 # Enable subdomain discovery via subfinder
 # When enabled, runs subfinder against discovered vendor domains to find
 # additional subdomains that may reveal more third-party relationships
 # Default: false (disabled)
-subdomain_enabled = false
+subdomain_enabled = true
 
 # Path to the subfinder binary
 # Can be an absolute path or just "subfinder" if it's in your PATH
@@ -311,7 +317,7 @@ subfinder_timeout_secs = 300
 # When enabled, probes known SaaS platforms to discover if the target
 # organization has active tenants (e.g., checking for okta.com/mycompany)
 # Default: false (disabled)
-saas_tenant_enabled = false
+saas_tenant_enabled = true
 
 # Timeout for tenant probe HTTP requests in seconds
 # Each probe makes an HTTP request to check for tenant existence
@@ -322,3 +328,40 @@ tenant_probe_timeout_secs = 10
 # Higher values speed up probing but use more resources
 # Default: 20
 tenant_probe_concurrency = 20
+
+# Enable web page analysis for organization name extraction
+# When enabled, fetches vendor homepages to extract organization names from:
+# - Schema.org JSON-LD structured data
+# - OpenGraph meta tags (og:site_name)
+# - HTML meta tags (author, application-name)
+# - Title tag patterns
+# - Copyright/footer notices
+# Default: true (enabled)
+web_org_enabled = true
+
+# Timeout for web org lookup requests in seconds
+# Default: 10
+web_org_timeout_secs = 10
+
+# Minimum confidence level (0.0-1.0) for web org extraction to be accepted
+# Higher values = more reliable but fewer matches
+# Recommended: 0.6 for balanced accuracy
+# Default: 0.6
+web_org_min_confidence = 0.6
+
+# =============================================================================
+# Embedded NER Organization Extraction
+# =============================================================================
+# Uses GLiNER (embedded at compile time) for organization name extraction.
+# Requires the binary to be compiled with --features embedded-ner
+# No external service required - model is embedded in the binary.
+
+# Enable NER-based organization extraction
+# Only works when binary is compiled with --features embedded-ner
+# Default: true (enabled when available)
+ner_enabled = true
+
+# Minimum confidence level (0.0-1.0) for NER extraction
+# Higher values = more reliable but fewer matches
+# Default: 0.6
+ner_min_confidence = 0.6

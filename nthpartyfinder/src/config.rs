@@ -114,6 +114,9 @@ impl AnalysisConfig {
 /// Discovery feature configuration for subdomain and SaaS tenant discovery
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiscoveryConfig {
+    /// Enable subprocessor web page analysis for enhanced vendor discovery
+    #[serde(default = "default_subprocessor_enabled")]
+    pub subprocessor_enabled: bool,
     /// Enable subdomain discovery via subfinder
     #[serde(default)]
     pub subdomain_enabled: bool,
@@ -132,6 +135,27 @@ pub struct DiscoveryConfig {
     /// Concurrent tenant probe requests
     #[serde(default = "default_tenant_probe_concurrency")]
     pub tenant_probe_concurrency: usize,
+    /// Enable web page analysis for organization name extraction
+    /// When enabled, fetches homepage to extract org name from meta tags, Schema.org, etc.
+    #[serde(default = "default_web_org_enabled")]
+    pub web_org_enabled: bool,
+    /// Timeout for web org lookup requests in seconds
+    #[serde(default = "default_web_org_timeout_secs")]
+    pub web_org_timeout_secs: u64,
+    /// Minimum confidence level (0.0-1.0) for web org extraction to be accepted
+    #[serde(default = "default_web_org_min_confidence")]
+    pub web_org_min_confidence: f32,
+    /// Enable embedded NER for organization extraction
+    /// Only works when compiled with --features embedded-ner
+    #[serde(default = "default_ner_enabled")]
+    pub ner_enabled: bool,
+    /// Minimum confidence (0.0-1.0) for NER extraction
+    #[serde(default = "default_ner_min_confidence")]
+    pub ner_min_confidence: f32,
+}
+
+fn default_subprocessor_enabled() -> bool {
+    true
 }
 
 fn default_subfinder_path() -> String {
@@ -150,15 +174,41 @@ fn default_tenant_probe_concurrency() -> usize {
     20
 }
 
+fn default_web_org_enabled() -> bool {
+    true
+}
+
+fn default_web_org_timeout_secs() -> u64 {
+    10
+}
+
+fn default_web_org_min_confidence() -> f32 {
+    0.6
+}
+
+fn default_ner_enabled() -> bool {
+    true // Enabled by default when feature is compiled in
+}
+
+fn default_ner_min_confidence() -> f32 {
+    0.6
+}
+
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
+            subprocessor_enabled: default_subprocessor_enabled(),
             subdomain_enabled: false,
             subfinder_path: default_subfinder_path(),
             subfinder_timeout_secs: default_subfinder_timeout_secs(),
             saas_tenant_enabled: false,
             tenant_probe_timeout_secs: default_tenant_probe_timeout_secs(),
             tenant_probe_concurrency: default_tenant_probe_concurrency(),
+            web_org_enabled: default_web_org_enabled(),
+            web_org_timeout_secs: default_web_org_timeout_secs(),
+            web_org_min_confidence: default_web_org_min_confidence(),
+            ner_enabled: default_ner_enabled(),
+            ner_min_confidence: default_ner_min_confidence(),
         }
     }
 }
@@ -414,6 +464,7 @@ vendor_limits_per_depth = [0, 20, 10, 5]
 total_vendor_budget = 200
 
 [discovery]
+subprocessor_enabled = false
 subdomain_enabled = true
 subfinder_path = "/usr/local/bin/subfinder"
 subfinder_timeout_secs = 600
@@ -425,6 +476,7 @@ tenant_probe_concurrency = 30
         let config: AppConfig = toml::from_str(config_str).expect("Config should parse");
 
         // Verify discovery config values
+        assert!(!config.discovery.subprocessor_enabled, "subprocessor_enabled should be false");
         assert!(config.discovery.subdomain_enabled, "subdomain_enabled should be true");
         assert_eq!(config.discovery.subfinder_path, "/usr/local/bin/subfinder");
         assert_eq!(config.discovery.subfinder_timeout_secs, 600);
@@ -475,6 +527,7 @@ total_vendor_budget = 200
         let config: AppConfig = toml::from_str(config_str).expect("Config should parse without discovery section");
 
         // Verify default values
+        assert!(config.discovery.subprocessor_enabled, "subprocessor_enabled should default to true");
         assert!(!config.discovery.subdomain_enabled, "subdomain_enabled should default to false");
         assert_eq!(config.discovery.subfinder_path, "subfinder", "subfinder_path should default to 'subfinder'");
         assert_eq!(config.discovery.subfinder_timeout_secs, 300, "subfinder_timeout_secs should default to 300");
