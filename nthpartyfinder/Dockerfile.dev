@@ -1,0 +1,29 @@
+# Development build without embedded NER (faster, smaller)
+FROM docker.io/library/rust:1.83-alpine AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_DIR=/usr
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY config/ config/
+COPY templates/ templates/
+
+RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
+
+FROM dhi.io/alpine:3.22
+RUN addgroup -S nthparty && adduser -S -G nthparty nthparty
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder /usr/local/bin/
+COPY --from=builder /build/config/ /etc/nthpartyfinder/
+RUN chown -R nthparty:nthparty /etc/nthpartyfinder
+RUN mkdir -p /output && chown nthparty:nthparty /output
+USER nthparty
+ENV NTHPARTYFINDER_CONFIG_DIR=/etc/nthpartyfinder
+WORKDIR /output
+ENTRYPOINT ["nthpartyfinder"]
+CMD ["--help"]

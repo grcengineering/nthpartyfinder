@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  nthpartyfinder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nthpartyfinder:latest
+    container_name: nthpartyfinder
+    # Mount output directory
+    volumes:
+      - ./output:/output
+    # Example: analyze a domain
+    # command: ["-d", "example.com", "-r", "2", "-f", "json", "-o", "/output/results"]
+
+    # Security settings
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+
+  # Development build without embedded NER (faster iteration)
+  nthpartyfinder-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: nthpartyfinder:dev
+    volumes:
+      - ./output:/output
