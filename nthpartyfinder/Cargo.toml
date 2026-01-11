@@ -52,8 +52,9 @@ rayon = "1.8"
 which = "6"
 zip = "0.6"
 # Embedded NER for organization extraction (replaces Ollama SLM)
+# Using load-dynamic to avoid Windows linking issues with ONNX Runtime
 gline-rs = { version = "1.0", optional = true }
-orp = { version = "0.9.2", optional = true }
+orp = { version = "0.9.2", optional = true, features = ["load-dynamic"] }
 
 [features]
 # NER is included by default. Use --no-default-features to exclude it for smaller builds.

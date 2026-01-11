@@ -2,11 +2,14 @@
 //!
 //! This module uses GLiNER (via gline-rs) to extract organization names
 //! from web page content. The model is embedded in the binary at compile time.
+//!
+//! On Windows, the ONNX Runtime DLL must be available. Set ORT_DYLIB_PATH
+//! environment variable or place onnxruntime.dll next to the executable.
 
 #[cfg(feature = "embedded-ner")]
 use anyhow::{Result, anyhow};
 #[cfg(feature = "embedded-ner")]
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 #[cfg(feature = "embedded-ner")]
 use std::io::Write;
 #[cfg(feature = "embedded-ner")]
@@ -59,8 +62,60 @@ impl NerOrganizationExtractor {
         Self::with_min_confidence(0.5)
     }
 
+    /// Try to find ONNX Runtime DLL on Windows and set ORT_DYLIB_PATH
+    #[cfg(target_os = "windows")]
+    fn setup_onnx_runtime() -> Result<()> {
+        // If ORT_DYLIB_PATH is already set, use it
+        if std::env::var("ORT_DYLIB_PATH").is_ok() {
+            debug!("ORT_DYLIB_PATH already set");
+            return Ok(());
+        }
+
+        // Try to find onnxruntime.dll in common locations
+        let search_paths = vec![
+            // Next to executable
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll"))),
+            // Current working directory
+            Some(std::path::PathBuf::from("onnxruntime.dll")),
+            // Project's onnxruntime directory
+            Some(std::path::PathBuf::from("onnxruntime/onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll")),
+            // User's local app data
+            dirs::data_local_dir().map(|d| d.join("onnxruntime").join("onnxruntime.dll")),
+        ];
+
+        for path_opt in search_paths {
+            if let Some(path) = path_opt {
+                if path.exists() {
+                    let path_str = path.to_string_lossy().to_string();
+                    info!("Found ONNX Runtime at: {}", path_str);
+                    std::env::set_var("ORT_DYLIB_PATH", &path_str);
+                    return Ok(());
+                }
+            }
+        }
+
+        // DLL not found - provide helpful error message
+        Err(anyhow!(
+            "ONNX Runtime DLL not found. On Windows, you need to:\n\
+             1. Run: .\\scripts\\download-onnxruntime.ps1\n\
+             2. Or set ORT_DYLIB_PATH to point to onnxruntime.dll\n\
+             3. Or place onnxruntime.dll next to the executable"
+        ))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn setup_onnx_runtime() -> Result<()> {
+        // On Linux/macOS, the runtime is typically available or statically linked
+        Ok(())
+    }
+
     /// Create a new NER extractor with custom minimum confidence threshold
     pub fn with_min_confidence(min_confidence: f32) -> Result<Self> {
+        // Setup ONNX runtime (Windows-specific DLL handling)
+        Self::setup_onnx_runtime()?;
+
         // Create temp directory for model files
         let temp_dir = std::env::temp_dir().join("nthpartyfinder_ner");
         std::fs::create_dir_all(&temp_dir)?;

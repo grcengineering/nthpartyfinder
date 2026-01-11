@@ -78,6 +78,26 @@ cargo build --release
 cargo build --release --no-default-features
 ```
 
+#### Windows-Specific Setup for NER
+
+On Windows, the ONNX Runtime DLL must be available at runtime. The build uses dynamic loading to avoid linker conflicts with system DLLs:
+
+```powershell
+# Download ONNX Runtime DLL
+.\scripts\download-onnxruntime.ps1
+
+# The DLL is automatically found if:
+# 1. It's in the same directory as the executable
+# 2. It's in the onnxruntime/ subdirectory
+# 3. ORT_DYLIB_PATH environment variable is set
+```
+
+Alternatively, set the environment variable:
+
+```powershell
+$env:ORT_DYLIB_PATH = "C:\path\to\onnxruntime.dll"
+```
+
 ### Prerequisites
 
 - **WHOIS command**: Most systems have this installed by default
