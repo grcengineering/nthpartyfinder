@@ -1,0 +1,34 @@
+# =============================================================================
+# nthpartyfinder Docker Build - Debug (with shell)
+# Uses Docker Hardened Images (dhi.io) for both build and runtime
+# =============================================================================
+
+FROM dhi.io/rust:1.83-alpine AS builder
+
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_DIR=/usr
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY config/ config/
+COPY templates/ templates/
+COPY models/ models/
+
+RUN cargo build --release --target x86_64-unknown-linux-musl --features embedded-ner
+RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
+
+# Runtime with busybox for debugging capability
+FROM dhi.io/busybox:latest
+
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder /usr/local/bin/
+COPY --from=builder /build/config/ /etc/nthpartyfinder/
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+ENV NTHPARTYFINDER_CONFIG_DIR=/etc/nthpartyfinder
+
+ENTRYPOINT ["nthpartyfinder"]
+CMD ["--help"]

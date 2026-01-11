@@ -1,0 +1,10 @@
+target/
+.git/
+.github/
+.claude/
+backup/
+*.md
+!README.md
+*.code-workspace
+reports/
+cache/
