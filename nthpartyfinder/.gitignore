@@ -1,0 +1,33 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files
+*.csv
+*.json
+*.log
+
+# Build artifacts
+*.exe
+*.dmg
+*.pkg
+*.deb
+*.rpm
+
+# Temporary files
+*.tmp
+*.temp
+# Model files (too large for git, download via scripts)
+models/*.onnx
+models/*.json
+!models/.gitkeep
