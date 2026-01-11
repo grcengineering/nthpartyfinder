@@ -1,0 +1,73 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download model files
+        run: |
+          mkdir -p models
+          curl -L "https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/onnx/model_int8.onnx" -o models/gliner_small.onnx
+          curl -L "https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/tokenizer.json" -o models/tokenizer.json
+          curl -L "https://huggingface.co/onnx-community/gliner_small-v2.1/resolve/main/config.json" -o models/config.json
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push (with embedded NER)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (without embedded NER - slim)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.dev
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
