@@ -1,4 +1,5 @@
-# Development build without embedded NER (faster, smaller)
+# Slim build without embedded NER (faster, smaller)
+# Use --no-default-features to exclude the NER model
 FROM docker.io/library/rust:1.83-alpine AS builder
 
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
@@ -13,7 +14,8 @@ COPY src/ src/
 COPY config/ config/
 COPY templates/ templates/
 
-RUN cargo build --release --target x86_64-unknown-linux-musl
+# Build WITHOUT NER (--no-default-features excludes embedded-ner)
+RUN cargo build --release --target x86_64-unknown-linux-musl --no-default-features
 RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
 
 FROM dhi.io/alpine:3.22

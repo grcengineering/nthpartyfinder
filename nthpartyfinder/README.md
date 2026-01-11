@@ -68,12 +68,14 @@ Platform-specific binaries:
 git clone https://github.com/your-org/nthpartyfinder.git
 cd nthpartyfinder
 
-# Build without embedded NER (faster, smaller)
+# Download model files (required for default build)
+./scripts/download-model.sh  # or .ps1 on Windows
+
+# Build with embedded NER (default)
 cargo build --release
 
-# Build with embedded NER (requires model files)
-./scripts/download-model.sh  # or .ps1 on Windows
-cargo build --release --features embedded-ner
+# Build WITHOUT NER (smaller binary, ~15MB vs ~175MB)
+cargo build --release --no-default-features
 ```
 
 ### Prerequisites
@@ -209,15 +211,15 @@ The tool automatically identifies common infrastructure providers to prevent inf
 
 ### Embedded NER Organization Extraction
 
-When compiled with `--features embedded-ner`, the tool includes a GLiNER model
-for intelligent organization name extraction. This provides several advantages:
+The default build includes a GLiNER model for intelligent organization name extraction.
+This provides several advantages:
 
 - **No External Services**: Works completely offline without API dependencies
 - **Improved Accuracy**: Machine learning-based extraction identifies organization names more reliably than regex patterns
 - **Subprocessor Detection**: Better identification of vendor names from privacy policies and subprocessor lists
 
 The NER model is approximately 175MB and is embedded directly in the binary.
-To use the slim version without NER, build without the `embedded-ner` feature.
+To build a slim version without NER, use `cargo build --release --no-default-features`.
 
 ## Contributing
 

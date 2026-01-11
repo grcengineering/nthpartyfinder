@@ -51,7 +51,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push (with embedded NER)
+      - name: Build and push (default - with embedded NER)
         uses: docker/build-push-action@v5
         with:
           context: .

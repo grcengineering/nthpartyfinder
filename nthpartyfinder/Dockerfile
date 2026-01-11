@@ -34,9 +34,9 @@ COPY templates/ templates/
 # Copy model files for embedded NER
 COPY models/ models/
 
-# Build the real binary with embedded NER
+# Build the real binary (NER is included by default)
 RUN touch src/main.rs && \
-    cargo build --release --target x86_64-unknown-linux-musl --features embedded-ner
+    cargo build --release --target x86_64-unknown-linux-musl
 
 # Strip the binary for minimal size
 RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
