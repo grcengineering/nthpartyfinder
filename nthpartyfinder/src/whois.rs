@@ -97,6 +97,7 @@ pub async fn get_organization_with_status_and_config(
 
     // Priority 5: NER-based extraction (if embedded-ner feature enabled)
     if ner_org::is_available() {
+        debug!("NER is available, attempting extraction for {}", domain);
         // First try to get web content for NER to analyze
         let page_content = web_org::fetch_page_content(domain).await.ok();
         let content_ref = page_content.as_deref();

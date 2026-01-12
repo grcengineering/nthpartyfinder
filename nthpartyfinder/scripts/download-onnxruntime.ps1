@@ -2,7 +2,7 @@
 # This is required when building with the embedded-ner feature on Windows
 # The load-dynamic feature loads the DLL at runtime via ORT_DYLIB_PATH
 
-$OrtVersion = "1.19.2"
+$OrtVersion = "1.20.1"
 $OrtUrl = "https://github.com/microsoft/onnxruntime/releases/download/v$OrtVersion/onnxruntime-win-x64-$OrtVersion.zip"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

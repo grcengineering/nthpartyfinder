@@ -80,7 +80,7 @@ impl NerOrganizationExtractor {
             // Current working directory
             Some(std::path::PathBuf::from("onnxruntime.dll")),
             // Project's onnxruntime directory
-            Some(std::path::PathBuf::from("onnxruntime/onnxruntime-win-x64-1.19.2/lib/onnxruntime.dll")),
+            Some(std::path::PathBuf::from("onnxruntime/onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
             // User's local app data
             dirs::data_local_dir().map(|d| d.join("onnxruntime").join("onnxruntime.dll")),
         ];
@@ -210,14 +210,27 @@ impl NerOrganizationExtractor {
 
     /// Extract organization from domain and optional page content
     pub fn extract_from_domain(&self, domain: &str, page_content: Option<&str>) -> Result<Option<NerOrgResult>> {
+        debug!("NER: Attempting to extract organization from domain: {}", domain);
+
         // Build context text for NER
         let text = if let Some(content) = page_content {
+            debug!("NER: Using page content ({} chars) for extraction", content.len());
             format!("Website: {}. {}", domain, content)
         } else {
+            debug!("NER: No page content available, using domain only");
             format!("Website: {}", domain)
         };
 
-        self.extract_organization(&text)
+        let result = self.extract_organization(&text);
+
+        if let Ok(Some(ref org_result)) = result {
+            debug!("NER: Successfully extracted '{}' (confidence: {:.2})",
+                   org_result.organization, org_result.confidence);
+        } else {
+            debug!("NER: No organization extracted for {}", domain);
+        }
+
+        result
     }
 }
 
