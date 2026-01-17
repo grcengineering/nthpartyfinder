@@ -532,18 +532,27 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
     }
 
     let mut domains = Vec::new();
-    let dmarc_tags = vec!["rua=", "ruf=", "sp="];
 
-    for tag in &dmarc_tags {
-        let pattern = format!(r"{}mailto:([^@]+@)?([^,;\s]+)", regex::escape(tag));
-        if let Ok(re) = Regex::new(&pattern) {
-            for cap in re.captures_iter(record) {
+    // Extract domains from rua and ruf tags (which can have comma-separated mailto addresses)
+    // e.g., rua=mailto:a@domain1.com,mailto:b@domain2.com
+    for tag in &["rua=", "ruf="] {
+        // Find the tag value (case-insensitive search)
+        let record_lower = record.to_lowercase();
+        if let Some(tag_pos) = record_lower.find(*tag) {
+            let value_start = tag_pos + tag.len();
+            // Find end of value (next semicolon or end of string)
+            let value_end = record[value_start..].find(';')
+                .map(|p| value_start + p)
+                .unwrap_or(record.len());
+            let tag_value = &record[value_start..value_end];
+
+            // Extract all mailto: addresses (comma-separated)
+            // Pattern: mailto:localpart@domain or mailto:domain
+            let mailto_re = Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap();
+            for cap in mailto_re.captures_iter(tag_value) {
                 if let Some(domain_match) = cap.get(2) {
                     let domain = domain_match.as_str();
                     if is_valid_domain(domain) {
-                        if let Some(logger) = logger {
-                            // Success logging removed - only failures are logged
-                        }
                         domains.push(VendorDomain {
                             domain: domain.to_string(),
                             source_type: RecordType::DnsTxtDmarc,
@@ -553,6 +562,20 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
                         logger.log_failure(source_domain, "DMARC", raw_record, Some(tag), "Invalid domain format");
                     }
                 }
+            }
+        }
+    }
+
+    // Also check sp= tag for subdomain policy domain references (less common)
+    if let Some(sp_match) = Regex::new(r"sp=([^;\s]+)").ok().and_then(|re| re.captures(record)) {
+        if let Some(domain_match) = sp_match.get(1) {
+            let domain = domain_match.as_str();
+            if is_valid_domain(domain) {
+                domains.push(VendorDomain {
+                    domain: domain.to_string(),
+                    source_type: RecordType::DnsTxtDmarc,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
     }
@@ -811,5 +834,5 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Check overall length and that it contains at least one dot
-    DOMAIN_VALIDATION_REGEX.is_match(domain) && domain.contains('.') && domain.len() <= 253 && domain.len() >= 3
+    DOMAIN_VALIDATION_REGEX.is_match(domain) && domain.contains('.') && domain.len() <= 253 && domain.len() >= 4
 }

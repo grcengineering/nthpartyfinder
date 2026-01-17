@@ -305,8 +305,8 @@ fn test_tabs_have_aria_controls() {
         "Tab should have aria-controls='all-tab'"
     );
     assert!(
-        html_content.contains(r#"aria-controls="spf-tab""#),
-        "Tab should have aria-controls='spf-tab'"
+        html_content.contains(r#"aria-controls="summary-tab""#),
+        "Tab should have aria-controls='summary-tab'"
     );
 }
 
@@ -326,8 +326,8 @@ fn test_search_boxes_have_aria_labels() {
         "All relationships search box should have aria-label"
     );
     assert!(
-        html_content.contains(r#"aria-label="Search email providers""#),
-        "SPF search box should have aria-label"
+        html_content.contains(r#"aria-label="Search organizations""#),
+        "Organizations search box should have aria-label"
     );
 }
 

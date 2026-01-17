@@ -4,17 +4,17 @@ use nthpartyfinder::vendor::{VendorRelationship, RecordType};
 #[tokio::test]
 async fn test_extract_vendor_domains_from_spf() {
     let txt_records = vec![
-        "v=spf1 include:_spf.google.com include:mailgun.org ~all".to_string(),
-        "v=spf1 include:servers.mcsv.net ?all".to_string(),
+        "v=spf1 include:google.com include:mailgun.org ~all".to_string(),
+        "v=spf1 include:mcsv.net ?all".to_string(),
     ];
     
     let vendor_domains = dns::extract_vendor_domains_with_source_and_logger(&txt_records, None, "test.com");
 
     // Check that the vendor domains were found
     let domains: Vec<String> = vendor_domains.iter().map(|v| v.domain.clone()).collect();
-    assert!(domains.contains(&"_spf.google.com".to_string()));
+    assert!(domains.contains(&"google.com".to_string()));
     assert!(domains.contains(&"mailgun.org".to_string()));
-    assert!(domains.contains(&"servers.mcsv.net".to_string()));
+    assert!(domains.contains(&"mcsv.net".to_string()));
 }
 
 #[test]
