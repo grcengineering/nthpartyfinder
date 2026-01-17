@@ -31,3 +31,6 @@ Thumbs.db
 models/*.onnx
 models/*.json
 !models/.gitkeep
+
+# Git worktrees
+.worktrees/
