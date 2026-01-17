@@ -2,7 +2,7 @@ use clap::Parser;
 use anyhow::Result;
 use ctrlc;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
 use std::io;
 use std::path::Path;
 use tokio::sync::{Mutex, Semaphore};
@@ -77,46 +77,94 @@ async fn main() -> Result<()> {
     };
 
     // Initialize known vendors database for reliable org lookups
-    match known_vendors::init() {
+    let known_vendors_loaded = match known_vendors::init() {
         Ok(()) => {
             if let Some(kv) = known_vendors::get() {
                 let stats = kv.stats();
-                if stats.base_count > 0 {
-                    eprintln!("✅ Known vendors database loaded: {} vendors", stats.base_count);
-                }
+                stats.base_count > 0
+            } else {
+                false
             }
         }
-        Err(e) => {
-            eprintln!("⚠️  Failed to load known vendors database: {}", e);
-            eprintln!("   Lookup will fall back to WHOIS and domain inference");
-            // Continue without known vendors - will fall back to WHOIS
-        }
-    }
+        Err(_) => false,
+    };
 
     // Initialize embedded NER for organization extraction (if feature enabled)
+    let ner_enabled: bool;
     #[cfg(feature = "embedded-ner")]
     {
-        if !args.disable_slm {  // Reuse the disable flag for backward compatibility
+        ner_enabled = if !args.disable_slm {
             match ner_org::init_with_config(0.6) {
-                Ok(()) => {
-                    eprintln!("✅ NER organization extraction initialized (embedded GLiNER model)");
-                }
-                Err(e) => {
-                    if args.enable_slm {
-                        eprintln!("⚠️  NER init failed: {}", e);
-                    }
-                    // Not critical - continue without NER
-                }
+                Ok(()) => true,
+                Err(_) => false,
             }
-        }
+        } else {
+            false
+        };
     }
 
     #[cfg(not(feature = "embedded-ner"))]
     {
-        if args.enable_slm {
-            eprintln!("⚠️  Embedded NER not available (compile with --features embedded-ner)");
+        ner_enabled = false;
+    }
+
+    // Determine feature enablement status for display
+    // (actual initialization happens later, but we show status to user first)
+    let web_org_will_be_enabled = args.enable_web_org
+        || (!args.disable_web_org && _app_config.discovery.web_org_enabled);
+    let subprocessor_will_be_enabled = args.enable_subprocessor_analysis
+        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled);
+    let subdomain_will_be_enabled = args.enable_subdomain_discovery
+        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled);
+    let saas_tenant_will_be_enabled = args.enable_saas_tenant_discovery
+        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled);
+
+    // Print consolidated initialization status block
+    eprintln!();
+    if known_vendors_loaded {
+        if let Some(kv) = known_vendors::get() {
+            eprintln!("✅ ENABLED: Known vendors database ({} vendors)", kv.stats().base_count);
+        }
+    } else {
+        eprintln!("❌ DISABLED: Known vendors database (will use WHOIS/domain inference)");
+    }
+    if ner_enabled {
+        eprintln!("✅ ENABLED: NER-based organization name extraction (via embedded GLiNER model)");
+    } else {
+        #[cfg(feature = "embedded-ner")]
+        {
+            if args.disable_slm {
+                eprintln!("❌ DISABLED: NER-based organization name extraction (via --disable-slm)");
+            } else {
+                eprintln!("❌ DISABLED: NER-based organization name extraction (initialization failed)");
+            }
+        }
+        #[cfg(not(feature = "embedded-ner"))]
+        {
+            eprintln!("❌ DISABLED: NER-based organization name extraction (not compiled in)");
         }
     }
+    if web_org_will_be_enabled {
+        eprintln!("✅ ENABLED: Deterministic organization name extraction (via HTTP & headless browser)");
+    } else {
+        eprintln!("❌ DISABLED: Deterministic organization name extraction (via --disable-web-org)");
+    }
+    if subprocessor_will_be_enabled {
+        eprintln!("✅ ENABLED: Subprocessor web page analysis");
+    } else {
+        eprintln!("❌ DISABLED: Subprocessor web page analysis");
+    }
+    if subdomain_will_be_enabled {
+        eprintln!("✅ ENABLED: Subdomain discovery (via subfinder)");
+    } else {
+        eprintln!("❌ DISABLED: Subdomain discovery");
+    }
+    if saas_tenant_will_be_enabled {
+        eprintln!("✅ ENABLED: SaaS tenant discovery");
+    } else {
+        eprintln!("❌ DISABLED: SaaS tenant discovery");
+    }
+    eprintln!();
 
     // Initialize new logging system
     let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
@@ -126,11 +174,9 @@ async fn main() -> Result<()> {
     });
 
     // Set up Ctrl-C handler for clean exit
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
     ctrlc::set_handler(move || {
-        println!("\n⚠️  Received interrupt signal, cleaning up...");
-        r.store(false, Ordering::SeqCst);
+        eprintln!("\n⚠️  Received interrupt signal, exiting...");
+        std::process::exit(130); // 130 = 128 + SIGINT(2), standard exit code for Ctrl-C
     }).expect("Error setting Ctrl-C handler");
 
     // Validate arguments
@@ -206,12 +252,17 @@ async fn main() -> Result<()> {
             logger.debug(&format!("Verification failure logging enabled: {}", verification_logger.get_file_path()));
         }
     }
-    
+
+    // Determine web org extraction settings (headless browser fallback for org name extraction)
+    // Must be set before any org lookups occur
+    let web_org_enabled = web_org_will_be_enabled;
+    let web_org_min_confidence = _app_config.discovery.web_org_min_confidence;
+
     let mut discovered_vendors = HashMap::new();
     let mut unverified_orgs: Vec<UnverifiedOrgMapping> = Vec::new();
 
     // Get initial organization for the root domain
-    if let Ok(org_result) = whois::get_organization_with_status(domain).await {
+    if let Ok(org_result) = whois::get_organization_with_status_and_config(domain, web_org_enabled, web_org_min_confidence).await {
         discovered_vendors.insert(domain.clone(), org_result.name.clone());
         logger.log_whois_lookup(domain, true);
         if !org_result.is_verified {
@@ -240,16 +291,12 @@ async fn main() -> Result<()> {
         _app_config.dns.doh_servers.len(), _app_config.dns.dns_servers.len()));
     
     // Create shared SubprocessorAnalyzer with persistent cache
-    let subprocessor_enabled = args.enable_subprocessor_analysis
-        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled);
+    let subprocessor_enabled = subprocessor_will_be_enabled;
     let subprocessor_analyzer = if subprocessor_enabled {
         Some(Arc::new(subprocessor::SubprocessorAnalyzer::new().await))
     } else {
         None
     };
-    if subprocessor_analyzer.is_some() {
-        logger.info("Subprocessor web page analysis enabled");
-    }
 
     // Initialize discovery modules if enabled
     let subdomain_discovery = if args.enable_subdomain_discovery
@@ -261,7 +308,6 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
         );
         if discovery.is_available() {
-            logger.info("Subdomain discovery enabled (subfinder found)");
             Some(discovery)
         } else {
             // Subfinder not found - show interactive installation menu
@@ -306,7 +352,6 @@ async fn main() -> Result<()> {
                                 std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
                             );
                             if discovery.is_available() {
-                                logger.info("Subdomain discovery enabled (subfinder downloaded)");
                                 Some(discovery)
                             } else {
                                 logger.warn("Subfinder was downloaded but failed verification");
@@ -322,7 +367,6 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(InstallOption::Skip) => {
-                    logger.info("Skipping subdomain discovery (subfinder not installed)");
                     None
                 }
                 Some(InstallOption::ManualDownload) => {
@@ -338,7 +382,6 @@ async fn main() -> Result<()> {
                     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 
                     eprintln!("After installing, run nthpartyfinder again.");
-                    logger.info("User chose manual download - continuing without subdomain discovery");
                     None
                 }
                 Some(InstallOption::Go) => {
@@ -357,7 +400,6 @@ async fn main() -> Result<()> {
                                 std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
                             );
                             if discovery.is_available() {
-                                logger.info("Subdomain discovery enabled (subfinder installed)");
                                 Some(discovery)
                             } else {
                                 logger.warn("Subfinder was installed but not found in PATH. You may need to add ~/go/bin to your PATH.");
@@ -389,7 +431,6 @@ async fn main() -> Result<()> {
                             eprintln!("  docker run -it projectdiscovery/subfinder:latest -d <domain>");
                             eprintln!();
                             eprintln!("For native integration, install subfinder via Go or download the binary.");
-                            logger.info("Docker image pulled - continuing without subdomain discovery");
                             None
                         }
                         Ok(false) => {
@@ -413,7 +454,6 @@ async fn main() -> Result<()> {
                                 std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
                             );
                             if discovery.is_available() {
-                                logger.info("Subdomain discovery enabled (subfinder installed)");
                                 Some(discovery)
                             } else {
                                 logger.warn("Subfinder was installed but not found. You may need to restart your terminal.");
@@ -432,7 +472,6 @@ async fn main() -> Result<()> {
                 }
                 None => {
                     eprintln!("Invalid selection. Continuing without subdomain discovery.");
-                    logger.info("Skipping subdomain discovery (invalid selection)");
                     None
                 }
             }
@@ -453,7 +492,6 @@ async fn main() -> Result<()> {
                 logger.warn(&format!("Failed to load SaaS platforms: {}", e));
                 None
             } else {
-                logger.info("SaaS tenant discovery enabled");
                 Some(discovery)
             }
         } else {
@@ -489,6 +527,8 @@ async fn main() -> Result<()> {
         logger.clone(),
         subprocessor_analyzer.as_ref(),
         subprocessor_enabled,
+        web_org_enabled,
+        web_org_min_confidence,
         &_app_config.analysis,
         subdomain_discovery.as_ref(),
         saas_tenant_discovery.as_ref(),
@@ -625,6 +665,8 @@ async fn discover_nth_parties(
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     subprocessor_enabled: bool,
+    web_org_enabled: bool,
+    web_org_min_confidence: f32,
     analysis_config: &AnalysisConfig,
     subdomain_discovery: Option<&SubfinderDiscovery>,
     saas_tenant_discovery: Option<&SaasTenantDiscovery>,
@@ -784,11 +826,12 @@ async fn discover_nth_parties(
                                         }
 
                                         // Add CNAME-derived vendors (third-party infrastructure)
+                                        // Use SubfinderDiscovery type to indicate these were found via subfinder
                                         for (cname_target, cname_base) in cname_vendors {
                                             subdomain_cname_vendors_found += 1;
                                             all_vendor_domains.push(dns::VendorDomain {
                                                 domain: cname_base,
-                                                source_type: RecordType::DnsCname,
+                                                source_type: RecordType::SubfinderDiscovery,
                                                 raw_record: format!("Subdomain {} CNAMEs to {} (subfinder:{})", subdomain, cname_target, source),
                                             });
                                         }
@@ -930,6 +973,8 @@ async fn discover_nth_parties(
                             logger_clone.clone(),
                             subprocessor_analyzer,
                             subprocessor_enabled,
+                            web_org_enabled,
+                            web_org_min_confidence,
                             &analysis_config_inner,
                         ).await;
                         
@@ -1015,6 +1060,8 @@ async fn process_vendor_domain(
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     subprocessor_enabled: bool,
+    web_org_enabled: bool,
+    web_org_min_confidence: f32,
     analysis_config: &AnalysisConfig,
 ) -> Vec<VendorRelationship> {
     let mut results = Vec::new();
@@ -1034,7 +1081,7 @@ async fn process_vendor_domain(
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&base_domain) {
             drop(vendors);
-            match whois::get_organization_with_status(&base_domain).await {
+            match whois::get_organization_with_status_and_config(&base_domain, web_org_enabled, web_org_min_confidence).await {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
                     vendors.insert(base_domain.clone(), org_result.name);
@@ -1055,7 +1102,7 @@ async fn process_vendor_domain(
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&customer_base_domain) {
             drop(vendors);
-            match whois::get_organization_with_status(&customer_base_domain).await {
+            match whois::get_organization_with_status_and_config(&customer_base_domain, web_org_enabled, web_org_min_confidence).await {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
                     vendors.insert(customer_base_domain.clone(), org_result.name);
@@ -1137,6 +1184,8 @@ async fn process_vendor_domain(
         logger.clone(),
         subprocessor_analyzer,
         subprocessor_enabled,
+        web_org_enabled,
+        web_org_min_confidence,
         analysis_config,
         None,  // subdomain_discovery - only runs at depth 1
         None,  // saas_tenant_discovery - only runs at depth 1
@@ -1189,6 +1238,8 @@ async fn discover_nth_parties_by_layers(
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     subprocessor_enabled: bool,
+    web_org_enabled: bool,
+    web_org_min_confidence: f32,
 ) -> Result<Vec<VendorRelationship>> {
     let mut all_results = Vec::new();
     let mut current_layer_domains = vec![domain.to_string()];
@@ -1259,6 +1310,8 @@ async fn discover_nth_parties_by_layers(
                     logger.clone(),
                     subprocessor_analyzer,
                     subprocessor_enabled,
+                    web_org_enabled,
+                    web_org_min_confidence,
                 ).await {
                     Ok((domain_results, next_domains)) => {
                         logger.debug(&format!("✅ Layer {} - Domain {} produced {} results, {} next domains", 
@@ -1351,6 +1404,8 @@ async fn discover_single_domain(
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     subprocessor_enabled: bool,
+    web_org_enabled: bool,
+    web_org_min_confidence: f32,
 ) -> Result<(Vec<VendorRelationship>, Vec<String>)> {
     // Check if we've already processed this domain
     {
@@ -1429,7 +1484,7 @@ async fn discover_single_domain(
                     let vendors = discovered_vendors.lock().await;
                     vendors.contains_key(&base_domain)
                 } {
-                    match whois::get_organization_with_status(&base_domain).await {
+                    match whois::get_organization_with_status_and_config(&base_domain, web_org_enabled, web_org_min_confidence).await {
                         Ok(org_result) => {
                             let mut vendors = discovered_vendors.lock().await;
                             vendors.insert(base_domain.clone(), org_result.name);

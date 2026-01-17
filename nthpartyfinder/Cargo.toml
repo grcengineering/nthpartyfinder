@@ -72,3 +72,7 @@ path = "src/main.rs"
 [[example]]
 name = "progress_test"
 path = "examples/progress_test.rs"
+
+[[example]]
+name = "ner_accuracy_test"
+path = "examples/ner_accuracy_test.rs"

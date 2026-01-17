@@ -4,48 +4,24 @@
       "name": "Okta",
       "vendor_domain": "okta.com",
       "tenant_patterns": [
-        "{tenant}.okta.com",
-        "{tenant}.oktapreview.com"
+        "{tenant}.okta.com"
       ],
       "detection": {
-        "success_indicators": ["Sign In", "Okta", "Sign in to your account", "okta-sign-in"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This page does not exist", "404"]
-      }
-    },
-    {
-      "name": "Atlassian Cloud",
-      "vendor_domain": "atlassian.net",
-      "tenant_patterns": [
-        "{tenant}.atlassian.net"
-      ],
-      "detection": {
-        "success_indicators": ["Atlassian", "Jira", "Confluence", "Log in", "Sign in"],
-        "failure_indicators": ["doesn't exist", "not found", "This site can't be reached", "no longer available"]
-      }
-    },
-    {
-      "name": "Salesforce",
-      "vendor_domain": "salesforce.com",
-      "tenant_patterns": [
-        "{tenant}.my.salesforce.com",
-        "{tenant}.lightning.force.com",
-        "{tenant}.salesforce.com"
-      ],
-      "detection": {
-        "success_indicators": ["Salesforce", "Login", "Username", "Password", "Log In"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid", "Unknown or expired link"]
+        "success_indicators": ["ui-service", "enduser-v2", "iris", "UserHome"],
+        "failure_indicators": ["okta-sign-in.min.js", "okta-signin-widget"],
+        "notes": "Valid tenants use modern iris UI; invalid tenants show classic sign-in widget"
       }
     },
     {
       "name": "Slack",
       "vendor_domain": "slack.com",
       "tenant_patterns": [
-        "{tenant}.slack.com",
-        "{tenant}.enterprise.slack.com"
+        "{tenant}.slack.com"
       ],
       "detection": {
-        "success_indicators": ["Slack", "Sign in", "workspace", "Continue"],
-        "failure_indicators": ["doesn't exist", "not found", "no workspace", "We couldn't find your workspace"]
+        "success_indicators": ["enterprise.slack.com", "Slack", "workspace"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404 - detected by status code, not body"
       }
     },
     {
@@ -55,207 +31,9 @@
         "{tenant}.zendesk.com"
       ],
       "detection": {
-        "success_indicators": ["Zendesk", "Sign in", "Help Center", "Submit a request"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This help center no longer exists"]
-      }
-    },
-    {
-      "name": "HubSpot",
-      "vendor_domain": "hubspot.com",
-      "tenant_patterns": [
-        "{tenant}.hubspotpagebuilder.com",
-        "app.hubspot.com/login/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["HubSpot", "Sign in", "Log in", "Email", "Password"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "404"]
-      }
-    },
-    {
-      "name": "ServiceNow",
-      "vendor_domain": "servicenow.com",
-      "tenant_patterns": [
-        "{tenant}.service-now.com"
-      ],
-      "detection": {
-        "success_indicators": ["ServiceNow", "Log in", "User name", "Password", "Sign in"],
-        "failure_indicators": ["not found", "doesn't exist", "instance not found", "This instance is not available"]
-      }
-    },
-    {
-      "name": "Workday",
-      "vendor_domain": "workday.com",
-      "tenant_patterns": [
-        "{tenant}.myworkday.com",
-        "wd5.myworkday.com/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Workday", "Sign In", "Username", "Log In"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid tenant"]
-      }
-    },
-    {
-      "name": "Freshdesk",
-      "vendor_domain": "freshdesk.com",
-      "tenant_patterns": [
-        "{tenant}.freshdesk.com"
-      ],
-      "detection": {
-        "success_indicators": ["Freshdesk", "Sign in", "Help Desk", "Support Portal", "Submit a ticket"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This portal is not configured"]
-      }
-    },
-    {
-      "name": "Monday.com",
-      "vendor_domain": "monday.com",
-      "tenant_patterns": [
-        "{tenant}.monday.com"
-      ],
-      "detection": {
-        "success_indicators": ["monday.com", "Log in", "Sign in", "Welcome"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This account doesn't exist"]
-      }
-    },
-    {
-      "name": "Notion",
-      "vendor_domain": "notion.so",
-      "tenant_patterns": [
-        "{tenant}.notion.site",
-        "notion.so/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Notion", "Log in", "Sign up", "Continue with"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This content does not exist"]
-      }
-    },
-    {
-      "name": "Intercom",
-      "vendor_domain": "intercom.com",
-      "tenant_patterns": [
-        "{tenant}.intercom-mail.com",
-        "app.intercom.com/a/apps/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Intercom", "Sign in", "Log in", "messenger"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid app"]
-      }
-    },
-    {
-      "name": "Greenhouse",
-      "vendor_domain": "greenhouse.io",
-      "tenant_patterns": [
-        "boards.greenhouse.io/{tenant}",
-        "{tenant}.greenhouse.io"
-      ],
-      "detection": {
-        "success_indicators": ["Greenhouse", "Jobs", "Careers", "Open positions", "Apply"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "No jobs available"]
-      }
-    },
-    {
-      "name": "Lever",
-      "vendor_domain": "lever.co",
-      "tenant_patterns": [
-        "jobs.lever.co/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Lever", "Jobs", "Careers", "Open positions", "teams"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This company page does not exist"]
-      }
-    },
-    {
-      "name": "DocuSign",
-      "vendor_domain": "docusign.com",
-      "tenant_patterns": [
-        "{tenant}.docusign.net",
-        "app.docusign.com/organizations/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["DocuSign", "Sign in", "Log in", "Electronic Signature"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid organization"]
-      }
-    },
-    {
-      "name": "Box",
-      "vendor_domain": "box.com",
-      "tenant_patterns": [
-        "{tenant}.app.box.com",
-        "{tenant}.ent.box.com"
-      ],
-      "detection": {
-        "success_indicators": ["Box", "Log in", "Sign in", "Secure file sharing"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This account does not exist"]
-      }
-    },
-    {
-      "name": "Dropbox Business",
-      "vendor_domain": "dropbox.com",
-      "tenant_patterns": [
-        "www.dropbox.com/team/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Dropbox", "Sign in", "Log in", "Business"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid team"]
-      }
-    },
-    {
-      "name": "GitHub Enterprise",
-      "vendor_domain": "github.com",
-      "tenant_patterns": [
-        "github.com/{tenant}",
-        "{tenant}.github.com"
-      ],
-      "detection": {
-        "success_indicators": ["GitHub", "Sign in", "Repositories", "Overview", "Projects"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This is not the web page you are looking for"]
-      }
-    },
-    {
-      "name": "GitLab",
-      "vendor_domain": "gitlab.com",
-      "tenant_patterns": [
-        "gitlab.com/{tenant}",
-        "{tenant}.gitlab.io"
-      ],
-      "detection": {
-        "success_indicators": ["GitLab", "Sign in", "Projects", "Repository", "Groups"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "The page could not be found"]
-      }
-    },
-    {
-      "name": "Zoom",
-      "vendor_domain": "zoom.us",
-      "tenant_patterns": [
-        "{tenant}.zoom.us"
-      ],
-      "detection": {
-        "success_indicators": ["Zoom", "Sign In", "Join", "Meeting", "webinar"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This link is not valid"]
-      }
-    },
-    {
-      "name": "Microsoft 365 / Azure AD",
-      "vendor_domain": "microsoft.com",
-      "tenant_patterns": [
-        "{tenant}.onmicrosoft.com",
-        "login.microsoftonline.com/{tenant}",
-        "{tenant}.sharepoint.com"
-      ],
-      "detection": {
-        "success_indicators": ["Microsoft", "Sign in", "Enter password", "Office 365", "Azure"],
-        "failure_indicators": ["doesn't exist", "not found", "no such tenant", "We couldn't find an account"]
-      }
-    },
-    {
-      "name": "Google Workspace",
-      "vendor_domain": "google.com",
-      "tenant_patterns": [
-        "workspace.google.com/{tenant}",
-        "admin.google.com/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Google", "Sign in", "Gmail", "Workspace"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "Couldn't find your Google Account"]
+        "success_indicators": ["Zendesk", "Help Center", "/hc/"],
+        "failure_indicators": ["help-center-closed", "helpcenter-closed", "This help center no longer exists"],
+        "notes": "Invalid tenants redirect to www.zendesk.com/help-center-closed/"
       }
     },
     {
@@ -265,158 +43,21 @@
         "{tenant}.pagerduty.com"
       ],
       "detection": {
-        "success_indicators": ["PagerDuty", "Sign In", "Log In", "Incident Management"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "subdomain does not exist"]
+        "success_indicators": ["identity.pagerduty.com", "PagerDuty", "session_restart"],
+        "failure_indicators": ["not_found"],
+        "notes": "Invalid tenants return HTTP 404 and redirect to /not_found"
       }
     },
     {
-      "name": "Datadog",
-      "vendor_domain": "datadoghq.com",
-      "tenant_patterns": [
-        "{tenant}.datadoghq.com",
-        "app.datadoghq.com/account/login/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Datadog", "Sign in", "Log in", "monitoring"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid subdomain"]
-      }
-    },
-    {
-      "name": "Splunk Cloud",
-      "vendor_domain": "splunk.com",
-      "tenant_patterns": [
-        "{tenant}.splunkcloud.com"
-      ],
-      "detection": {
-        "success_indicators": ["Splunk", "Sign In", "Login", "username"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "instance not found"]
-      }
-    },
-    {
-      "name": "Confluence",
+      "name": "Atlassian Cloud",
       "vendor_domain": "atlassian.net",
       "tenant_patterns": [
-        "{tenant}.atlassian.net/wiki"
+        "{tenant}.atlassian.net"
       ],
       "detection": {
-        "success_indicators": ["Confluence", "Log in", "Space directory", "Pages"],
-        "failure_indicators": ["doesn't exist", "not found", "This site can't be reached", "no longer available"]
-      }
-    },
-    {
-      "name": "Jira",
-      "vendor_domain": "atlassian.net",
-      "tenant_patterns": [
-        "{tenant}.atlassian.net/jira"
-      ],
-      "detection": {
-        "success_indicators": ["Jira", "Log in", "Projects", "Boards", "Issues"],
-        "failure_indicators": ["doesn't exist", "not found", "This site can't be reached", "no longer available"]
-      }
-    },
-    {
-      "name": "Asana",
-      "vendor_domain": "asana.com",
-      "tenant_patterns": [
-        "app.asana.com/0/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Asana", "Log In", "Sign Up", "work management"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid workspace"]
-      }
-    },
-    {
-      "name": "Trello",
-      "vendor_domain": "trello.com",
-      "tenant_patterns": [
-        "trello.com/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Trello", "Log In", "Boards", "workspace"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This user doesn't exist"]
-      }
-    },
-    {
-      "name": "Figma",
-      "vendor_domain": "figma.com",
-      "tenant_patterns": [
-        "www.figma.com/@{tenant}",
-        "www.figma.com/team/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Figma", "Log in", "Sign up", "design"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "user not found"]
-      }
-    },
-    {
-      "name": "Miro",
-      "vendor_domain": "miro.com",
-      "tenant_patterns": [
-        "miro.com/app/dashboard/?team={tenant}",
-        "{tenant}.miro.com"
-      ],
-      "detection": {
-        "success_indicators": ["Miro", "Log in", "Sign up", "whiteboard", "board"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "team not found"]
-      }
-    },
-    {
-      "name": "1Password Business",
-      "vendor_domain": "1password.com",
-      "tenant_patterns": [
-        "{tenant}.1password.com"
-      ],
-      "detection": {
-        "success_indicators": ["1Password", "Sign In", "Log in", "account"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "team not found"]
-      }
-    },
-    {
-      "name": "LastPass",
-      "vendor_domain": "lastpass.com",
-      "tenant_patterns": [
-        "{tenant}.lastpass.com"
-      ],
-      "detection": {
-        "success_indicators": ["LastPass", "Log In", "Sign In", "password manager"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid company"]
-      }
-    },
-    {
-      "name": "Duo Security",
-      "vendor_domain": "duosecurity.com",
-      "tenant_patterns": [
-        "{tenant}.duosecurity.com",
-        "api-{tenant}.duosecurity.com"
-      ],
-      "detection": {
-        "success_indicators": ["Duo", "Two-Factor", "Authentication", "Verify"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid integration"]
-      }
-    },
-    {
-      "name": "Auth0",
-      "vendor_domain": "auth0.com",
-      "tenant_patterns": [
-        "{tenant}.auth0.com",
-        "{tenant}.us.auth0.com",
-        "{tenant}.eu.auth0.com"
-      ],
-      "detection": {
-        "success_indicators": ["Auth0", "Sign In", "Log In", "Universal Login"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "tenant not found"]
-      }
-    },
-    {
-      "name": "Ping Identity",
-      "vendor_domain": "pingidentity.com",
-      "tenant_patterns": [
-        "{tenant}.pingidentity.com",
-        "sso.connect.pingidentity.com/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Ping Identity", "Sign On", "Login", "Identity"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid environment"]
+        "success_indicators": ["id.atlassian.com", "Atlassian", "confluence", "jira"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404"
       }
     },
     {
@@ -426,8 +67,177 @@
         "{tenant}.onelogin.com"
       ],
       "detection": {
-        "success_indicators": ["OneLogin", "Sign In", "Login", "SSO"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "subdomain not found"]
+        "success_indicators": ["web-login-v2-cdn.onelogin.com/login2", "OneLogin"],
+        "failure_indicators": ["subdomain-helper", "Enter your company's OneLogin Domain", "subdomain_input", "subdomain_helper"],
+        "notes": "Invalid tenants show subdomain helper asking for company domain"
+      }
+    },
+    {
+      "name": "Salesforce",
+      "vendor_domain": "salesforce.com",
+      "tenant_patterns": [
+        "{tenant}.my.salesforce.com"
+      ],
+      "detection": {
+        "success_indicators": ["saml_request_id", "Salesforce", "salesforce.com"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Greenhouse",
+      "vendor_domain": "greenhouse.io",
+      "tenant_patterns": [
+        "boards.greenhouse.io/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["Greenhouse", "Jobs", "Careers", "careers", "jobs"],
+        "failure_indicators": [],
+        "notes": "Valid tenants often redirect to company's own careers page; invalid return HTTP 404"
+      }
+    },
+    {
+      "name": "GitHub Enterprise",
+      "vendor_domain": "github.com",
+      "tenant_patterns": [
+        "github.com/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["GitHub", "Repositories", "repositories", "Overview"],
+        "failure_indicators": [],
+        "notes": "Invalid organizations return HTTP 404"
+      }
+    },
+    {
+      "name": "Splunk Cloud",
+      "vendor_domain": "splunk.com",
+      "tenant_patterns": [
+        "{tenant}.splunkcloud.com"
+      ],
+      "detection": {
+        "success_indicators": ["Splunk", "account/login", "/en-US/"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Zoom",
+      "vendor_domain": "zoom.us",
+      "tenant_patterns": [
+        "{tenant}.zoom.us"
+      ],
+      "detection": {
+        "success_indicators": ["Zoom", "zoom.us"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "ServiceNow",
+      "vendor_domain": "servicenow.com",
+      "tenant_patterns": [
+        "{tenant}.service-now.com"
+      ],
+      "detection": {
+        "success_indicators": ["ServiceNow", "service-now.com"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Freshdesk",
+      "vendor_domain": "freshdesk.com",
+      "tenant_patterns": [
+        "{tenant}.freshdesk.com"
+      ],
+      "detection": {
+        "success_indicators": ["Freshdesk", "freshdesk", "Support Portal"],
+        "failure_indicators": ["This portal is not configured", "page not found"],
+        "notes": "Check HTTP status - many invalid tenants return 404"
+      }
+    },
+    {
+      "name": "HubSpot",
+      "vendor_domain": "hubspot.com",
+      "tenant_patterns": [
+        "{tenant}.hubspotpagebuilder.com"
+      ],
+      "detection": {
+        "success_indicators": ["HubSpot", "hubspot"],
+        "failure_indicators": [],
+        "notes": "Detection via subdomain pattern"
+      }
+    },
+    {
+      "name": "Workday",
+      "vendor_domain": "workday.com",
+      "tenant_patterns": [
+        "{tenant}.myworkday.com"
+      ],
+      "detection": {
+        "success_indicators": ["Workday", "myworkday.com", "wd-services"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Monday.com",
+      "vendor_domain": "monday.com",
+      "tenant_patterns": [
+        "{tenant}.monday.com"
+      ],
+      "detection": {
+        "success_indicators": ["monday.com", "monday"],
+        "failure_indicators": ["This account doesn't exist", "account doesn't exist"],
+        "notes": "Check for account existence message"
+      }
+    },
+    {
+      "name": "Lever",
+      "vendor_domain": "lever.co",
+      "tenant_patterns": [
+        "jobs.lever.co/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["Lever", "jobs", "teams", "positions"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404"
+      }
+    },
+    {
+      "name": "DocuSign",
+      "vendor_domain": "docusign.com",
+      "tenant_patterns": [
+        "{tenant}.docusign.net"
+      ],
+      "detection": {
+        "success_indicators": ["DocuSign", "docusign"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Box",
+      "vendor_domain": "box.com",
+      "tenant_patterns": [
+        "{tenant}.app.box.com"
+      ],
+      "detection": {
+        "success_indicators": ["Box", "box.com"],
+        "failure_indicators": ["This account does not exist"],
+        "notes": "Check for account existence"
+      }
+    },
+    {
+      "name": "Microsoft 365 / Azure AD",
+      "vendor_domain": "microsoft.com",
+      "tenant_patterns": [
+        "{tenant}.sharepoint.com"
+      ],
+      "detection": {
+        "success_indicators": ["Microsoft", "SharePoint", "Office 365"],
+        "failure_indicators": ["We couldn't find an account", "no such tenant"],
+        "notes": "Invalid tenants fail DNS resolution for SharePoint"
       }
     },
     {
@@ -437,44 +247,106 @@
         "{tenant}.myshopify.com"
       ],
       "detection": {
-        "success_indicators": ["Shopify", "Shop", "Cart", "Products", "Checkout"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "This store is unavailable"]
-      }
-    },
-    {
-      "name": "Stripe",
-      "vendor_domain": "stripe.com",
-      "tenant_patterns": [
-        "dashboard.stripe.com/{tenant}",
-        "billing.stripe.com/{tenant}"
-      ],
-      "detection": {
-        "success_indicators": ["Stripe", "Sign in", "Dashboard", "Payments"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid account"]
+        "success_indicators": ["Shopify", "shop", "cart", "products"],
+        "failure_indicators": ["This store is unavailable", "store is currently unavailable", "password page"],
+        "notes": "Check for store availability message"
       }
     },
     {
       "name": "Snowflake",
       "vendor_domain": "snowflake.com",
       "tenant_patterns": [
-        "{tenant}.snowflakecomputing.com",
-        "app.snowflake.com/{tenant}"
+        "{tenant}.snowflakecomputing.com"
       ],
       "detection": {
-        "success_indicators": ["Snowflake", "Sign in", "Username", "Warehouse"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "account not found"]
+        "success_indicators": ["Snowflake", "snowflake"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "BambooHR",
+      "vendor_domain": "bamboohr.com",
+      "tenant_patterns": [
+        "{tenant}.bamboohr.com"
+      ],
+      "detection": {
+        "success_indicators": ["BambooHR", "bamboohr"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants redirect to www.bamboohr.com"
+      }
+    },
+    {
+      "name": "SAP Concur",
+      "vendor_domain": "concur.com",
+      "tenant_patterns": [
+        "{tenant}.concursolutions.com"
+      ],
+      "detection": {
+        "success_indicators": ["Concur", "SAP", "concur"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Coupa",
+      "vendor_domain": "coupa.com",
+      "tenant_patterns": [
+        "{tenant}.coupahost.com"
+      ],
+      "detection": {
+        "success_indicators": ["Coupa", "coupa"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Auth0",
+      "vendor_domain": "auth0.com",
+      "tenant_patterns": [
+        "{tenant}.auth0.com",
+        "{tenant}.us.auth0.com"
+      ],
+      "detection": {
+        "success_indicators": ["Auth0", "Universal Login", "auth0"],
+        "failure_indicators": ["tenant not found", "Invalid tenant"],
+        "notes": "Many tenants redirect to auth0.com; detection may be unreliable"
+      }
+    },
+    {
+      "name": "Duo Security",
+      "vendor_domain": "duosecurity.com",
+      "tenant_patterns": [
+        "{tenant}.duosecurity.com"
+      ],
+      "detection": {
+        "success_indicators": ["Duo", "duosecurity"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Ping Identity",
+      "vendor_domain": "pingidentity.com",
+      "tenant_patterns": [
+        "{tenant}.pingidentity.com"
+      ],
+      "detection": {
+        "success_indicators": ["Ping Identity", "pingidentity"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
       }
     },
     {
       "name": "Tableau Online",
       "vendor_domain": "tableau.com",
       "tenant_patterns": [
-        "{tenant}.online.tableau.com",
-        "online.tableau.com/#/site/{tenant}"
+        "{tenant}.online.tableau.com"
       ],
       "detection": {
-        "success_indicators": ["Tableau", "Sign In", "Views", "Workbooks"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "site not found"]
+        "success_indicators": ["Tableau", "tableau"],
+        "failure_indicators": ["site not found"],
+        "notes": "Check for site existence"
       }
     },
     {
@@ -485,66 +357,33 @@
         "{tenant}.cloud.looker.com"
       ],
       "detection": {
-        "success_indicators": ["Looker", "Sign In", "Log In", "dashboard"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "instance not found"]
-      }
-    },
-    {
-      "name": "Coupa",
-      "vendor_domain": "coupa.com",
-      "tenant_patterns": [
-        "{tenant}.coupahost.com",
-        "{tenant}.coupacloud.com"
-      ],
-      "detection": {
-        "success_indicators": ["Coupa", "Sign In", "Log In", "Procurement"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "instance not found"]
-      }
-    },
-    {
-      "name": "SAP Concur",
-      "vendor_domain": "concur.com",
-      "tenant_patterns": [
-        "{tenant}.concursolutions.com"
-      ],
-      "detection": {
-        "success_indicators": ["Concur", "SAP", "Sign In", "Travel", "Expense"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "company not found"]
+        "success_indicators": ["Looker", "looker"],
+        "failure_indicators": ["instance not found"],
+        "notes": "Check for instance existence"
       }
     },
     {
       "name": "Netsuite",
       "vendor_domain": "netsuite.com",
       "tenant_patterns": [
-        "{tenant}.app.netsuite.com",
-        "system.netsuite.com/pages/customerlogin.jsp?compid={tenant}"
+        "{tenant}.app.netsuite.com"
       ],
       "detection": {
-        "success_indicators": ["NetSuite", "Sign In", "Log In", "Oracle"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid company"]
-      }
-    },
-    {
-      "name": "Bamboo HR",
-      "vendor_domain": "bamboohr.com",
-      "tenant_patterns": [
-        "{tenant}.bamboohr.com"
-      ],
-      "detection": {
-        "success_indicators": ["BambooHR", "Sign In", "Log In", "HR"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "company not found"]
+        "success_indicators": ["NetSuite", "Oracle", "netsuite"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
       }
     },
     {
       "name": "ADP",
       "vendor_domain": "adp.com",
       "tenant_patterns": [
-        "workforcenow.adp.com/{tenant}",
         "{tenant}.adp.com"
       ],
       "detection": {
-        "success_indicators": ["ADP", "Sign In", "Log In", "Workforce", "Payroll"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "invalid client"]
+        "success_indicators": ["ADP", "Workforce", "Payroll"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
       }
     },
     {
@@ -554,20 +393,93 @@
         "app.gusto.com/companies/{tenant}"
       ],
       "detection": {
-        "success_indicators": ["Gusto", "Sign In", "Log In", "Payroll"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "company not found"]
+        "success_indicators": ["Gusto", "gusto"],
+        "failure_indicators": ["company not found"],
+        "notes": "Path-based tenant pattern"
       }
     },
     {
       "name": "Rippling",
       "vendor_domain": "rippling.com",
       "tenant_patterns": [
-        "{tenant}.rippling.com",
-        "app.rippling.com/{tenant}"
+        "{tenant}.rippling.com"
       ],
       "detection": {
-        "success_indicators": ["Rippling", "Sign In", "Log In", "HR"],
-        "failure_indicators": ["not found", "doesn't exist", "page not found", "company not found"]
+        "success_indicators": ["Rippling", "rippling"],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Asana",
+      "vendor_domain": "asana.com",
+      "tenant_patterns": [
+        "app.asana.com/0/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["Asana", "asana"],
+        "failure_indicators": ["invalid workspace"],
+        "notes": "Path-based tenant pattern"
+      }
+    },
+    {
+      "name": "Figma",
+      "vendor_domain": "figma.com",
+      "tenant_patterns": [
+        "www.figma.com/@{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["Figma", "figma", "design"],
+        "failure_indicators": ["user not found", "page not found"],
+        "notes": "Profile-based detection"
+      }
+    },
+    {
+      "name": "Miro",
+      "vendor_domain": "miro.com",
+      "tenant_patterns": [
+        "{tenant}.miro.com"
+      ],
+      "detection": {
+        "success_indicators": ["Miro", "miro", "whiteboard"],
+        "failure_indicators": ["team not found"],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    },
+    {
+      "name": "Notion",
+      "vendor_domain": "notion.so",
+      "tenant_patterns": [
+        "{tenant}.notion.site"
+      ],
+      "detection": {
+        "success_indicators": ["Notion", "notion"],
+        "failure_indicators": ["This content does not exist", "page not found"],
+        "notes": "Public workspace detection"
+      }
+    },
+    {
+      "name": "Intercom",
+      "vendor_domain": "intercom.com",
+      "tenant_patterns": [
+        "{tenant}.intercom-mail.com"
+      ],
+      "detection": {
+        "success_indicators": ["Intercom", "intercom"],
+        "failure_indicators": [],
+        "notes": "Email domain detection"
+      }
+    },
+    {
+      "name": "GitLab",
+      "vendor_domain": "gitlab.com",
+      "tenant_patterns": [
+        "gitlab.com/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": ["GitLab", "Projects", "Repository"],
+        "failure_indicators": [],
+        "notes": "Invalid organizations redirect to sign_in; detection may be unreliable without auth"
       }
     }
   ]

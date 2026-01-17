@@ -195,6 +195,7 @@
             padding: 0.75rem;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
+            vertical-align: middle;
         }
 
         .data-table th {
@@ -286,7 +287,10 @@
         .record-type-DNS\:\:TXT\:\:VERIFICATION { background: #06b6d4; }
         .record-type-DNS\:\:TXT\:\:DMARC { background: #ec4899; }
         .record-type-DNS\:\:SUBDOMAIN { background: #f97316; }
+        .record-type-DNS\:\:CNAME { background: #14b8a6; }
         .record-type-HTTP\:\:SUBPROCESSOR { background: #dc2626; }
+        .record-type-DISCOVERY\:\:SUBFINDER { background: #a855f7; }
+        .record-type-DISCOVERY\:\:SAAS_TENANT { background: #eab308; }
         .record-type-default { background: var(--text-secondary); }
 
         .search-box {
@@ -844,9 +848,7 @@
 
         /* Evidence Cell Buttons */
         .evidence-cell {
-            display: flex;
-            gap: 0.375rem;
-            align-items: center;
+            text-align: center;
         }
 
         .evidence-preview {
@@ -1055,9 +1057,6 @@
             <div class="section-content">
                 <div class="tabs" role="tablist" aria-label="Data view tabs">
                     <button class="tab active" role="tab" aria-selected="true" aria-controls="all-tab" id="tab-all" onclick="showTab('all', event)" onkeydown="handleTabKeydown(event, 'all')">All Relationships</button>
-                    <button class="tab" role="tab" aria-selected="false" aria-controls="spf-tab" id="tab-spf" onclick="showTab('spf', event)" onkeydown="handleTabKeydown(event, 'spf')">Email Providers (SPF)</button>
-                    <button class="tab" role="tab" aria-selected="false" aria-controls="verification-tab" id="tab-verification" onclick="showTab('verification', event)" onkeydown="handleTabKeydown(event, 'verification')">Verified Services</button>
-                    <button class="tab" role="tab" aria-selected="false" aria-controls="subprocessors-tab" id="tab-subprocessors" onclick="showTab('subprocessors', event)" onkeydown="handleTabKeydown(event, 'subprocessors')">Subprocessors</button>
                     <button class="tab" role="tab" aria-selected="false" aria-controls="summary-tab" id="tab-summary" onclick="showTab('summary', event)" onkeydown="handleTabKeydown(event, 'summary')">Summary by Organization</button>
                 </div>
 
@@ -1074,14 +1073,17 @@
                             </select>
                         </div>
                         <div class="filter-group">
-                            <label class="filter-label">Record Type:</label>
+                            <label class="filter-label">Discovery Source:</label>
                             <select class="filter-select" id="filter-type-all" onchange="applyFilters('all-table')">
-                                <option value="">All Types</option>
-                                <option value="DNS::TXT::SPF">DNS::TXT::SPF</option>
-                                <option value="DNS::TXT::VERIFICATION">DNS::TXT::VERIFICATION</option>
-                                <option value="DNS::TXT::DMARC">DNS::TXT::DMARC</option>
-                                <option value="DNS::SUBDOMAIN">DNS::SUBDOMAIN</option>
-                                <option value="HTTP::SUBPROCESSOR">HTTP::SUBPROCESSOR</option>
+                                <option value="">All Sources</option>
+                                <option value="DNS::TXT::SPF">Email Provider (SPF)</option>
+                                <option value="DNS::TXT::VERIFICATION">Domain Verification</option>
+                                <option value="DNS::TXT::DMARC">Email Security (DMARC)</option>
+                                <option value="DNS::SUBDOMAIN">Subdomain</option>
+                                <option value="DNS::CNAME">CNAME Record</option>
+                                <option value="HTTP::SUBPROCESSOR">Subprocessor Page</option>
+                                <option value="DISCOVERY::SUBFINDER">Subdomain Discovery</option>
+                                <option value="DISCOVERY::SAAS_TENANT">SaaS Tenant</option>
                             </select>
                         </div>
                     </div>
@@ -1092,7 +1094,7 @@
                                     <th class="sortable" onclick="sortTable('all-table', 0)">Vendor Domain</th>
                                     <th class="sortable" onclick="sortTable('all-table', 1)">Organization</th>
                                     <th class="sortable" onclick="sortTable('all-table', 2)">Layer</th>
-                                    <th class="sortable" onclick="sortTable('all-table', 3)">Record Type</th>
+                                    <th class="sortable" onclick="sortTable('all-table', 3)">Discovery Source</th>
                                     <th class="sortable" onclick="sortTable('all-table', 4)">Customer</th>
                                     <th class="sortable" onclick="sortTable('all-table', 5)">Record Value</th>
                                     <th class="sortable" onclick="sortTable('all-table', 6)">Evidence</th>
@@ -1112,129 +1114,6 @@
                                     </td>
                                 </tr>
                                 {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div id="spf-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-spf">
-                    <input type="text" class="search-box" id="search-spf" placeholder="Search email providers..." aria-label="Search email providers" onkeyup="filterTable('spf-table', this.value)">
-                    <div class="table-container">
-                        <table class="data-table" id="spf-table">
-                            <thead>
-                                <tr>
-                                    <th class="sortable" onclick="sortTable('spf-table', 0)">Email Provider</th>
-                                    <th class="sortable" onclick="sortTable('spf-table', 1)">Organization</th>
-                                    <th class="sortable" onclick="sortTable('spf-table', 2)">Layer</th>
-                                    <th class="sortable" onclick="sortTable('spf-table', 3)">Customer Domain</th>
-                                    <th class="sortable" onclick="sortTable('spf-table', 4)">SPF Record</th>
-                                    <th class="sortable" onclick="sortTable('spf-table', 5)">Evidence</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {%- for rel in relationships -%}
-                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "DNS::TXT::SPF" %}
-                                <tr>
-                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
-                                    <td>{{ rel.nth_party_organization }}</td>
-                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
-                                    <td>{{ rel.nth_party_customer_domain }}</td>
-                                    <td><code>{{ rel.nth_party_record }}</code></td>
-                                    <td class="evidence-cell">
-                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
-                                    </td>
-                                </tr>
-                                {%- endif -%}
-                                {%- endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div id="verification-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-verification">
-                    <input type="text" class="search-box" id="search-verification" placeholder="Search verified services..." aria-label="Search verified services" onkeyup="filterTable('verification-table', this.value)">
-                    <div class="table-container">
-                        <table class="data-table" id="verification-table">
-                            <thead>
-                                <tr>
-                                    <th class="sortable" onclick="sortTable('verification-table', 0)">Service Provider</th>
-                                    <th class="sortable" onclick="sortTable('verification-table', 1)">Organization</th>
-                                    <th class="sortable" onclick="sortTable('verification-table', 2)">Layer</th>
-                                    <th class="sortable" onclick="sortTable('verification-table', 3)">Customer Domain</th>
-                                    <th class="sortable" onclick="sortTable('verification-table', 4)">Verification Record</th>
-                                    <th class="sortable" onclick="sortTable('verification-table', 5)">Evidence</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {%- for rel in relationships -%}
-                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "DNS::TXT::VERIFICATION" %}
-                                <tr>
-                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
-                                    <td>{{ rel.nth_party_organization }}</td>
-                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
-                                    <td>{{ rel.nth_party_customer_domain }}</td>
-                                    <td><code>{{ rel.nth_party_record }}</code></td>
-                                    <td class="evidence-cell">
-                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
-                                    </td>
-                                </tr>
-                                {%- endif -%}
-                                {%- endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <div id="subprocessors-tab" class="tab-content" role="tabpanel" aria-labelledby="tab-subprocessors">
-                    <input type="text" class="search-box" id="search-subprocessors" placeholder="Search subprocessors..." aria-label="Search subprocessors" onkeyup="filterTable('subprocessors-table', this.value)">
-                    <div class="filters">
-                        <div class="filter-group">
-                            <label class="filter-label">Layer:</label>
-                            <select class="filter-select" onchange="filterSubprocessorsByLayer('subprocessors-table', this.value)">
-                                <option value="">All Layers</option>
-                                {% for layer in 1..=summary.max_depth %}
-                                <option value="{{ layer }}">Layer {{ layer }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                        <div class="filter-group">
-                            <label class="filter-label">Show Only:</label>
-                            <select class="filter-select" onchange="filterSubprocessorsByType('subprocessors-table', this.value)">
-                                <option value="">All Subprocessors</option>
-                                <option value="direct">Direct Subprocessors (from root domain)</option>
-                                <option value="nested">Nested Subprocessors (from 3rd+ parties)</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="table-container">
-                        <table class="data-table" id="subprocessors-table">
-                            <thead>
-                                <tr>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 0)">Subprocessor</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 1)">Organization</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 2)">Layer</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 3)">Parent Domain</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 4)">Parent Organization</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 5)">Subprocessor URL</th>
-                                    <th class="sortable" onclick="sortTable('subprocessors-table', 6)">Evidence</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {%- for rel in relationships -%}
-                                {%- if rel.nth_party_record_type.as_hierarchy_string() == "HTTP::SUBPROCESSOR" %}
-                                <tr data-layer="{{ rel.nth_party_layer }}" data-parent-domain="{{ rel.nth_party_customer_domain }}" data-subprocessor-type="{% if rel.nth_party_layer == 1 %}direct{% else %}nested{% endif %}">
-                                    <td><strong>{{ rel.nth_party_domain }}</strong></td>
-                                    <td>{{ rel.nth_party_organization }}</td>
-                                    <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
-                                    <td>{{ rel.nth_party_customer_domain }}</td>
-                                    <td>{{ rel.nth_party_customer_organization }}</td>
-                                    <td><code>{{ rel.nth_party_record }}</code></td>
-                                    <td class="evidence-cell">
-                                        <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
-                                    </td>
-                                </tr>
-                                {%- endif -%}
-                                {%- endfor %}
                             </tbody>
                         </table>
                     </div>
@@ -1566,22 +1445,24 @@
                 initializeGraph();
                 generateSummaryTable();
                 setupTableInteractions();
+                convertRecordTypeBadges();
 
                 // Initialize pagination for large tables
                 initializePagination('all-table');
-                initializePagination('spf-table');
-                initializePagination('verification-table');
-                initializePagination('subprocessors-table');
                 initializePagination('summary-table');
 
                 // Add export buttons to each tab
                 addExportButton('all-table', 'all-tab', 'all-relationships.csv');
-                addExportButton('spf-table', 'spf-tab', 'email-providers.csv');
-                addExportButton('verification-table', 'verification-tab', 'verified-services.csv');
-                addExportButton('subprocessors-table', 'subprocessors-tab', 'subprocessors.csv');
                 addExportButton('summary-table', 'summary-tab', 'organization-summary.csv');
             }, 100);
         });
+
+        function convertRecordTypeBadges() {
+            document.querySelectorAll('.record-type-badge').forEach(badge => {
+                const rawType = badge.textContent.trim();
+                badge.textContent = getReadableRecordType(rawType);
+            });
+        }
 
         function generateInsights() {
             const insightsContainer = document.getElementById('insights-section');
@@ -1993,12 +1874,17 @@
                 case 'DnsSubdomain':
                 case 'DNS::SUBDOMAIN':
                     return '#f97316';
+                case 'DnsCname':
+                case 'DNS::CNAME':
+                    return '#14b8a6';
                 case 'HttpSubprocessor':
                 case 'HTTP::SUBPROCESSOR':
                     return '#22c55e';
                 case 'SubfinderDiscovery':
-                    return '#ec4899';
+                case 'DISCOVERY::SUBFINDER':
+                    return '#a855f7';
                 case 'SaasTenantProbe':
+                case 'DISCOVERY::SAAS_TENANT':
                     return '#eab308';
                 default:
                     return '#6b7280';
@@ -2810,19 +2696,24 @@
 
         function getReadableRecordType(type) {
             const types = {
-                'DnsTxtSpf': 'DNS TXT SPF Record',
-                'DnsTxtVerification': 'DNS TXT Verification Record',
-                'DnsTxtDmarc': 'DNS TXT DMARC Record',
-                'DnsTxtDkim': 'DNS TXT DKIM Record',
-                'DnsSubdomain': 'DNS Subdomain',
-                'DnsCname': 'DNS CNAME Record',
-                'DnsMx': 'DNS MX Record',
-                'HttpSubprocessor': 'HTTP Subprocessor Page',
-                'SubfinderDiscovery': 'Subdomain Discovery (Subfinder)',
-                'SaasTenantProbe': 'SaaS Tenant Discovery',
-                'DNS::TXT::SPF': 'DNS TXT SPF Record',
-                'DNS::TXT::VERIFICATION': 'DNS TXT Verification Record',
-                'HTTP::SUBPROCESSOR': 'HTTP Subprocessor Page'
+                'DnsTxtSpf': 'Email Provider (SPF)',
+                'DnsTxtVerification': 'Domain Verification',
+                'DnsTxtDmarc': 'Email Security (DMARC)',
+                'DnsTxtDkim': 'Email Security (DKIM)',
+                'DnsSubdomain': 'Subdomain',
+                'DnsCname': 'CNAME Record',
+                'DnsMx': 'Mail Server (MX)',
+                'HttpSubprocessor': 'Subprocessor Page',
+                'SubfinderDiscovery': 'Subdomain Discovery',
+                'SaasTenantProbe': 'SaaS Tenant',
+                'DNS::TXT::SPF': 'Email Provider (SPF)',
+                'DNS::TXT::VERIFICATION': 'Domain Verification',
+                'DNS::TXT::DMARC': 'Email Security (DMARC)',
+                'DNS::SUBDOMAIN': 'Subdomain',
+                'DNS::CNAME': 'CNAME Record',
+                'HTTP::SUBPROCESSOR': 'Subprocessor Page',
+                'DISCOVERY::SUBFINDER': 'Subdomain Discovery',
+                'DISCOVERY::SAAS_TENANT': 'SaaS Tenant'
             };
             return types[type] || type;
         }
@@ -2938,18 +2829,44 @@
             const isVerification = recordType === 'DnsTxtVerification' || recordType === 'DNS::TXT::VERIFICATION';
             const isSubprocessor = recordType === 'HttpSubprocessor' || recordType === 'HTTP::SUBPROCESSOR';
             const isDmarc = recordType === 'DnsTxtDmarc' || recordType === 'DNS::TXT::DMARC';
-            const isSubfinder = recordType === 'SubfinderDiscovery';
-            const isSaasTenant = recordType === 'SaasTenantProbe';
+            const isCname = recordType === 'DnsCname' || recordType === 'DNS::CNAME';
+            const isSubfinder = recordType === 'SubfinderDiscovery' || recordType === 'DISCOVERY::SUBFINDER';
+            const isSaasTenant = recordType === 'SaasTenantProbe' || recordType === 'DISCOVERY::SAAS_TENANT';
 
             let commands = {};
-            const searchPattern = record.substring(0, Math.min(50, record.length));
+
+            // Determine the appropriate search pattern based on record type
+            let searchPattern;
+            if (isVerification) {
+                // For Domain Verification records, extract the vendor name prefix
+                // e.g., "jetbrains-domain-verification=xxx" -> "jetbrains"
+                // or "google-site-verification=xxx" -> "google"
+                // The record field might contain the derived domain (e.g., "jetbrains.com")
+                // So we also try to extract from the evidence or vendor domain
+                const vendorDomain = rel.nth_party_domain;
+                // Extract the base vendor name (without TLD) - e.g., "jetbrains.com" -> "jetbrains"
+                const vendorBase = vendorDomain.split('.')[0];
+                // Try to find the verification record pattern in the evidence
+                const verificationMatch = evidence.match(/([a-z0-9-]+)[-_](?:domain|site|ownership)?[-_]?verification/i);
+                if (verificationMatch) {
+                    searchPattern = verificationMatch[1]; // e.g., "jetbrains" from "jetbrains-domain-verification"
+                } else {
+                    // Fall back to vendor base name
+                    searchPattern = vendorBase;
+                }
+            } else {
+                // For SPF, DMARC, and other records, use the record content
+                searchPattern = record.substring(0, Math.min(50, record.length));
+            }
+
+            const grepExplanation = 'dig TXT queries DNS TXT records, +short gives concise output, and grep -i does case-insensitive pattern matching.';
 
             if (isSpf || isVerification || isDmarc) {
                 commands.browser = createBrowserValidation(domain, searchPattern, false, null, null);
                 commands.macos = createCommandContainer(
                     'Terminal Command',
                     'dig TXT ' + domain + ' +short | grep -i "' + searchPattern + '"',
-                    'dig TXT queries DNS TXT records, +short gives concise output, and grep filters for the specific record pattern.'
+                    grepExplanation
                 );
                 commands.windows = createCommandContainer(
                     'PowerShell Command',
@@ -2959,24 +2876,62 @@
                 commands.linux = createCommandContainer(
                     'Terminal Command',
                     'dig TXT ' + domain + ' +short | grep -i "' + searchPattern + '"',
-                    'dig TXT queries DNS TXT records, +short gives concise output, and grep -i does case-insensitive pattern matching.'
+                    grepExplanation
                 );
             } else if (isSubprocessor) {
                 const urlMatch = evidence.match(/https?:\/\/[^\s)]+/);
                 const subprocessorUrl = urlMatch ? urlMatch[0] : '';
+                const curlCommand = 'curl -s "' + (subprocessorUrl || 'URL_HERE') + '" | grep -i "' + rel.nth_party_organization + '"';
+                const curlExplanation = 'curl -s fetches the page silently, and grep -i searches for the organization name (case-insensitive).';
 
                 commands.browser = createBrowserValidation(rel.nth_party_domain, null, true, subprocessorUrl, rel.nth_party_organization);
                 commands.macos = createCommandContainer(
                     'Terminal Command',
-                    'curl -s "' + (subprocessorUrl || 'URL_HERE') + '" | grep -i "' + rel.nth_party_organization + '"',
-                    'curl -s fetches the page silently, and grep -i searches for the organization name (case-insensitive).'
+                    curlCommand,
+                    curlExplanation
                 );
                 commands.windows = createCommandContainer(
                     'PowerShell Command',
                     '(Invoke-WebRequest -Uri "' + (subprocessorUrl || 'URL_HERE') + '").Content | Select-String "' + rel.nth_party_organization + '"',
                     'Invoke-WebRequest fetches the webpage, and Select-String searches for the organization name.'
                 );
-                commands.linux = commands.macos;
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    curlCommand,
+                    curlExplanation
+                );
+            } else if (isCname) {
+                // CNAME discovery - validate the CNAME chain
+                const subdomainMatch = evidence.match(/Subdomain\s+([^\s]+)\s+CNAMEs\s+to\s+([^\s(]+)/);
+                const subdomain = subdomainMatch ? subdomainMatch[1] : domain;
+                const cnameTarget = subdomainMatch ? subdomainMatch[2] : rel.nth_party_domain;
+
+                const cnameDiv = document.createElement('div');
+                cnameDiv.className = 'browser-validation';
+                const cnameTitle = createTextElement('div', '🔗 CNAME Infrastructure Validation', 'browser-validation-title');
+                cnameDiv.appendChild(cnameTitle);
+                const cnameDesc = createTextElement('p', 'This vendor was discovered via CNAME record analysis. The subdomain "' + subdomain + '" has a CNAME pointing to "' + cnameTarget + '", indicating third-party infrastructure.');
+                cnameDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
+                cnameDiv.appendChild(cnameDesc);
+                commands.browser = cnameDiv;
+
+                const cnameCommand = 'dig CNAME ' + subdomain + ' +short';
+                const cnameExplanation = 'Query the CNAME record to verify the subdomain points to third-party infrastructure.';
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    cnameCommand,
+                    cnameExplanation
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    'Resolve-DnsName -Name ' + subdomain + ' -Type CNAME',
+                    'Resolve the CNAME record to verify the third-party infrastructure relationship.'
+                );
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    cnameCommand,
+                    cnameExplanation
+                );
             } else if (isSubfinder) {
                 // Subdomain discovery - validate the subdomain exists
                 const subdomainMatch = evidence.match(/Subdomain:\s*([^\s(]+)/);
@@ -2991,17 +2946,23 @@
                 subfinderDiv.appendChild(subfinderDesc);
                 commands.browser = subfinderDiv;
 
+                const subfinderCommand = 'dig ' + subdomain + ' +short && dig ' + rel.nth_party_domain + ' +short';
+                const subfinderExplanation = 'Resolve the subdomain and vendor domain to verify the relationship.';
                 commands.macos = createCommandContainer(
                     'Terminal Command',
-                    'dig ' + subdomain + ' +short && dig ' + rel.nth_party_domain + ' +short',
-                    'Resolve the subdomain and vendor domain to verify the relationship.'
+                    subfinderCommand,
+                    subfinderExplanation
                 );
                 commands.windows = createCommandContainer(
                     'PowerShell Command',
                     'Resolve-DnsName -Name ' + subdomain + '; Resolve-DnsName -Name ' + rel.nth_party_domain,
                     'Resolve both the subdomain and vendor domain to verify they are related.'
                 );
-                commands.linux = commands.macos;
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    subfinderCommand,
+                    subfinderExplanation
+                );
             } else if (isSaasTenant) {
                 // SaaS tenant discovery - validate the tenant URL
                 const tenantUrlMatch = evidence.match(/Tenant URL:\s*([^\s(]+)/);
@@ -3024,17 +2985,23 @@
                 }
                 commands.browser = tenantDiv;
 
+                const tenantCommand = 'curl -sI "' + (tenantUrl || 'TENANT_URL_HERE') + '" | head -20';
+                const tenantExplanation = 'Fetch HTTP headers from the tenant URL to verify it exists and responds.';
                 commands.macos = createCommandContainer(
                     'Terminal Command',
-                    'curl -sI "' + (tenantUrl || 'TENANT_URL_HERE') + '" | head -20',
-                    'Fetch HTTP headers from the tenant URL to verify it exists and responds.'
+                    tenantCommand,
+                    tenantExplanation
                 );
                 commands.windows = createCommandContainer(
                     'PowerShell Command',
                     'Invoke-WebRequest -Uri "' + (tenantUrl || 'TENANT_URL_HERE') + '" -Method Head | Select-Object StatusCode, StatusDescription',
                     'Send a HEAD request to verify the tenant URL exists.'
                 );
-                commands.linux = commands.macos;
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    tenantCommand,
+                    tenantExplanation
+                );
             } else {
                 const manualDiv = document.createElement('div');
                 manualDiv.className = 'browser-validation';

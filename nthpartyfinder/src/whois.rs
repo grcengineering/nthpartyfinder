@@ -61,8 +61,9 @@ pub async fn get_organization_with_status_and_config(
     }
 
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
+    // Uses HTTP first, falls back to headless browser for SPA sites
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_from_web(domain).await {
+        if let Ok(Some(web_result)) = web_org::extract_organization_with_fallback(domain, false).await {
             if web_result.confidence >= min_confidence {
                 debug!("Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
                        domain, web_result.organization, web_result.source, web_result.confidence);
@@ -137,8 +138,9 @@ pub async fn get_organization_with_config(
     }
 
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
+    // Uses HTTP first, falls back to headless browser for SPA sites
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_from_web(domain).await {
+        if let Ok(Some(web_result)) = web_org::extract_organization_with_fallback(domain, false).await {
             if web_result.confidence >= min_confidence {
                 debug!("Found {} via web page analysis: {} (confidence: {:.2})",
                        domain, web_result.organization, web_result.confidence);

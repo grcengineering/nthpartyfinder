@@ -86,6 +86,15 @@ pub struct Args {
     /// Disable NER organization extraction (overrides config)
     #[arg(long)]
     pub disable_slm: bool,
+
+    /// Enable web page analysis for organization name extraction
+    /// Uses Schema.org, OpenGraph, and meta tags with headless browser fallback for SPAs
+    #[arg(long)]
+    pub enable_web_org: bool,
+
+    /// Disable web page analysis for organization extraction (overrides config)
+    #[arg(long)]
+    pub disable_web_org: bool,
 }
 
 impl Args {

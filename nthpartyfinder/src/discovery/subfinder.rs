@@ -9,6 +9,36 @@ use tokio::process::Command;
 use tokio::io::{BufReader, AsyncBufReadExt};
 use tracing::{debug, warn, info};
 
+/// Latest subfinder version to download
+const SUBFINDER_VERSION: &str = "2.11.0";
+
+/// Available installation methods for subfinder
+/// Based on official Project Discovery documentation:
+/// https://docs.projectdiscovery.io/opensource/subfinder/install
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallOption {
+    AutoDownload,
+    Go,
+    Homebrew,
+    Docker,
+    ManualDownload,
+    Skip,
+}
+
+impl InstallOption {
+    /// Get the display name for this installation option
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            InstallOption::AutoDownload => "Auto-download subfinder (Recommended)",
+            InstallOption::Go => "Go (go install)",
+            InstallOption::Homebrew => "Homebrew (macOS/Linux)",
+            InstallOption::Docker => "Docker",
+            InstallOption::ManualDownload => "Open GitHub releases page",
+            InstallOption::Skip => "Skip - Continue without subdomain discovery",
+        }
+    }
+}
+
 pub struct SubfinderDiscovery {
     binary_path: PathBuf,
     timeout: Duration,
@@ -32,7 +62,160 @@ impl SubfinderDiscovery {
     }
 
     pub fn is_available(&self) -> bool {
-        self.binary_path.exists() || which::which(&self.binary_path).is_ok()
+        self.get_resolved_binary_path().is_some()
+    }
+
+    /// Get the actual binary path to use, checking:
+    /// 1. The configured binary_path (if it exists or is in PATH)
+    /// 2. The bundled binary location
+    fn get_resolved_binary_path(&self) -> Option<PathBuf> {
+        // Check explicit path first
+        if self.binary_path.exists() {
+            return Some(self.binary_path.clone());
+        }
+        if which::which(&self.binary_path).is_ok() {
+            return Some(self.binary_path.clone());
+        }
+        // Check bundled location
+        if let Some(bundled) = Self::get_bundled_binary_path() {
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+        None
+    }
+
+    /// Get the path to the bundled subfinder binary in the app's data directory
+    pub fn get_bundled_binary_path() -> Option<PathBuf> {
+        let binary_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+
+        // Use platform-appropriate data directory
+        #[cfg(windows)]
+        {
+            std::env::var("LOCALAPPDATA").ok()
+                .map(|p| PathBuf::from(p).join("nthpartyfinder").join("bin").join(binary_name))
+        }
+        #[cfg(not(windows))]
+        {
+            dirs::data_local_dir()
+                .map(|p| p.join("nthpartyfinder").join("bin").join(binary_name))
+        }
+    }
+
+    /// Get the download URL for subfinder for the current platform
+    pub fn get_platform_download_url() -> Option<String> {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+
+        let os_name = match os {
+            "windows" => "windows",
+            "macos" => "darwin",
+            "linux" => "linux",
+            _ => return None,
+        };
+
+        let arch_name = match arch {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "x86" => "386",
+            _ => return None,
+        };
+
+        Some(format!(
+            "https://github.com/projectdiscovery/subfinder/releases/download/v{}/subfinder_{}_{}_{}.zip",
+            SUBFINDER_VERSION, SUBFINDER_VERSION, os_name, arch_name
+        ))
+    }
+
+    /// Download and install subfinder to the bundled location
+    pub async fn download_and_install() -> Result<PathBuf> {
+        let download_url = Self::get_platform_download_url()
+            .ok_or_else(|| anyhow!("Unsupported platform for automatic download"))?;
+
+        let install_path = Self::get_bundled_binary_path()
+            .ok_or_else(|| anyhow!("Could not determine installation path"))?;
+
+        let install_dir = install_path.parent()
+            .ok_or_else(|| anyhow!("Invalid installation path"))?;
+
+        // Create the installation directory
+        std::fs::create_dir_all(install_dir)
+            .map_err(|e| anyhow!("Failed to create installation directory: {}", e))?;
+
+        info!("Downloading subfinder v{} from GitHub...", SUBFINDER_VERSION);
+        debug!("Download URL: {}", download_url);
+
+        // Download the zip file
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+
+        let response = client.get(&download_url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Failed to download subfinder: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Download failed with status: {}", response.status()));
+        }
+
+        let bytes = response.bytes()
+            .await
+            .map_err(|e| anyhow!("Failed to read download response: {}", e))?;
+
+        info!("Downloaded {} bytes, extracting...", bytes.len());
+
+        // Extract the zip file
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| anyhow!("Failed to open zip archive: {}", e))?;
+
+        // Find and extract the subfinder binary
+        let binary_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+        let mut found = false;
+
+        for i in 0..archive.len() {
+            let mut file = archive.by_index(i)
+                .map_err(|e| anyhow!("Failed to read zip entry: {}", e))?;
+
+            let name = file.name().to_string();
+            if name.ends_with(binary_name) || name == binary_name {
+                let mut outfile = std::fs::File::create(&install_path)
+                    .map_err(|e| anyhow!("Failed to create output file: {}", e))?;
+
+                std::io::copy(&mut file, &mut outfile)
+                    .map_err(|e| anyhow!("Failed to extract binary: {}", e))?;
+
+                // Make executable on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = outfile.metadata()?.permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&install_path, perms)?;
+                }
+
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Err(anyhow!("Could not find subfinder binary in downloaded archive"));
+        }
+
+        info!("Subfinder installed to: {}", install_path.display());
+        Ok(install_path)
+    }
+
+    /// Create a new SubfinderDiscovery using the bundled binary if available
+    pub fn with_bundled_or_path(custom_path: Option<PathBuf>, timeout: Duration) -> Self {
+        let binary_path = custom_path
+            .or_else(|| Self::get_bundled_binary_path().filter(|p| p.exists()))
+            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "subfinder.exe" } else { "subfinder" }));
+
+        Self::new(binary_path, timeout)
     }
 
     /// Get installation instructions for subfinder
@@ -131,15 +314,120 @@ impl SubfinderDiscovery {
         }
     }
 
-    pub async fn discover(&self, domain: &str) -> Result<Vec<SubdomainResult>> {
-        if !self.is_available() {
-            warn!("Subfinder binary not found at {:?}", self.binary_path);
-            return Ok(vec![]);
+    /// Check if Homebrew is installed (macOS/Linux)
+    pub fn is_homebrew_installed() -> bool {
+        std::process::Command::new("brew")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Check if Docker is installed
+    pub fn is_docker_installed() -> bool {
+        std::process::Command::new("docker")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Attempt to install subfinder using Homebrew (macOS/Linux)
+    pub async fn install_via_homebrew() -> Result<bool> {
+        if !Self::is_homebrew_installed() {
+            return Err(anyhow!("Homebrew is not installed"));
         }
 
-        debug!("Running subfinder for domain: {}", domain);
+        info!("Installing subfinder via Homebrew...");
 
-        let mut child = Command::new(&self.binary_path)
+        let output = tokio::process::Command::new("brew")
+            .args(["install", "subfinder"])
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to run brew install: {}", e))?;
+
+        if output.status.success() {
+            info!("Subfinder installed successfully via Homebrew!");
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!("brew install failed: {}", stderr))
+        }
+    }
+
+    /// Attempt to pull subfinder Docker image
+    pub async fn install_via_docker() -> Result<bool> {
+        if !Self::is_docker_installed() {
+            return Err(anyhow!("Docker is not installed"));
+        }
+
+        info!("Pulling subfinder Docker image...");
+
+        let output = tokio::process::Command::new("docker")
+            .args(["pull", "projectdiscovery/subfinder:latest"])
+            .output()
+            .await
+            .map_err(|e| anyhow!("Failed to run docker pull: {}", e))?;
+
+        if output.status.success() {
+            info!("Subfinder Docker image pulled successfully!");
+            info!("Run with: docker run -it projectdiscovery/subfinder:latest -d <domain>");
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow!("docker pull failed: {}", stderr))
+        }
+    }
+
+    /// Get the download URL for subfinder releases
+    pub fn get_download_url() -> &'static str {
+        "https://github.com/projectdiscovery/subfinder/releases/latest"
+    }
+
+    /// Get available installation options for the current platform
+    /// Based on official Project Discovery documentation
+    pub fn get_available_install_options() -> Vec<InstallOption> {
+        let mut options = Vec::new();
+
+        // Auto-download is available on supported platforms (Windows, macOS, Linux with x86_64 or arm64)
+        if Self::get_platform_download_url().is_some() {
+            options.push(InstallOption::AutoDownload);
+        }
+
+        // Go install is available if Go is installed (works on all platforms)
+        if Self::is_go_installed() {
+            options.push(InstallOption::Go);
+        }
+
+        // Homebrew is available on macOS and Linux
+        if Self::is_homebrew_installed() {
+            options.push(InstallOption::Homebrew);
+        }
+
+        // Docker is available on all platforms if Docker is installed
+        if Self::is_docker_installed() {
+            options.push(InstallOption::Docker);
+        }
+
+        // Manual binary download is always available
+        options.push(InstallOption::ManualDownload);
+        options.push(InstallOption::Skip);
+
+        options
+    }
+
+    pub async fn discover(&self, domain: &str) -> Result<Vec<SubdomainResult>> {
+        let binary_path = match self.get_resolved_binary_path() {
+            Some(path) => path,
+            None => {
+                warn!("Subfinder binary not found at {:?}", self.binary_path);
+                return Ok(vec![]);
+            }
+        };
+
+        debug!("Running subfinder ({}) for domain: {}", binary_path.display(), domain);
+
+        let mut child = Command::new(&binary_path)
             .args(["-d", domain, "-silent", "-json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

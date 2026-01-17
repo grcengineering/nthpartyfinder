@@ -72,15 +72,20 @@ impl NerOrganizationExtractor {
         }
 
         // Try to find onnxruntime.dll in common locations
+        // IMPORTANT: Use absolute paths to avoid loading wrong system DLLs
         let search_paths = vec![
-            // Next to executable
+            // Next to executable (absolute path)
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll"))),
-            // Current working directory
-            Some(std::path::PathBuf::from("onnxruntime.dll")),
-            // Project's onnxruntime directory
-            Some(std::path::PathBuf::from("onnxruntime/onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
+            // Current working directory (absolute path)
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.join("onnxruntime.dll")),
+            // Project's onnxruntime directory (absolute path)
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
             // User's local app data
             dirs::data_local_dir().map(|d| d.join("onnxruntime").join("onnxruntime.dll")),
         ];
@@ -88,7 +93,9 @@ impl NerOrganizationExtractor {
         for path_opt in search_paths {
             if let Some(path) = path_opt {
                 if path.exists() {
-                    let path_str = path.to_string_lossy().to_string();
+                    // CRITICAL: Convert to absolute path to avoid loading wrong DLL
+                    let abs_path = path.canonicalize().unwrap_or(path.clone());
+                    let path_str = abs_path.to_string_lossy().to_string();
                     info!("Found ONNX Runtime at: {}", path_str);
                     std::env::set_var("ORT_DYLIB_PATH", &path_str);
                     return Ok(());
@@ -168,9 +175,10 @@ impl NerOrganizationExtractor {
         };
 
         // Create input for organization entity extraction
+        // Include "product" and "brand" to catch SaaS sites that use company names as products
         let input = TextInput::from_str(
             &[text],
-            &["organization", "company"],
+            &["organization", "company", "product", "brand"],
         ).map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
 
         // Run inference
@@ -183,7 +191,9 @@ impl NerOrganizationExtractor {
         for spans in &output.spans {
             for span in spans {
                 let entity_type = span.class().to_lowercase();
-                if entity_type == "organization" || entity_type == "company" {
+                // Accept organization, company, product, and brand entity types
+                if entity_type == "organization" || entity_type == "company"
+                    || entity_type == "product" || entity_type == "brand" {
                     let confidence = span.probability();
                     if confidence >= self.min_confidence {
                         if best_match.is_none() || confidence > best_match.as_ref().unwrap().confidence {
@@ -322,5 +332,81 @@ mod tests {
         assert!(!is_available());
         let result = extract_organization("example.com", None).unwrap();
         assert!(result.is_none());
+    }
+
+    /// Test NER extraction with real company names in various contexts
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extraction_accuracy() {
+        // Initialize NER if not already done
+        let _ = init_with_config(0.5);
+
+        if !is_available() {
+            println!("NER not available, skipping test");
+            return;
+        }
+
+        let test_cases = vec![
+            // (input text, expected org or None if no extraction expected)
+            ("Microsoft Corporation provides cloud services", Some("Microsoft")),
+            ("Google LLC is a technology company", Some("Google")),
+            ("Amazon Web Services powers the cloud", Some("Amazon")),
+            ("Stripe Inc. processes payments worldwide", Some("Stripe")),
+            ("The website klaviyo.com belongs to Klaviyo", Some("Klaviyo")),
+            ("Salesforce CRM is enterprise software", Some("Salesforce")),
+            ("Adobe Inc. makes creative software", Some("Adobe")),
+            ("random words without company names", None),
+        ];
+
+        println!("\n=== NER Extraction Test Results ===\n");
+
+        let extractor = get().expect("NER should be available");
+        let mut passed = 0;
+        let mut total = 0;
+
+        for (text, expected) in test_cases {
+            total += 1;
+            let result = extractor.extract_organization(text);
+
+            match result {
+                Ok(Some(ner_result)) => {
+                    let extracted = &ner_result.organization;
+                    let confidence = ner_result.confidence;
+                    println!("Input: \"{}\"", text);
+                    println!("  Extracted: {} (confidence: {:.2})", extracted, confidence);
+
+                    if let Some(exp) = expected {
+                        if extracted.to_lowercase().contains(&exp.to_lowercase()) {
+                            println!("  ✅ PASS - Expected {} found", exp);
+                            passed += 1;
+                        } else {
+                            println!("  ⚠️  DIFFERENT - Expected {}, got {}", exp, extracted);
+                        }
+                    } else {
+                        println!("  ⚠️  UNEXPECTED - Expected no extraction, got {}", extracted);
+                    }
+                }
+                Ok(None) => {
+                    println!("Input: \"{}\"", text);
+                    println!("  Extracted: None");
+                    if expected.is_none() {
+                        println!("  ✅ PASS - Expected no extraction");
+                        passed += 1;
+                    } else {
+                        println!("  ❌ FAIL - Expected {}", expected.unwrap());
+                    }
+                }
+                Err(e) => {
+                    println!("Input: \"{}\"", text);
+                    println!("  ❌ ERROR: {}", e);
+                }
+            }
+            println!();
+        }
+
+        println!("=== Results: {}/{} passed ===\n", passed, total);
+
+        // Don't fail the test, just report results
+        // This is more of a benchmark/verification than a strict test
     }
 }

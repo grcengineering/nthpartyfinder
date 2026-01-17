@@ -20,6 +20,8 @@ pub struct SaasPlatform {
 pub struct DetectionConfig {
     pub success_indicators: Vec<String>,
     pub failure_indicators: Vec<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +230,7 @@ mod tests {
         let detection = DetectionConfig {
             success_indicators: vec!["Sign In".to_string(), "Okta".to_string()],
             failure_indicators: vec!["not found".to_string()],
+            notes: None,
         };
         let status = analyze_response(200, "Welcome to Okta Sign In page", &detection);
         assert_eq!(status, TenantStatus::Confirmed);
@@ -238,6 +241,7 @@ mod tests {
         let detection = DetectionConfig {
             success_indicators: vec!["Sign In".to_string()],
             failure_indicators: vec!["not found".to_string()],
+            notes: None,
         };
         let status = analyze_response(404, "Page not found", &detection);
         assert_eq!(status, TenantStatus::NotFound);
@@ -248,6 +252,7 @@ mod tests {
         let detection = DetectionConfig {
             success_indicators: vec!["Specific Brand".to_string()],
             failure_indicators: vec!["not found".to_string()],
+            notes: None,
         };
         let status = analyze_response(200, "Some generic page content", &detection);
         assert_eq!(status, TenantStatus::Likely);
@@ -258,6 +263,7 @@ mod tests {
         let detection = DetectionConfig {
             success_indicators: vec!["Okta".to_string()],
             failure_indicators: vec!["not found".to_string()],
+            notes: None,
         };
         // Even with Okta in the body, "not found" should trigger NotFound
         let status = analyze_response(200, "Okta tenant not found", &detection);
