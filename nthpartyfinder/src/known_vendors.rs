@@ -2,12 +2,14 @@
 //!
 //! This module provides a curated database of well-known vendor domains and their
 //! official organization names. It supports:
-//! - Local JSON database shipped with the tool
+//! - VendorRegistry (consolidated vendor JSON files)
+//! - Local JSON database shipped with the tool (legacy)
 //! - GitHub sync for remote updates
 //! - Local user overrides for confirmed mappings
 //!
-//! Lookup priority: Local overrides → Remote database → Base database
+//! Lookup priority: Local overrides → VendorRegistry → Remote database → Base database
 
+use crate::vendor_registry;
 use anyhow::{Result, anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -166,6 +168,8 @@ pub enum KnownVendorSource {
     Remote,
     /// From local user overrides
     LocalOverride,
+    /// From VendorRegistry (consolidated vendor JSON files)
+    VendorRegistry,
 }
 
 impl std::fmt::Display for KnownVendorSource {
@@ -174,6 +178,7 @@ impl std::fmt::Display for KnownVendorSource {
             KnownVendorSource::Base => write!(f, "known_vendors"),
             KnownVendorSource::Remote => write!(f, "known_vendors_remote"),
             KnownVendorSource::LocalOverride => write!(f, "local_override"),
+            KnownVendorSource::VendorRegistry => write!(f, "vendor_registry"),
         }
     }
 }
@@ -259,7 +264,16 @@ impl KnownVendors {
             }
         }
 
-        // 2. Check remote database (if synced)
+        // 2. Check VendorRegistry (consolidated vendor JSON files)
+        if let Some(org) = vendor_registry::lookup_organization(&domain_lower) {
+            debug!("Found {} in VendorRegistry: {}", domain, org);
+            return Some(KnownVendorResult {
+                organization: org,
+                source: KnownVendorSource::VendorRegistry,
+            });
+        }
+
+        // 3. Check remote database (if synced)
         if let Ok(remote_guard) = self.remote.read() {
             if let Some(ref remote) = *remote_guard {
                 if let Some(org) = remote.vendors.get(&domain_lower) {
@@ -272,7 +286,7 @@ impl KnownVendors {
             }
         }
 
-        // 3. Check base database
+        // 4. Check base database (legacy known_vendors.json)
         if let Some(org) = self.base.vendors.get(&domain_lower) {
             debug!("Found {} in base database: {}", domain, org);
             return Some(KnownVendorResult {
@@ -293,6 +307,15 @@ impl KnownVendors {
                         source: KnownVendorSource::LocalOverride,
                     });
                 }
+            }
+
+            // Try VendorRegistry for base domain
+            if let Some(org) = vendor_registry::lookup_organization(&base_domain) {
+                debug!("Found base domain {} in VendorRegistry: {}", base_domain, org);
+                return Some(KnownVendorResult {
+                    organization: org,
+                    source: KnownVendorSource::VendorRegistry,
+                });
             }
 
             // Try remote for base domain
@@ -554,5 +577,6 @@ mod tests {
         assert_eq!(KnownVendorSource::Base.to_string(), "known_vendors");
         assert_eq!(KnownVendorSource::Remote.to_string(), "known_vendors_remote");
         assert_eq!(KnownVendorSource::LocalOverride.to_string(), "local_override");
+        assert_eq!(KnownVendorSource::VendorRegistry.to_string(), "vendor_registry");
     }
 }

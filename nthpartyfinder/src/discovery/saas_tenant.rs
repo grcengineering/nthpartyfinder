@@ -1,4 +1,8 @@
 //! SaaS tenant discovery by probing popular platforms.
+//!
+//! Supports loading platform definitions from:
+//! - VendorRegistry (consolidated vendor JSON files) - preferred
+//! - Legacy saas_platforms.json file - fallback
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -6,7 +10,9 @@ use std::path::Path;
 use std::time::Duration;
 use futures::{stream, StreamExt};
 use reqwest::Client;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use crate::vendor_registry;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaasPlatform {
@@ -69,11 +75,68 @@ impl SaasTenantDiscovery {
         }
     }
 
+    /// Load platforms from legacy saas_platforms.json file
     pub fn load_platforms(&mut self, path: &Path) -> Result<()> {
         let content = std::fs::read_to_string(path)?;
         let file: PlatformsFile = serde_json::from_str(&content)?;
         self.platforms = file.platforms;
-        debug!("Loaded {} SaaS platforms", self.platforms.len());
+        debug!("Loaded {} SaaS platforms from file", self.platforms.len());
+        Ok(())
+    }
+
+    /// Load platforms from VendorRegistry (preferred source)
+    /// Falls back to empty list if registry not initialized
+    pub fn load_from_vendor_registry(&mut self) {
+        let tenants = vendor_registry::get_all_saas_tenants();
+        if tenants.is_empty() {
+            debug!("No SaaS tenants found in VendorRegistry");
+            return;
+        }
+
+        for (vendor_id, tenant) in tenants {
+            // Get vendor info for the vendor_domain
+            let vendor_domain = if let Some(vendor) = vendor_registry::get() {
+                vendor.get_vendor(&vendor_id)
+                    .map(|v| v.primary_domain.clone())
+                    .unwrap_or_else(|| format!("{}.com", vendor_id))
+            } else {
+                format!("{}.com", vendor_id)
+            };
+
+            let detection = if let Some(det) = tenant.detection {
+                DetectionConfig {
+                    success_indicators: det.success_indicators.unwrap_or_default(),
+                    failure_indicators: det.failure_indicators.unwrap_or_default(),
+                    notes: det.notes,
+                }
+            } else {
+                DetectionConfig {
+                    success_indicators: Vec::new(),
+                    failure_indicators: Vec::new(),
+                    notes: None,
+                }
+            };
+
+            self.platforms.push(SaasPlatform {
+                name: tenant.name,
+                vendor_domain,
+                tenant_patterns: tenant.patterns,
+                detection,
+            });
+        }
+
+        info!("Loaded {} SaaS platforms from VendorRegistry", self.platforms.len());
+    }
+
+    /// Load platforms from VendorRegistry first, then fallback to file if empty
+    pub fn load_platforms_with_fallback(&mut self, fallback_path: &Path) -> Result<()> {
+        self.load_from_vendor_registry();
+
+        if self.platforms.is_empty() {
+            debug!("VendorRegistry empty, falling back to file");
+            self.load_platforms(fallback_path)?;
+        }
+
         Ok(())
     }
 

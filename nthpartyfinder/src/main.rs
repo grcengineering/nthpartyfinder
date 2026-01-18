@@ -18,6 +18,7 @@ mod domain_utils;
 mod verification_logger;
 mod subprocessor;
 mod logger;
+mod vendor_registry;
 mod known_vendors;
 mod web_org;
 mod ner_org;
@@ -76,17 +77,30 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Initialize known vendors database for reliable org lookups
-    let known_vendors_loaded = match known_vendors::init() {
+    // Initialize vendor registry (consolidated vendor JSON files)
+    let vendor_registry_loaded = match vendor_registry::init() {
         Ok(()) => {
-            if let Some(kv) = known_vendors::get() {
-                let stats = kv.stats();
-                stats.base_count > 0
+            if let Some(reg) = vendor_registry::get() {
+                reg.vendor_count() > 0
             } else {
                 false
             }
         }
         Err(_) => false,
+    };
+
+    // Initialize known vendors database for reliable org lookups
+    // (now uses vendor_registry as primary source with JSON fallback)
+    let known_vendors_loaded = match known_vendors::init() {
+        Ok(()) => {
+            if let Some(kv) = known_vendors::get() {
+                let stats = kv.stats();
+                stats.base_count > 0 || vendor_registry_loaded
+            } else {
+                vendor_registry_loaded
+            }
+        }
+        Err(_) => vendor_registry_loaded,
     };
 
     // Initialize embedded NER for organization extraction (if feature enabled)
@@ -121,9 +135,21 @@ async fn main() -> Result<()> {
 
     // Print consolidated initialization status block
     eprintln!();
+    if vendor_registry_loaded {
+        if let Some(reg) = vendor_registry::get() {
+            eprintln!("✅ ENABLED: Vendor registry ({} vendors, {} domains)", reg.vendor_count(), reg.domain_count());
+        }
+    } else {
+        eprintln!("⚠️  Vendor registry not loaded (using legacy known_vendors.json)");
+    }
     if known_vendors_loaded {
         if let Some(kv) = known_vendors::get() {
-            eprintln!("✅ ENABLED: Known vendors database ({} vendors)", kv.stats().base_count);
+            let stats = kv.stats();
+            if vendor_registry_loaded {
+                eprintln!("✅ ENABLED: Known vendors fallback ({} vendors in legacy JSON)", stats.base_count);
+            } else {
+                eprintln!("✅ ENABLED: Known vendors database ({} vendors)", stats.base_count);
+            }
         }
     } else {
         eprintln!("❌ DISABLED: Known vendors database (will use WHOIS/domain inference)");

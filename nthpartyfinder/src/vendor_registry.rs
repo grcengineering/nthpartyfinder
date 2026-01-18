@@ -203,3 +203,111 @@ impl VendorRegistry {
 impl Default for VendorRegistry {
     fn default() -> Self { Self::new() }
 }
+
+// ============================================================================
+// Global Registry Access
+// ============================================================================
+
+use std::sync::OnceLock;
+
+/// Global vendor registry instance
+static VENDOR_REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
+
+/// Find the config directory by checking multiple locations
+fn find_config_dir() -> Option<PathBuf> {
+    // Priority 1: Relative to current working directory
+    let cwd_config = PathBuf::from("./config");
+    if cwd_config.exists() && cwd_config.is_dir() {
+        if cwd_config.join("vendors").exists() {
+            debug!("Found config directory at: {:?}", cwd_config.canonicalize().unwrap_or(cwd_config.clone()));
+            return Some(cwd_config);
+        }
+    }
+
+    // Priority 2: Relative to executable directory
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let exe_config = exe_dir.join("config");
+            if exe_config.exists() && exe_config.join("vendors").exists() {
+                debug!("Found config directory next to executable: {:?}", exe_config);
+                return Some(exe_config);
+            }
+            if let Some(parent) = exe_dir.parent() {
+                let parent_config = parent.join("config");
+                if parent_config.exists() && parent_config.join("vendors").exists() {
+                    return Some(parent_config);
+                }
+                if let Some(grandparent) = parent.parent() {
+                    let grandparent_config = grandparent.join("config");
+                    if grandparent_config.exists() && grandparent_config.join("vendors").exists() {
+                        return Some(grandparent_config);
+                    }
+                }
+            }
+        }
+    }
+
+    // Priority 3: Env var
+    if let Ok(env_config) = std::env::var("NTHPARTYFINDER_CONFIG_DIR") {
+        let env_path = PathBuf::from(&env_config);
+        if env_path.exists() && env_path.join("vendors").exists() {
+            return Some(env_path);
+        }
+    }
+
+    None
+}
+
+/// Initialize the global vendor registry
+pub fn init() -> Result<()> {
+    let config_dir = find_config_dir();
+
+    let registry = if let Some(ref dir) = config_dir {
+        VendorRegistry::load_from_directory(dir)?
+    } else {
+        warn!("No config/vendors directory found, using empty registry");
+        VendorRegistry::new()
+    };
+
+    let vendor_count = registry.vendor_count();
+    let domain_count = registry.domain_count();
+
+    VENDOR_REGISTRY.set(registry)
+        .map_err(|_| anyhow::anyhow!("Vendor registry already initialized"))?;
+
+    if vendor_count > 0 {
+        info!("Vendor registry initialized: {} vendors, {} domains", vendor_count, domain_count);
+    }
+
+    Ok(())
+}
+
+/// Get a reference to the global vendor registry
+pub fn get() -> Option<&'static VendorRegistry> {
+    VENDOR_REGISTRY.get()
+}
+
+/// Look up organization name for a domain using the global registry
+pub fn lookup_organization(domain: &str) -> Option<String> {
+    get().and_then(|r| r.get_organization(domain))
+}
+
+/// Check if a domain is known in the global registry
+pub fn is_known_domain(domain: &str) -> bool {
+    get().map_or(false, |r| r.is_known_domain(domain))
+}
+
+/// Get vendor by domain from global registry
+pub fn get_vendor_by_domain(domain: &str) -> Option<Arc<VendorConfig>> {
+    get().and_then(|r| r.get_vendor_by_domain(domain))
+}
+
+/// Find vendor by verification pattern from global registry
+pub fn find_vendor_by_verification(txt: &str) -> Option<Arc<VendorConfig>> {
+    get().and_then(|r| r.find_vendor_by_verification(txt))
+}
+
+/// Get all SaaS tenants from global registry
+pub fn get_all_saas_tenants() -> Vec<(String, SaasTenant)> {
+    get().map_or(Vec::new(), |r| r.get_all_saas_tenants())
+}
