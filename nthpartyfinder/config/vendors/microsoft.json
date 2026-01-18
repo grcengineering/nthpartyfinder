@@ -1,0 +1,55 @@
+{
+  "$schema": "./_schema.json",
+  "id": "microsoft",
+  "organization": "Microsoft",
+  "primary_domain": "microsoft.com",
+  "domains": {
+    "azure.com": {
+      "type": "service",
+      "category": "infrastructure"
+    },
+    "azure.microsoft.com": {
+      "type": "service",
+      "category": "infrastructure"
+    },
+    "bing.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "microsoft.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "microsoftonline.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "MS="
+  ],
+  "provider_aliases": [
+    "microsoft",
+    "azure"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Microsoft 365 / Azure AD",
+      "patterns": [
+        "{tenant}.sharepoint.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Microsoft",
+          "SharePoint",
+          "Office 365"
+        ],
+        "failure_indicators": [
+          "We couldn't find an account",
+          "no such tenant"
+        ],
+        "notes": "Invalid tenants fail DNS resolution for SharePoint"
+      }
+    }
+  ]
+}

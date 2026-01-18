@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "rollbar",
+  "organization": "Rollbar",
+  "primary_domain": "rollbar.com",
+  "domains": {
+    "rollbar.com": {
+      "type": "primary",
+      "category": "monitoring"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

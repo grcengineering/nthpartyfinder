@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sparkpost",
+  "organization": "SparkPost",
+  "primary_domain": "sparkpost.com",
+  "parent_vendor": "message-systems",
+  "domains": {
+    "sparkpost.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

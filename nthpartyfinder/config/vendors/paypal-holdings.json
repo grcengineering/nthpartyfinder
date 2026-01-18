@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "paypal-holdings",
+  "organization": "PayPal Holdings",
+  "primary_domain": "paypal.com",
+  "domains": {
+    "paypal.com": {
+      "type": "primary",
+      "category": "payment"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

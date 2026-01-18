@@ -1,0 +1,33 @@
+{
+  "$schema": "./_schema.json",
+  "id": "lever",
+  "organization": "Lever",
+  "primary_domain": "lever.co",
+  "parent_vendor": "employ",
+  "domains": {
+    "lever.co": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Lever",
+      "patterns": [
+        "jobs.lever.co/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Lever",
+          "jobs",
+          "teams",
+          "positions"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "darktrace",
+  "organization": "Darktrace",
+  "primary_domain": "darktrace.com",
+  "domains": {
+    "darktrace.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

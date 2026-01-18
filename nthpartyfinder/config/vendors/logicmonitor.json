@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "logicmonitor",
+  "organization": "LogicMonitor",
+  "primary_domain": "logicmonitor.com",
+  "domains": {
+    "logicmonitor.com": {
+      "type": "primary",
+      "category": "monitoring"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

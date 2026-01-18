@@ -1,0 +1,39 @@
+{
+  "$schema": "./_schema.json",
+  "id": "okta",
+  "organization": "Okta",
+  "primary_domain": "okta.com",
+  "domains": {
+    "okta.com": {
+      "type": "primary",
+      "category": "security"
+    },
+    "oktacdn.com": {
+      "type": "cdn",
+      "category": "security"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Okta",
+      "patterns": [
+        "{tenant}.okta.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "ui-service",
+          "enduser-v2",
+          "iris",
+          "UserHome"
+        ],
+        "failure_indicators": [
+          "okta-sign-in.min.js",
+          "okta-signin-widget"
+        ],
+        "notes": "Valid tenants use modern iris UI; invalid tenants show classic sign-in widget"
+      }
+    }
+  ]
+}

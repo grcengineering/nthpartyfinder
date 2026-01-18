@@ -1,0 +1,30 @@
+{
+  "$schema": "./_schema.json",
+  "id": "ping-identity",
+  "organization": "Ping Identity",
+  "primary_domain": "pingidentity.com",
+  "domains": {
+    "pingidentity.com": {
+      "type": "primary",
+      "category": "security"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Ping Identity",
+      "patterns": [
+        "{tenant}.pingidentity.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Ping Identity",
+          "pingidentity"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

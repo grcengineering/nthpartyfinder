@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sprinklr",
+  "organization": "Sprinklr",
+  "primary_domain": "sprinklr.com",
+  "domains": {
+    "sprinklr.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

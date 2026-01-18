@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "circleci",
+  "organization": "CircleCI",
+  "primary_domain": "circleci.com",
+  "domains": {
+    "circleci.com": {
+      "type": "primary",
+      "category": "development"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

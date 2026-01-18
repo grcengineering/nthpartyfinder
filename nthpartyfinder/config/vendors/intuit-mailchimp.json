@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "intuit-mailchimp",
+  "organization": "Intuit Mailchimp",
+  "primary_domain": "mailchimp.com",
+  "domains": {
+    "mailchimp.com": {
+      "type": "primary",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

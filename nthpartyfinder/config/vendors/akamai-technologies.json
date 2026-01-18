@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "akamai-technologies",
+  "organization": "Akamai Technologies",
+  "primary_domain": "akamai.com",
+  "domains": {
+    "akamai.com": {
+      "type": "primary",
+      "category": "infrastructure"
+    },
+    "akamaiedge.net": {
+      "type": "cdn",
+      "category": "infrastructure"
+    },
+    "akamaihd.net": {
+      "type": "service",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

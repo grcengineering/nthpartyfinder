@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "fullstory",
+  "organization": "FullStory",
+  "primary_domain": "fullstory.com",
+  "domains": {
+    "fullstory.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

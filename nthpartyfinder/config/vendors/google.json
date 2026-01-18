@@ -1,0 +1,36 @@
+{
+  "$schema": "./_schema.json",
+  "id": "google",
+  "organization": "Google",
+  "primary_domain": "google.com",
+  "domains": {
+    "google.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "googleapis.com": {
+      "type": "api",
+      "category": "platform"
+    },
+    "googletagmanager.com": {
+      "type": "service",
+      "category": "tracking"
+    },
+    "googlesyndication.com": {
+      "type": "service",
+      "category": "advertising"
+    },
+    "gstatic.com": {
+      "type": "cdn",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "google-site-verification="
+  ],
+  "provider_aliases": [
+    "google",
+    "gcp"
+  ],
+  "saas_tenants": []
+}

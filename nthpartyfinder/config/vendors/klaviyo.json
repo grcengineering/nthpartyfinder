@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "klaviyo",
+  "organization": "Klaviyo",
+  "primary_domain": "klaviyo.com",
+  "domains": {
+    "klaviyo.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "myklpages.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "klaviyo-site-verification="
+  ],
+  "provider_aliases": [
+    "klaviyo"
+  ],
+  "saas_tenants": []
+}

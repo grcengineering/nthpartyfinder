@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "twilio-sendgrid",
+  "organization": "Twilio SendGrid",
+  "primary_domain": "sendgrid.com",
+  "domains": {
+    "sendgrid.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "sendgrid.net": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

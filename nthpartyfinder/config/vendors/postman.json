@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "postman",
+  "organization": "Postman",
+  "primary_domain": "postman.com",
+  "domains": {
+    "getpostman.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "postman.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "postman-domain-verification="
+  ],
+  "provider_aliases": [
+    "postman"
+  ],
+  "saas_tenants": []
+}

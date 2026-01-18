@@ -1,0 +1,34 @@
+{
+  "$schema": "./_schema.json",
+  "id": "servicenow",
+  "organization": "ServiceNow",
+  "primary_domain": "servicenow.com",
+  "domains": {
+    "servicenow.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "service-now.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "ServiceNow",
+      "patterns": [
+        "{tenant}.service-now.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "ServiceNow",
+          "service-now.com"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

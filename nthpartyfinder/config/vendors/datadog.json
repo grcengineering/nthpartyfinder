@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "datadog",
+  "organization": "Datadog",
+  "primary_domain": "datadog.com",
+  "domains": {
+    "datadog.com": {
+      "type": "primary",
+      "category": "monitoring"
+    },
+    "datadoghq.com": {
+      "type": "service",
+      "category": "monitoring"
+    },
+    "datadoghq.eu": {
+      "type": "service",
+      "category": "monitoring"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

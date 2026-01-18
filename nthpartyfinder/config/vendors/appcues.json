@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "appcues",
+  "organization": "Appcues",
+  "primary_domain": "appcues.com",
+  "domains": {
+    "appcues.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

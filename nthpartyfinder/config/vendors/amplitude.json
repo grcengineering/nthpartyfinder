@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "amplitude",
+  "organization": "Amplitude",
+  "primary_domain": "amplitude.com",
+  "domains": {
+    "amplitude.com": {
+      "type": "primary",
+      "category": "analytics"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "./_schema.json",
+  "id": "salesforce-tableau",
+  "organization": "Salesforce Tableau",
+  "primary_domain": "tableau.com",
+  "domains": {
+    "tableau.com": {
+      "type": "primary",
+      "category": "analytics"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Tableau Online",
+      "patterns": [
+        "{tenant}.online.tableau.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Tableau",
+          "tableau"
+        ],
+        "failure_indicators": [
+          "site not found"
+        ],
+        "notes": "Check for site existence"
+      }
+    }
+  ]
+}

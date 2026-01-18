@@ -1,0 +1,36 @@
+{
+  "$schema": "./_schema.json",
+  "id": "splunk",
+  "organization": "Splunk",
+  "primary_domain": "splunk.com",
+  "parent_vendor": "cisco",
+  "domains": {
+    "splunk.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "splunkcloud.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Splunk Cloud",
+      "patterns": [
+        "{tenant}.splunkcloud.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Splunk",
+          "account/login",
+          "/en-US/"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

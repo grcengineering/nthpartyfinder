@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "oracle",
+  "organization": "Oracle",
+  "primary_domain": "oracle.com",
+  "domains": {
+    "mysql.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "oracle.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

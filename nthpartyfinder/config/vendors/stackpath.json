@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "stackpath",
+  "organization": "StackPath",
+  "primary_domain": "stackpath.com",
+  "domains": {
+    "stackpath.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

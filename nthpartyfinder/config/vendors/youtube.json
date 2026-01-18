@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "youtube",
+  "organization": "YouTube",
+  "primary_domain": "youtube.com",
+  "parent_vendor": "google",
+  "domains": {
+    "youtube.com": {
+      "type": "primary",
+      "category": "media"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

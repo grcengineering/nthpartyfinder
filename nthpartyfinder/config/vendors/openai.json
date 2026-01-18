@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "openai",
+  "organization": "OpenAI",
+  "primary_domain": "openai.com",
+  "domains": {
+    "openai.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "openai-domain-verification="
+  ],
+  "provider_aliases": [
+    "openai"
+  ],
+  "saas_tenants": []
+}

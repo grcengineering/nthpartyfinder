@@ -1,0 +1,33 @@
+{
+  "$schema": "./_schema.json",
+  "id": "miro",
+  "organization": "Miro",
+  "primary_domain": "miro.com",
+  "domains": {
+    "miro.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Miro",
+      "patterns": [
+        "{tenant}.miro.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Miro",
+          "miro",
+          "whiteboard"
+        ],
+        "failure_indicators": [
+          "team not found"
+        ],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

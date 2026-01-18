@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "adobe-marketo",
+  "organization": "Adobe Marketo",
+  "primary_domain": "marketo.com",
+  "domains": {
+    "marketo.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

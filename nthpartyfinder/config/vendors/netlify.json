@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "netlify",
+  "organization": "Netlify",
+  "primary_domain": "netlify.com",
+  "domains": {
+    "netlify.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "netlify.app": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

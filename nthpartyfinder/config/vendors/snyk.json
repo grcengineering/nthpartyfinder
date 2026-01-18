@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "snyk",
+  "organization": "Snyk",
+  "primary_domain": "snyk.io",
+  "domains": {
+    "snyk.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

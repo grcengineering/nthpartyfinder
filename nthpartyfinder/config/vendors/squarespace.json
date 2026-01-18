@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "squarespace",
+  "organization": "Squarespace",
+  "primary_domain": "squarespace.com",
+  "domains": {
+    "squarespace.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

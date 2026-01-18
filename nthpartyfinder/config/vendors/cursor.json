@@ -1,0 +1,20 @@
+{
+  "$schema": "./_schema.json",
+  "id": "cursor",
+  "organization": "Cursor",
+  "primary_domain": "cursor.com",
+  "parent_vendor": "anysphere",
+  "domains": {
+    "cursor.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "cursor-domain-verification"
+  ],
+  "provider_aliases": [
+    "cursor"
+  ],
+  "saas_tenants": []
+}

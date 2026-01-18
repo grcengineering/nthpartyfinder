@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "unity-technologies",
+  "organization": "Unity Technologies",
+  "primary_domain": "unity.com",
+  "domains": {
+    "unity.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "unity3d.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

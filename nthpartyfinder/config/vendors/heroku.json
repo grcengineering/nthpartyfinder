@@ -1,0 +1,20 @@
+{
+  "$schema": "./_schema.json",
+  "id": "heroku",
+  "organization": "Heroku",
+  "primary_domain": "heroku.com",
+  "parent_vendor": "salesforce",
+  "domains": {
+    "heroku.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "heroku-domain-verification="
+  ],
+  "provider_aliases": [
+    "heroku"
+  ],
+  "saas_tenants": []
+}

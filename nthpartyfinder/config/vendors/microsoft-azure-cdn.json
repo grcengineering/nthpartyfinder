@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "microsoft-azure-cdn",
+  "organization": "Microsoft Azure CDN",
+  "primary_domain": "azureedge.net",
+  "domains": {
+    "azureedge.net": {
+      "type": "primary",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

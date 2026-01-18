@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "spotify",
+  "organization": "Spotify",
+  "primary_domain": "spotify.com",
+  "domains": {
+    "spotify.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

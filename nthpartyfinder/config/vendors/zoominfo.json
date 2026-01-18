@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "zoominfo",
+  "organization": "ZoomInfo",
+  "primary_domain": "zoominfo.com",
+  "domains": {
+    "zoominfo.com": {
+      "type": "primary",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

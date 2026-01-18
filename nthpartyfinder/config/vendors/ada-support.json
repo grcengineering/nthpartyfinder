@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "ada-support",
+  "organization": "Ada Support",
+  "primary_domain": "ada.cx",
+  "domains": {
+    "ada.cx": {
+      "type": "primary",
+      "category": "support"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

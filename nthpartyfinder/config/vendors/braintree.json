@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "braintree",
+  "organization": "Braintree",
+  "primary_domain": "braintreegateway.com",
+  "parent_vendor": "paypal",
+  "domains": {
+    "braintreegateway.com": {
+      "type": "primary",
+      "category": "payment"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

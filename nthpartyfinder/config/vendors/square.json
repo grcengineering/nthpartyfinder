@@ -1,0 +1,20 @@
+{
+  "$schema": "./_schema.json",
+  "id": "square",
+  "organization": "Square",
+  "primary_domain": "square.com",
+  "parent_vendor": "block",
+  "domains": {
+    "square.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "squareup.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

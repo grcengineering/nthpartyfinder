@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "mongodb",
+  "organization": "MongoDB",
+  "primary_domain": "mongodb.com",
+  "domains": {
+    "mongodb.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

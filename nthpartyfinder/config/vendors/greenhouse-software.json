@@ -1,0 +1,33 @@
+{
+  "$schema": "./_schema.json",
+  "id": "greenhouse-software",
+  "organization": "Greenhouse Software",
+  "primary_domain": "greenhouse.io",
+  "domains": {
+    "greenhouse.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Greenhouse",
+      "patterns": [
+        "boards.greenhouse.io/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Greenhouse",
+          "Jobs",
+          "Careers",
+          "careers",
+          "jobs"
+        ],
+        "failure_indicators": [],
+        "notes": "Valid tenants often redirect to company's own careers page; invalid return HTTP 404"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "chronosphere",
+  "organization": "Chronosphere",
+  "primary_domain": "chronosphere.io",
+  "domains": {
+    "chronosphere.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

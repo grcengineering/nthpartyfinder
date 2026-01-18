@@ -1,0 +1,48 @@
+{
+  "$schema": "./_schema.json",
+  "id": "atlassian",
+  "organization": "Atlassian",
+  "primary_domain": "atlassian.com",
+  "domains": {
+    "atlassian.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "atlassian.net": {
+      "type": "service",
+      "category": "platform"
+    },
+    "bitbucket.org": {
+      "type": "service",
+      "category": "development"
+    },
+    "jira.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "atlassian-domain-verification="
+  ],
+  "provider_aliases": [
+    "atlassian"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Atlassian Cloud",
+      "patterns": [
+        "{tenant}.atlassian.net"
+      ],
+      "detection": {
+        "success_indicators": [
+          "id.atlassian.com",
+          "Atlassian",
+          "confluence",
+          "jira"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404"
+      }
+    }
+  ]
+}

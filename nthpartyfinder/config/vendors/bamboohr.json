@@ -1,0 +1,30 @@
+{
+  "$schema": "./_schema.json",
+  "id": "bamboohr",
+  "organization": "BambooHR",
+  "primary_domain": "bamboohr.com",
+  "domains": {
+    "bamboohr.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "BambooHR",
+      "patterns": [
+        "{tenant}.bamboohr.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "BambooHR",
+          "bamboohr"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants redirect to www.bamboohr.com"
+      }
+    }
+  ]
+}

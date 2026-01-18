@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "kandji",
+  "organization": "Kandji",
+  "primary_domain": "kandji.io",
+  "domains": {
+    "kandji.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "grammarly",
+  "organization": "Grammarly",
+  "primary_domain": "grammarly.com",
+  "domains": {
+    "grammarly.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

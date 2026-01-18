@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "dbt-labs",
+  "organization": "dbt Labs",
+  "primary_domain": "dbt.com",
+  "domains": {
+    "dbt.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

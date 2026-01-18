@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "iterable",
+  "organization": "Iterable",
+  "primary_domain": "iterable.com",
+  "domains": {
+    "iterable.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "glean",
+  "organization": "Glean",
+  "primary_domain": "glean.com",
+  "domains": {
+    "glean.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "./_schema.json",
+  "id": "workday",
+  "organization": "Workday",
+  "primary_domain": "workday.com",
+  "domains": {
+    "workday.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "myworkday.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Workday",
+      "patterns": [
+        "{tenant}.myworkday.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Workday",
+          "myworkday.com",
+          "wd-services"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "amazon-cloudfront",
+  "organization": "Amazon CloudFront",
+  "primary_domain": "cloudfront.net",
+  "domains": {
+    "cloudfront.net": {
+      "type": "primary",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

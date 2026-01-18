@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "crowdstrike",
+  "organization": "CrowdStrike",
+  "primary_domain": "crowdstrike.com",
+  "domains": {
+    "crowdstrike.com": {
+      "type": "primary",
+      "category": "security"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

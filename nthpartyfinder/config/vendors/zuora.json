@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "zuora",
+  "organization": "Zuora",
+  "primary_domain": "zuora.com",
+  "domains": {
+    "zuora.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

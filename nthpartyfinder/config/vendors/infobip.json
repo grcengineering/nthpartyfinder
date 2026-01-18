@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "infobip",
+  "organization": "Infobip",
+  "primary_domain": "infobip.com",
+  "domains": {
+    "infobip.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "expensify",
+  "organization": "Expensify",
+  "primary_domain": "expensify.com",
+  "domains": {
+    "expensify.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

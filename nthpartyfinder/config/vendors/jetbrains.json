@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "jetbrains",
+  "organization": "JetBrains",
+  "primary_domain": "jetbrains.com",
+  "domains": {
+    "jetbrains.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "jetbrains-domain-verification="
+  ],
+  "provider_aliases": [
+    "jetbrains"
+  ],
+  "saas_tenants": []
+}

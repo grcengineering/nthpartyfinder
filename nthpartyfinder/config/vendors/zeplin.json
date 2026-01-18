@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "zeplin",
+  "organization": "Zeplin",
+  "primary_domain": "zeplin.io",
+  "domains": {
+    "zeplin.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "google-ads",
+  "organization": "Google Ads",
+  "primary_domain": "googleads.g.doubleclick.net",
+  "domains": {
+    "googleads.g.doubleclick.net": {
+      "type": "primary",
+      "category": "advertising"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

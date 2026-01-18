@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "codesandbox",
+  "organization": "CodeSandbox",
+  "primary_domain": "codesandbox.io",
+  "domains": {
+    "codesandbox.io": {
+      "type": "primary",
+      "category": "storage"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

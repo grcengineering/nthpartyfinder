@@ -1,0 +1,36 @@
+{
+  "$schema": "./_schema.json",
+  "id": "github",
+  "organization": "GitHub",
+  "primary_domain": "github.com",
+  "domains": {
+    "github.com": {
+      "type": "primary",
+      "category": "development"
+    },
+    "github.io": {
+      "type": "service",
+      "category": "development"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "GitHub Enterprise",
+      "patterns": [
+        "github.com/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "GitHub",
+          "Repositories",
+          "repositories",
+          "Overview"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid organizations return HTTP 404"
+      }
+    }
+  ]
+}

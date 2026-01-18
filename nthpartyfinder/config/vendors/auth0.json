@@ -1,0 +1,36 @@
+{
+  "$schema": "./_schema.json",
+  "id": "auth0",
+  "organization": "Auth0",
+  "primary_domain": "auth0.com",
+  "parent_vendor": "okta",
+  "domains": {
+    "auth0.com": {
+      "type": "primary",
+      "category": "security"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Auth0",
+      "patterns": [
+        "{tenant}.auth0.com",
+        "{tenant}.us.auth0.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Auth0",
+          "Universal Login",
+          "auth0"
+        ],
+        "failure_indicators": [
+          "tenant not found",
+          "Invalid tenant"
+        ],
+        "notes": "Many tenants redirect to auth0.com; detection may be unreliable"
+      }
+    }
+  ]
+}

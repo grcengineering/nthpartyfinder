@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "twilio-segment",
+  "organization": "Twilio Segment",
+  "primary_domain": "segment.com",
+  "domains": {
+    "segment.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "segment.io": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

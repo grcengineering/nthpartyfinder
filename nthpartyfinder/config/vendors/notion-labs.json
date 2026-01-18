@@ -1,0 +1,41 @@
+{
+  "$schema": "./_schema.json",
+  "id": "notion-labs",
+  "organization": "Notion Labs",
+  "primary_domain": "notion.so",
+  "domains": {
+    "notion.so": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "notion.site": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "notion-domain-verification="
+  ],
+  "provider_aliases": [
+    "notion"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Notion",
+      "patterns": [
+        "{tenant}.notion.site"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Notion",
+          "notion"
+        ],
+        "failure_indicators": [
+          "This content does not exist",
+          "page not found"
+        ],
+        "notes": "Public workspace detection"
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "dropbox",
+  "organization": "Dropbox",
+  "primary_domain": "dropbox.com",
+  "domains": {
+    "dropbox.com": {
+      "type": "primary",
+      "category": "storage"
+    },
+    "dropboxapi.com": {
+      "type": "api",
+      "category": "storage"
+    }
+  },
+  "verification_patterns": [
+    "dropbox-domain-verification="
+  ],
+  "provider_aliases": [
+    "dropbox"
+  ],
+  "saas_tenants": []
+}

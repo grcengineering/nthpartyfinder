@@ -1,0 +1,58 @@
+{
+  "$schema": "./_schema.json",
+  "id": "hubspot",
+  "organization": "HubSpot",
+  "primary_domain": "hubspot.com",
+  "domains": {
+    "hs-analytics.net": {
+      "type": "service",
+      "category": "tracking"
+    },
+    "hs-scripts.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "hsappstatic.net": {
+      "type": "cdn",
+      "category": "platform"
+    },
+    "hsforms.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "hubspot.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "hubspot.net": {
+      "type": "service",
+      "category": "platform"
+    },
+    "hubspotpagebuilder.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "hubspot-domain-verification="
+  ],
+  "provider_aliases": [
+    "hubspot"
+  ],
+  "saas_tenants": [
+    {
+      "name": "HubSpot",
+      "patterns": [
+        "{tenant}.hubspotpagebuilder.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "HubSpot",
+          "hubspot"
+        ],
+        "failure_indicators": [],
+        "notes": "Detection via subdomain pattern"
+      }
+    }
+  ]
+}

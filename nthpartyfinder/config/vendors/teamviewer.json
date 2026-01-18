@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "teamviewer",
+  "organization": "TeamViewer",
+  "primary_domain": "teamviewer.com",
+  "domains": {
+    "teamviewer.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "teamviewer-sso-verification="
+  ],
+  "provider_aliases": [
+    "teamviewer"
+  ],
+  "saas_tenants": []
+}

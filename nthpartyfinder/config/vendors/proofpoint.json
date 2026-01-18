@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "proofpoint",
+  "organization": "Proofpoint",
+  "primary_domain": "proofpoint.com",
+  "domains": {
+    "proofpoint.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

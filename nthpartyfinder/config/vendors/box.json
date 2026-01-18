@@ -1,0 +1,32 @@
+{
+  "$schema": "./_schema.json",
+  "id": "box",
+  "organization": "Box",
+  "primary_domain": "box.com",
+  "domains": {
+    "box.com": {
+      "type": "primary",
+      "category": "storage"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Box",
+      "patterns": [
+        "{tenant}.app.box.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Box",
+          "box.com"
+        ],
+        "failure_indicators": [
+          "This account does not exist"
+        ],
+        "notes": "Check for account existence"
+      }
+    }
+  ]
+}

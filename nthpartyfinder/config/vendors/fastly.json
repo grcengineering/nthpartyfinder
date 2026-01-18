@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "fastly",
+  "organization": "Fastly",
+  "primary_domain": "fastly.com",
+  "domains": {
+    "fastly.com": {
+      "type": "primary",
+      "category": "infrastructure"
+    },
+    "fastly.net": {
+      "type": "service",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

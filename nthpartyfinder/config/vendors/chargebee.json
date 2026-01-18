@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "chargebee",
+  "organization": "Chargebee",
+  "primary_domain": "chargebee.com",
+  "domains": {
+    "chargebee.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "meta-workplace",
+  "organization": "Meta Workplace",
+  "primary_domain": "workplace.com",
+  "domains": {
+    "workplace.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

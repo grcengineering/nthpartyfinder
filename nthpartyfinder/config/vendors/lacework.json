@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "lacework",
+  "organization": "Lacework",
+  "primary_domain": "lacework.com",
+  "parent_vendor": "fortinet",
+  "domains": {
+    "lacework.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

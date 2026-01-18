@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "udemy",
+  "organization": "Udemy",
+  "primary_domain": "udemy.com",
+  "domains": {
+    "udemy.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "cisco-webex",
+  "organization": "Cisco Webex",
+  "primary_domain": "webex.com",
+  "domains": {
+    "webex.com": {
+      "type": "primary",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [
+    "webex-domain-verification="
+  ],
+  "provider_aliases": [
+    "webex"
+  ],
+  "saas_tenants": []
+}

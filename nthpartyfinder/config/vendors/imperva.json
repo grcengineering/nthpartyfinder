@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "imperva",
+  "organization": "Imperva",
+  "primary_domain": "imperva.com",
+  "domains": {
+    "imperva.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

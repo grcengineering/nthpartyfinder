@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "vimeo",
+  "organization": "Vimeo",
+  "primary_domain": "vimeo.com",
+  "domains": {
+    "vimeo.com": {
+      "type": "primary",
+      "category": "media"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

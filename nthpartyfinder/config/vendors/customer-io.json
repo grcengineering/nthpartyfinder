@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "customer-io",
+  "organization": "Customer.io",
+  "primary_domain": "customerio.com",
+  "domains": {
+    "customerio.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

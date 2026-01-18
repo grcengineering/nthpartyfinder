@@ -1,0 +1,38 @@
+{
+  "$schema": "./_schema.json",
+  "id": "docusign",
+  "organization": "DocuSign",
+  "primary_domain": "docusign.com",
+  "domains": {
+    "docusign.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "docusign.net": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "docusign="
+  ],
+  "provider_aliases": [
+    "docusign"
+  ],
+  "saas_tenants": [
+    {
+      "name": "DocuSign",
+      "patterns": [
+        "{tenant}.docusign.net"
+      ],
+      "detection": {
+        "success_indicators": [
+          "DocuSign",
+          "docusign"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

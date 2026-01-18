@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "recurly",
+  "organization": "Recurly",
+  "primary_domain": "recurly.com",
+  "domains": {
+    "recurly.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

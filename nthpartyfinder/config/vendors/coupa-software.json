@@ -1,0 +1,34 @@
+{
+  "$schema": "./_schema.json",
+  "id": "coupa-software",
+  "organization": "Coupa Software",
+  "primary_domain": "coupa.com",
+  "domains": {
+    "coupa.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "coupahost.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Coupa",
+      "patterns": [
+        "{tenant}.coupahost.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Coupa",
+          "coupa"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "discord",
+  "organization": "Discord",
+  "primary_domain": "discord.com",
+  "domains": {
+    "discord.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

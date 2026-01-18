@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "clickup",
+  "organization": "ClickUp",
+  "primary_domain": "clickup.com",
+  "domains": {
+    "clickup.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

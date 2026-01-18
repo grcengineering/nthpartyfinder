@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "algolia",
+  "organization": "Algolia",
+  "primary_domain": "algolia.com",
+  "domains": {
+    "algolia.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "algolianet.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

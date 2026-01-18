@@ -1,0 +1,32 @@
+{
+  "$schema": "./_schema.json",
+  "id": "asana",
+  "organization": "Asana",
+  "primary_domain": "asana.com",
+  "domains": {
+    "asana.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Asana",
+      "patterns": [
+        "app.asana.com/0/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Asana",
+          "asana"
+        ],
+        "failure_indicators": [
+          "invalid workspace"
+        ],
+        "notes": "Path-based tenant pattern"
+      }
+    }
+  ]
+}

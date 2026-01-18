@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "stripe",
+  "organization": "Stripe",
+  "primary_domain": "stripe.com",
+  "domains": {
+    "stripe.com": {
+      "type": "primary",
+      "category": "payment"
+    },
+    "stripecdn.com": {
+      "type": "cdn",
+      "category": "payment"
+    }
+  },
+  "verification_patterns": [
+    "stripe-verification="
+  ],
+  "provider_aliases": [
+    "stripe"
+  ],
+  "saas_tenants": []
+}

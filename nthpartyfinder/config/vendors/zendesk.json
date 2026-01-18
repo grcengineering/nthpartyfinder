@@ -1,0 +1,41 @@
+{
+  "$schema": "./_schema.json",
+  "id": "zendesk",
+  "organization": "Zendesk",
+  "primary_domain": "zendesk.com",
+  "domains": {
+    "zendesk.com": {
+      "type": "primary",
+      "category": "support"
+    },
+    "zendeskcdn.com": {
+      "type": "cdn",
+      "category": "support"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [
+    "zendesk"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Zendesk",
+      "patterns": [
+        "{tenant}.zendesk.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Zendesk",
+          "Help Center",
+          "/hc/"
+        ],
+        "failure_indicators": [
+          "help-center-closed",
+          "helpcenter-closed",
+          "This help center no longer exists"
+        ],
+        "notes": "Invalid tenants redirect to www.zendesk.com/help-center-closed/"
+      }
+    }
+  ]
+}

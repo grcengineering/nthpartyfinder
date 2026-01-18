@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "calendly",
+  "organization": "Calendly",
+  "primary_domain": "calendly.com",
+  "domains": {
+    "calendly.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

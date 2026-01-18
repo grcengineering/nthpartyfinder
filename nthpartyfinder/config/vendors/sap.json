@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sap",
+  "organization": "SAP",
+  "primary_domain": "sap.com",
+  "domains": {
+    "sap.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

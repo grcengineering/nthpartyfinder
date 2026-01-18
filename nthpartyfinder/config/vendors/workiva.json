@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "workiva",
+  "organization": "Workiva",
+  "primary_domain": "workiva.com",
+  "domains": {
+    "workiva.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

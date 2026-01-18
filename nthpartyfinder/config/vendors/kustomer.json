@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "kustomer",
+  "organization": "Kustomer",
+  "primary_domain": "kustomer.com",
+  "parent_vendor": "meta",
+  "domains": {
+    "kustomer.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

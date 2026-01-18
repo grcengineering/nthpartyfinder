@@ -1,0 +1,37 @@
+{
+  "$schema": "./_schema.json",
+  "id": "salesforce",
+  "organization": "Salesforce",
+  "primary_domain": "salesforce.com",
+  "domains": {
+    "salesforce.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "salesforceliveagent.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [
+    "salesforce"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Salesforce",
+      "patterns": [
+        "{tenant}.my.salesforce.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "saml_request_id",
+          "Salesforce",
+          "salesforce.com"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

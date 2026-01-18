@@ -1,0 +1,40 @@
+{
+  "$schema": "./_schema.json",
+  "id": "slack-technologies",
+  "organization": "Slack Technologies",
+  "primary_domain": "slack.com",
+  "parent_vendor": "salesforce",
+  "domains": {
+    "slack.com": {
+      "type": "primary",
+      "category": "communication"
+    },
+    "slack-edge.com": {
+      "type": "cdn",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [
+    "slack-domain-verification="
+  ],
+  "provider_aliases": [
+    "slack"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Slack",
+      "patterns": [
+        "{tenant}.slack.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "enterprise.slack.com",
+          "Slack",
+          "workspace"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404 - detected by status code, not body"
+      }
+    }
+  ]
+}

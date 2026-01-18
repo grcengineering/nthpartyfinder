@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sap-concur",
+  "organization": "SAP Concur",
+  "primary_domain": "concursolutions.com",
+  "domains": {
+    "concursolutions.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

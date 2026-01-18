@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "new-relic",
+  "organization": "New Relic",
+  "primary_domain": "newrelic.com",
+  "domains": {
+    "newrelic.com": {
+      "type": "primary",
+      "category": "monitoring"
+    },
+    "nr-data.net": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

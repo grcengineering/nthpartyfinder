@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "amazon-s3",
+  "organization": "Amazon S3",
+  "primary_domain": "s3.amazonaws.com",
+  "domains": {
+    "s3.amazonaws.com": {
+      "type": "primary",
+      "category": "storage"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

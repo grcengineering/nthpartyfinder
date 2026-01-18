@@ -1,0 +1,36 @@
+{
+  "$schema": "./_schema.json",
+  "id": "onelogin",
+  "organization": "OneLogin",
+  "primary_domain": "onelogin.com",
+  "parent_vendor": "one-identity",
+  "domains": {
+    "onelogin.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "OneLogin",
+      "patterns": [
+        "{tenant}.onelogin.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "web-login-v2-cdn.onelogin.com/login2",
+          "OneLogin"
+        ],
+        "failure_indicators": [
+          "subdomain-helper",
+          "Enter your company's OneLogin Domain",
+          "subdomain_input",
+          "subdomain_helper"
+        ],
+        "notes": "Invalid tenants show subdomain helper asking for company domain"
+      }
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "./_schema.json",
+  "id": "monday-com",
+  "organization": "monday.com",
+  "primary_domain": "monday.com",
+  "domains": {
+    "monday.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Monday.com",
+      "patterns": [
+        "{tenant}.monday.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "monday.com",
+          "monday"
+        ],
+        "failure_indicators": [
+          "This account doesn't exist",
+          "account doesn't exist"
+        ],
+        "notes": "Check for account existence message"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "snap",
+  "organization": "Snap",
+  "primary_domain": "snapchat.com",
+  "domains": {
+    "snapchat.com": {
+      "type": "primary",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

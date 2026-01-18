@@ -1,0 +1,27 @@
+{
+  "$schema": "./_schema.json",
+  "id": "meta-platforms",
+  "organization": "Meta Platforms",
+  "primary_domain": "facebook.com",
+  "domains": {
+    "facebook.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "instagram.com": {
+      "type": "service",
+      "category": "tracking"
+    },
+    "meta.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "facebook-domain-verification="
+  ],
+  "provider_aliases": [
+    "facebook"
+  ],
+  "saas_tenants": []
+}

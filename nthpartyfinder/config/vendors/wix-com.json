@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "wix-com",
+  "organization": "Wix.com",
+  "primary_domain": "wix.com",
+  "domains": {
+    "wix.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

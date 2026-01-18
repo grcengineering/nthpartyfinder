@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sage-group",
+  "organization": "Sage Group",
+  "primary_domain": "sage.com",
+  "domains": {
+    "sage.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "intacct-esk="
+  ],
+  "provider_aliases": [
+    "intacct"
+  ],
+  "saas_tenants": []
+}

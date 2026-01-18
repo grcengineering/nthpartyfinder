@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sonarsource",
+  "organization": "SonarSource",
+  "primary_domain": "sonarsource.com",
+  "domains": {
+    "sonarqube.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "sonarsource.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

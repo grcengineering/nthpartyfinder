@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "mixpanel",
+  "organization": "Mixpanel",
+  "primary_domain": "mixpanel.com",
+  "domains": {
+    "mixpanel.com": {
+      "type": "primary",
+      "category": "analytics"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

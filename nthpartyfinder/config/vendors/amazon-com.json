@@ -1,0 +1,17 @@
+{
+  "$schema": "./_schema.json",
+  "id": "amazon-com",
+  "organization": "Amazon.com",
+  "primary_domain": "amazon.com",
+  "domains": {
+    "amazon.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [
+    "aws"
+  ],
+  "saas_tenants": []
+}

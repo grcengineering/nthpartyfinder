@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "digitalocean",
+  "organization": "DigitalOcean",
+  "primary_domain": "digitalocean.com",
+  "domains": {
+    "digitalocean.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

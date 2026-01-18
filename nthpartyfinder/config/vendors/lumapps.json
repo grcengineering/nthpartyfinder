@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "lumapps",
+  "organization": "LumApps",
+  "primary_domain": "lumapps.com",
+  "domains": {
+    "lumapps.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

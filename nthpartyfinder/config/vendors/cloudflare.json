@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "cloudflare",
+  "organization": "Cloudflare",
+  "primary_domain": "cloudflare.com",
+  "domains": {
+    "cloudflare.com": {
+      "type": "primary",
+      "category": "infrastructure"
+    },
+    "cloudflare.net": {
+      "type": "service",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

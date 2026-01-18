@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "browserstack",
+  "organization": "BrowserStack",
+  "primary_domain": "browserstack.com",
+  "domains": {
+    "browserstack.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "browserstack-domain-verification="
+  ],
+  "provider_aliases": [
+    "browserstack"
+  ],
+  "saas_tenants": []
+}

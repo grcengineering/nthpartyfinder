@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "usertesting",
+  "organization": "UserTesting",
+  "primary_domain": "userzoom.com",
+  "parent_vendor": "userzoom",
+  "domains": {
+    "userzoom.com": {
+      "type": "primary",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

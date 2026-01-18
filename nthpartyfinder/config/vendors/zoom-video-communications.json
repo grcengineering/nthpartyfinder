@@ -1,0 +1,39 @@
+{
+  "$schema": "./_schema.json",
+  "id": "zoom-video-communications",
+  "organization": "Zoom Video Communications",
+  "primary_domain": "zoom.com",
+  "domains": {
+    "zoom.com": {
+      "type": "primary",
+      "category": "communication"
+    },
+    "zoom.us": {
+      "type": "service",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [
+    "ZOOM_verify_",
+    "zoom-domain-verification="
+  ],
+  "provider_aliases": [
+    "zoom"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Zoom",
+      "patterns": [
+        "{tenant}.zoom.us"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Zoom",
+          "zoom.us"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

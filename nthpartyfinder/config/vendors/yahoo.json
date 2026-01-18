@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "yahoo",
+  "organization": "Yahoo!",
+  "primary_domain": "yahoo.com",
+  "domains": {
+    "yahoo.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

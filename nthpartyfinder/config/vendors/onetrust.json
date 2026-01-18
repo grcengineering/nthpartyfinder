@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "onetrust",
+  "organization": "OneTrust",
+  "primary_domain": "onetrust.com",
+  "domains": {
+    "onetrust.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "onetrust-domain-verification="
+  ],
+  "provider_aliases": [
+    "onetrust"
+  ],
+  "saas_tenants": []
+}

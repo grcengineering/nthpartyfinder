@@ -1,0 +1,38 @@
+{
+  "$schema": "./_schema.json",
+  "id": "intercom",
+  "organization": "Intercom",
+  "primary_domain": "intercom.com",
+  "domains": {
+    "intercom.com": {
+      "type": "primary",
+      "category": "support"
+    },
+    "intercom.io": {
+      "type": "service",
+      "category": "support"
+    },
+    "intercomcdn.com": {
+      "type": "cdn",
+      "category": "support"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Intercom",
+      "patterns": [
+        "{tenant}.intercom-mail.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Intercom",
+          "intercom"
+        ],
+        "failure_indicators": [],
+        "notes": "Email domain detection"
+      }
+    }
+  ]
+}

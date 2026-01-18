@@ -1,0 +1,30 @@
+{
+  "$schema": "./_schema.json",
+  "id": "cisco-duo",
+  "organization": "Cisco Duo",
+  "primary_domain": "duosecurity.com",
+  "domains": {
+    "duosecurity.com": {
+      "type": "primary",
+      "category": "security"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Duo Security",
+      "patterns": [
+        "{tenant}.duosecurity.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Duo",
+          "duosecurity"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants fail DNS resolution"
+      }
+    }
+  ]
+}

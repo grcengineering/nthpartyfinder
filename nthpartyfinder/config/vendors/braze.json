@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "braze",
+  "organization": "Braze",
+  "primary_domain": "braze.com",
+  "domains": {
+    "braze.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "braze.eu": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

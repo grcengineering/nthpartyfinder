@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "twilio",
+  "organization": "Twilio",
+  "primary_domain": "twilio.com",
+  "domains": {
+    "twilio.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

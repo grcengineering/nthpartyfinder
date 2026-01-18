@@ -1,0 +1,33 @@
+{
+  "$schema": "./_schema.json",
+  "id": "pagerduty",
+  "organization": "PagerDuty",
+  "primary_domain": "pagerduty.com",
+  "domains": {
+    "pagerduty.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "PagerDuty",
+      "patterns": [
+        "{tenant}.pagerduty.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "identity.pagerduty.com",
+          "PagerDuty",
+          "session_restart"
+        ],
+        "failure_indicators": [
+          "not_found"
+        ],
+        "notes": "Invalid tenants return HTTP 404 and redirect to /not_found"
+      }
+    }
+  ]
+}

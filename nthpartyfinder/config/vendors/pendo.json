@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "pendo",
+  "organization": "Pendo",
+  "primary_domain": "pendo.io",
+  "domains": {
+    "pendo.io": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

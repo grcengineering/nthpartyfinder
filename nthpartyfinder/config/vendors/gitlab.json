@@ -1,0 +1,31 @@
+{
+  "$schema": "./_schema.json",
+  "id": "gitlab",
+  "organization": "GitLab",
+  "primary_domain": "gitlab.com",
+  "domains": {
+    "gitlab.com": {
+      "type": "primary",
+      "category": "development"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "GitLab",
+      "patterns": [
+        "gitlab.com/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "GitLab",
+          "Projects",
+          "Repository"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid organizations redirect to sign_in; detection may be unreliable without auth"
+      }
+    }
+  ]
+}

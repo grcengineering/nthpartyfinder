@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "launchdarkly",
+  "organization": "LaunchDarkly",
+  "primary_domain": "launchdarkly.com",
+  "domains": {
+    "launchdarkly.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

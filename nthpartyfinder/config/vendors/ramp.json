@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "ramp",
+  "organization": "Ramp",
+  "primary_domain": "ramp.com",
+  "domains": {
+    "ramp.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

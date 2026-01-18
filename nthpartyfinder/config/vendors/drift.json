@@ -1,0 +1,20 @@
+{
+  "$schema": "./_schema.json",
+  "id": "drift",
+  "organization": "Drift",
+  "primary_domain": "drift.com",
+  "parent_vendor": "salesloft",
+  "domains": {
+    "drift.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "drift-domain-verification="
+  ],
+  "provider_aliases": [
+    "drift"
+  ],
+  "saas_tenants": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "globalsign",
+  "organization": "GlobalSign",
+  "primary_domain": "globalsign.com",
+  "domains": {
+    "globalsign.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "globalsign-domain-verification="
+  ],
+  "provider_aliases": [
+    "globalsign"
+  ],
+  "saas_tenants": []
+}

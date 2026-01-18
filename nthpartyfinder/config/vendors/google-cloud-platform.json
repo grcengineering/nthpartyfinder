@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "google-cloud-platform",
+  "organization": "Google Cloud Platform",
+  "primary_domain": "gcp.com",
+  "domains": {
+    "gcp.com": {
+      "type": "primary",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

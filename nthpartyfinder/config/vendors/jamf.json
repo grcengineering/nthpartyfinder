@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "jamf",
+  "organization": "Jamf",
+  "primary_domain": "jamf.com",
+  "domains": {
+    "jamf.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "jamf-site-verification="
+  ],
+  "provider_aliases": [
+    "jamf"
+  ],
+  "saas_tenants": []
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "./_schema.json",
+  "id": "shopify",
+  "organization": "Shopify",
+  "primary_domain": "shopify.com",
+  "domains": {
+    "shopify.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "myshopify.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [
+    "shopify"
+  ],
+  "saas_tenants": [
+    {
+      "name": "Shopify",
+      "patterns": [
+        "{tenant}.myshopify.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Shopify",
+          "shop",
+          "cart",
+          "products"
+        ],
+        "failure_indicators": [
+          "This store is unavailable",
+          "store is currently unavailable",
+          "password page"
+        ],
+        "notes": "Check for store availability message"
+      }
+    }
+  ]
+}

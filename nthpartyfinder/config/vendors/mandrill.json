@@ -1,0 +1,16 @@
+{
+  "$schema": "./_schema.json",
+  "id": "mandrill",
+  "organization": "Mandrill",
+  "primary_domain": "mandrill.com",
+  "parent_vendor": "intuit-mailchimp",
+  "domains": {
+    "mandrill.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

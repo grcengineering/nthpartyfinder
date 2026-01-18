@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "vmware-carbon-black",
+  "organization": "VMware Carbon Black",
+  "primary_domain": "carbonblack.com",
+  "domains": {
+    "carbonblack.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

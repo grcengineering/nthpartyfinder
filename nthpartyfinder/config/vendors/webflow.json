@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "webflow",
+  "organization": "Webflow",
+  "primary_domain": "webflow.com",
+  "domains": {
+    "webflow.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "webflow.io": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

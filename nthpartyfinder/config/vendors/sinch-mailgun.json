@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sinch-mailgun",
+  "organization": "Sinch Mailgun",
+  "primary_domain": "mailgun.com",
+  "domains": {
+    "mailgun.com": {
+      "type": "primary",
+      "category": "communication"
+    },
+    "mailgun.org": {
+      "type": "email",
+      "category": "communication"
+    }
+  },
+  "verification_patterns": [
+    "mgverify="
+  ],
+  "provider_aliases": [
+    "mailgun"
+  ],
+  "saas_tenants": []
+}

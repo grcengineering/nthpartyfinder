@@ -1,0 +1,23 @@
+{
+  "$schema": "./_schema.json",
+  "id": "apple",
+  "organization": "Apple",
+  "primary_domain": "apple.com",
+  "domains": {
+    "apple.com": {
+      "type": "primary",
+      "category": "platform"
+    },
+    "icloud.com": {
+      "type": "service",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "apple-domain-verification="
+  ],
+  "provider_aliases": [
+    "apple"
+  ],
+  "saas_tenants": []
+}

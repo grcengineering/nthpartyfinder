@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "atlassian-trello",
+  "organization": "Atlassian Trello",
+  "primary_domain": "trello.com",
+  "domains": {
+    "trello.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "amazon-web-services",
+  "organization": "Amazon Web Services",
+  "primary_domain": "amazonaws.com",
+  "domains": {
+    "amazonaws.com": {
+      "type": "primary",
+      "category": "infrastructure"
+    },
+    "aws.amazon.com": {
+      "type": "service",
+      "category": "infrastructure"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "canva",
+  "organization": "Canva",
+  "primary_domain": "canva.com",
+  "domains": {
+    "canva.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "canva-site-verification="
+  ],
+  "provider_aliases": [
+    "canva"
+  ],
+  "saas_tenants": []
+}

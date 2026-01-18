@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "neat",
+  "organization": "Neat",
+  "primary_domain": "neat.co",
+  "domains": {
+    "neat.co": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "neat-pulse-domain-verification"
+  ],
+  "provider_aliases": [
+    "neat"
+  ],
+  "saas_tenants": []
+}

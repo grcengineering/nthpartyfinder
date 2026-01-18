@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "adobe",
+  "organization": "Adobe",
+  "primary_domain": "adobe.com",
+  "domains": {
+    "adobe.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "adobe-idp-site-verification="
+  ],
+  "provider_aliases": [
+    "adobe"
+  ],
+  "saas_tenants": []
+}

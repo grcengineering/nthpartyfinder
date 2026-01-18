@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "sumo-logic",
+  "organization": "Sumo Logic",
+  "primary_domain": "sumologic.com",
+  "domains": {
+    "sumo.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "sumologic.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}

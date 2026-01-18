@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "whimsical",
+  "organization": "Whimsical",
+  "primary_domain": "whimsical.com",
+  "domains": {
+    "whimsical.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "<whimsical="
+  ],
+  "provider_aliases": [
+    "whimsical"
+  ],
+  "saas_tenants": []
+}

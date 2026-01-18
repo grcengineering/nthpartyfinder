@@ -1,0 +1,42 @@
+{
+  "$schema": "./_schema.json",
+  "id": "freshworks",
+  "organization": "Freshworks",
+  "primary_domain": "freshworks.com",
+  "domains": {
+    "freshdesk.com": {
+      "type": "service",
+      "category": "support"
+    },
+    "freshservice.com": {
+      "type": "service",
+      "category": "platform"
+    },
+    "freshworks.com": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": [
+    {
+      "name": "Freshdesk",
+      "patterns": [
+        "{tenant}.freshdesk.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Freshdesk",
+          "freshdesk",
+          "Support Portal"
+        ],
+        "failure_indicators": [
+          "This portal is not configured",
+          "page not found"
+        ],
+        "notes": "Check HTTP status - many invalid tenants return 404"
+      }
+    }
+  ]
+}

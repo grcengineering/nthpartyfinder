@@ -1,0 +1,19 @@
+{
+  "$schema": "./_schema.json",
+  "id": "datadome",
+  "organization": "DataDome",
+  "primary_domain": "datadome.co",
+  "domains": {
+    "datadome.co": {
+      "type": "primary",
+      "category": "platform"
+    }
+  },
+  "verification_patterns": [
+    "datadome-domain-verify="
+  ],
+  "provider_aliases": [
+    "datadome"
+  ],
+  "saas_tenants": []
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./_schema.json",
+  "id": "salesforce-pardot",
+  "organization": "Salesforce Pardot",
+  "primary_domain": "pardot.com",
+  "domains": {
+    "pardot.com": {
+      "type": "primary",
+      "category": "advertising"
+    }
+  },
+  "verification_patterns": [],
+  "provider_aliases": [],
+  "saas_tenants": []
+}
