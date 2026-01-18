@@ -12,5 +12,6 @@ pub mod logger;
 pub mod known_vendors;
 pub mod web_org;
 pub mod ner_org;
+pub mod vendor_registry;
 
 pub use vendor::VendorRelationship;

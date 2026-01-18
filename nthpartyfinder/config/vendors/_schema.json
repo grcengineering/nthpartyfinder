@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "vendor-schema.json",
+  "title": "nthpartyfinder Vendor Configuration",
+  "description": "Schema for vendor configuration files in nthpartyfinder. Each vendor gets its own JSON file containing all related domains, verification patterns, SaaS tenant configurations, and risk metadata.",
+  "type": "object",
+  "required": ["id", "organization", "primary_domain", "domains"],
+
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Reference to this schema file"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique vendor identifier (should match filename without .json extension)",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "organization": {
+      "type": "string",
+      "description": "Official organization name (e.g., 'Google LLC', 'Salesforce, Inc.')"
+    },
+    "primary_domain": {
+      "type": "string",
+      "description": "Main domain for this vendor",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]?\.[a-zA-Z]{2,}$"
+    },
+    "parent_vendor": {
+      "type": "string",
+      "description": "ID of parent vendor if this vendor was acquired",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "acquired_year": {
+      "type": "integer",
+      "minimum": 1990,
+      "maximum": 2100,
+      "description": "Year this vendor was acquired by parent_vendor"
+    },
+
+    "domains": {
+      "type": "object",
+      "description": "Map of domain -> domain metadata. All domains owned by or associated with this vendor.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["primary", "service", "api", "cdn", "acquired", "alias", "email"],
+            "description": "The role this domain plays for the vendor"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "platform", "infrastructure", "tracking", "advertising",
+              "security", "payment", "communication", "storage",
+              "development", "monitoring", "media", "support", "analytics"
+            ],
+            "description": "Risk category for this domain"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of what this domain is used for"
+          },
+          "acquired_year": {
+            "type": "integer",
+            "minimum": 1990,
+            "maximum": 2100,
+            "description": "Year this specific domain/brand was acquired"
+          },
+          "vendor_ref": {
+            "type": "string",
+            "description": "Reference to subsidiary vendor file ID (for type=acquired domains)",
+            "pattern": "^[a-z0-9-]+$"
+          }
+        }
+      }
+    },
+
+    "verification_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "TXT record patterns that indicate this vendor is being used (e.g., 'google-site-verification=')"
+    },
+
+    "provider_aliases": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Alternative names for this vendor used in dynamic TXT pattern extraction"
+    },
+
+    "saas_tenants": {
+      "type": "array",
+      "description": "SaaS tenant detection configurations for this vendor's multi-tenant services",
+      "items": {
+        "type": "object",
+        "required": ["name", "patterns"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-readable name for this tenant type"
+          },
+          "patterns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "URL patterns with {tenant} placeholder (e.g., '{tenant}.slack.com')"
+          },
+          "detection": {
+            "type": "object",
+            "description": "Configuration for detecting valid vs invalid tenants",
+            "properties": {
+              "success_indicators": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Strings in response body indicating valid tenant"
+              },
+              "failure_indicators": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Strings in response body indicating invalid tenant"
+              },
+              "notes": {
+                "type": "string",
+                "description": "Additional notes about detection behavior"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  "additionalProperties": false
+}

@@ -15,6 +15,7 @@ Thumbs.db
 # Output files
 *.csv
 *.json
+!config/vendors/*.json
 *.log
 
 # Build artifacts
