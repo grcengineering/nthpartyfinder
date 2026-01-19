@@ -358,6 +358,9 @@ fn escape_markdown(text: &str) -> String {
     text.replace("|", "\\|").replace("*", "\\*").replace("_", "\\_")
 }
 
+// XYFlow Svelte vendor graph bundle - embedded at compile time
+const VENDOR_GRAPH_JS: &str = include_str!("../static/vendor-graph.js");
+
 #[derive(Template)]
 #[template(path = "report.html")]
 struct HtmlReportTemplate {
@@ -365,6 +368,7 @@ struct HtmlReportTemplate {
     relationships: Vec<VendorRelationship>,
     relationships_json: String,
     summary_json: String,
+    vendor_graph_js: &'static str,
 }
 
 #[derive(serde::Serialize)]
@@ -395,6 +399,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
             relationships: Vec::new(),
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
+            vendor_graph_js: VENDOR_GRAPH_JS,
         };
         
         let html_content = empty_template.render()?;
@@ -428,6 +433,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
         relationships: relationships.to_vec(),
         relationships_json,
         summary_json,
+        vendor_graph_js: VENDOR_GRAPH_JS,
     };
     
     let html_content = template.render()?;

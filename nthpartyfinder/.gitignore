@@ -16,6 +16,7 @@ Thumbs.db
 *.csv
 *.json
 !config/vendors/*.json
+!frontend/*.json
 *.log
 
 # Build artifacts
