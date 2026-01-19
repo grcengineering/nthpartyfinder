@@ -1285,9 +1285,9 @@ impl SubprocessorAnalyzer {
     /// Detect organizations in content using NLP-like pattern recognition
     async fn detect_organizations_in_content(&self, document: &Html, html_content: &str) -> Vec<DetectedOrganization> {
         debug!("🔍 ORGANIZATION DETECTION: Scanning content for company patterns");
-        
+
         let mut detected_orgs = Vec::new();
-        
+
         // High-confidence patterns for organization names
         let org_patterns = vec![
             // Common company suffixes
@@ -1298,23 +1298,75 @@ impl SubprocessorAnalyzer {
             r"(?i)\b([A-Z][a-zA-Z]{3,20})\s+(Services?|Analytics?|Platform|Network|Software|SaaS|Cloud|Data|Security|Infrastructure)\b",
         ];
 
+        // Prefer content-focused elements over generic * selector to avoid navigation noise
+        // Priority: main content areas first, then fall back to all elements
+        let content_selectors = [
+            "main *",           // Main content area
+            "article *",        // Article content
+            ".content *",       // Common content class
+            "[role='main'] *",  // ARIA main role
+            "table *",          // Table cells (subprocessor lists are often in tables)
+            "ul li, ol li",     // List items
+            "p",                // Paragraphs
+        ];
+
         for pattern_str in &org_patterns {
             if let Ok(pattern) = Regex::new(pattern_str) {
-                for text_element in document.select(&Selector::parse("*").unwrap()) {
-                    let text = text_element.text().collect::<String>();
-                    if let Ok(Some(captures)) = pattern.captures(&text) {
-                        if let Some(full_match) = captures.get(0) {
-                            let org_name = full_match.as_str().trim().to_string();
-                            let confidence = self.calculate_organization_confidence(&org_name, &text);
-                            
-                            if confidence > 0.6 {
-                                let dom_context = self.extract_dom_context(&text_element);
-                                detected_orgs.push(DetectedOrganization {
-                                    name: org_name.clone(),
-                                    confidence,
-                                    dom_context,
-                                });
-                                debug!("🔍 FOUND: {} (confidence: {:.2})", org_name, confidence);
+                // Try content-focused selectors first
+                let mut found_in_content = false;
+                for selector_str in &content_selectors {
+                    if let Ok(selector) = Selector::parse(selector_str) {
+                        for text_element in document.select(&selector) {
+                            // Skip if element is inside navigation containers
+                            if self.is_in_navigation_container(&text_element) {
+                                continue;
+                            }
+
+                            let text = text_element.text().collect::<String>();
+                            if let Ok(Some(captures)) = pattern.captures(&text) {
+                                if let Some(full_match) = captures.get(0) {
+                                    let org_name = full_match.as_str().trim().to_string();
+                                    let confidence = self.calculate_organization_confidence(&org_name, &text);
+
+                                    if confidence > 0.6 {
+                                        let dom_context = self.extract_dom_context(&text_element);
+                                        detected_orgs.push(DetectedOrganization {
+                                            name: org_name.clone(),
+                                            confidence,
+                                            dom_context,
+                                        });
+                                        debug!("🔍 FOUND: {} (confidence: {:.2})", org_name, confidence);
+                                        found_in_content = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Only fall back to generic * selector if no content found in focused areas
+                if !found_in_content {
+                    for text_element in document.select(&Selector::parse("*").unwrap()) {
+                        // Skip navigation containers
+                        if self.is_in_navigation_container(&text_element) {
+                            continue;
+                        }
+
+                        let text = text_element.text().collect::<String>();
+                        if let Ok(Some(captures)) = pattern.captures(&text) {
+                            if let Some(full_match) = captures.get(0) {
+                                let org_name = full_match.as_str().trim().to_string();
+                                let confidence = self.calculate_organization_confidence(&org_name, &text);
+
+                                if confidence > 0.6 {
+                                    let dom_context = self.extract_dom_context(&text_element);
+                                    detected_orgs.push(DetectedOrganization {
+                                        name: org_name.clone(),
+                                        confidence,
+                                        dom_context,
+                                    });
+                                    debug!("🔍 FOUND (fallback): {} (confidence: {:.2})", org_name, confidence);
+                                }
                             }
                         }
                     }
@@ -1398,6 +1450,72 @@ impl SubprocessorAnalyzer {
             text_content: element.text().collect::<String>().trim().to_string(),
             xpath_like,
         }
+    }
+
+    /// Check if an element is inside a navigation container (nav, header, footer, sidebar)
+    /// These elements typically contain navigation links, not subprocessor content
+    fn is_in_navigation_container(&self, element: &scraper::ElementRef) -> bool {
+        // Navigation-related tag names to exclude
+        let nav_tags = ["nav", "header", "footer", "aside"];
+
+        // Navigation-related class/id patterns
+        let nav_patterns = [
+            "nav", "menu", "header", "footer", "sidebar", "navigation",
+            "topbar", "navbar", "menubar", "breadcrumb", "sitemap",
+        ];
+
+        // Check the element itself
+        let tag_name = element.value().name().to_lowercase();
+        if nav_tags.contains(&tag_name.as_str()) {
+            return true;
+        }
+
+        // Check element's classes and id
+        let classes: Vec<String> = element.value().classes().map(|c| c.to_lowercase()).collect();
+        let id = element.value().id().map(|i| i.to_lowercase()).unwrap_or_default();
+
+        for pattern in &nav_patterns {
+            if classes.iter().any(|c| c.contains(pattern)) || id.contains(pattern) {
+                return true;
+            }
+        }
+
+        // Check parent elements up the DOM tree
+        let mut current = element.parent();
+        let mut depth = 0;
+        while let Some(parent_node) = current {
+            if depth > 10 {
+                break; // Limit traversal depth
+            }
+
+            if let Some(parent_ref) = scraper::ElementRef::wrap(parent_node) {
+                let parent_tag = parent_ref.value().name().to_lowercase();
+
+                // Check if parent is a nav container tag
+                if nav_tags.contains(&parent_tag.as_str()) {
+                    return true;
+                }
+
+                // Check parent's classes and id
+                let parent_classes: Vec<String> = parent_ref.value().classes()
+                    .map(|c| c.to_lowercase())
+                    .collect();
+                let parent_id = parent_ref.value().id()
+                    .map(|i| i.to_lowercase())
+                    .unwrap_or_default();
+
+                for pattern in &nav_patterns {
+                    if parent_classes.iter().any(|c| c.contains(pattern)) || parent_id.contains(pattern) {
+                        return true;
+                    }
+                }
+            }
+
+            current = parent_node.parent();
+            depth += 1;
+        }
+
+        false
     }
 
     /// Derive extraction patterns from detected organizations' DOM contexts
@@ -2711,25 +2829,47 @@ impl SubprocessorAnalyzer {
                     }
 
                     // Extract organization name to domain mappings from table content
+                    // IMPORTANT: Each extraction must be matched with its OWN company name from its raw_record
+                    // to prevent mismatched mappings (e.g., "El Camino" -> wrong domain)
                     if let Ok(td_selector) = scraper::Selector::parse("td") {
                         for cell in table.select(&td_selector) {
                             let cell_text = cell.text().collect::<String>().trim().to_string();
-                            
-                            // For each company name we found, try to match it to the corresponding domain
-                            for (company_name, extraction) in company_names.iter().zip(successful_extractions.iter()) {
-                                if cell_text.to_lowercase().contains(&company_name.to_lowercase()) {
-                                    // Add direct mapping from company name to domain
-                                    custom_mappings.insert(company_name.to_lowercase(), extraction.domain.clone());
-                                    
-                                    // Also add variations of the company name
-                                    let org_variations = self.extract_organization_variations(&company_name);
-                                    for org_name in org_variations {
-                                        if !org_name.is_empty() && org_name.len() > 3 {
-                                            custom_mappings.insert(org_name.to_lowercase(), extraction.domain.clone());
+
+                            // For each extraction, extract its company name from its own raw_record
+                            // and only create a mapping if THAT company name matches the cell
+                            for extraction in successful_extractions.iter() {
+                                // Extract this extraction's company name from its raw_record
+                                let extraction_company_name = if let Some(start) = extraction.raw_record.find(">") {
+                                    if let Some(end) = extraction.raw_record.rfind("<") {
+                                        let name = extraction.raw_record[start + 1..end].trim();
+                                        if !name.is_empty() && name.len() > 3 {
+                                            Some(name.to_string())
+                                        } else {
+                                            None
                                         }
+                                    } else {
+                                        None
                                     }
-                                    
-                                    debug!("Added domain mapping: '{}' -> '{}'", company_name, extraction.domain);
+                                } else {
+                                    None
+                                };
+
+                                if let Some(company_name) = extraction_company_name {
+                                    // Only create mapping if THIS extraction's company name matches the cell
+                                    if cell_text.to_lowercase().contains(&company_name.to_lowercase()) {
+                                        // Add direct mapping from company name to domain
+                                        custom_mappings.insert(company_name.to_lowercase(), extraction.domain.clone());
+
+                                        // Also add variations of the company name
+                                        let org_variations = self.extract_organization_variations(&company_name);
+                                        for org_name in org_variations {
+                                            if !org_name.is_empty() && org_name.len() > 3 {
+                                                custom_mappings.insert(org_name.to_lowercase(), extraction.domain.clone());
+                                            }
+                                        }
+
+                                        debug!("Added verified domain mapping: '{}' -> '{}'", company_name, extraction.domain);
+                                    }
                                 }
                             }
                         }

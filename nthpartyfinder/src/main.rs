@@ -1157,10 +1157,14 @@ async fn process_vendor_domain(
     };
     
     // Determine record value based on source
-    let record_value = if source_type == RecordType::DnsSubdomain {
-        format!("{} (base of {})", base_domain, customer_domain)
-    } else {
-        vendor_domain.clone()
+    // For DNS TXT records, use the raw record so users can see the actual TXT content
+    // For subdomains, show the base domain with context
+    // For other types, use the vendor domain
+    let record_value = match source_type {
+        RecordType::DnsSubdomain => format!("{} (base of {})", base_domain, customer_domain),
+        RecordType::DnsTxtVerification | RecordType::DnsTxtSpf |
+        RecordType::DnsTxtDmarc | RecordType::DnsTxtDkim => raw_record.clone(),
+        _ => vendor_domain.clone(),
     };
     
     let relationship = VendorRelationship::new(

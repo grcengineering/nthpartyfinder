@@ -215,6 +215,15 @@ async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig) -> T
     match client.get(url).send().await {
         Ok(response) => {
             let status_code = response.status().as_u16();
+            let final_url = response.url().to_string();
+
+            // Check if we were redirected to the main company site
+            // This indicates the tenant doesn't exist (e.g., auth0.com/duo.com redirect invalid tenants)
+            if was_redirected_to_main_site(url, &final_url) {
+                debug!("Tenant URL {} redirected to main site {}, marking as NotFound", url, final_url);
+                return TenantStatus::NotFound;
+            }
+
             match response.text().await {
                 Ok(body) => analyze_response(status_code, &body, detection),
                 Err(_) => {
@@ -233,6 +242,99 @@ async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig) -> T
                 TenantStatus::NotFound
             }
         }
+    }
+}
+
+/// Check if a URL was redirected to the main company site
+/// This detects cases like klaviyo.auth0.com -> auth0.com
+fn was_redirected_to_main_site(original_url: &str, final_url: &str) -> bool {
+    // Parse URLs to extract domains
+    let original_host = extract_host_from_url(original_url);
+    let final_host = extract_host_from_url(final_url);
+
+    if original_host.is_none() || final_host.is_none() {
+        return false;
+    }
+
+    let original_host = original_host.unwrap();
+    let final_host = final_host.unwrap();
+
+    // If hosts are the same, no redirect to main site
+    if original_host == final_host {
+        return false;
+    }
+
+    // Check if the final host is the "base" domain of the original
+    // e.g., klaviyo.auth0.com -> auth0.com
+    // e.g., klaviyo.duosecurity.com -> duo.com
+    let original_parts: Vec<&str> = original_host.split('.').collect();
+    let final_parts: Vec<&str> = final_host.split('.').collect();
+
+    // Main sites usually have 2 parts (domain.tld) or www.domain.tld
+    // Check if final URL looks like a main company site
+    let is_main_site = final_parts.len() <= 3 &&
+        (final_parts.first() == Some(&"www") || final_parts.len() == 2);
+
+    if !is_main_site {
+        return false;
+    }
+
+    // Check if the original URL's subdomain was the tenant identifier
+    // e.g., if original is "tenant.auth0.com" and final is "auth0.com"
+    if original_parts.len() > final_parts.len() {
+        // Check if the "core" domain matches
+        let original_core = if original_parts.len() >= 2 {
+            format!("{}.{}", original_parts[original_parts.len()-2], original_parts[original_parts.len()-1])
+        } else {
+            original_host.clone()
+        };
+
+        let final_core = if final_parts.len() >= 2 {
+            let last = final_parts.len();
+            format!("{}.{}", final_parts[last-2], final_parts[last-1])
+        } else {
+            final_host.clone()
+        };
+
+        // Known redirect patterns: some services redirect to different domains
+        // e.g., duosecurity.com -> duo.com
+        let known_redirects = [
+            ("duosecurity.com", "duo.com"),
+            ("auth0.com", "auth0.com"),
+        ];
+
+        for (from_domain, to_domain) in known_redirects {
+            if original_core.ends_with(from_domain) && final_core.ends_with(to_domain) {
+                return true;
+            }
+        }
+
+        // If core domains match, it's likely a redirect to main site
+        if original_core == final_core {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Extract host from URL string
+fn extract_host_from_url(url: &str) -> Option<String> {
+    // Simple URL parsing - handle both http:// and https://
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    // Get just the host part (before any path/query)
+    let host = without_scheme.split('/').next()?;
+    let host = host.split('?').next()?;
+    let host = host.split(':').next()?; // Remove port if present
+
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
     }
 }
 
