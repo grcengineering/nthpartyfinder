@@ -6,37 +6,41 @@
   import RootNode from './nodes/RootNode.svelte';
   import VendorNode from './nodes/VendorNode.svelte';
   import LoadMoreNode from './nodes/LoadMoreNode.svelte';
+  import VendorTooltip from './components/VendorTooltip.svelte';
 
-  import type { XYFlowNode, XYFlowEdge, Relationship } from './lib/transform';
-  import { buildRelationshipMap } from './lib/transform';
+  import type { XYFlowNode, XYFlowEdge, Relationship, DiscoverySource, AggregatedVendor } from './lib/transform';
+  import { transformToXyflow, buildChildrenMap } from './lib/transform';
 
   // Props
-  export let initialNodes: XYFlowNode[] = [];
-  export let initialEdges: XYFlowEdge[] = [];
-  export let rootDomain: string = '';
   export let relationships: Relationship[] = [];
+  export let rootDomain: string = '';
 
-  // Layer limits for progressive disclosure
-  const LAYER_LIMITS: Record<number, number> = { 1: 50, 2: 10, 3: 5 };
-  const DEFAULT_LIMIT = 5;
+  // Pagination constant
+  const VENDORS_PER_PAGE = 10;
 
-  function getLayerLimit(layer: number): number {
-    return LAYER_LIMITS[layer] || DEFAULT_LIMIT;
-  }
+  // Transform data with deduplication
+  const { nodes: initialNodes, edges: initialEdges, vendors } = transformToXyflow(relationships, rootDomain);
 
   // Stores
   const nodes = writable<XYFlowNode[]>(initialNodes);
   const edges = writable<XYFlowEdge[]>(initialEdges);
 
-  // Track expanded state and visibility
+  // Track expanded state and pagination
   const expandedNodes = new Set<string>([rootDomain]);
-  const visibilityCount = new Map<string, { shown: number; total: number }>();
+  const paginationState = new Map<string, { shown: number; total: number }>();
 
-  // Relationship map for quick lookup
-  const relationshipMap = buildRelationshipMap(relationships);
+  // Build children map for expand/collapse (using unique children)
+  const childrenMap = buildChildrenMap(relationships);
 
-  // Node types
-  const nodeTypes = {
+  // Tooltip state
+  let tooltipVisible = false;
+  let tooltipDomain = '';
+  let tooltipOrganization = '';
+  let tooltipSources: DiscoverySource[] = [];
+  let tooltipPosition = { x: 0, y: 0 };
+
+  // Node types (cast to any to avoid strict type checking with SvelteFlow)
+  const nodeTypes: any = {
     root: RootNode,
     vendor: VendorNode,
     loadMore: LoadMoreNode
@@ -51,12 +55,12 @@
     if (!node) return;
 
     // Handle load more node
-    if (node.type === 'loadMore') {
+    if (node.type === 'loadMore' && node.data.parentId) {
       loadMoreVendors(node.data.parentId);
       return;
     }
 
-    // Toggle expand/collapse
+    // Toggle expand/collapse for nodes with children
     if (node.data.hasChildren) {
       if (expandedNodes.has(nodeId)) {
         collapseNode(nodeId);
@@ -67,30 +71,45 @@
   }
 
   function expandNode(nodeId: string) {
-    const children = relationshipMap.get(nodeId) || [];
-    if (children.length === 0) return;
+    const children = childrenMap.get(nodeId);
+    if (!children || children.size === 0) return;
 
-    // Get layer info from parent
-    const parentNode = $nodes.find(n => n.id === nodeId);
-    const childLayer = (parentNode?.data.layer || 0) + 1;
-    const limit = getLayerLimit(childLayer);
+    const childArray = Array.from(children);
 
-    // Initialize or get visibility tracking
-    if (!visibilityCount.has(nodeId)) {
-      visibilityCount.set(nodeId, { shown: 0, total: children.length });
+    // Initialize pagination if needed
+    if (!paginationState.has(nodeId)) {
+      paginationState.set(nodeId, { shown: 0, total: childArray.length });
     }
-    const visibility = visibilityCount.get(nodeId)!;
+    const pagination = paginationState.get(nodeId)!;
 
-    // Calculate how many to show
-    const startIndex = visibility.shown;
-    const endIndex = Math.min(startIndex + limit, children.length);
-    const toShow = children.slice(startIndex, endIndex);
+    // Calculate slice to show
+    const startIndex = pagination.shown;
+    const endIndex = Math.min(startIndex + VENDORS_PER_PAGE, childArray.length);
+    const toShow = childArray.slice(startIndex, endIndex);
 
-    // Show nodes and edges
+    // Calculate positions for new nodes
+    const parentNode = $nodes.find(n => n.id === nodeId);
+    const parentPos = parentNode?.position || { x: 0, y: 0 };
+    const parentLayer = parentNode?.data.layer || 0;
+
+    // Show nodes
     nodes.update(ns => {
       return ns.map(n => {
-        if (toShow.some(rel => rel.nth_party_domain === n.id)) {
-          return { ...n, hidden: false };
+        if (toShow.includes(n.id)) {
+          // Calculate vertical position based on visible siblings
+          const visibleSiblings = toShow.filter(id => id !== n.id).length;
+          const siblingIndex = toShow.indexOf(n.id);
+          const totalHeight = (toShow.length - 1) * 90;
+          const startY = parentPos.y - totalHeight / 2;
+
+          return {
+            ...n,
+            hidden: false,
+            position: {
+              x: parentPos.x + 300,
+              y: startY + siblingIndex * 90
+            }
+          };
         }
         if (n.id === nodeId) {
           return { ...n, data: { ...n.data, expanded: true } };
@@ -99,45 +118,47 @@
       });
     });
 
+    // Show edges
     edges.update(es => {
       return es.map(e => {
-        if (e.source === nodeId && toShow.some(rel => rel.nth_party_domain === e.target)) {
+        if (e.source === nodeId && toShow.includes(e.target)) {
           return { ...e, hidden: false };
         }
         return e;
       });
     });
 
-    visibility.shown = endIndex;
+    pagination.shown = endIndex;
     expandedNodes.add(nodeId);
 
-    // Add load more node if needed
-    const remaining = children.length - visibility.shown;
-    if (remaining > 0) {
-      addLoadMoreNode(nodeId, remaining, childLayer);
-    }
+    // Update or add load more node
+    const remaining = childArray.length - pagination.shown;
+    updateLoadMoreNode(nodeId, remaining, parentLayer + 1, parentPos);
   }
 
   function collapseNode(nodeId: string) {
-    const children = relationshipMap.get(nodeId) || [];
+    const children = childrenMap.get(nodeId);
+    if (!children) return;
+
+    const childArray = Array.from(children);
 
     // Recursively collapse children first
-    for (const child of children) {
-      if (expandedNodes.has(child.nth_party_domain)) {
-        collapseNode(child.nth_party_domain);
+    for (const childId of childArray) {
+      if (expandedNodes.has(childId)) {
+        collapseNode(childId);
       }
     }
 
     // Hide children nodes and edges
     nodes.update(ns => {
       return ns.map(n => {
-        if (children.some(rel => rel.nth_party_domain === n.id)) {
+        if (childArray.includes(n.id)) {
           return { ...n, hidden: true };
         }
         if (n.id === nodeId) {
           return { ...n, data: { ...n.data, expanded: false } };
         }
-        // Also hide load more nodes for this parent
+        // Hide load more node for this parent
         if (n.type === 'loadMore' && n.data.parentId === nodeId) {
           return { ...n, hidden: true };
         }
@@ -155,21 +176,27 @@
     });
 
     expandedNodes.delete(nodeId);
-    visibilityCount.delete(nodeId);
+    paginationState.delete(nodeId);
   }
 
   function loadMoreVendors(parentId: string) {
     expandNode(parentId);
   }
 
-  function addLoadMoreNode(parentId: string, remaining: number, layer: number) {
+  function updateLoadMoreNode(parentId: string, remaining: number, layer: number, parentPos: { x: number; y: number }) {
     const loadMoreId = `loadMore-${parentId}`;
-    const parentNode = $nodes.find(n => n.id === parentId);
-    const parentPos = parentNode?.position || { x: 0, y: 0 };
 
-    // Remove existing load more node if any
+    // Remove existing load more node
     nodes.update(ns => ns.filter(n => n.id !== loadMoreId));
     edges.update(es => es.filter(e => e.target !== loadMoreId));
+
+    if (remaining <= 0) return;
+
+    // Calculate position at bottom of siblings
+    const pagination = paginationState.get(parentId);
+    const shown = pagination?.shown || VENDORS_PER_PAGE;
+    const totalHeight = (shown) * 90;
+    const loadMoreY = parentPos.y - totalHeight / 2 + shown * 90;
 
     // Add new load more node
     const newNode: XYFlowNode = {
@@ -183,9 +210,11 @@
         childCount: remaining,
         hasChildren: false,
         expanded: false,
+        discoveryCount: 0,
+        sources: [],
         parentId: parentId
-      } as any,
-      position: { x: parentPos.x + 200, y: parentPos.y + 100 },
+      },
+      position: { x: parentPos.x + 300, y: loadMoreY },
       hidden: false
     };
 
@@ -201,9 +230,29 @@
     }]);
   }
 
-  // Public methods for external control
+  // Handle info button click from VendorNode
+  function handleShowInfo(event: CustomEvent) {
+    const { domain, sources } = event.detail;
+    const vendor = vendors.get(domain);
+
+    tooltipDomain = domain;
+    tooltipOrganization = vendor?.organization || '';
+    tooltipSources = sources || [];
+
+    // Position tooltip near the center of the viewport
+    tooltipPosition = {
+      x: window.innerWidth / 2 - 140,
+      y: window.innerHeight / 3
+    };
+    tooltipVisible = true;
+  }
+
+  function closeTooltip() {
+    tooltipVisible = false;
+  }
+
+  // Public methods
   export function resetView() {
-    // Collapse all except root
     for (const nodeId of expandedNodes) {
       if (nodeId !== rootDomain) {
         collapseNode(nodeId);
@@ -212,22 +261,9 @@
   }
 
   export function expandAll() {
-    const toExpand = $nodes.filter(n => n.data.hasChildren && !expandedNodes.has(n.id));
+    const toExpand = $nodes.filter(n => n.data.hasChildren && !expandedNodes.has(n.id) && !n.hidden);
     for (const node of toExpand) {
       expandNode(node.id);
-    }
-  }
-
-  export function focusNode(nodeId: string) {
-    // Ensure node is visible by expanding parents
-    const node = $nodes.find(n => n.id === nodeId);
-    if (node?.hidden) {
-      // Find parent and expand
-      const rel = relationships.find(r => r.nth_party_domain === nodeId);
-      if (rel) {
-        focusNode(rel.nth_party_customer_domain);
-        expandNode(rel.nth_party_customer_domain);
-      }
     }
   }
 </script>
@@ -249,6 +285,15 @@
     <Background variant={BackgroundVariant.Dots} />
     <MiniMap />
   </SvelteFlow>
+
+  <VendorTooltip
+    domain={tooltipDomain}
+    organization={tooltipOrganization}
+    sources={tooltipSources}
+    position={tooltipPosition}
+    visible={tooltipVisible}
+    on:close={closeTooltip}
+  />
 </div>
 
 <style>

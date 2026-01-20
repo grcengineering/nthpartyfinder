@@ -1,4 +1,4 @@
-// Transform Rust data format to xyflow nodes and edges
+// Transform Rust data format to xyflow nodes and edges with deduplication
 
 export interface Relationship {
   nth_party_domain: string;
@@ -6,6 +6,22 @@ export interface Relationship {
   nth_party_customer_domain: string;
   nth_party_layer: number;
   nth_party_record_type: string;
+  nth_party_record?: string;  // Raw record content
+}
+
+export interface DiscoverySource {
+  recordType: string;
+  parentDomain: string;
+  rawRecord?: string;
+}
+
+export interface AggregatedVendor {
+  domain: string;
+  organization: string;
+  layer: number;
+  discoveryCount: number;
+  sources: DiscoverySource[];
+  children: string[];  // Child vendor domains
 }
 
 export interface XYFlowNode {
@@ -19,6 +35,9 @@ export interface XYFlowNode {
     childCount: number;
     hasChildren: boolean;
     expanded: boolean;
+    discoveryCount: number;
+    sources: DiscoverySource[];
+    parentId?: string;
   };
   position: { x: number; y: number };
   hidden?: boolean;
@@ -37,7 +56,62 @@ export interface XYFlowEdge {
   };
 }
 
-// Build parent -> children map
+// Build aggregated vendor map with deduplication
+export function aggregateVendors(relationships: Relationship[]): Map<string, AggregatedVendor> {
+  const vendors = new Map<string, AggregatedVendor>();
+
+  for (const rel of relationships) {
+    const domain = rel.nth_party_domain;
+
+    if (!vendors.has(domain)) {
+      vendors.set(domain, {
+        domain,
+        organization: rel.nth_party_organization || domain,
+        layer: rel.nth_party_layer,
+        discoveryCount: 0,
+        sources: [],
+        children: []
+      });
+    }
+
+    const vendor = vendors.get(domain)!;
+
+    // Use minimum layer (earliest discovery point)
+    vendor.layer = Math.min(vendor.layer, rel.nth_party_layer);
+
+    // Add discovery source
+    vendor.sources.push({
+      recordType: rel.nth_party_record_type,
+      parentDomain: rel.nth_party_customer_domain,
+      rawRecord: rel.nth_party_record
+    });
+    vendor.discoveryCount++;
+
+    // Update organization if we have a better one
+    if (rel.nth_party_organization && rel.nth_party_organization !== domain) {
+      vendor.organization = rel.nth_party_organization;
+    }
+  }
+
+  return vendors;
+}
+
+// Build parent -> children map (deduplicated)
+export function buildChildrenMap(relationships: Relationship[]): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+
+  for (const rel of relationships) {
+    const parent = rel.nth_party_customer_domain;
+    if (!map.has(parent)) {
+      map.set(parent, new Set());
+    }
+    map.get(parent)!.add(rel.nth_party_domain);
+  }
+
+  return map;
+}
+
+// Build parent -> children map for expand/collapse (returns relationships)
 export function buildRelationshipMap(relationships: Relationship[]): Map<string, Relationship[]> {
   const map = new Map<string, Relationship[]>();
 
@@ -52,33 +126,42 @@ export function buildRelationshipMap(relationships: Relationship[]): Map<string,
   return map;
 }
 
-// Calculate hierarchical positions using dagre-like layout
-function calculatePositions(
-  nodes: Map<string, { layer: number; index: number }>,
+// Layout constants - HORIZONTAL left-to-right
+const HORIZONTAL_SPACING = 300;  // Distance between layers (columns)
+const VERTICAL_SPACING = 90;     // Distance between nodes in same layer (rows)
+
+// Calculate horizontal positions (left-to-right layout)
+function calculateHorizontalPositions(
+  vendors: Map<string, AggregatedVendor>,
+  childrenMap: Map<string, Set<string>>,
   rootDomain: string
 ): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
 
-  // Group nodes by layer
+  // Group vendors by layer
   const layerNodes = new Map<number, string[]>();
-  for (const [nodeId, { layer }] of nodes) {
-    if (!layerNodes.has(layer)) {
-      layerNodes.set(layer, []);
+
+  // Add root at layer 0
+  layerNodes.set(0, [rootDomain]);
+
+  // Group other vendors by layer
+  for (const [domain, vendor] of vendors) {
+    if (domain === rootDomain) continue;
+    if (!layerNodes.has(vendor.layer)) {
+      layerNodes.set(vendor.layer, []);
     }
-    layerNodes.get(layer)!.push(nodeId);
+    layerNodes.get(vendor.layer)!.push(domain);
   }
 
-  const horizontalSpacing = 250;
-  const verticalSpacing = 150;
+  // Calculate positions for each layer
+  for (const [layer, domains] of layerNodes) {
+    const totalHeight = (domains.length - 1) * VERTICAL_SPACING;
+    const startY = -totalHeight / 2;
 
-  for (const [layer, nodeIds] of layerNodes) {
-    const totalWidth = (nodeIds.length - 1) * horizontalSpacing;
-    const startX = -totalWidth / 2;
-
-    nodeIds.forEach((nodeId, index) => {
-      positions.set(nodeId, {
-        x: startX + index * horizontalSpacing,
-        y: layer * verticalSpacing
+    domains.forEach((domain, index) => {
+      positions.set(domain, {
+        x: layer * HORIZONTAL_SPACING,
+        y: startY + index * VERTICAL_SPACING
       });
     });
   }
@@ -89,97 +172,113 @@ function calculatePositions(
 export function transformToXyflow(
   relationships: Relationship[],
   rootDomain: string
-): { nodes: XYFlowNode[]; edges: XYFlowEdge[] } {
+): { nodes: XYFlowNode[]; edges: XYFlowEdge[]; vendors: Map<string, AggregatedVendor> } {
   const nodes: XYFlowNode[] = [];
   const edges: XYFlowEdge[] = [];
-  const addedNodes = new Set<string>();
-  const nodeLayerInfo = new Map<string, { layer: number; index: number }>();
+  const addedEdges = new Set<string>();
 
-  // Build relationship map for child counting
-  const relationshipMap = buildRelationshipMap(relationships);
+  // Aggregate vendors (deduplication)
+  const vendors = aggregateVendors(relationships);
+  const childrenMap = buildChildrenMap(relationships);
+
+  // Add children info to vendors
+  for (const [domain, children] of childrenMap) {
+    if (vendors.has(domain)) {
+      vendors.get(domain)!.children = Array.from(children);
+    }
+  }
+
+  // Calculate positions
+  const positions = calculateHorizontalPositions(vendors, childrenMap, rootDomain);
 
   // Add root node
-  const rootChildCount = relationshipMap.get(rootDomain)?.length || 0;
-  nodeLayerInfo.set(rootDomain, { layer: 0, index: 0 });
-  addedNodes.add(rootDomain);
+  const rootChildren = childrenMap.get(rootDomain) || new Set();
+  nodes.push({
+    id: rootDomain,
+    type: 'root',
+    data: {
+      label: rootDomain,
+      organization: rootDomain,
+      domain: rootDomain,
+      layer: 0,
+      childCount: rootChildren.size,
+      hasChildren: rootChildren.size > 0,
+      expanded: true,
+      discoveryCount: 1,
+      sources: []
+    },
+    position: positions.get(rootDomain) || { x: 0, y: 0 },
+    hidden: false
+  });
 
-  // Process relationships to collect all nodes
-  let edgeIndex = 0;
+  // Add vendor nodes
+  for (const [domain, vendor] of vendors) {
+    if (domain === rootDomain) continue;
+
+    const children = childrenMap.get(domain) || new Set();
+    const position = positions.get(domain) || { x: vendor.layer * HORIZONTAL_SPACING, y: 0 };
+
+    nodes.push({
+      id: domain,
+      type: 'vendor',
+      data: {
+        label: domain,
+        organization: vendor.organization,
+        domain: domain,
+        layer: vendor.layer,
+        childCount: children.size,
+        hasChildren: children.size > 0,
+        expanded: false,
+        discoveryCount: vendor.discoveryCount,
+        sources: vendor.sources
+      },
+      position,
+      hidden: vendor.layer > 1  // Only show layer 1 initially
+    });
+  }
+
+  // Add edges (deduplicated - one edge per parent-child pair)
   for (const rel of relationships) {
-    // Add vendor node if not exists
-    if (!addedNodes.has(rel.nth_party_domain)) {
-      const childCount = relationshipMap.get(rel.nth_party_domain)?.length || 0;
-      nodeLayerInfo.set(rel.nth_party_domain, {
-        layer: rel.nth_party_layer,
-        index: nodeLayerInfo.size
-      });
-      addedNodes.add(rel.nth_party_domain);
-    }
+    const edgeKey = `${rel.nth_party_customer_domain}->${rel.nth_party_domain}`;
+    if (addedEdges.has(edgeKey)) continue;
+    addedEdges.add(edgeKey);
 
-    // Add edge
+    const vendor = vendors.get(rel.nth_party_domain);
+    const layer = vendor?.layer || rel.nth_party_layer;
+
     edges.push({
-      id: `e-${edgeIndex++}`,
+      id: `e-${edgeKey}`,
       source: rel.nth_party_customer_domain,
       target: rel.nth_party_domain,
-      label: formatRecordType(rel.nth_party_record_type),
       type: 'smoothstep',
-      hidden: rel.nth_party_layer > 1, // Only show first layer initially
+      hidden: layer > 1,
       data: {
         recordType: rel.nth_party_record_type,
-        layer: rel.nth_party_layer
+        layer: layer
       }
     });
   }
 
-  // Calculate positions
-  const positions = calculatePositions(nodeLayerInfo, rootDomain);
-
-  // Create node objects
-  for (const domain of addedNodes) {
-    const layerInfo = nodeLayerInfo.get(domain)!;
-    const position = positions.get(domain) || { x: 0, y: 0 };
-    const childCount = relationshipMap.get(domain)?.length || 0;
-
-    // Find organization name from relationships
-    let organization = domain;
-    const rel = relationships.find(r => r.nth_party_domain === domain);
-    if (rel) {
-      organization = rel.nth_party_organization || domain;
-    }
-
-    const isRoot = domain === rootDomain;
-
-    nodes.push({
-      id: domain,
-      type: isRoot ? 'root' : 'vendor',
-      data: {
-        label: domain,
-        organization: organization,
-        domain: domain,
-        layer: layerInfo.layer,
-        childCount: childCount,
-        hasChildren: childCount > 0,
-        expanded: isRoot // Root starts expanded
-      },
-      position,
-      hidden: !isRoot && layerInfo.layer > 1 // Only show root and first layer initially
-    });
-  }
-
-  return { nodes, edges };
+  return { nodes, edges, vendors };
 }
 
-function formatRecordType(recordType: string): string {
-  // Convert record type to readable label
+export function formatRecordType(recordType: string): string {
   const typeMap: Record<string, string> = {
-    'TXT::Verification': 'DNS',
-    'TXT::SPF': 'SPF',
-    'MX': 'Email',
-    'CNAME': 'CNAME',
-    'NS': 'NS',
-    'HTTP::Subprocessor': 'Subprocessor',
-    'HTTP::WebOrg': 'Web',
-    'SaaSTenant': 'SaaS'
+    'DnsTxtSpf': 'SPF',
+    'DnsTxtVerification': 'DNS Verification',
+    'DnsTxtDmarc': 'DMARC',
+    'DnsTxtDkim': 'DKIM',
+    'DnsSubdomain': 'Subdomain',
+    'DnsCname': 'CNAME',
+    'HttpSubprocessor': 'Subprocessor',
+    'DiscoverySaas': 'SaaS Tenant',
+    'DNS::TXT::SPF': 'SPF',
+    'DNS::TXT::VERIFICATION': 'DNS Verification',
+    'DNS::TXT::DMARC': 'DMARC',
+    'DNS::SUBDOMAIN': 'Subdomain',
+    'DNS::CNAME': 'CNAME',
+    'HTTP::SUBPROCESSOR': 'Subprocessor',
+    'DISCOVERY::SAAS_TENANT': 'SaaS Tenant'
   };
 
   return typeMap[recordType] || recordType.split('::').pop() || recordType;

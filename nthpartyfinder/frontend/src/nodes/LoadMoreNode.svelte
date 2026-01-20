@@ -9,7 +9,8 @@
 </script>
 
 <div class="load-more-node">
-  <Handle type="target" position={Position.Top} />
+  <!-- Left handle for horizontal layout -->
+  <Handle type="target" position={Position.Left} />
 
   <div class="node-content">
     <div class="node-icon">+</div>

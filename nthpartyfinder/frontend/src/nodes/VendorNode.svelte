@@ -1,5 +1,7 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte';
+  import { createEventDispatcher } from 'svelte';
+  import type { DiscoverySource } from '../lib/transform';
 
   export let data: {
     label: string;
@@ -9,7 +11,11 @@
     childCount: number;
     hasChildren: boolean;
     expanded: boolean;
+    discoveryCount: number;
+    sources: DiscoverySource[];
   };
+
+  const dispatch = createEventDispatcher();
 
   // Color based on layer depth
   const layerColors: Record<number, { bg: string; border: string; shadow: string }> = {
@@ -20,6 +26,11 @@
   };
 
   $: colors = layerColors[data.layer] || layerColors[4];
+
+  function handleInfoClick(event: MouseEvent) {
+    event.stopPropagation();
+    dispatch('showinfo', { domain: data.domain, sources: data.sources });
+  }
 </script>
 
 <div
@@ -28,22 +39,36 @@
   class:has-children={data.hasChildren}
   style="background: {colors.bg}; --shadow-color: {colors.shadow};"
 >
-  <Handle type="target" position={Position.Top} />
+  <!-- Left handle for incoming edges (horizontal layout) -->
+  <Handle type="target" position={Position.Left} />
+
+  <!-- Info button -->
+  <button class="info-btn" on:click={handleInfoClick} title="View discovery details">
+    ℹ
+  </button>
 
   <div class="node-content">
     <div class="node-domain">{data.domain}</div>
     {#if data.organization && data.organization !== data.domain}
       <div class="node-org">{data.organization}</div>
     {/if}
+
+    <!-- Discovery count badge -->
+    {#if data.discoveryCount > 1}
+      <div class="discovery-badge">×{data.discoveryCount} sources</div>
+    {/if}
+
+    <!-- Child count indicator -->
     {#if data.hasChildren}
       <div class="node-children">
-        {data.expanded ? '▲' : '▼'} {data.childCount}
+        {data.expanded ? '◀' : '▶'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
       </div>
     {/if}
   </div>
 
+  <!-- Right handle for outgoing edges (horizontal layout) -->
   {#if data.hasChildren}
-    <Handle type="source" position={Position.Bottom} />
+    <Handle type="source" position={Position.Right} />
   {/if}
 </div>
 
@@ -52,10 +77,12 @@
     color: white;
     padding: 12px 16px;
     border-radius: 10px;
-    min-width: 140px;
+    min-width: 160px;
+    max-width: 200px;
     box-shadow: 0 3px 10px var(--shadow-color, rgba(0,0,0,0.2));
     cursor: pointer;
     transition: transform 0.2s, box-shadow 0.2s;
+    position: relative;
   }
 
   .vendor-node:hover {
@@ -71,8 +98,34 @@
     box-shadow: 0 4px 12px var(--shadow-color, rgba(0,0,0,0.3));
   }
 
+  .info-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(255, 255, 255, 0.25);
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+    padding: 0;
+    line-height: 1;
+  }
+
+  .info-btn:hover {
+    background: rgba(255, 255, 255, 0.4);
+  }
+
   .node-content {
     text-align: center;
+    padding-right: 16px; /* Space for info button */
   }
 
   .node-domain {
@@ -85,10 +138,19 @@
   .node-org {
     font-size: 10px;
     opacity: 0.9;
-    max-width: 140px;
+    max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .discovery-badge {
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.2);
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 9px;
+    margin-top: 4px;
   }
 
   .node-children {

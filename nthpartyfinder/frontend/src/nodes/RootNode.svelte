@@ -20,11 +20,12 @@
     {/if}
     {#if data.hasChildren}
       <div class="node-children">
-        {data.expanded ? '▲' : '▼'} {data.childCount} vendors
+        {data.expanded ? '◀' : '▶'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
       </div>
     {/if}
   </div>
-  <Handle type="source" position={Position.Bottom} />
+  <!-- Right handle for horizontal layout -->
+  <Handle type="source" position={Position.Right} />
 </div>
 
 <style>

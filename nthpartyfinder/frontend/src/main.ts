@@ -1,5 +1,4 @@
 import VendorGraph from './VendorGraph.svelte';
-import { transformToXyflow } from './lib/transform';
 
 // Type declarations for window.graphData
 declare global {
@@ -11,6 +10,7 @@ declare global {
         nth_party_customer_domain: string;
         nth_party_layer: number;
         nth_party_record_type: string;
+        nth_party_record?: string;
       }>;
       summary: {
         root_domain: string;
@@ -35,16 +35,9 @@ function init() {
     return;
   }
 
-  const { nodes, edges } = transformToXyflow(
-    window.graphData.relationships,
-    window.graphData.summary.root_domain
-  );
-
   window.vendorGraph = new VendorGraph({
     target: container,
     props: {
-      initialNodes: nodes,
-      initialEdges: edges,
       rootDomain: window.graphData.summary.root_domain,
       relationships: window.graphData.relationships
     }
