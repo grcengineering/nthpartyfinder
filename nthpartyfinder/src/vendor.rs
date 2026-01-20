@@ -34,6 +34,7 @@ pub enum RecordType {
     // Discovery-based
     SubfinderDiscovery,  // DISCOVERY::SUBFINDER
     SaasTenantProbe,     // DISCOVERY::SAAS_TENANT
+    CtLogDiscovery,      // DISCOVERY::CT_LOG
 
     // Unknown/Other
     Unknown,             // UNKNOWN
@@ -67,6 +68,7 @@ impl RecordType {
             RecordType::HttpSubprocessor => "HTTP::SUBPROCESSOR".to_string(),
             RecordType::SubfinderDiscovery => "DISCOVERY::SUBFINDER".to_string(),
             RecordType::SaasTenantProbe => "DISCOVERY::SAAS_TENANT".to_string(),
+            RecordType::CtLogDiscovery => "DISCOVERY::CT_LOG".to_string(),
             RecordType::Unknown => "UNKNOWN".to_string(),
         }
     }
@@ -87,7 +89,7 @@ impl RecordType {
             RecordType::HttpWellKnown | RecordType::HttpMeta | RecordType::HttpFile | RecordType::HttpSubprocessor => "HTTP Verification",
             RecordType::CertDomain | RecordType::CertSan => "Certificate Authority",
             RecordType::ApiEndpoint | RecordType::ApiWebhook => "API Integration",
-            RecordType::SubfinderDiscovery | RecordType::SaasTenantProbe => "Discovery",
+            RecordType::SubfinderDiscovery | RecordType::SaasTenantProbe | RecordType::CtLogDiscovery => "Discovery",
             RecordType::Unknown => "Other",
         }
     }
@@ -113,6 +115,7 @@ impl RecordType {
             RecordType::ApiWebhook => "Webhook endpoint registration",
             RecordType::SubfinderDiscovery => "Subdomain discovered via subfinder",
             RecordType::SaasTenantProbe => "SaaS tenant probe discovery",
+            RecordType::CtLogDiscovery => "Certificate Transparency log discovery",
             RecordType::Unknown => "Unknown or unclassified record type",
         }
     }

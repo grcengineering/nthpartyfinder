@@ -66,6 +66,14 @@ pub struct Args {
     #[arg(long)]
     pub disable_saas_tenant_discovery: bool,
 
+    /// Enable Certificate Transparency (CT) log discovery
+    #[arg(long)]
+    pub enable_ct_discovery: bool,
+
+    /// Disable CT log discovery (overrides config)
+    #[arg(long)]
+    pub disable_ct_discovery: bool,
+
     /// Path to subfinder binary
     #[arg(long)]
     pub subfinder_path: Option<String>,

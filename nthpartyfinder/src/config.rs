@@ -135,6 +135,12 @@ pub struct DiscoveryConfig {
     /// Concurrent tenant probe requests
     #[serde(default = "default_tenant_probe_concurrency")]
     pub tenant_probe_concurrency: usize,
+    /// Enable Certificate Transparency (CT) log discovery
+    #[serde(default)]
+    pub ct_discovery_enabled: bool,
+    /// Timeout for CT log queries in seconds
+    #[serde(default = "default_ct_timeout_secs")]
+    pub ct_timeout_secs: u64,
     /// Enable web page analysis for organization name extraction
     /// When enabled, fetches homepage to extract org name from meta tags, Schema.org, etc.
     #[serde(default = "default_web_org_enabled")]
@@ -194,6 +200,10 @@ fn default_ner_min_confidence() -> f32 {
     0.6
 }
 
+fn default_ct_timeout_secs() -> u64 {
+    30
+}
+
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
@@ -204,6 +214,8 @@ impl Default for DiscoveryConfig {
             saas_tenant_enabled: false,
             tenant_probe_timeout_secs: default_tenant_probe_timeout_secs(),
             tenant_probe_concurrency: default_tenant_probe_concurrency(),
+            ct_discovery_enabled: false,
+            ct_timeout_secs: default_ct_timeout_secs(),
             web_org_enabled: default_web_org_enabled(),
             web_org_timeout_secs: default_web_org_timeout_secs(),
             web_org_min_confidence: default_web_org_min_confidence(),

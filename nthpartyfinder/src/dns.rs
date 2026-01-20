@@ -380,7 +380,9 @@ pub fn extract_vendor_domains_with_source(txt_records: &[String]) -> Vec<VendorD
 
 pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], logger: Option<&dyn LogFailure>, source_domain: &str) -> Vec<VendorDomain> {
     let mut vendor_domains = Vec::new();
-    let mut seen_domains = HashSet::new();
+    // Deduplicate by (domain, record_type, raw_record) to allow same vendor from different sources
+    // but prevent exact duplicates (same domain + same record type + same raw record)
+    let mut seen_entries: HashSet<(String, String, String)> = HashSet::new();
 
     for record in txt_records {
         let record_clean = record.replace("\\", "").replace("\"", "");
@@ -390,7 +392,12 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
         if let Some(domains) = extract_from_spf_record(&record_clean, logger, source_domain, &record) {
             record_matched = true;
             for domain_info in domains {
-                if seen_domains.insert(domain_info.domain.clone()) {
+                let key = (
+                    domain_info.domain.clone(),
+                    domain_info.source_type.as_hierarchy_string(),
+                    domain_info.raw_record.clone(),
+                );
+                if seen_entries.insert(key) {
                     vendor_domains.push(domain_info);
                 }
             }
@@ -399,7 +406,12 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
         if let Some(domains) = extract_from_dkim_record(&record_clean, logger, source_domain, &record) {
             record_matched = true;
             for domain_info in domains {
-                if seen_domains.insert(domain_info.domain.clone()) {
+                let key = (
+                    domain_info.domain.clone(),
+                    domain_info.source_type.as_hierarchy_string(),
+                    domain_info.raw_record.clone(),
+                );
+                if seen_entries.insert(key) {
                     vendor_domains.push(domain_info);
                 }
             }
@@ -408,7 +420,12 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
         if let Some(domains) = extract_from_dmarc_record(&record_clean, logger, source_domain, &record) {
             record_matched = true;
             for domain_info in domains {
-                if seen_domains.insert(domain_info.domain.clone()) {
+                let key = (
+                    domain_info.domain.clone(),
+                    domain_info.source_type.as_hierarchy_string(),
+                    domain_info.raw_record.clone(),
+                );
+                if seen_entries.insert(key) {
                     vendor_domains.push(domain_info);
                 }
             }
@@ -417,7 +434,12 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
         if let Some(domains) = extract_from_verification_record(&record_clean, logger, source_domain, &record) {
             record_matched = true;
             for domain_info in domains {
-                if seen_domains.insert(domain_info.domain.clone()) {
+                let key = (
+                    domain_info.domain.clone(),
+                    domain_info.source_type.as_hierarchy_string(),
+                    domain_info.raw_record.clone(),
+                );
+                if seen_entries.insert(key) {
                     vendor_domains.push(domain_info);
                 }
             }

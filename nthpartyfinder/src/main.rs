@@ -27,7 +27,7 @@ use cli::Args;
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
 use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
-use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption};
+use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -528,6 +528,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Set up CT log discovery
+    let ct_discovery = if args.enable_ct_discovery
+        || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled) {
+        Some(CtLogDiscovery::new(
+            std::time::Duration::from_secs(_app_config.discovery.ct_timeout_secs),
+        ))
+    } else {
+        None
+    };
+
     // Configure concurrency based on analysis config
     // For recursive processing, use depth-1 concurrency as initial limit (CLI --parallel-jobs can override)
     let recursive_limit = _app_config.analysis.get_concurrency_for_depth(1).min(args.parallel_jobs);
@@ -558,6 +568,7 @@ async fn main() -> Result<()> {
         &_app_config.analysis,
         subdomain_discovery.as_ref(),
         saas_tenant_discovery.as_ref(),
+        ct_discovery.as_ref(),
     ).await?;
     
     let unique_vendors = results.iter()
@@ -696,6 +707,7 @@ async fn discover_nth_parties(
     analysis_config: &AnalysisConfig,
     subdomain_discovery: Option<&SubfinderDiscovery>,
     saas_tenant_discovery: Option<&SaasTenantDiscovery>,
+    ct_discovery: Option<&CtLogDiscovery>,
 ) -> Result<Vec<VendorRelationship>> {
     // Check if we've already processed this domain
     {
@@ -901,6 +913,30 @@ async fn discover_nth_parties(
                         }
                         Err(e) => {
                             logger.warn(&format!("SaaS tenant discovery failed: {}", e));
+                        }
+                    }
+                }
+
+                // Certificate Transparency log discovery
+                if let Some(ct_disc) = ct_discovery {
+                    logger.info("Running Certificate Transparency log discovery...");
+                    match ct_disc.discover(domain).await {
+                        Ok(ct_results) => {
+                            if !ct_results.is_empty() {
+                                logger.info(&format!("Found {} vendors from CT logs", ct_results.len()));
+                                for result in ct_results {
+                                    all_vendor_domains.push(dns::VendorDomain {
+                                        domain: result.domain,
+                                        source_type: RecordType::CtLogDiscovery,
+                                        raw_record: result.certificate_info,
+                                    });
+                                }
+                            } else {
+                                logger.debug("No vendors discovered from CT logs");
+                            }
+                        }
+                        Err(e) => {
+                            logger.warn(&format!("CT log discovery failed: {}", e));
                         }
                     }
                 }
@@ -1219,6 +1255,7 @@ async fn process_vendor_domain(
         analysis_config,
         None,  // subdomain_discovery - only runs at depth 1
         None,  // saas_tenant_discovery - only runs at depth 1
+        None,  // ct_discovery - only runs at depth 1
     ).await {
         Ok(sub_results) => {
             results.extend(sub_results);
