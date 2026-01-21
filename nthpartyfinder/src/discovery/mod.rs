@@ -7,4 +7,4 @@ pub mod ct_logs;
 
 pub use subfinder::{SubfinderDiscovery, InstallOption};
 pub use saas_tenant::{SaasTenantDiscovery, TenantStatus};
-pub use ct_logs::{CtLogDiscovery, CtDiscoveryResult};
+pub use ct_logs::CtLogDiscovery;

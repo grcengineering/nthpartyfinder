@@ -11,7 +11,7 @@ use crate::dns::LogFailure;
 use crate::vendor::RecordType;
 use headless_chrome::Browser;
 use fancy_regex::Regex;
-use rayon::prelude::*;
+// rayon available if needed for parallel processing
 use std::collections::BTreeMap;
 
 /// Represents a discovered subprocessor from web page analysis
@@ -1182,13 +1182,6 @@ impl SubprocessorAnalyzer {
         // Update extraction metadata
         extraction_metadata.successful_extractions = vendors.len() as u32;
 
-        // Log successful extractions
-        if let Some(logger) = logger {
-            for vendor in &vendors {
-                // Success logging removed - only failures are logged
-            }
-        }
-
         // If static HTML parsing found no vendors, try intelligent analysis and then headless browser
         if vendors.is_empty() {
             debug!("🔥🔥🔥 STATIC HTML PARSING FAILED - trying AI-powered analysis");
@@ -1283,7 +1276,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Detect organizations in content using NLP-like pattern recognition
-    async fn detect_organizations_in_content(&self, document: &Html, html_content: &str) -> Vec<DetectedOrganization> {
+    async fn detect_organizations_in_content(&self, document: &Html, _html_content: &str) -> Vec<DetectedOrganization> {
         debug!("🔍 ORGANIZATION DETECTION: Scanning content for company patterns");
 
         let mut detected_orgs = Vec::new();
@@ -1748,7 +1741,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Scrape subprocessor page using headless browser for JavaScript-generated content
-    pub async fn scrape_with_headless_browser(&self, url: &str, logger: Option<&dyn LogFailure>, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
+    pub async fn scrape_with_headless_browser(&self, url: &str, _logger: Option<&dyn LogFailure>, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
         debug!("🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}", url);
         debug!("Starting headless browser scraping for: {}", url);
 
@@ -1950,7 +1943,6 @@ impl SubprocessorAnalyzer {
             
             if is_likely_subprocessor_page {
                 debug!("No explicit subprocessor context found, but URL suggests subprocessor page - proceeding anyway");
-                found_subprocessor_context = true;
             } else {
                 debug!("No subprocessor context found on page and URL doesn't suggest subprocessor content");
                 return Ok((vendors, None));
@@ -3167,7 +3159,7 @@ impl SubprocessorAnalyzer {
         
         // For larger elements, try to extract just the part containing the entity name
         let text_content = element.text().collect::<String>();
-        if let Some(pos) = text_content.to_lowercase().find(&entity_name.to_lowercase()) {
+        if text_content.to_lowercase().contains(&entity_name.to_lowercase()) {
             // Look for the tag name of the element
             let tag_name = element.value().name();
             

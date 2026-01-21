@@ -9,7 +9,7 @@
 #[cfg(feature = "embedded-ner")]
 use anyhow::{Result, anyhow};
 #[cfg(feature = "embedded-ner")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 #[cfg(feature = "embedded-ner")]
 use std::io::Write;
 #[cfg(feature = "embedded-ner")]

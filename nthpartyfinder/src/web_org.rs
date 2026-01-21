@@ -15,7 +15,7 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Result of web-based organization extraction
 #[derive(Debug, Clone)]
@@ -393,7 +393,7 @@ fn extract_from_meta_tags(document: &Html) -> Option<WebOrgResult> {
 }
 
 /// Extract organization from title tag
-fn extract_from_title(document: &Html, domain: &str) -> Option<WebOrgResult> {
+fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
     let selector = Selector::parse("title").ok()?;
     let title = document.select(&selector).next()?.text().collect::<String>();
     let title = title.trim();

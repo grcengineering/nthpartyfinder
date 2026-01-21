@@ -508,7 +508,7 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
     if domains.is_empty() { None } else { Some(domains) }
 }
 
-fn extract_from_dkim_record(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn extract_from_dkim_record(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
     if !record.contains("k=rsa") && !record.contains("k=ed25519") {
         return None;
     }
@@ -530,9 +530,6 @@ fn extract_from_dkim_record(record: &str, logger: Option<&dyn LogFailure>, sourc
                     // DKIM records usually don't contain direct domain references
                     // This is a simplified extraction that may need refinement
                     if value.contains(".") && is_valid_domain(value) {
-                        if let Some(_logger) = logger {
-                            // Success logging removed - only failures are logged
-                        }
                         domains.push(VendorDomain {
                             domain: value.to_string(),
                             source_type: RecordType::DnsTxtDkim,
@@ -621,7 +618,7 @@ fn extract_from_verification_record(record: &str, logger: Option<&dyn LogFailure
     if domains.is_empty() { None } else { Some(domains) }
 }
 
-fn try_static_verification_patterns(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
     // Comprehensive static provider mappings based on research
     let verification_patterns = vec![
         // Common verification patterns
@@ -679,9 +676,6 @@ fn try_static_verification_patterns(record: &str, logger: Option<&dyn LogFailure
     for (pattern, domain, record_type) in &verification_patterns {
         if let Ok(re) = Regex::new(pattern) {
             if re.is_match(record) {
-                if let Some(logger) = logger {
-                    // Success logging removed - only failures are logged
-                }
                 domains.push(VendorDomain {
                     domain: domain.to_string(),
                     source_type: record_type.clone(),
@@ -694,7 +688,7 @@ fn try_static_verification_patterns(record: &str, logger: Option<&dyn LogFailure
     if domains.is_empty() { None } else { Some(domains) }
 }
 
-fn try_dynamic_verification_patterns(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn try_dynamic_verification_patterns(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
     let mut domains = Vec::new();
 
     // Dynamic pattern 1: "*-verification=" or "*-domain-verification="
@@ -703,10 +697,7 @@ fn try_dynamic_verification_patterns(record: &str, logger: Option<&dyn LogFailur
             if let Some(provider_match) = cap.get(1) {
                 let provider_name = provider_match.as_str().to_lowercase();
                 if let Some(domain) = infer_provider_domain(&provider_name) {
-                    if let Some(logger) = logger {
-                        // Success logging removed - only failures are logged
-                    }
-                    domains.push(VendorDomain {
+                        domains.push(VendorDomain {
                         domain,
                         source_type: RecordType::DnsTxtVerification,
                         raw_record: raw_record.to_string(),
@@ -721,10 +712,7 @@ fn try_dynamic_verification_patterns(record: &str, logger: Option<&dyn LogFailur
             if let Some(provider_match) = cap.get(1) {
                 let provider_name = provider_match.as_str().to_lowercase();
                 if let Some(domain) = infer_provider_domain(&provider_name) {
-                    if let Some(logger) = logger {
-                        // Success logging removed - only failures are logged
-                    }
-                    domains.push(VendorDomain {
+                        domains.push(VendorDomain {
                         domain,
                         source_type: RecordType::DnsTxtVerification,
                         raw_record: raw_record.to_string(),
@@ -739,10 +727,7 @@ fn try_dynamic_verification_patterns(record: &str, logger: Option<&dyn LogFailur
             if let Some(provider_match) = cap.get(1) {
                 let provider_name = provider_match.as_str().to_lowercase();
                 if let Some(domain) = infer_provider_domain(&provider_name) {
-                    if let Some(logger) = logger {
-                        // Success logging removed - only failures are logged
-                    }
-                    domains.push(VendorDomain {
+                        domains.push(VendorDomain {
                         domain,
                         source_type: RecordType::DnsTxtVerification,
                         raw_record: raw_record.to_string(),
@@ -757,10 +742,7 @@ fn try_dynamic_verification_patterns(record: &str, logger: Option<&dyn LogFailur
             if let Some(provider_match) = cap.get(1) {
                 let provider_name = provider_match.as_str().to_lowercase();
                 if let Some(domain) = infer_provider_domain(&provider_name) {
-                    if let Some(logger) = logger {
-                        // Success logging removed - only failures are logged
-                    }
-                    domains.push(VendorDomain {
+                        domains.push(VendorDomain {
                         domain,
                         source_type: RecordType::DnsTxtVerification,
                         raw_record: raw_record.to_string(),

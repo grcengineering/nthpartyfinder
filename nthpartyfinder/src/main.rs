@@ -1467,7 +1467,7 @@ async fn discover_single_domain(
     root_customer_organization: &str,
     verification_logger: &verification_logger::VerificationFailureLogger,
     dns_pool: Arc<dns::DnsServerPool>,
-    args: &Args,
+    _args: &Args,
     logger: Arc<AnalysisLogger>,
     subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
     subprocessor_enabled: bool,
