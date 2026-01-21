@@ -1,3 +1,7 @@
+// Allow dead code for public API functions that may not be used internally
+// but are part of the library's exposed interface
+#![allow(dead_code)]
+
 pub mod cli;
 pub mod config;
 pub mod discovery;

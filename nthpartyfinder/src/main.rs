@@ -1,3 +1,6 @@
+// Allow dead code for functions that are part of the API surface but not used in all code paths
+#![allow(dead_code)]
+
 use clap::Parser;
 use anyhow::Result;
 use ctrlc;
