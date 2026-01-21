@@ -250,7 +250,8 @@ async fn test_css_selector_parsing_performance() {
 
     // This test documents the performance issue, not validates performance
     // The speedup should be significant (100x+)
-    assert!(uncached_per_parse > 0, "Should measure some parsing time");
+    // Note: In release mode, per-parse time may round to 0 μs, so check total duration instead
+    assert!(uncached_duration.as_nanos() > 0, "Should measure some parsing time");
 }
 
 #[tokio::test]

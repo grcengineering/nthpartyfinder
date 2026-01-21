@@ -428,13 +428,13 @@ fn test_deduplication_multiple_records() {
     ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
-    // google.com appears in both SPF and verification, should be deduplicated
-    // But they have different source_types, so may appear twice
-    // This tests the actual deduplication behavior
+    // google.com appears in both SPF and verification
+    // Deduplication is by (domain, record_type, raw_record) tuple
+    // So same vendor from different sources should appear multiple times
     let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
 
-    // Based on code review, deduplication is by domain string only
-    assert_eq!(google_domains.len(), 1);
+    // Should appear twice: once for SPF, once for verification
+    assert_eq!(google_domains.len(), 2);
 }
 
 // ============================================================================
