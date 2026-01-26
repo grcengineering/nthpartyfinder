@@ -42,6 +42,7 @@ scraper = "0.18"
 indicatif = { version = "0.18", features = ["tokio"] }
 urlencoding = "2.1"
 ctrlc = "3.4"
+colored = "2.1"
 # DNS over HTTPS support
 hickory-resolver = { version = "0.24", features = ["dns-over-https", "dns-over-https-rustls"] }
 # Headless browser for JavaScript content
@@ -64,6 +65,11 @@ embedded-ner = ["gline-rs", "orp"]
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.10"
+wiremock = "0.6"
+insta = { version = "1.42", features = ["json"] }
+rstest = "0.26"
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [[bin]]
 name = "nthpartyfinder"
