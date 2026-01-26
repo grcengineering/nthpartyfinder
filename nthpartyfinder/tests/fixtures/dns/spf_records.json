@@ -1,0 +1,47 @@
+{
+  "domain": "example.com",
+  "record_type": "TXT",
+  "query": "_spf.example.com",
+  "records": [
+    "v=spf1 include:_spf.google.com include:sendgrid.net include:servers.mcsv.net include:spf.protection.outlook.com -all"
+  ],
+  "parsed_includes": [
+    {
+      "mechanism": "include",
+      "value": "_spf.google.com",
+      "vendor": "Google Workspace"
+    },
+    {
+      "mechanism": "include",
+      "value": "sendgrid.net",
+      "vendor": "SendGrid"
+    },
+    {
+      "mechanism": "include",
+      "value": "servers.mcsv.net",
+      "vendor": "Mailchimp"
+    },
+    {
+      "mechanism": "include",
+      "value": "spf.protection.outlook.com",
+      "vendor": "Microsoft 365"
+    }
+  ],
+  "test_cases": [
+    {
+      "description": "Simple SPF with single include",
+      "record": "v=spf1 include:_spf.google.com -all",
+      "expected_vendors": ["Google Workspace"]
+    },
+    {
+      "description": "SPF with multiple includes",
+      "record": "v=spf1 include:sendgrid.net include:amazonses.com -all",
+      "expected_vendors": ["SendGrid", "Amazon SES"]
+    },
+    {
+      "description": "SPF with IP addresses only",
+      "record": "v=spf1 ip4:192.0.2.0/24 ip4:198.51.100.0/24 -all",
+      "expected_vendors": []
+    }
+  ]
+}

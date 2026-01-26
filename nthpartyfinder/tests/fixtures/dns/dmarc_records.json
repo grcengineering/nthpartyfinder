@@ -1,0 +1,39 @@
+{
+  "domain": "example.com",
+  "record_type": "TXT",
+  "query": "_dmarc.example.com",
+  "records": [
+    "v=DMARC1; p=reject; rua=mailto:dmarc-reports@example.com; ruf=mailto:dmarc-forensics@example.com; fo=1; adkim=s; aspf=s"
+  ],
+  "parsed_fields": {
+    "version": "DMARC1",
+    "policy": "reject",
+    "rua": "mailto:dmarc-reports@example.com",
+    "ruf": "mailto:dmarc-forensics@example.com",
+    "fo": "1",
+    "adkim": "s",
+    "aspf": "s"
+  },
+  "test_cases": [
+    {
+      "description": "Basic DMARC with reject policy",
+      "record": "v=DMARC1; p=reject; rua=mailto:dmarc@example.com",
+      "expected_policy": "reject"
+    },
+    {
+      "description": "DMARC with quarantine policy",
+      "record": "v=DMARC1; p=quarantine; pct=50",
+      "expected_policy": "quarantine"
+    },
+    {
+      "description": "DMARC with third-party reporting",
+      "record": "v=DMARC1; p=none; rua=mailto:dmarc@dmarcian.com",
+      "expected_vendors": ["Dmarcian"]
+    },
+    {
+      "description": "DMARC pointing to Valimail",
+      "record": "v=DMARC1; p=reject; rua=mailto:dmarc_agg@vali.email",
+      "expected_vendors": ["Valimail"]
+    }
+  ]
+}

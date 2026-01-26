@@ -1,0 +1,115 @@
+# Sample WHOIS Responses for Testing
+# Each response is separated by a delimiter line: ===DELIMITER===
+
+# Response 1: Typical .com domain
+Domain Name: EXAMPLE.COM
+Registry Domain ID: 2336799_DOMAIN_COM-VRSN
+Registrar WHOIS Server: whois.registrar-example.com
+Registrar URL: http://www.registrar-example.com
+Updated Date: 2024-08-14T07:01:38Z
+Creation Date: 1995-08-14T04:00:00Z
+Registry Expiry Date: 2025-08-13T04:00:00Z
+Registrar: Example Registrar, Inc.
+Registrar IANA ID: 376
+Registrar Abuse Contact Email: abuse@registrar-example.com
+Registrar Abuse Contact Phone: +1.5555551234
+Domain Status: clientDeleteProhibited https://icann.org/epp#clientDeleteProhibited
+Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
+Domain Status: clientUpdateProhibited https://icann.org/epp#clientUpdateProhibited
+Name Server: NS1.CLOUDFLARE.COM
+Name Server: NS2.CLOUDFLARE.COM
+DNSSEC: unsigned
+URL of the ICANN Whois Inaccuracy Complaint Form: https://www.icann.org/wicf/
+
+>>> Last update of whois database: 2026-01-26T12:00:00Z <<<
+
+===DELIMITER===
+
+# Response 2: Domain with AWS Route53 nameservers
+Domain Name: TESTDOMAIN.COM
+Registry Domain ID: 12345678_DOMAIN_COM-VRSN
+Registrar WHOIS Server: whois.amazon.com
+Registrar URL: http://aws.amazon.com
+Updated Date: 2025-03-20T15:30:00Z
+Creation Date: 2020-03-20T10:00:00Z
+Registry Expiry Date: 2027-03-20T10:00:00Z
+Registrar: Amazon Registrar, Inc.
+Registrar IANA ID: 468
+Domain Status: ok https://icann.org/epp#ok
+Name Server: NS-1234.AWSDNS-12.ORG
+Name Server: NS-5678.AWSDNS-34.CO.UK
+Name Server: NS-9012.AWSDNS-56.COM
+Name Server: NS-3456.AWSDNS-78.NET
+DNSSEC: unsigned
+
+===DELIMITER===
+
+# Response 3: Domain with Google Cloud DNS
+Domain Name: GCPEXAMPLE.COM
+Registry Domain ID: 87654321_DOMAIN_COM-VRSN
+Registrar WHOIS Server: whois.google.com
+Registrar URL: http://domains.google
+Updated Date: 2025-06-15T08:45:00Z
+Creation Date: 2019-06-15T12:00:00Z
+Registry Expiry Date: 2026-06-15T12:00:00Z
+Registrar: Google LLC
+Registrar IANA ID: 895
+Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
+Name Server: NS-CLOUD-A1.GOOGLEDOMAINS.COM
+Name Server: NS-CLOUD-A2.GOOGLEDOMAINS.COM
+Name Server: NS-CLOUD-A3.GOOGLEDOMAINS.COM
+Name Server: NS-CLOUD-A4.GOOGLEDOMAINS.COM
+DNSSEC: unsigned
+
+===DELIMITER===
+
+# Response 4: Domain with DNSimple
+Domain Name: DNSIMPLETEST.COM
+Registry Domain ID: 11223344_DOMAIN_COM-VRSN
+Registrar WHOIS Server: whois.dnsimple.com
+Registrar URL: https://dnsimple.com
+Updated Date: 2025-01-10T14:20:00Z
+Creation Date: 2018-01-10T09:00:00Z
+Registry Expiry Date: 2028-01-10T09:00:00Z
+Registrar: DNSimple, LLC
+Registrar IANA ID: 1448
+Domain Status: ok https://icann.org/epp#ok
+Name Server: NS1.DNSIMPLE.COM
+Name Server: NS2.DNSIMPLE-DNS.COM
+Name Server: NS3.DNSIMPLE-DNS.ORG
+Name Server: NS4.DNSIMPLE-DNS.NET
+DNSSEC: signedDelegation
+
+===DELIMITER===
+
+# Response 5: Redacted WHOIS (GDPR compliant)
+Domain Name: PRIVACYEXAMPLE.COM
+Registry Domain ID: 99887766_DOMAIN_COM-VRSN
+Registrar WHOIS Server: whois.namecheap.com
+Registrar URL: http://www.namecheap.com
+Updated Date: 2025-11-01T00:00:00Z
+Creation Date: 2021-11-01T00:00:00Z
+Registry Expiry Date: 2026-11-01T00:00:00Z
+Registrar: NameCheap, Inc.
+Registrar IANA ID: 1068
+Domain Status: clientTransferProhibited https://icann.org/epp#clientTransferProhibited
+Registrant Organization: REDACTED FOR PRIVACY
+Registrant State/Province: REDACTED FOR PRIVACY
+Registrant Country: REDACTED FOR PRIVACY
+Name Server: DNS1.REGISTRAR-SERVERS.COM
+Name Server: DNS2.REGISTRAR-SERVERS.COM
+DNSSEC: unsigned
+
+===DELIMITER===
+
+# Response 6: Error response - Domain not found
+No match for "NONEXISTENTDOMAIN12345.COM".
+
+>>> Last update of whois database: 2026-01-26T12:00:00Z <<<
+
+===DELIMITER===
+
+# Response 7: Rate limited response
+Error: Your query rate limit has been exceeded. Please try again later.
+Queries remaining: 0
+Rate limit resets: 2026-01-26T13:00:00Z

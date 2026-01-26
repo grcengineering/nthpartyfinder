@@ -1,0 +1,99 @@
+{
+  "domain": "example.com",
+  "record_type": "TXT",
+  "description": "Domain verification TXT records used by various SaaS providers",
+  "records": [
+    "google-site-verification=abc123def456ghi789jkl012mno345pqr678stu901",
+    "stripe-verification=def456abc789xyz123",
+    "hubspot-domain-verification=hs-12345678",
+    "atlassian-domain-verification=abcdefghijklmnop/qrstuvwxyz123456",
+    "docusign=a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "facebook-domain-verification=abcdef1234567890abcdef1234567890",
+    "apple-domain-verification=abc123DEF456",
+    "MS=ms12345678",
+    "amazonses:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+    "slack-domain-verification=abc123xyz789",
+    "zoom-verification=ZMVERIFY_abcdef123456",
+    "_github-pages-challenge-example=abc123def456"
+  ],
+  "parsed_verifications": [
+    {
+      "pattern": "google-site-verification",
+      "vendor": "Google Search Console",
+      "category": "SEO/Analytics"
+    },
+    {
+      "pattern": "stripe-verification",
+      "vendor": "Stripe",
+      "category": "Payments"
+    },
+    {
+      "pattern": "hubspot-domain-verification",
+      "vendor": "HubSpot",
+      "category": "Marketing/CRM"
+    },
+    {
+      "pattern": "atlassian-domain-verification",
+      "vendor": "Atlassian",
+      "category": "Collaboration"
+    },
+    {
+      "pattern": "docusign",
+      "vendor": "DocuSign",
+      "category": "E-Signature"
+    },
+    {
+      "pattern": "facebook-domain-verification",
+      "vendor": "Meta/Facebook",
+      "category": "Social/Advertising"
+    },
+    {
+      "pattern": "apple-domain-verification",
+      "vendor": "Apple",
+      "category": "Platform"
+    },
+    {
+      "pattern": "MS=",
+      "vendor": "Microsoft 365",
+      "category": "Productivity"
+    },
+    {
+      "pattern": "amazonses:",
+      "vendor": "Amazon SES",
+      "category": "Email"
+    },
+    {
+      "pattern": "slack-domain-verification",
+      "vendor": "Slack",
+      "category": "Communication"
+    },
+    {
+      "pattern": "zoom-verification",
+      "vendor": "Zoom",
+      "category": "Video Conferencing"
+    },
+    {
+      "pattern": "_github-pages-challenge",
+      "vendor": "GitHub",
+      "category": "Development"
+    }
+  ],
+  "test_cases": [
+    {
+      "description": "Google site verification",
+      "record": "google-site-verification=abc123",
+      "expected_vendor": "Google Search Console"
+    },
+    {
+      "description": "Unknown verification pattern",
+      "record": "unknown-verification=xyz789",
+      "expected_vendor": null
+    },
+    {
+      "description": "Case sensitivity test",
+      "record": "GOOGLE-SITE-VERIFICATION=ABC123",
+      "expected_vendor": "Google Search Console",
+      "notes": "Should handle case-insensitive matching"
+    }
+  ]
+}
