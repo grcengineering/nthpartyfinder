@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::vendor::RecordType;
 use crate::domain_utils;
 use crate::config::AppConfig;
+use crate::rate_limit::RateLimitContext;
 
 // Compile regex patterns once at startup for performance (fixes B020)
 static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -35,6 +36,16 @@ static PROVIDER_VERIFY_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 static DOMAIN_VALIDATION_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$").unwrap()
+});
+
+// DMARC mailto: extraction regex (fixes B020)
+static MAILTO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap()
+});
+
+// DMARC sp= tag extraction regex (fixes B020)
+static SP_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"sp=([^;\s]+)").unwrap()
 });
 
 pub trait LogFailure {
@@ -130,7 +141,58 @@ impl DnsServerPool {
             client,
         }
     }
-    
+}
+
+#[cfg(test)]
+impl DnsServerPool {
+    /// Create a DnsServerPool with custom DoH URLs for testing.
+    /// Allows injecting wiremock server addresses for mocked DNS responses.
+    ///
+    /// # Arguments
+    /// * `urls` - A vector of DoH endpoint URLs (e.g., wiremock server addresses)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mock_server = wiremock::MockServer::start().await;
+    /// let pool = DnsServerPool::with_test_urls(vec![mock_server.uri()]);
+    /// ```
+    pub fn with_test_urls(urls: Vec<String>) -> Self {
+        let doh_servers: Vec<DohServerConfig> = urls
+            .into_iter()
+            .enumerate()
+            .map(|(i, url)| DohServerConfig {
+                url,
+                name: format!("Test DoH Server {}", i + 1),
+                timeout_secs: 5,
+            })
+            .collect();
+
+        // Provide minimal DNS fallback servers for tests (won't be used if DoH succeeds)
+        let dns_servers = vec![
+            DnsServerConfig {
+                address: "127.0.0.1:53".to_string(),
+                name: "Test DNS Fallback".to_string(),
+                timeout_secs: 2,
+            },
+        ];
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .user_agent("nthpartyfinder-test/1.0")
+            .build()
+            .expect("Failed to create HTTP client for test DoH");
+
+        Self {
+            doh_servers,
+            dns_servers,
+            current_doh_index: AtomicUsize::new(0),
+            current_dns_index: AtomicUsize::new(0),
+            client,
+        }
+    }
+}
+
+impl DnsServerPool {
     /// Get the next DoH server in rotation
     fn next_doh_server(&self) -> &DohServerConfig {
         let index = self.current_doh_index.fetch_add(1, Ordering::Relaxed) % self.doh_servers.len();
@@ -223,7 +285,9 @@ impl DnsServerPool {
         let mut config = ResolverConfig::new();
         
         config.add_name_server(NameServerConfig {
-            socket_addr: server.address.parse().unwrap(),
+            socket_addr: server.address.parse().expect(&format!(
+                "Invalid DNS server address '{}' for server '{}'", server.address, server.name
+            )),
             protocol: if use_tcp { Protocol::Tcp } else { Protocol::Udp },
             tls_dns_name: None,
             trust_negative_responses: true,
@@ -250,6 +314,20 @@ pub async fn get_txt_records(domain: &str) -> Result<Vec<String>> {
 }
 
 pub async fn get_txt_records_with_pool(domain: &str, dns_pool: &DnsServerPool) -> Result<Vec<String>> {
+    get_txt_records_with_rate_limit(domain, dns_pool, None).await
+}
+
+/// Get TXT records with optional rate limiting support
+pub async fn get_txt_records_with_rate_limit(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+    rate_limit_ctx: Option<&RateLimitContext>,
+) -> Result<Vec<String>> {
+    // Apply rate limiting if configured
+    if let Some(ctx) = rate_limit_ctx {
+        ctx.dns_limiter.acquire().await;
+    }
+
     debug!("Querying TXT records for domain: {}", domain);
     
     // First, try DNS over HTTPS (primary method)
@@ -341,6 +419,20 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
 
 /// Get CNAME records for a domain using the DNS pool
 pub async fn get_cname_records_with_pool(domain: &str, dns_pool: &DnsServerPool) -> Result<Vec<String>> {
+    get_cname_records_with_rate_limit(domain, dns_pool, None).await
+}
+
+/// Get CNAME records with optional rate limiting support
+pub async fn get_cname_records_with_rate_limit(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+    rate_limit_ctx: Option<&RateLimitContext>,
+) -> Result<Vec<String>> {
+    // Apply rate limiting if configured
+    if let Some(ctx) = rate_limit_ctx {
+        ctx.dns_limiter.acquire().await;
+    }
+
     debug!("Querying CNAME records for domain: {}", domain);
 
     // Try DNS over HTTPS first
@@ -567,8 +659,7 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
 
             // Extract all mailto: addresses (comma-separated)
             // Pattern: mailto:localpart@domain or mailto:domain
-            let mailto_re = Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap();
-            for cap in mailto_re.captures_iter(tag_value) {
+            for cap in MAILTO_REGEX.captures_iter(tag_value) {
                 if let Some(domain_match) = cap.get(2) {
                     let domain = domain_match.as_str();
                     if is_valid_domain(domain) {
@@ -586,7 +677,7 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
     }
 
     // Also check sp= tag for subdomain policy domain references (less common)
-    if let Some(sp_match) = Regex::new(r"sp=([^;\s]+)").ok().and_then(|re| re.captures(record)) {
+    if let Some(sp_match) = SP_TAG_REGEX.captures(record) {
         if let Some(domain_match) = sp_match.get(1) {
             let domain = domain_match.as_str();
             if is_valid_domain(domain) {
