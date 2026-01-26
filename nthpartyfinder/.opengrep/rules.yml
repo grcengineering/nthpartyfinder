@@ -1,0 +1,36 @@
+rules:
+  - id: no-unwrap-in-prod
+    patterns:
+      - pattern: $X.unwrap()
+    paths:
+      include:
+        - src/**/*.rs
+      exclude:
+        - src/**/tests/**
+        - tests/**
+    message: "Avoid .unwrap() - use .expect() with context or proper error handling"
+    severity: WARNING
+    languages: [rust]
+
+  - id: no-eprintln-in-prod
+    pattern: eprintln!($...)
+    paths:
+      include:
+        - src/**/*.rs
+    message: "Use tracing macros instead of eprintln! for logging"
+    severity: WARNING
+    languages: [rust]
+
+  - id: sensitive-data-in-logs
+    patterns:
+      - pattern-either:
+          - pattern: debug!($<MSG>)
+          - pattern: info!($<MSG>)
+          - pattern: warn!($<MSG>)
+          - pattern: error!($<MSG>)
+    metavariable-regex:
+      metavariable: $MSG
+      regex: ".*(password|secret|key|token|credential).*"
+    message: "Potential sensitive data in log statement"
+    severity: ERROR
+    languages: [rust]
