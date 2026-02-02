@@ -128,12 +128,39 @@ Usage: nthpartyfinder [OPTIONS] --domain <DOMAIN>
 Options:
   -d, --domain <DOMAIN>          Domain name to analyze for Nth party relationships
   -r, --depth <DEPTH>            Maximum recursion depth (if not specified, recurses until no more vendors found)
-  -f, --output-format <FORMAT>   Output format: 'csv' (default) or 'json'
-  -o, --output <FILE>            Output file path [default: nth_parties.csv]
-  -v, --verbose                  Verbose logging
+  -f, --output-format <FORMAT>   Output format: 'csv', 'json', 'markdown', or 'html' [default: csv]
+  -o, --output <FILE>            Output filename [default: nth_parties]
+      --output-dir <DIR>         Output directory for results (default: Desktop)
+  -j, --parallel-jobs <N>        Number of parallel jobs [default: 10]
+  -v, --verbose                  Verbose logging (-v for INFO, -vv for DEBUG)
+      --init                     Create default configuration file
   -h, --help                     Print help
   -V, --version                  Print version
+
+Discovery Options:
+      --enable-subprocessor-analysis    Enable subprocessor web page analysis
+      --disable-subprocessor-analysis   Disable subprocessor analysis
+      --enable-subdomain-discovery      Enable subdomain discovery (requires subfinder)
+      --disable-subdomain-discovery     Disable subdomain discovery
+      --enable-saas-tenant-discovery    Enable SaaS tenant discovery
+      --disable-saas-tenant-discovery   Disable SaaS tenant discovery
+      --enable-ct-discovery             Enable Certificate Transparency log discovery
+      --disable-ct-discovery            Disable CT log discovery
+      --enable-slm                      Enable NER organization extraction
+      --disable-slm                     Disable NER extraction
+      --enable-web-org                  Enable web page organization extraction
+      --disable-web-org                 Disable web page org extraction
+      --subfinder-path <PATH>           Path to subfinder binary
+
+Rate Limiting Options:
+      --dns-rate-limit <QPS>            Maximum DNS queries per second
+      --http-rate-limit <RPS>           Maximum HTTP requests per second per domain
+      --backoff-strategy <STRATEGY>     Backoff strategy: "linear" or "exponential"
+      --max-retries <COUNT>             Maximum retry attempts
+      --whois-concurrency <N>           Maximum concurrent WHOIS lookups
 ```
+
+See [Configuration Guide](docs/configuration.md) for detailed configuration options.
 
 ### Examples
 
@@ -208,6 +235,48 @@ The JSON output provides the same data in a structured format with additional su
   ]
 }
 ```
+
+## Configuration
+
+nthpartyfinder uses a TOML configuration file for persistent settings. CLI arguments override config file values.
+
+### Quick Setup
+
+```bash
+# Create default configuration file
+nthpartyfinder --init
+
+# This creates ./config/nthpartyfinder.toml
+```
+
+### Configuration File Location
+
+```
+./config/nthpartyfinder.toml
+```
+
+### Key Configuration Sections
+
+| Section | Description |
+|---------|-------------|
+| `[http]` | HTTP client settings (user agent, timeouts) |
+| `[dns]` | DNS servers (DoH and traditional) |
+| `[patterns]` | Vendor detection patterns and mappings |
+| `[analysis]` | Resource management (concurrency, strategies) |
+| `[discovery]` | Feature toggles (subprocessor, subdomain, NER) |
+| `[rate_limits]` | Request rate limiting and backoff |
+
+### Example: Override Config via CLI
+
+```bash
+# Use higher rate limits for this run only
+nthpartyfinder --domain example.com --dns-rate-limit 100 --http-rate-limit 20
+
+# Disable features for quick scan
+nthpartyfinder --domain example.com --disable-subprocessor-analysis --disable-slm
+```
+
+For detailed configuration options, see the [Configuration Guide](docs/configuration.md).
 
 ## How It Works
 

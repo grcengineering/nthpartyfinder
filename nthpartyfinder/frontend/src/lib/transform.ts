@@ -38,6 +38,7 @@ export interface XYFlowNode {
     discoveryCount: number;
     sources: DiscoverySource[];
     parentId?: string;
+    onShowInfo?: (domain: string, sources: DiscoverySource[]) => void;
   };
   position: { x: number; y: number };
   hidden?: boolean;

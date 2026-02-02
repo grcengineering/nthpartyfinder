@@ -57,6 +57,125 @@ pub struct AppConfig {
     pub analysis: AnalysisConfig,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
+    pub rate_limits: RateLimitConfig,
+    #[serde(default)]
+    pub organization: OrganizationConfig,
+}
+
+/// Organization name normalization configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct OrganizationConfig {
+    /// Enable organization name normalization during analysis
+    #[serde(default = "default_org_normalization_enabled")]
+    pub enabled: bool,
+    /// Fuzzy matching similarity threshold (0.0 - 1.0)
+    /// Names with similarity above this threshold are considered the same
+    #[serde(default = "default_org_similarity_threshold")]
+    pub similarity_threshold: f64,
+    /// Manual organization aliases (alias -> canonical name)
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
+}
+
+fn default_org_normalization_enabled() -> bool {
+    true
+}
+
+fn default_org_similarity_threshold() -> f64 {
+    0.85
+}
+
+impl Default for OrganizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_org_normalization_enabled(),
+            similarity_threshold: default_org_similarity_threshold(),
+            aliases: HashMap::new(),
+        }
+    }
+}
+
+/// Backoff strategy for retry attempts
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackoffStrategy {
+    /// Linear backoff: wait time = base_delay * attempt_number
+    #[default]
+    Linear,
+    /// Exponential backoff: wait time = base_delay * 2^(attempt_number - 1)
+    Exponential,
+}
+
+/// Rate limiting configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum DNS queries per second (0 = unlimited)
+    #[serde(default = "default_dns_queries_per_second")]
+    pub dns_queries_per_second: u32,
+    /// Maximum HTTP requests per second per domain (0 = unlimited)
+    #[serde(default = "default_http_requests_per_second")]
+    pub http_requests_per_second: u32,
+    /// Maximum WHOIS queries per second (0 = unlimited)
+    #[serde(default = "default_whois_queries_per_second")]
+    pub whois_queries_per_second: u32,
+    /// Backoff strategy for retries
+    #[serde(default)]
+    pub backoff_strategy: BackoffStrategy,
+    /// Maximum retry attempts
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Base delay for backoff in milliseconds
+    #[serde(default = "default_backoff_base_delay_ms")]
+    pub backoff_base_delay_ms: u64,
+    /// Maximum delay for backoff in milliseconds
+    #[serde(default = "default_backoff_max_delay_ms")]
+    pub backoff_max_delay_ms: u64,
+}
+
+fn default_dns_queries_per_second() -> u32 { 50 }
+fn default_http_requests_per_second() -> u32 { 10 }
+fn default_whois_queries_per_second() -> u32 { 2 }
+fn default_max_retries() -> u32 { 3 }
+fn default_backoff_base_delay_ms() -> u64 { 1000 }
+fn default_backoff_max_delay_ms() -> u64 { 30000 }
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            dns_queries_per_second: default_dns_queries_per_second(),
+            http_requests_per_second: default_http_requests_per_second(),
+            whois_queries_per_second: default_whois_queries_per_second(),
+            backoff_strategy: BackoffStrategy::default(),
+            max_retries: default_max_retries(),
+            backoff_base_delay_ms: default_backoff_base_delay_ms(),
+            backoff_max_delay_ms: default_backoff_max_delay_ms(),
+        }
+    }
+}
+
+impl RateLimitConfig {
+    /// Calculate the delay for a given retry attempt based on the backoff strategy
+    pub fn calculate_backoff_delay(&self, attempt: u32) -> std::time::Duration {
+        if attempt == 0 {
+            return std::time::Duration::ZERO;
+        }
+
+        let delay_ms = match self.backoff_strategy {
+            BackoffStrategy::Linear => {
+                self.backoff_base_delay_ms * (attempt as u64)
+            }
+            BackoffStrategy::Exponential => {
+                // 2^(attempt-1) * base_delay, capped at max
+                let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1));
+                self.backoff_base_delay_ms.saturating_mul(multiplier)
+            }
+        };
+
+        // Cap at maximum delay
+        let capped_delay = delay_ms.min(self.backoff_max_delay_ms);
+        std::time::Duration::from_millis(capped_delay)
+    }
 }
 
 /// Resource management strategy for vendor analysis
@@ -158,7 +277,12 @@ pub struct DiscoveryConfig {
     /// Minimum confidence (0.0-1.0) for NER extraction
     #[serde(default = "default_ner_min_confidence")]
     pub ner_min_confidence: f32,
+    /// Maximum concurrent WHOIS/organization lookups
+    #[serde(default = "default_whois_concurrency")]
+    pub whois_concurrency: usize,
 }
+
+fn default_whois_concurrency() -> usize { 5 }
 
 fn default_subprocessor_enabled() -> bool {
     true
@@ -221,6 +345,7 @@ impl Default for DiscoveryConfig {
             web_org_min_confidence: default_web_org_min_confidence(),
             ner_enabled: default_ner_enabled(),
             ner_min_confidence: default_ner_min_confidence(),
+            whois_concurrency: default_whois_concurrency(),
         }
     }
 }

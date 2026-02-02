@@ -25,17 +25,62 @@ mod vendor_registry;
 mod known_vendors;
 mod web_org;
 mod ner_org;
+mod cache_commands;
+mod rate_limit;
+mod batch;
+mod org_normalizer;
+mod checkpoint;
 
-use cli::Args;
+use cli::{Args, Cli, Commands, CacheCommands};
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
 use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
 use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery};
+use checkpoint::{Checkpoint, ResumeMode, generate_settings_hash};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag for interrupt signaling - used to gracefully save checkpoint on Ctrl+C
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Check if analysis was interrupted
+pub fn is_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    // Handle cache subcommand first (before any other processing)
+    if let Some(Commands::Cache { action }) = &cli.command {
+        match action {
+            CacheCommands::List => {
+                return cache_commands::list_cached_domains().await;
+            }
+            CacheCommands::Show { domain } => {
+                return cache_commands::show_cache_entry(domain).await;
+            }
+            CacheCommands::Clear { domain, all } => {
+                if *all {
+                    return cache_commands::clear_all_cache().await;
+                } else if let Some(d) = domain {
+                    return cache_commands::clear_domain_cache(d).await;
+                } else {
+                    eprintln!("Error: Either specify a domain or use --all to clear all cache entries.");
+                    eprintln!("Usage: nthpartyfinder cache clear <domain>");
+                    eprintln!("       nthpartyfinder cache clear --all");
+                    std::process::exit(1);
+                }
+            }
+            CacheCommands::Validate { detailed, domain } => {
+                return cache_commands::validate_cache(*detailed, domain.as_deref()).await;
+            }
+        }
+    }
+
+    // Convert Cli to Args for backward compatibility with existing code
+    let args = Args::from(&cli);
 
     // Handle --init flag first (before any other processing)
     if args.init {
@@ -193,6 +238,15 @@ async fn main() -> Result<()> {
     } else {
         eprintln!("❌ DISABLED: SaaS tenant discovery");
     }
+
+    // Initialize organization name normalizer from config (global singleton)
+    org_normalizer::init(&_app_config.organization);
+    if org_normalizer::is_enabled() {
+        eprintln!("✅ ENABLED: Organization name normalization (threshold: {:.0}%)",
+            _app_config.organization.similarity_threshold * 100.0);
+    } else {
+        eprintln!("❌ DISABLED: Organization name normalization");
+    }
     eprintln!();
 
     // Initialize new logging system
@@ -202,9 +256,14 @@ async fn main() -> Result<()> {
         None => AnalysisLogger::new(verbosity),
     });
 
-    // Set up Ctrl-C handler for clean exit
+    // Set up Ctrl-C handler that signals interruption (checkpoint save happens in main loop)
     ctrlc::set_handler(move || {
-        eprintln!("\n⚠️  Received interrupt signal, exiting...");
+        // Set the interrupted flag - main loop will save checkpoint and exit
+        INTERRUPTED.store(true, Ordering::SeqCst);
+        eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
+        // Give the main loop a moment to save checkpoint before force-exiting
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        eprintln!("⚠️  Force exiting (checkpoint may be incomplete).");
         std::process::exit(130); // 130 = 128 + SIGINT(2), standard exit code for Ctrl-C
     }).expect("Error setting Ctrl-C handler");
 
@@ -214,8 +273,15 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Get domain (required at this point since --init was not used)
-    let domain = args.domain.as_ref().expect("Domain is required when not using --init");
+    // Handle batch mode if --input-file is provided
+    // TODO: Implement batch analysis - run_batch_analysis function not yet ported
+    if args.is_batch_mode() {
+        eprintln!("Batch mode is not yet implemented. Please analyze domains individually.");
+        std::process::exit(1);
+    }
+
+    // Get domain (required at this point since --init was not used and not batch mode)
+    let domain = args.domain.as_ref().expect("Domain is required when not using --init or --input-file");
     
     // Get domain-specific output directory
     let output_dir = match args.get_domain_output_dir() {
@@ -267,6 +333,115 @@ async fn main() -> Result<()> {
 
     logger.log_initialization(domain);
 
+    // Generate settings hash for checkpoint compatibility checking
+    let settings_hash = generate_settings_hash(
+        args.depth,
+        subprocessor_will_be_enabled,
+        subdomain_will_be_enabled,
+        saas_tenant_will_be_enabled,
+        args.enable_ct_discovery || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled),
+        web_org_will_be_enabled,
+    );
+
+    // Check for existing checkpoint and handle resume
+    let output_dir_path = Path::new(&output_dir);
+    let resume_mode = args.get_resume_mode();
+    let mut checkpoint: Option<Checkpoint> = None;
+
+    if Checkpoint::exists(output_dir_path) {
+        match Checkpoint::load(output_dir_path) {
+            Ok(existing_checkpoint) => {
+                let summary = existing_checkpoint.summary();
+                let is_compatible = existing_checkpoint.is_compatible(domain, &settings_hash);
+
+                match resume_mode {
+                    ResumeMode::AutoResume => {
+                        if is_compatible {
+                            println!();
+                            println!("📋 Resuming from checkpoint:");
+                            println!("   {}", summary);
+                            println!();
+                            checkpoint = Some(existing_checkpoint);
+                        } else {
+                            println!();
+                            println!("⚠️  Existing checkpoint is incompatible (different domain or settings).");
+                            println!("   Starting fresh analysis.");
+                            println!();
+                            let _ = Checkpoint::delete(output_dir_path);
+                        }
+                    }
+                    ResumeMode::Fresh => {
+                        println!();
+                        println!("🔄 Starting fresh analysis (--no-resume specified).");
+                        let _ = Checkpoint::delete(output_dir_path);
+                        println!();
+                    }
+                    ResumeMode::Prompt => {
+                        println!();
+                        println!("╔════════════════════════════════════════════════════════════════╗");
+                        println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
+                        println!("╚════════════════════════════════════════════════════════════════╝");
+                        println!();
+                        println!("   {}", summary);
+                        println!("   Created: {}", existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                        println!();
+
+                        if is_compatible {
+                            print!("Resume from checkpoint? [Y/n]: ");
+                            io::Write::flush(&mut io::stdout()).unwrap();
+
+                            let mut resume_input = String::new();
+                            io::stdin().read_line(&mut resume_input).unwrap();
+                            let resume_input = resume_input.trim().to_lowercase();
+
+                            if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
+                                println!("✅ Resuming from checkpoint...");
+                                println!();
+                                checkpoint = Some(existing_checkpoint);
+                            } else {
+                                println!("🔄 Starting fresh analysis...");
+                                let _ = Checkpoint::delete(output_dir_path);
+                                println!();
+                            }
+                        } else {
+                            println!("⚠️  Checkpoint is incompatible with current settings.");
+                            println!("   (Different domain or analysis options)");
+                            print!("Delete checkpoint and start fresh? [Y/n]: ");
+                            io::Write::flush(&mut io::stdout()).unwrap();
+
+                            let mut delete_input = String::new();
+                            io::stdin().read_line(&mut delete_input).unwrap();
+                            let delete_input = delete_input.trim().to_lowercase();
+
+                            if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
+                                let _ = Checkpoint::delete(output_dir_path);
+                                println!("🔄 Starting fresh analysis...");
+                                println!();
+                            } else {
+                                println!("❌ Cannot proceed with incompatible checkpoint. Exiting.");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                logger.warn(&format!("Failed to load existing checkpoint: {}. Starting fresh.", e));
+                let _ = Checkpoint::delete(output_dir_path);
+            }
+        }
+    }
+
+    // Create new checkpoint if not resuming
+    let checkpoint = Arc::new(Mutex::new(checkpoint.unwrap_or_else(|| {
+        Checkpoint::new(
+            domain.clone(),
+            None, // Will be set after WHOIS lookup
+            args.depth,
+            settings_hash.clone(),
+        )
+    })));
+
     // Initialize verification failure logger if enabled
     let verification_logger = verification_logger::VerificationFailureLogger::new(
         &output_dir,
@@ -287,21 +462,47 @@ async fn main() -> Result<()> {
     let web_org_enabled = web_org_will_be_enabled;
     let web_org_min_confidence = _app_config.discovery.web_org_min_confidence;
 
-    let mut discovered_vendors = HashMap::new();
+    // Initialize state - restore from checkpoint if resuming
+    let (mut discovered_vendors, processed_domains_set, resumed_results) = {
+        let cp = checkpoint.lock().await;
+        if !cp.completed_domains.is_empty() {
+            // Resuming from checkpoint - restore state
+            logger.info(&format!("Restoring state: {} completed domains, {} pending, {} partial results",
+                cp.completed_domains.len(), cp.pending_domains.len(), cp.partial_results.len()));
+            (
+                cp.discovered_vendors.clone(),
+                cp.completed_domains.clone(),
+                cp.partial_results.clone(),
+            )
+        } else {
+            // Fresh start
+            (HashMap::new(), HashSet::new(), Vec::new())
+        }
+    };
+
     let mut unverified_orgs: Vec<UnverifiedOrgMapping> = Vec::new();
 
-    // Get initial organization for the root domain
-    if let Ok(org_result) = whois::get_organization_with_status_and_config(domain, web_org_enabled, web_org_min_confidence).await {
-        discovered_vendors.insert(domain.clone(), org_result.name.clone());
-        logger.log_whois_lookup(domain, true);
-        if !org_result.is_verified {
-            unverified_orgs.push(UnverifiedOrgMapping {
-                domain: domain.clone(),
-                inferred_org: org_result.name,
-            });
+    // Get initial organization for the root domain (if not already in checkpoint)
+    if !discovered_vendors.contains_key(domain) {
+        if let Ok(org_result) = whois::get_organization_with_status_and_config(domain, web_org_enabled, web_org_min_confidence).await {
+            // Apply organization name normalization if enabled (uses global normalizer)
+            let normalized_name = org_normalizer::normalize(&org_result.name);
+            discovered_vendors.insert(domain.clone(), normalized_name.clone());
+            logger.log_whois_lookup(domain, true);
+            if !org_result.is_verified {
+                unverified_orgs.push(UnverifiedOrgMapping {
+                    domain: domain.clone(),
+                    inferred_org: normalized_name,
+                });
+            }
+            // Update checkpoint with root organization
+            {
+                let mut cp = checkpoint.lock().await;
+                cp.root_organization = discovered_vendors.get(domain).cloned();
+            }
+        } else {
+            logger.log_whois_lookup(domain, false);
         }
-    } else {
-        logger.log_whois_lookup(domain, false);
     }
 
     let root_customer_domain = domain.clone();
@@ -311,7 +512,7 @@ async fn main() -> Result<()> {
 
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
-    let processed_domains = Arc::new(Mutex::new(HashSet::new()));
+    let processed_domains = Arc::new(Mutex::new(processed_domains_set));
     let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
     
     // Create shared DNS server pool from configuration
@@ -549,8 +750,12 @@ async fn main() -> Result<()> {
                           args.parallel_jobs, recursive_limit, _app_config.analysis.strategy));
     logger.debug(&format!("Concurrency per depth: {:?}, request delay: {}ms",
                           _app_config.analysis.concurrency_per_depth, _app_config.analysis.request_delay_ms));
-    
-    let results = discover_nth_parties(
+
+    // Clone checkpoint for use in analysis (will be saved periodically and on interrupt)
+    let checkpoint_for_analysis = checkpoint.clone();
+    let output_dir_for_checkpoint = output_dir.clone();
+
+    let new_results = discover_nth_parties(
         domain,
         args.depth,
         discovered_vendors.clone(),
@@ -572,15 +777,44 @@ async fn main() -> Result<()> {
         subdomain_discovery.as_ref(),
         saas_tenant_discovery.as_ref(),
         ct_discovery.as_ref(),
+        checkpoint_for_analysis.clone(),
+        &output_dir_for_checkpoint,
     ).await?;
-    
+
+    // Check if interrupted - save checkpoint and exit
+    if is_interrupted() {
+        logger.warn("Analysis interrupted by user.");
+        // Checkpoint has already been saved in the analysis loop
+        std::process::exit(130);
+    }
+
+    // Combine resumed results with new results
+    let results: Vec<VendorRelationship> = {
+        let mut all_results = resumed_results;
+        all_results.extend(new_results);
+        // Deduplicate results by (vendor_domain, customer_domain, record_type)
+        let mut seen = HashSet::new();
+        all_results.retain(|r| {
+            let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone(), format!("{:?}", r.nth_party_record_type));
+            seen.insert(key)
+        });
+        all_results
+    };
+
     let unique_vendors = results.iter()
         .map(|r| &r.nth_party_organization)
         .collect::<HashSet<_>>()
         .len();
-    
+
     logger.record_vendor_relationships(results.len());
     logger.record_unique_vendors(unique_vendors);
+
+    // Delete checkpoint on successful completion
+    if let Err(e) = Checkpoint::delete(output_dir_path) {
+        logger.debug(&format!("Failed to delete checkpoint (non-critical): {}", e));
+    } else {
+        logger.debug("Checkpoint deleted after successful completion.");
+    }
     
     logger.log_export_start(&args.output_format);
     
@@ -711,7 +945,22 @@ async fn discover_nth_parties(
     subdomain_discovery: Option<&SubfinderDiscovery>,
     saas_tenant_discovery: Option<&SaasTenantDiscovery>,
     ct_discovery: Option<&CtLogDiscovery>,
+    checkpoint: Arc<Mutex<Checkpoint>>,
+    checkpoint_output_dir: &str,
 ) -> Result<Vec<VendorRelationship>> {
+    // Check for interrupt signal
+    if is_interrupted() {
+        // Save checkpoint before returning
+        let cp = checkpoint.lock().await;
+        let checkpoint_path = Path::new(checkpoint_output_dir);
+        if let Err(e) = cp.save(checkpoint_path) {
+            eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
+        } else {
+            eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
+        }
+        return Ok(vec![]);
+    }
+
     // Check if we've already processed this domain
     {
         let processed = processed_domains.lock().await;
@@ -720,7 +969,7 @@ async fn discover_nth_parties(
             return Ok(vec![]);
         }
     }
-    
+
     // Check if we've exceeded max depth
     if let Some(max) = max_depth {
         if current_depth > max {
@@ -728,12 +977,12 @@ async fn discover_nth_parties(
             return Ok(vec![]);
         }
     }
-    
+
     {
         let mut processed = processed_domains.lock().await;
         processed.insert(domain.to_string());
     }
-    
+
     logger.record_domain_processed();
     logger.record_depth_reached(current_depth);
     logger.debug(&format!("Analyzing domain: {} at depth {}", domain, current_depth));
@@ -994,6 +1243,7 @@ async fn discover_nth_parties(
                 
                 let request_delay_ms = analysis_config.request_delay_ms;
                 let analysis_config_clone = analysis_config.clone();
+                let checkpoint_output_dir_owned = checkpoint_output_dir.to_string();
                 let vendor_stream = stream::iter(all_vendor_domains.into_iter().enumerate().map(|(index, vendor_domain_info)| {
                     let discovered_vendors = discovered_vendors.clone();
                     let processed_domains = processed_domains.clone();
@@ -1008,6 +1258,8 @@ async fn discover_nth_parties(
                     let vendor_domain_clone = vendor_domain_info.domain.clone();
                     let total_vendors = vendor_count;
                     let analysis_config_inner = analysis_config_clone.clone();
+                    let checkpoint_clone = checkpoint.clone();
+                    let checkpoint_output_dir_clone = checkpoint_output_dir_owned.clone();
 
                     async move {
                         // Apply rate limiting delay if configured (helps prevent server/resource overwhelming)
@@ -1016,9 +1268,9 @@ async fn discover_nth_parties(
                         }
 
                         let start_time = std::time::Instant::now();
-                        logger_clone.debug(&format!("🔍 Starting analysis for vendor {}/{}: {} (depth {}, source: {:?})", 
+                        logger_clone.debug(&format!("🔍 Starting analysis for vendor {}/{}: {} (depth {}, source: {:?})",
                             index + 1, total_vendors, vendor_domain_clone, current_depth, vendor_domain_info.source_type));
-                        
+
                         let result = process_vendor_domain(
                             vendor_domain_info.domain,
                             vendor_domain_info.source_type,
@@ -1041,6 +1293,8 @@ async fn discover_nth_parties(
                             web_org_enabled,
                             web_org_min_confidence,
                             &analysis_config_inner,
+                            checkpoint_clone,
+                            checkpoint_output_dir_clone,
                         ).await;
                         
                         let elapsed = start_time.elapsed();
@@ -1068,16 +1322,69 @@ async fn discover_nth_parties(
                 
                 // Process all vendors to completion without timeout
                 let mut processed_count = 0;
+                let checkpoint_path = Path::new(checkpoint_output_dir);
                 while let Some(result) = vendor_stream.next().await {
+                    // Check for interrupt signal
+                    if is_interrupted() {
+                        // Save checkpoint immediately
+                        let mut cp = checkpoint.lock().await;
+                        // Update checkpoint with current state
+                        let vendors = discovered_vendors.lock().await;
+                        cp.discovered_vendors = vendors.clone();
+                        drop(vendors);
+                        let processed = processed_domains.lock().await;
+                        cp.completed_domains = processed.clone();
+                        drop(processed);
+                        // Add any results collected so far
+                        for r in &result {
+                            cp.add_result(r.clone());
+                        }
+                        for batch in &vendor_results {
+                            for r in batch {
+                                cp.add_result(r.clone());
+                            }
+                        }
+                        results.extend(result);
+                        if let Err(e) = cp.save(checkpoint_path) {
+                            eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
+                        } else {
+                            eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
+                        }
+                        return Ok(results);
+                    }
+
                     processed_count += 1;
                     vendor_results.push(result);
                     if processed_count % 5 == 0 || processed_count == vendor_count {
                         logger.debug(&format!("📊 Progress: {}/{} vendors processed", processed_count, vendor_count));
+                        // Save checkpoint periodically (every 5 domains at depth 1)
+                        if current_depth == 1 {
+                            let mut cp = checkpoint.lock().await;
+                            let vendors = discovered_vendors.lock().await;
+                            cp.discovered_vendors = vendors.clone();
+                            drop(vendors);
+                            let processed = processed_domains.lock().await;
+                            cp.completed_domains = processed.clone();
+                            drop(processed);
+                            // Add results to checkpoint
+                            for batch in &vendor_results {
+                                for r in batch {
+                                    if !cp.partial_results.iter().any(|pr| pr.nth_party_domain == r.nth_party_domain && pr.nth_party_customer_domain == r.nth_party_customer_domain) {
+                                        cp.add_result(r.clone());
+                                    }
+                                }
+                            }
+                            if let Err(e) = cp.save(checkpoint_path) {
+                                logger.debug(&format!("Failed to save checkpoint: {}", e));
+                            } else {
+                                logger.debug(&format!("Checkpoint saved: {} domains completed", cp.completed_domains.len()));
+                            }
+                        }
                     }
                 }
-                
+
                 logger.debug(&format!("All {} vendor domains processed successfully at depth {}", vendor_results.len(), current_depth));
-                
+
                 // Collect results from parallel processing
                 let mut total_relationships = 0;
                 for vendor_result in vendor_results {
@@ -1128,6 +1435,8 @@ async fn process_vendor_domain(
     web_org_enabled: bool,
     web_org_min_confidence: f32,
     analysis_config: &AnalysisConfig,
+    checkpoint: Arc<Mutex<Checkpoint>>,
+    checkpoint_output_dir: String,
 ) -> Vec<VendorRelationship> {
     let mut results = Vec::new();
     
@@ -1149,13 +1458,14 @@ async fn process_vendor_domain(
             match whois::get_organization_with_status_and_config(&base_domain, web_org_enabled, web_org_min_confidence).await {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(base_domain.clone(), org_result.name);
+                    // Apply organization name normalization (uses global normalizer)
+                    vendors.insert(base_domain.clone(), org_normalizer::normalize(&org_result.name));
                     logger.log_whois_lookup(&base_domain, org_result.is_verified);
                 },
                 Err(e) => {
                     logger.debug(&format!("Failed to get organization for {}: {}", base_domain, e));
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(base_domain.clone(), base_domain.clone());
+                    vendors.insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
                     logger.log_whois_lookup(&base_domain, false);
                 }
             }
@@ -1170,13 +1480,14 @@ async fn process_vendor_domain(
             match whois::get_organization_with_status_and_config(&customer_base_domain, web_org_enabled, web_org_min_confidence).await {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(customer_base_domain.clone(), org_result.name);
+                    // Apply organization name normalization (uses global normalizer)
+                    vendors.insert(customer_base_domain.clone(), org_normalizer::normalize(&org_result.name));
                     logger.log_whois_lookup(&customer_base_domain, org_result.is_verified);
                 },
                 Err(e) => {
                     logger.debug(&format!("Failed to get organization for customer {}: {}", customer_base_domain, e));
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(customer_base_domain.clone(), customer_base_domain.clone());
+                    vendors.insert(customer_base_domain.clone(), org_normalizer::normalize(&customer_base_domain));
                     logger.log_whois_lookup(&customer_base_domain, false);
                 }
             }
@@ -1259,6 +1570,8 @@ async fn process_vendor_domain(
         None,  // subdomain_discovery - only runs at depth 1
         None,  // saas_tenant_discovery - only runs at depth 1
         None,  // ct_discovery - only runs at depth 1
+        checkpoint,
+        &checkpoint_output_dir,
     ).await {
         Ok(sub_results) => {
             results.extend(sub_results);
@@ -1290,326 +1603,6 @@ fn is_common_denominator(domain: &str) -> bool {
     common_denominators.iter().any(|&cd| {
         domain == cd || domain.ends_with(&format!(".{}", cd))
     })
-}
-
-/// Layer-by-layer processing approach for better resource management and deduplication
-/// This processes all vendors at layer N before moving to layer N+1
-async fn discover_nth_parties_by_layers(
-    domain: &str,
-    max_depth: Option<u32>,
-    discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
-    _semaphore: Arc<Semaphore>,
-    root_customer_domain: &str,
-    root_customer_organization: &str,
-    verification_logger: &verification_logger::VerificationFailureLogger,
-    dns_pool: Arc<dns::DnsServerPool>,
-    args: &Args,
-    logger: Arc<AnalysisLogger>,
-    subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
-    subprocessor_enabled: bool,
-    web_org_enabled: bool,
-    web_org_min_confidence: f32,
-) -> Result<Vec<VendorRelationship>> {
-    let mut all_results = Vec::new();
-    let mut current_layer_domains = vec![domain.to_string()];
-    let global_processed_vendors = Arc::new(Mutex::new(HashSet::<String>::new())); // Track processed vendors globally
-    
-    // Process each layer sequentially
-    for current_depth in 1..=max_depth.unwrap_or(1) {
-        if current_layer_domains.is_empty() {
-            logger.info(&format!("No more domains to process at depth {}, stopping", current_depth));
-            break;
-        }
-        
-        logger.info(&format!("🏗️  Processing Layer {} with {} domains", current_depth, current_layer_domains.len()));
-        
-        // Adjust concurrency based on depth
-        let layer_concurrency = match current_depth {
-            1 => args.parallel_jobs,
-            2 => args.parallel_jobs.min(20),
-            3 => args.parallel_jobs.min(10),
-            _ => args.parallel_jobs.min(5)
-        };
-        
-        let layer_semaphore = Arc::new(Semaphore::new(layer_concurrency));
-        let mut layer_results = Vec::new();
-        let mut next_layer_domains = Vec::new();
-        
-        logger.debug(&format!("Layer {} concurrency: {} jobs", current_depth, layer_concurrency));
-        
-        // Process all domains in this layer in parallel
-        use futures::{stream, StreamExt};
-        
-        let domain_stream = stream::iter(current_layer_domains.into_iter().enumerate().map(|(index, layer_domain)| {
-            let discovered_vendors = discovered_vendors.clone();
-            let processed_domains = processed_domains.clone();
-            let layer_semaphore = layer_semaphore.clone();
-            let root_customer_domain = root_customer_domain.to_string();
-            let root_customer_organization = root_customer_organization.to_string();
-            let dns_pool = dns_pool.clone();
-            let logger = logger.clone();
-            let domain_clone = layer_domain.clone();
-            let global_processed_vendors = global_processed_vendors.clone();
-            
-            async move {
-                let _permit = layer_semaphore.acquire().await.unwrap();
-                
-                logger.debug(&format!("🔍 Layer {} - Processing domain {}: {}", current_depth, index + 1, domain_clone));
-                
-                // Check if we've already processed this vendor globally (deduplication)
-                let base_domain = domain_utils::extract_base_domain(&domain_clone);
-                {
-                    let processed_vendors = global_processed_vendors.lock().await;
-                    if processed_vendors.contains(&base_domain) {
-                        logger.debug(&format!("⭕ Skipping {} - already processed in earlier layer", base_domain));
-                        return (Vec::new(), Vec::new());
-                    }
-                }
-                
-                match discover_single_domain(
-                    &domain_clone,
-                    current_depth,
-                    discovered_vendors,
-                    processed_domains,
-                    &root_customer_domain,
-                    &root_customer_organization,
-                    verification_logger,
-                    dns_pool,
-                    args,
-                    logger.clone(),
-                    subprocessor_analyzer,
-                    subprocessor_enabled,
-                    web_org_enabled,
-                    web_org_min_confidence,
-                ).await {
-                    Ok((domain_results, next_domains)) => {
-                        logger.debug(&format!("✅ Layer {} - Domain {} produced {} results, {} next domains", 
-                                            current_depth, domain_clone, domain_results.len(), next_domains.len()));
-                        (domain_results, next_domains)
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("❌ Layer {} - Failed to process domain {}: {}", current_depth, domain_clone, e));
-                        (Vec::new(), Vec::new())
-                    }
-                }
-            }
-        }));
-        
-        let buffer_size = layer_concurrency.min(10).max(3);
-        let mut domain_stream = domain_stream.buffer_unordered(buffer_size);
-        
-        logger.info(&format!("⏳ Processing Layer {} (no timeout limit)", current_depth));
-        
-        // Process all domains in this layer to completion without timeout
-        while let Some((domain_results, next_domains)) = domain_stream.next().await {
-            // Track processed vendors for deduplication
-            {
-                let mut processed_vendors = global_processed_vendors.lock().await;
-                for result in &domain_results {
-                    processed_vendors.insert(result.nth_party_domain.clone());
-                }
-            }
-            
-            layer_results.extend(domain_results);
-            next_layer_domains.extend(next_domains);
-        }
-        
-        logger.info(&format!("✅ Layer {} completed successfully - {} results, {} domains for next layer", 
-                           current_depth, layer_results.len(), next_layer_domains.len()));
-        
-        // Remove duplicates from next layer domains
-        next_layer_domains.sort();
-        next_layer_domains.dedup();
-        
-        // Filter out already processed domains
-        {
-            let processed_vendors = global_processed_vendors.lock().await;
-            next_layer_domains.retain(|domain| {
-                let base_domain = domain_utils::extract_base_domain(domain);
-                !processed_vendors.contains(&base_domain)
-            });
-        }
-        
-        // Limit next layer domains to prevent exponential growth
-        let max_next_domains = match current_depth {
-            1 => next_layer_domains.len(),
-            2 => next_layer_domains.len().min(50),
-            3 => next_layer_domains.len().min(20),
-            _ => next_layer_domains.len().min(10)
-        };
-        
-        if next_layer_domains.len() > max_next_domains {
-            logger.warn(&format!("🔒 Limiting next layer domains from {} to {} to prevent exponential growth", 
-                               next_layer_domains.len(), max_next_domains));
-            next_layer_domains.truncate(max_next_domains);
-        }
-        
-        all_results.extend(layer_results);
-        current_layer_domains = next_layer_domains;
-        
-        let processed_count = {
-            let processed_vendors = global_processed_vendors.lock().await;
-            processed_vendors.len()
-        };
-        logger.info(&format!("📊 Layer {} Summary: {} total results so far, {} vendors processed globally", 
-                           current_depth, all_results.len(), processed_count));
-    }
-    
-    logger.info(&format!("🏁 Layer-by-layer processing completed: {} total results across all layers", all_results.len()));
-    Ok(all_results)
-}
-
-/// Process a single domain and return both results and next domains to process
-async fn discover_single_domain(
-    domain: &str,
-    current_depth: u32,
-    discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
-    root_customer_domain: &str,
-    root_customer_organization: &str,
-    verification_logger: &verification_logger::VerificationFailureLogger,
-    dns_pool: Arc<dns::DnsServerPool>,
-    _args: &Args,
-    logger: Arc<AnalysisLogger>,
-    subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
-    subprocessor_enabled: bool,
-    web_org_enabled: bool,
-    web_org_min_confidence: f32,
-) -> Result<(Vec<VendorRelationship>, Vec<String>)> {
-    // Check if we've already processed this domain
-    {
-        let processed = processed_domains.lock().await;
-        if processed.contains(domain) {
-            logger.debug(&format!("Domain {} already processed, skipping", domain));
-            return Ok((vec![], vec![]));
-        }
-    }
-    
-    // Mark as processed
-    {
-        let mut processed = processed_domains.lock().await;
-        processed.insert(domain.to_string());
-    }
-    
-    logger.record_domain_processed();
-    logger.record_depth_reached(current_depth);
-    logger.debug(&format!("Analyzing domain: {} at depth {}", domain, current_depth));
-    
-    let mut results = Vec::new();
-    let mut next_domains = Vec::new();
-    
-    // DNS TXT record analysis
-    match dns::get_txt_records_with_pool(domain, &dns_pool).await {
-        Ok(txt_records) => {
-            if !txt_records.is_empty() {
-                logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
-                logger.debug(&format!("Raw TXT records for {}: {:?}", domain, txt_records));
-            }
-            
-            let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(&txt_records, Some(verification_logger), domain);
-            
-            // Include base domain for subdomain analysis
-            let current_base_domain = domain_utils::extract_base_domain(domain);
-            let mut all_vendor_domains = vendor_domains_with_source;
-            if current_base_domain != domain {
-                all_vendor_domains.push(dns::VendorDomain {
-                    domain: current_base_domain.clone(),
-                    source_type: RecordType::DnsSubdomain,
-                    raw_record: format!("Subdomain analysis: {} -> {}", domain, current_base_domain),
-                });
-            }
-            
-            // Subprocessor analysis (if enabled)
-            if subprocessor_enabled && subprocessor_analyzer.is_some() {
-                match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), subprocessor_analyzer.unwrap()).await {
-                    Ok(subprocessor_domains) => {
-                        let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains.into_iter()
-                            .map(|sub_domain| dns::VendorDomain {
-                                domain: sub_domain.domain,
-                                source_type: sub_domain.source_type,
-                                raw_record: sub_domain.raw_record,
-                            })
-                            .collect();
-                        all_vendor_domains.extend(converted_domains);
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("Subprocessor analysis failed for {}: {}", domain, e));
-                    }
-                }
-            }
-            
-            // Process vendor domains and collect results and next domains
-            for vendor_domain_info in all_vendor_domains {
-                let base_domain = domain_utils::extract_base_domain(&vendor_domain_info.domain);
-                let customer_base_domain = domain_utils::extract_base_domain(domain);
-                
-                // Skip self-references
-                if base_domain == customer_base_domain {
-                    continue;
-                }
-                
-                // Get organization info
-                if !{
-                    let vendors = discovered_vendors.lock().await;
-                    vendors.contains_key(&base_domain)
-                } {
-                    match whois::get_organization_with_status_and_config(&base_domain, web_org_enabled, web_org_min_confidence).await {
-                        Ok(org_result) => {
-                            let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(base_domain.clone(), org_result.name);
-                            logger.log_whois_lookup(&base_domain, org_result.is_verified);
-                        }
-                        Err(_) => {
-                            let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(base_domain.clone(), base_domain.clone());
-                            logger.log_whois_lookup(&base_domain, false);
-                        }
-                    }
-                }
-                
-                // Create vendor relationship
-                let (customer_org, vendor_org) = {
-                    let vendors = discovered_vendors.lock().await;
-                    let customer_org = vendors.get(&customer_base_domain).unwrap_or(&customer_base_domain.to_string()).clone();
-                    let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
-                    (customer_org, vendor_org)
-                };
-                
-                let record_value = if vendor_domain_info.source_type == RecordType::DnsSubdomain {
-                    format!("{} (base of {})", base_domain, domain)
-                } else {
-                    vendor_domain_info.domain.clone()
-                };
-                
-                let relationship = VendorRelationship::new(
-                    base_domain.clone(),
-                    vendor_org.clone(),
-                    current_depth,
-                    customer_base_domain.clone(),
-                    customer_org.clone(),
-                    record_value.clone(),
-                    vendor_domain_info.source_type.clone(),
-                    root_customer_domain.to_string(),
-                    root_customer_organization.to_string(),
-                    vendor_domain_info.raw_record.clone(),
-                );
-                
-                results.push(relationship);
-                
-                // Add to next layer if not a common denominator and within depth limits
-                if !is_common_denominator(&base_domain) {
-                    let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
-                    next_domains.push(lookup_domain);
-                }
-            }
-        }
-        Err(e) => {
-            logger.log_dns_lookup_failed(domain, &e.to_string());
-        }
-    }
-    
-    Ok((results, next_domains))
 }
 
 /// Prompt the user to confirm pending org-to-domain mappings discovered via generic fallback
@@ -1965,4 +1958,459 @@ async fn confirm_unverified_organizations(
 
     println!();
     Ok(())
+}
+
+// ============================================================================
+// Batch Analysis Mode
+// ============================================================================
+
+/// Run batch analysis mode - process multiple domains from an input file
+async fn run_batch_analysis(
+    args: &Args,
+    app_config: &AppConfig,
+    logger: Arc<AnalysisLogger>,
+) -> Result<()> {
+    use batch::{
+        parse_domain_file, DomainAnalysisResult,
+        new_batch_summary, finalize_batch_summary, export_batch_summary,
+    };
+    use futures::{stream, StreamExt};
+
+    let input_file = args.input_file.as_ref()
+        .expect("input_file required in batch mode");
+    let input_path = Path::new(input_file);
+
+    // Parse domain list from input file
+    println!();
+    println!("========================================================================");
+    println!("                     BATCH ANALYSIS MODE                                ");
+    println!("========================================================================");
+    println!();
+
+    logger.info(&format!("Loading domains from: {}", input_file));
+
+    let domains = match parse_domain_file(input_path) {
+        Ok(domains) => {
+            if domains.is_empty() {
+                logger.error("No valid domains found in input file");
+                std::process::exit(1);
+            }
+            domains
+        }
+        Err(e) => {
+            logger.error(&format!("Failed to parse input file: {}", e));
+            std::process::exit(1);
+        }
+    };
+
+    println!("Loaded {} domains from input file", domains.len());
+    println!();
+
+    // Determine output directory
+    let batch_output_dir = match &args.batch_output_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let base = Args::get_default_output_dir().unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(base).join("batch_reports")
+        }
+    };
+
+    // Create output directory
+    if let Err(e) = std::fs::create_dir_all(&batch_output_dir) {
+        logger.error(&format!("Failed to create batch output directory: {}", e));
+        std::process::exit(1);
+    }
+
+    println!("Batch output directory: {}", batch_output_dir.display());
+    println!("Parallel domains: {}", args.batch_parallel);
+    println!("Output format: {}", args.output_format);
+    if args.batch_combined {
+        println!("Mode: Combined report");
+    } else {
+        println!("Mode: Individual reports per domain");
+    }
+    println!();
+
+    // Confirm with user
+    print!("Press Enter to start batch analysis or Ctrl+C to cancel: ");
+    io::Write::flush(&mut io::stdout()).unwrap();
+    let mut input = String::new();
+    let _ = io::stdin().read_line(&mut input);
+    println!();
+
+    // Initialize batch summary
+    let mut summary = new_batch_summary();
+    let batch_start = std::time::Instant::now();
+
+    // Combined results if --batch-combined is enabled
+    let all_results: Arc<Mutex<Vec<VendorRelationship>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Process domains with configurable parallelism
+    println!("Starting batch analysis of {} domains...", domains.len());
+    println!();
+
+    let batch_semaphore = Arc::new(Semaphore::new(args.batch_parallel));
+    let domains_arc = Arc::new(domains);
+    let total_domains = domains_arc.len();
+
+    // Process domains in parallel streams
+    let domain_stream = stream::iter(domains_arc.iter().enumerate().map(|(index, entry)| {
+        let batch_sem = batch_semaphore.clone();
+        let output_dir = batch_output_dir.clone();
+        let output_format = args.output_format.clone();
+        let logger = logger.clone();
+        let all_results = all_results.clone();
+        let batch_combined = args.batch_combined;
+        let app_config = app_config.clone();
+        let args_depth = args.depth;
+        let args_parallel_jobs = args.parallel_jobs;
+        let entry = entry.clone();
+
+        async move {
+            let _permit = batch_sem.acquire().await.unwrap();
+            let domain_start = std::time::Instant::now();
+
+            println!("[{}/{}] Starting analysis: {} {}",
+                index + 1, total_domains,
+                entry.domain,
+                entry.label.as_ref().map(|l| format!("({})", l)).unwrap_or_default()
+            );
+
+            // Run single domain analysis
+            let result = analyze_single_domain_for_batch(
+                &entry,
+                &output_dir,
+                &output_format,
+                batch_combined,
+                &app_config,
+                args_depth,
+                args_parallel_jobs,
+                logger.clone(),
+            ).await;
+
+            let duration = domain_start.elapsed().as_secs_f64();
+
+            match result {
+                Ok((relationships, output_file)) => {
+                    let count = relationships.len();
+
+                    // Store results for combined report
+                    if batch_combined {
+                        let mut all = all_results.lock().await;
+                        all.extend(relationships);
+                    }
+
+                    println!("[{}/{}] Completed: {} - {} relationships in {:.1}s",
+                        index + 1, total_domains,
+                        entry.domain,
+                        count,
+                        duration
+                    );
+
+                    DomainAnalysisResult {
+                        domain: entry.domain.clone(),
+                        label: entry.label.clone(),
+                        success: true,
+                        error: None,
+                        relationship_count: count,
+                        output_file,
+                        duration_secs: duration,
+                    }
+                }
+                Err(e) => {
+                    println!("[{}/{}] Failed: {} - {} ({:.1}s)",
+                        index + 1, total_domains,
+                        entry.domain,
+                        e,
+                        duration
+                    );
+
+                    DomainAnalysisResult {
+                        domain: entry.domain.clone(),
+                        label: entry.label.clone(),
+                        success: false,
+                        error: Some(e.to_string()),
+                        relationship_count: 0,
+                        output_file: None,
+                        duration_secs: duration,
+                    }
+                }
+            }
+        }
+    }));
+
+    // Collect results
+    let results: Vec<DomainAnalysisResult> = domain_stream
+        .buffer_unordered(args.batch_parallel)
+        .collect()
+        .await;
+
+    // Update summary with results
+    summary.domain_results = results;
+    summary.total_duration_secs = batch_start.elapsed().as_secs_f64();
+    finalize_batch_summary(&mut summary);
+
+    println!();
+    println!("========================================================================");
+    println!("                       BATCH ANALYSIS COMPLETE                          ");
+    println!("========================================================================");
+    println!();
+    println!("Summary:");
+    println!("   Total domains:       {}", summary.total_domains);
+    println!("   Successful:          {}", summary.successful);
+    println!("   Failed:              {}", summary.failed);
+    println!("   Total relationships: {}", summary.total_relationships);
+    println!("   Total duration:      {:.1}s", summary.total_duration_secs);
+    println!();
+
+    // Export combined report if requested
+    if args.batch_combined {
+        let combined_filename = format!("Combined_Nth_Party_Analysis.{}", args.output_format);
+        let combined_path = batch_output_dir.join(&combined_filename);
+
+        let all_relationships = all_results.lock().await;
+
+        match args.output_format.as_str() {
+            "json" => export::export_json(&all_relationships, &combined_path.to_string_lossy())?,
+            "markdown" => export::export_markdown(&all_relationships, &combined_path.to_string_lossy())?,
+            "html" => export::export_html(&all_relationships, &combined_path.to_string_lossy())?,
+            "csv" | _ => export::export_csv(&all_relationships, &combined_path.to_string_lossy())?,
+        }
+
+        println!("Combined report: {}", combined_path.display());
+    }
+
+    // Export batch summary
+    let summary_path = batch_output_dir.join("batch_summary.json");
+    export_batch_summary(&summary, &summary_path)?;
+    println!("Batch summary:   {}", summary_path.display());
+
+    // List any failed domains
+    let failed: Vec<_> = summary.domain_results.iter().filter(|r| !r.success).collect();
+    if !failed.is_empty() {
+        println!();
+        println!("Failed domains:");
+        for result in failed {
+            println!("   - {}: {}", result.domain, result.error.as_deref().unwrap_or("Unknown error"));
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Analyze a single domain for batch processing
+async fn analyze_single_domain_for_batch(
+    entry: &batch::DomainEntry,
+    output_dir: &Path,
+    output_format: &str,
+    skip_individual_export: bool,
+    app_config: &AppConfig,
+    depth: Option<u32>,
+    parallel_jobs: usize,
+    _logger: Arc<AnalysisLogger>,
+) -> Result<(Vec<VendorRelationship>, Option<String>)> {
+    // Create a minimal logger for this domain (suppress most output in batch mode)
+    let logger = Arc::new(AnalysisLogger::new_with_color_setting(VerbosityLevel::Silent, false));
+
+    // Initialize shared state for this domain analysis
+    let discovered_vendors = Arc::new(Mutex::new(HashMap::new()));
+    let processed_domains = Arc::new(Mutex::new(HashSet::new()));
+    let semaphore = Arc::new(Semaphore::new(parallel_jobs));
+    let dns_pool = Arc::new(dns::DnsServerPool::from_config(app_config));
+    let recursive_semaphore = Arc::new(Semaphore::new(parallel_jobs.min(10)));
+
+    // Get root organization
+    let root_customer_domain = entry.domain.clone();
+    let root_customer_org = match whois::get_organization_with_status_and_config(&entry.domain, false, 0.5).await {
+        Ok(org_result) => {
+            discovered_vendors.lock().await.insert(entry.domain.clone(), org_result.name.clone());
+            org_result.name
+        }
+        Err(_) => entry.domain.clone()
+    };
+
+    // Create verification logger (disabled for batch mode)
+    let verification_logger = verification_logger::VerificationFailureLogger::new(
+        &output_dir.to_string_lossy(),
+        &entry.domain,
+        false
+    );
+
+    // Run the analysis using the minimal function
+    let results = discover_nth_parties_minimal(
+        &entry.domain,
+        depth,
+        discovered_vendors,
+        processed_domains,
+        semaphore,
+        1,
+        &root_customer_domain,
+        &root_customer_org,
+        &verification_logger,
+        dns_pool,
+        recursive_semaphore,
+        parallel_jobs,
+        logger.clone(),
+        &app_config.analysis,
+    ).await?;
+
+    // Export individual report if not in combined mode
+    let output_file = if !skip_individual_export && !results.is_empty() {
+        let filename = batch::domain_output_filename(&entry.domain, output_format);
+        let domain_dir = output_dir.join(entry.domain.replace('.', "_"));
+        std::fs::create_dir_all(&domain_dir)?;
+        let output_path = domain_dir.join(&filename);
+
+        match output_format {
+            "json" => export::export_json(&results, &output_path.to_string_lossy())?,
+            "markdown" => export::export_markdown(&results, &output_path.to_string_lossy())?,
+            "html" => export::export_html(&results, &output_path.to_string_lossy())?,
+            "csv" | _ => export::export_csv(&results, &output_path.to_string_lossy())?,
+        }
+
+        Some(output_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    Ok((results, output_file))
+}
+
+/// Minimal version of discover_nth_parties for batch processing
+/// Skips interactive prompts and discovery methods that require user input
+async fn discover_nth_parties_minimal(
+    domain: &str,
+    max_depth: Option<u32>,
+    discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
+    processed_domains: Arc<Mutex<HashSet<String>>>,
+    semaphore: Arc<Semaphore>,
+    current_depth: u32,
+    root_customer_domain: &str,
+    root_customer_organization: &str,
+    verification_logger: &verification_logger::VerificationFailureLogger,
+    dns_pool: Arc<dns::DnsServerPool>,
+    recursive_semaphore: Arc<Semaphore>,
+    parallel_jobs: usize,
+    logger: Arc<AnalysisLogger>,
+    analysis_config: &AnalysisConfig,
+) -> Result<Vec<VendorRelationship>> {
+    // Check if already processed
+    {
+        let processed = processed_domains.lock().await;
+        if processed.contains(domain) {
+            return Ok(vec![]);
+        }
+    }
+
+    // Check depth limit
+    if let Some(max) = max_depth {
+        if current_depth > max {
+            return Ok(vec![]);
+        }
+    }
+
+    // Mark as processed
+    {
+        let mut processed = processed_domains.lock().await;
+        processed.insert(domain.to_string());
+    }
+
+    let mut results = Vec::new();
+
+    // DNS TXT record analysis
+    match dns::get_txt_records_with_pool(domain, &dns_pool).await {
+        Ok(txt_records) => {
+            let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
+                &txt_records, Some(verification_logger), domain
+            );
+
+            // Process vendor domains
+            for vendor_domain_info in vendor_domains_with_source {
+                let base_domain = domain_utils::extract_base_domain(&vendor_domain_info.domain);
+                let customer_base_domain = domain_utils::extract_base_domain(domain);
+
+                // Skip self-references
+                if base_domain == customer_base_domain {
+                    continue;
+                }
+
+                // Get organization info
+                if !{
+                    let vendors = discovered_vendors.lock().await;
+                    vendors.contains_key(&base_domain)
+                } {
+                    match whois::get_organization_with_status_and_config(&base_domain, false, 0.5).await {
+                        Ok(org_result) => {
+                            let mut vendors = discovered_vendors.lock().await;
+                            // Apply organization name normalization (uses global normalizer)
+                            vendors.insert(base_domain.clone(), org_normalizer::normalize(&org_result.name));
+                        }
+                        Err(_) => {
+                            let mut vendors = discovered_vendors.lock().await;
+                            vendors.insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
+                        }
+                    }
+                }
+
+                // Create relationship
+                let (customer_org, vendor_org) = {
+                    let vendors = discovered_vendors.lock().await;
+                    let customer_org = vendors.get(&customer_base_domain)
+                        .unwrap_or(&customer_base_domain.to_string()).clone();
+                    let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
+                    (customer_org, vendor_org)
+                };
+
+                let record_value = match vendor_domain_info.source_type {
+                    RecordType::DnsSubdomain => format!("{} (base of {})", base_domain, domain),
+                    _ => vendor_domain_info.domain.clone(),
+                };
+
+                let relationship = VendorRelationship::new(
+                    base_domain.clone(),
+                    vendor_org,
+                    current_depth,
+                    customer_base_domain.clone(),
+                    customer_org,
+                    record_value,
+                    vendor_domain_info.source_type.clone(),
+                    root_customer_domain.to_string(),
+                    root_customer_organization.to_string(),
+                    vendor_domain_info.raw_record.clone(),
+                );
+
+                results.push(relationship);
+
+                // Recursive analysis if not a common denominator
+                if !is_common_denominator(&base_domain) {
+                    let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
+
+                    if let Ok(sub_results) = Box::pin(discover_nth_parties_minimal(
+                        &lookup_domain,
+                        max_depth,
+                        discovered_vendors.clone(),
+                        processed_domains.clone(),
+                        semaphore.clone(),
+                        current_depth + 1,
+                        root_customer_domain,
+                        root_customer_organization,
+                        verification_logger,
+                        dns_pool.clone(),
+                        recursive_semaphore.clone(),
+                        parallel_jobs,
+                        logger.clone(),
+                        analysis_config,
+                    )).await {
+                        results.extend(sub_results);
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // DNS lookup failed - continue silently in batch mode
+        }
+    }
+
+    Ok(results)
 }

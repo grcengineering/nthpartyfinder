@@ -17,5 +17,11 @@ pub mod known_vendors;
 pub mod web_org;
 pub mod ner_org;
 pub mod vendor_registry;
+pub mod rate_limit;
+pub mod cache_commands;
+pub mod batch;
+pub mod org_normalizer;
+pub mod checkpoint;
 
 pub use vendor::VendorRelationship;
+pub use checkpoint::{Checkpoint, ResumeMode};

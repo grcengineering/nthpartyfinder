@@ -18,8 +18,31 @@
   // Pagination constant
   const VENDORS_PER_PAGE = 10;
 
+  // Callback for showing vendor info (passed to nodes)
+  function showVendorInfo(domain: string, sources: DiscoverySource[]) {
+    const vendor = vendors.get(domain);
+
+    tooltipDomain = domain;
+    tooltipOrganization = vendor?.organization || '';
+    tooltipSources = sources || [];
+
+    // Position tooltip near the center of the viewport
+    tooltipPosition = {
+      x: window.innerWidth / 2 - 140,
+      y: window.innerHeight / 3
+    };
+    tooltipVisible = true;
+  }
+
   // Transform data with deduplication
   const { nodes: initialNodes, edges: initialEdges, vendors } = transformToXyflow(relationships, rootDomain);
+
+  // Add callback to all vendor nodes
+  for (const node of initialNodes) {
+    if (node.type === 'vendor') {
+      node.data.onShowInfo = showVendorInfo;
+    }
+  }
 
   // Stores
   const nodes = writable<XYFlowNode[]>(initialNodes);
@@ -230,22 +253,6 @@
     }]);
   }
 
-  // Handle info button click from VendorNode
-  function handleShowInfo(event: CustomEvent) {
-    const { domain, sources } = event.detail;
-    const vendor = vendors.get(domain);
-
-    tooltipDomain = domain;
-    tooltipOrganization = vendor?.organization || '';
-    tooltipSources = sources || [];
-
-    // Position tooltip near the center of the viewport
-    tooltipPosition = {
-      x: window.innerWidth / 2 - 140,
-      y: window.innerHeight / 3
-    };
-    tooltipVisible = true;
-  }
 
   function closeTooltip() {
     tooltipVisible = false;

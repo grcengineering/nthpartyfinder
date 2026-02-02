@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use std::io::{self, Write};
 use std::fs::OpenOptions;
 use std::path::Path;
+use colored::{Colorize, control};
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum VerbosityLevel {
@@ -31,6 +32,7 @@ pub struct AnalysisLogger {
     analysis_metadata: Arc<Mutex<AnalysisMetadata>>,
     log_buffer: Arc<Mutex<Vec<String>>>,
     log_file_path: Option<String>,
+    color_enabled: bool,
 }
 
 #[derive(Default, Clone)]
@@ -47,24 +49,94 @@ struct AnalysisMetadata {
 }
 
 impl AnalysisLogger {
+    /// Check if colors should be enabled based on environment and settings
+    fn should_enable_colors(no_color_flag: bool) -> bool {
+        // Respect NO_COLOR environment variable (standard convention)
+        if std::env::var("NO_COLOR").is_ok() {
+            return false;
+        }
+
+        // Respect --no-color CLI flag
+        if no_color_flag {
+            return false;
+        }
+
+        // Disable colors when stdout is not a tty
+        if !atty::is(atty::Stream::Stdout) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Configure the colored crate based on our color settings
+    fn configure_colored(enabled: bool) {
+        if enabled {
+            control::set_override(true);
+        } else {
+            control::set_override(false);
+        }
+    }
+
     pub fn new(verbosity: VerbosityLevel) -> Self {
+        let color_enabled = Self::should_enable_colors(false);
+        Self::configure_colored(color_enabled);
+
         Self {
             verbosity,
             progress_bar: Arc::new(RwLock::new(None)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
+            color_enabled,
+        }
+    }
+
+    pub fn new_with_color_setting(verbosity: VerbosityLevel, no_color: bool) -> Self {
+        let color_enabled = Self::should_enable_colors(no_color);
+        Self::configure_colored(color_enabled);
+
+        Self {
+            verbosity,
+            progress_bar: Arc::new(RwLock::new(None)),
+            analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            log_buffer: Arc::new(Mutex::new(Vec::new())),
+            log_file_path: None,
+            color_enabled,
         }
     }
 
     pub fn with_log_file(verbosity: VerbosityLevel, log_file_path: String) -> Self {
+        let color_enabled = Self::should_enable_colors(false);
+        Self::configure_colored(color_enabled);
+
         Self {
             verbosity,
             progress_bar: Arc::new(RwLock::new(None)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
+            color_enabled,
         }
+    }
+
+    pub fn with_log_file_and_color(verbosity: VerbosityLevel, log_file_path: String, no_color: bool) -> Self {
+        let color_enabled = Self::should_enable_colors(no_color);
+        Self::configure_colored(color_enabled);
+
+        Self {
+            verbosity,
+            progress_bar: Arc::new(RwLock::new(None)),
+            analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            log_buffer: Arc::new(Mutex::new(Vec::new())),
+            log_file_path: Some(log_file_path),
+            color_enabled,
+        }
+    }
+
+    /// Check if colors are enabled
+    pub fn is_color_enabled(&self) -> bool {
+        self.color_enabled
     }
 
     // Core logging functions with consistent timestamp formatting
@@ -92,28 +164,50 @@ impl AnalysisLogger {
         }
     }
 
+    pub fn success(&self, message: &str) {
+        // Always show success messages (they are important user feedback)
+        self.print_message("SUCCESS", message);
+    }
+
     fn print_message(&self, level: &str, message: &str) {
         let timestamp = self.get_timestamp();
-        // Use progress bar's println! to avoid interfering with fixed positioning
-        let msg = format!("[{}] {}: {}", timestamp, level, message);
-        
-        // Store in log buffer if log file export is enabled
+
+        // Plain message for log file (no ANSI codes)
+        let plain_msg = format!("[{}] {}: {}", timestamp, level, message);
+
+        // Store in log buffer if log file export is enabled (without colors)
         if self.log_file_path.is_some() {
             if let Ok(mut buffer) = self.log_buffer.lock() {
-                buffer.push(msg.clone());
+                buffer.push(plain_msg.clone());
             }
         }
-        
+
+        // Colored message for terminal output
+        let display_msg = if self.color_enabled {
+            let timestamp_colored = timestamp.dimmed();
+            let (level_colored, message_colored) = match level {
+                "INFO" => (level.cyan().bold(), message.cyan()),
+                "WARN" => (level.yellow().bold(), message.yellow()),
+                "ERROR" => (level.red().bold(), message.red()),
+                "DEBUG" => (level.dimmed().bold(), message.dimmed()),
+                "SUCCESS" => (level.bright_green().bold(), message.bright_green()),
+                _ => (level.normal().bold(), message.normal()),
+            };
+            format!("[{}] {}: {}", timestamp_colored, level_colored, message_colored)
+        } else {
+            plain_msg.clone()
+        };
+
         // Check if we have an active progress bar and use its println method
         if let Ok(guard) = self.progress_bar.try_read() {
             if let Some(pb) = guard.as_ref() {
-                pb.println(msg);
+                pb.println(&display_msg);
                 return;
             }
         }
-        
+
         // Fallback if no progress bar
-        eprintln!("{}", msg);
+        eprintln!("{}", display_msg);
     }
 
     fn get_timestamp(&self) -> String {
@@ -154,7 +248,8 @@ impl AnalysisLogger {
         *progress_guard = Some(pb);
         
         // Record start time
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during start_progress");
         metadata.start_time = Some(SystemTime::now());
     }
 
@@ -183,88 +278,176 @@ impl AnalysisLogger {
         if let Some(pb) = progress_guard.take() {
             pb.finish_and_clear();
         }
-        
+
         // Record end time
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during finish_progress");
         metadata.end_time = Some(SystemTime::now());
-        
+
         if self.verbosity >= VerbosityLevel::Summary {
             self.print_message("INFO", final_message);
         }
     }
 
+    /// Start an indeterminate spinner for early scan phases before we know the total work
+    pub async fn start_spinner(&self, message: &str) {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("[{elapsed_precise}] {spinner:.cyan} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        );
+        pb.set_message(message.to_string());
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        let mut progress_guard = self.progress_bar.write().await;
+        *progress_guard = Some(pb);
+
+        // Record start time
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during start_spinner");
+        metadata.start_time = Some(SystemTime::now());
+    }
+
+    /// Convert spinner to a determinate progress bar when we know the total work
+    pub async fn convert_to_progress(&self, total_steps: u64) {
+        let mut progress_guard = self.progress_bar.write().await;
+
+        // Clear existing spinner if any
+        if let Some(pb) = progress_guard.take() {
+            pb.finish_and_clear();
+        }
+
+        // Create new determinate progress bar
+        let pb = ProgressBar::new(total_steps);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .unwrap_or_else(|_| {
+                    ProgressStyle::default_bar()
+                        .template("{bar:40} {pos}/{len} {msg}")
+                        .unwrap_or_else(|_| ProgressStyle::default_bar())
+                })
+                .progress_chars("##-")
+        );
+        pb.set_message("Processing...");
+
+        *progress_guard = Some(pb);
+    }
+
     // Metadata recording functions
     pub fn record_dns_method(&self, method: &str) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_dns_method");
         metadata.dns_method_used = method.to_string();
     }
 
     pub fn record_txt_records_found(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_txt_records_found");
         metadata.total_txt_records_found += count;
     }
 
     pub fn record_domain_processed(&self) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_domain_processed");
         metadata.total_domains_processed += 1;
     }
 
     pub fn record_vendor_relationships(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_vendor_relationships");
         metadata.total_vendor_relationships = count;
     }
 
     pub fn record_depth_reached(&self, depth: u32) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_depth_reached");
         if depth > metadata.max_depth_reached {
             metadata.max_depth_reached = depth;
         }
     }
 
     pub fn record_unique_vendors(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_unique_vendors");
         metadata.unique_vendors = count;
     }
 
     pub fn record_output_file(&self, path: &str) {
-        let mut metadata = self.analysis_metadata.lock().unwrap();
+        let mut metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during record_output_file");
         metadata.output_file = path.to_string();
     }
 
     // Final summary message
     pub fn print_final_summary(&self) {
-        let metadata = self.analysis_metadata.lock().unwrap();
-        
+        let metadata = self.analysis_metadata.lock()
+            .expect("analysis_metadata mutex poisoned during print_final_summary");
+
         // Ensure clean output after progress bar
         print!("\x1b[2K\r"); // Clear any remaining progress bar artifacts
         io::stdout().flush().unwrap();
-        
+
         // Always print summary regardless of verbosity level
-        println!("\n=== ANALYSIS SUMMARY ===");
-        
-        if let (Some(start), Some(end)) = (metadata.start_time, metadata.end_time) {
-            let duration = end.duration_since(start).unwrap_or_default();
-            println!("Analysis Duration: {:.2}s", duration.as_secs_f64());
-        }
-        
-        println!("DNS Resolution Method: {}", metadata.dns_method_used);
-        println!("Domains Processed: {}", metadata.total_domains_processed);
-        println!("TXT Records Found: {}", metadata.total_txt_records_found);
-        println!("Vendor Relationships: {}", metadata.total_vendor_relationships);
-        println!("Unique Vendors: {}", metadata.unique_vendors);
-        println!("Maximum Depth: {}", metadata.max_depth_reached);
-        
-        if !metadata.output_file.is_empty() {
-            println!("Results Exported: {}", metadata.output_file);
-        }
-        
-        println!("========================\n");
-        
-        // Success message
-        if metadata.total_vendor_relationships > 0 {
-            println!("✅ Analysis completed successfully! Found {} vendor relationships.", metadata.total_vendor_relationships);
+        if self.color_enabled {
+            println!("\n{}", "=== ANALYSIS SUMMARY ===".bold().cyan());
+
+            if let (Some(start), Some(end)) = (metadata.start_time, metadata.end_time) {
+                let duration = end.duration_since(start).unwrap_or_default();
+                println!("{}: {:.2}s", "Analysis Duration".bold(), duration.as_secs_f64());
+            }
+
+            println!("{}: {}", "DNS Resolution Method".bold(), metadata.dns_method_used);
+            println!("{}: {}", "Domains Processed".bold(), metadata.total_domains_processed);
+            println!("{}: {}", "TXT Records Found".bold(), metadata.total_txt_records_found);
+            println!("{}: {}", "Vendor Relationships".bold(), metadata.total_vendor_relationships);
+            println!("{}: {}", "Unique Vendors".bold(), metadata.unique_vendors);
+            println!("{}: {}", "Maximum Depth".bold(), metadata.max_depth_reached);
+
+            if !metadata.output_file.is_empty() {
+                println!("{}: {}", "Results Exported".bold(), metadata.output_file.green());
+            }
+
+            println!("{}\n", "========================".bold().cyan());
+
+            // Success message
+            if metadata.total_vendor_relationships > 0 {
+                println!("{} Analysis completed successfully! Found {} vendor relationships.",
+                    "SUCCESS:".bright_green().bold(),
+                    metadata.total_vendor_relationships.to_string().bright_green().bold());
+            } else {
+                println!("{} Analysis completed. No vendor relationships found.",
+                    "SUCCESS:".bright_green().bold());
+            }
         } else {
-            println!("✅ Analysis completed. No vendor relationships found.");
+            println!("\n=== ANALYSIS SUMMARY ===");
+
+            if let (Some(start), Some(end)) = (metadata.start_time, metadata.end_time) {
+                let duration = end.duration_since(start).unwrap_or_default();
+                println!("Analysis Duration: {:.2}s", duration.as_secs_f64());
+            }
+
+            println!("DNS Resolution Method: {}", metadata.dns_method_used);
+            println!("Domains Processed: {}", metadata.total_domains_processed);
+            println!("TXT Records Found: {}", metadata.total_txt_records_found);
+            println!("Vendor Relationships: {}", metadata.total_vendor_relationships);
+            println!("Unique Vendors: {}", metadata.unique_vendors);
+            println!("Maximum Depth: {}", metadata.max_depth_reached);
+
+            if !metadata.output_file.is_empty() {
+                println!("Results Exported: {}", metadata.output_file);
+            }
+
+            println!("========================\n");
+
+            // Success message
+            if metadata.total_vendor_relationships > 0 {
+                println!("SUCCESS: Analysis completed successfully! Found {} vendor relationships.", metadata.total_vendor_relationships);
+            } else {
+                println!("SUCCESS: Analysis completed. No vendor relationships found.");
+            }
         }
     }
 

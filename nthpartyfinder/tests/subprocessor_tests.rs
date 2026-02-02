@@ -115,10 +115,10 @@ async fn test_domain_extraction_valid_domains() {
     }
 }
 
-#[tokio::test] 
+#[tokio::test]
 async fn test_domain_extraction_filters_placeholders() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Test that placeholder domains are filtered out
     let test_cases = vec![
         "Visit example.com for testing",  // Should be filtered as placeholder
@@ -126,12 +126,221 @@ async fn test_domain_extraction_filters_placeholders() {
         "Our site is yoursite.com",      // Generic placeholder
         "Contact domain.com support",    // Generic placeholder
     ];
-    
+
     for text in test_cases {
         let result = analyzer.extract_domain_from_text(text);
         if let Some(domain) = result {
-            assert!(!analyzer.is_valid_vendor_domain(&domain), 
+            assert!(!analyzer.is_valid_vendor_domain(&domain),
                     "Should have filtered out placeholder domain '{}' from text: '{}'", domain, text);
         }
     }
+}
+
+// =============================================================================
+// F001: Enhanced URL Generation Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_url_generation_includes_new_security_patterns() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // New security/compliance paths from F001 feature spec
+    let security_patterns = vec![
+        "https://acme.com/security/subprocessors",
+        "https://www.acme.com/security/subprocessors",
+        "https://acme.com/compliance/subprocessors",
+        "https://www.acme.com/compliance/subprocessors",
+        "https://acme.com/trust-center/subprocessors",
+        "https://www.acme.com/trust-center/subprocessors",
+    ];
+
+    for pattern in security_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing security pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_legal_variations() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // Legal path variations from F001 feature spec
+    let legal_patterns = vec![
+        "https://acme.com/legal/subprocessors",
+        "https://acme.com/legal/sub-processors",
+        "https://www.acme.com/legal/subprocessors",
+        "https://www.acme.com/legal/sub-processors",
+        "https://acme.com/privacy/subprocessors",
+        "https://www.acme.com/privacy/subprocessors",
+    ];
+
+    for pattern in legal_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing legal pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_data_processing_patterns() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // Data processing/GDPR paths from F001 feature spec
+    let data_patterns = vec![
+        "https://acme.com/data-processing/subprocessors",
+        "https://www.acme.com/data-processing/subprocessors",
+        "https://acme.com/gdpr/subprocessors",
+        "https://www.acme.com/gdpr/subprocessors",
+        "https://acme.com/data-security/subprocessors",
+        "https://www.acme.com/data-security/subprocessors",
+    ];
+
+    for pattern in data_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing data processing pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_third_party_patterns() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // Third-party/vendor paths from F001 feature spec
+    let third_party_patterns = vec![
+        "https://acme.com/third-party/subprocessors",
+        "https://www.acme.com/third-party/subprocessors",
+        "https://acme.com/vendors",
+        "https://www.acme.com/vendors",
+        "https://acme.com/third-party-services",
+        "https://www.acme.com/third-party-services",
+    ];
+
+    for pattern in third_party_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing third-party pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_html_suffixes() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // HTML file suffixes from F001 feature spec
+    let html_patterns = vec![
+        "https://acme.com/subprocessors.html",
+        "https://www.acme.com/subprocessors.html",
+        "https://acme.com/sub-processors.html",
+        "https://www.acme.com/sub-processors.html",
+    ];
+
+    for pattern in html_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing HTML suffix pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_domain_specific_patterns() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("slack.com");
+
+    // Domain-specific pattern: /{domain}-subprocessors
+    // For slack.com, should generate /slack-subprocessors
+    let domain_specific_patterns = vec![
+        "https://slack.com/slack-subprocessors",
+        "https://www.slack.com/slack-subprocessors",
+    ];
+
+    for pattern in domain_specific_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing domain-specific pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_includes_data_sub_processors_pattern() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // data-sub-processors pattern from F001 feature spec
+    let data_sub_patterns = vec![
+        "https://acme.com/data-sub-processors",
+        "https://www.acme.com/data-sub-processors",
+    ];
+
+    for pattern in data_sub_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing data-sub-processors pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_trailing_slash_variations() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("acme.com");
+
+    // Both with and without trailing slashes should be present for key patterns
+    // Check that we have at least some trailing slash variants
+    let trailing_slash_patterns = vec![
+        "https://acme.com/policies/subprocessors/",
+        "https://www.acme.com/policies/subprocessors/",
+    ];
+
+    for pattern in trailing_slash_patterns {
+        assert!(urls.contains(&pattern.to_string()),
+                "Missing trailing slash pattern: {}", pattern);
+    }
+}
+
+#[tokio::test]
+async fn test_url_generation_trust_subdomain_pattern() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("cursor.com");
+
+    // Trust subdomain pattern (e.g., trust.cursor.com)
+    assert!(urls.contains(&"https://trust.cursor.com/subprocessors".to_string()),
+            "Missing trust subdomain pattern: https://trust.cursor.com/subprocessors");
+}
+
+#[tokio::test]
+async fn test_url_generation_prioritizes_successful_patterns() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("testcompany.com");
+
+    // High-priority patterns should appear early in the list
+    // Based on successful cache hits, these patterns work most often:
+    // - /legal/subprocessors
+    // - /subprocessors
+    // - /legal/service-providers
+
+    // Find the index of known successful patterns
+    let legal_subprocessors_idx = urls.iter().position(|u| u == "https://testcompany.com/legal/subprocessors");
+    let root_subprocessors_idx = urls.iter().position(|u| u == "https://testcompany.com/subprocessors");
+
+    // Both should exist
+    assert!(legal_subprocessors_idx.is_some(), "Missing /legal/subprocessors pattern");
+    assert!(root_subprocessors_idx.is_some(), "Missing /subprocessors pattern");
+
+    // They should be in the first 15 URLs (high priority)
+    assert!(legal_subprocessors_idx.unwrap() < 15,
+            "/legal/subprocessors should be in first 15 URLs, but was at index {}",
+            legal_subprocessors_idx.unwrap());
+    assert!(root_subprocessors_idx.unwrap() < 15,
+            "/subprocessors should be in first 15 URLs, but was at index {}",
+            root_subprocessors_idx.unwrap());
+}
+
+#[tokio::test]
+async fn test_url_generation_count_increased() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("testdomain.com");
+
+    // With all the new patterns, we should generate significantly more URLs
+    // Previous was ~70, new should be ~100+
+    assert!(urls.len() >= 80,
+            "Should generate at least 80 URLs for comprehensive coverage, got {}", urls.len());
 }

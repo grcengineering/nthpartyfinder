@@ -9,10 +9,53 @@ use tracing::debug;
 use serde::{Deserialize, Serialize};
 use crate::dns::LogFailure;
 use crate::vendor::RecordType;
+use crate::rate_limit::RateLimitContext;
 use headless_chrome::Browser;
 use fancy_regex::Regex;
 // rayon available if needed for parallel processing
 use std::collections::BTreeMap;
+use once_cell::sync::Lazy;
+
+// Compile CSS selectors once at startup for performance (fixes B015)
+static DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("div").unwrap()
+});
+
+static ALL_ELEMENTS_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("*").unwrap()
+});
+
+static PARAGRAPH_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("p").unwrap()
+});
+
+static HEADER_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("thead tr, tr:first-child").unwrap()
+});
+
+static HEADER_CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("th, td").unwrap()
+});
+
+static DATA_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("tbody tr, tr").unwrap()
+});
+
+static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("td, th").unwrap()
+});
+
+static TH_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("th").unwrap()
+});
+
+static PARAGRAPH_DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("p, div").unwrap()
+});
+
+static TR_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("tr").unwrap()
+});
 
 /// Represents a discovered subprocessor from web page analysis
 #[derive(Debug, Clone)]
@@ -560,21 +603,24 @@ pub struct SubprocessorAnalyzer {
 }
 
 impl SubprocessorAnalyzer {
-    /// Create a new subprocessor analyzer with production-ready defaults
-    pub async fn new() -> Self {
-        let client = reqwest::Client::builder()
+    /// Create HTTP client with production-ready configuration
+    fn create_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
             .timeout(Duration::from_secs(30))  // Increased timeout for slower servers
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")  // Realistic browser user agent
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false)  // Security: reject invalid certificates
             .https_only(true)                    // Security: force HTTPS
             .build()
-            .expect("Failed to create HTTP client");
+            .expect("Failed to create HTTP client")
+    }
 
+    /// Create a new subprocessor analyzer with production-ready defaults
+    pub async fn new() -> Self {
         let cache = SubprocessorCache::load().await;
-        
+
         Self {
-            client,
+            client: Self::create_http_client(),
             cache: Arc::new(RwLock::new(cache)),
             pending_mappings: Arc::new(RwLock::new(Vec::new())),
         }
@@ -582,17 +628,8 @@ impl SubprocessorAnalyzer {
 
     /// Create analyzer with existing cache (for sharing across instances)
     pub fn with_cache(cache: Arc<RwLock<SubprocessorCache>>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))  // Increased timeout for slower servers
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")  // Realistic browser user agent
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .danger_accept_invalid_certs(false)
-            .https_only(true)
-            .build()
-            .expect("Failed to create HTTP client");
-        
         Self {
-            client,
+            client: Self::create_http_client(),
             cache,
             pending_mappings: Arc::new(RwLock::new(Vec::new())),
         }
@@ -620,13 +657,34 @@ impl SubprocessorAnalyzer {
         cache.add_confirmed_mappings(source_domain, confirmed_mappings).await
     }
 
-    /// Analyze a domain for subprocessor pages and extract vendor relationships  
+    /// Analyze a domain for subprocessor pages and extract vendor relationships
     pub async fn analyze_domain(&self, domain: &str, logger: Option<&dyn LogFailure>) -> Result<Vec<SubprocessorDomain>> {
         self.analyze_domain_with_logging(domain, logger, None).await
     }
-    
+
+    /// Analyze a domain with rate limiting support
+    pub async fn analyze_domain_with_rate_limit(
+        &self,
+        domain: &str,
+        logger: Option<&dyn LogFailure>,
+        rate_limit_ctx: Option<&RateLimitContext>,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        self.analyze_domain_with_full_options(domain, logger, None, rate_limit_ctx).await
+    }
+
     /// Analyze a domain with additional debug logging for cache operations
     pub async fn analyze_domain_with_logging(&self, domain: &str, logger: Option<&dyn LogFailure>, debug_logger: Option<&crate::logger::AnalysisLogger>) -> Result<Vec<SubprocessorDomain>> {
+        self.analyze_domain_with_full_options(domain, logger, debug_logger, None).await
+    }
+
+    /// Analyze a domain with all options including rate limiting
+    pub async fn analyze_domain_with_full_options(
+        &self,
+        domain: &str,
+        logger: Option<&dyn LogFailure>,
+        debug_logger: Option<&crate::logger::AnalysisLogger>,
+        rate_limit_ctx: Option<&RateLimitContext>,
+    ) -> Result<Vec<SubprocessorDomain>> {
         if let Some(debug_logger) = &debug_logger {
             debug_logger.debug(&format!("🔍 Starting detailed subprocessor analysis for {}", domain));
         }
@@ -647,6 +705,10 @@ impl SubprocessorAnalyzer {
             }
             
             // Always scrape fresh content from cached URL
+            // Apply HTTP rate limiting before the request
+            if let Some(ctx) = rate_limit_ctx {
+                ctx.http_limiter.acquire(domain).await;
+            }
             let request_start = std::time::Instant::now();
             debug!("🔥🔥🔥 CACHED PATH: ABOUT TO CALL scrape_subprocessor_page for: {}", url);
             match self.scrape_subprocessor_page(&url, logger, domain).await {
@@ -722,11 +784,15 @@ impl SubprocessorAnalyzer {
                 break;
             }
             if let Some(debug_logger) = &debug_logger {
-                debug_logger.debug(&format!("🔗 Checking URL {}/{}: {}", 
+                debug_logger.debug(&format!("🔗 Checking URL {}/{}: {}",
                     url_index + 1, urls_to_test.len(), url));
                 debug_logger.debug(&format!("🚀 Making HTTP request to: {}", url));
             }
-            
+
+            // Apply HTTP rate limiting before each request
+            if let Some(ctx) = rate_limit_ctx {
+                ctx.http_limiter.acquire(domain).await;
+            }
             let request_start = std::time::Instant::now();
             debug!("🔥🔥🔥 ABOUT TO CALL scrape_subprocessor_page for: {}", url);
             match self.scrape_subprocessor_page(&url, logger, domain).await {
@@ -933,18 +999,40 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/vendors", domain),
             format!("https://{}/third-party-vendors", domain),
             format!("https://www.{}/third-party-vendors", domain),
-            
+
+            // F001: Third-party/services patterns
+            format!("https://{}/third-party/subprocessors", domain),
+            format!("https://www.{}/third-party/subprocessors", domain),
+            format!("https://{}/third-party-services", domain),
+            format!("https://www.{}/third-party-services", domain),
+
+            // F001: Compliance section patterns
+            format!("https://{}/compliance/subprocessors", domain),
+            format!("https://www.{}/compliance/subprocessors", domain),
+
+            // F001: Data processing/security patterns
+            format!("https://{}/data-processing/subprocessors", domain),
+            format!("https://www.{}/data-processing/subprocessors", domain),
+            format!("https://{}/data-security/subprocessors", domain),
+            format!("https://www.{}/data-security/subprocessors", domain),
+            format!("https://{}/data-sub-processors", domain),
+            format!("https://www.{}/data-sub-processors", domain),
+
+            // F001: Domain-specific patterns (e.g., /slack-subprocessors for slack.com)
+            format!("https://{}/{}-subprocessors", domain, base_domain.split('.').next().unwrap_or(base_domain)),
+            format!("https://www.{}/{}-subprocessors", domain, base_domain.split('.').next().unwrap_or(base_domain)),
+
             // NEW: Terms section patterns
             format!("https://{}/terms/subprocessors", domain),
             format!("https://www.{}/terms/subprocessors", domain),
             format!("https://{}/terms/subprocessors/", domain),
             format!("https://www.{}/terms/subprocessors/", domain),
-            
+
             // NEW: CDN and asset-based patterns (for companies that host subprocessor lists on CDNs)
             format!("https://content-management-files.{}/assets/subprocessors", base_domain),
             format!("https://assets.{}/subprocessors/list", base_domain),
             format!("https://cdn.{}/legal/subprocessors", base_domain),
-            
+
             // NEW: PDF document patterns (many companies use PDFs)
             format!("https://www.{}/content/dam/legal/documents/Subprocessor-List-2024.pdf", base_domain),
             format!("https://www.{}/content/dam/legal/documents/Subprocessor-List-2023.pdf", base_domain),
@@ -954,9 +1042,174 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/legal/documents/subprocessors.pdf", base_domain),
             format!("https://{}/assets/legal/subprocessor-list.pdf", base_domain),
             format!("https://www.{}/assets/legal/subprocessor-list.pdf", base_domain),
-            
+
             // (Legal subdomain patterns moved to front)
             format!("https://www.{}/en/trust/subprocessors/", base_domain),
+
+            // F001: Additional security and compliance URL patterns
+            format!("https://{}/security/sub-processors", domain),
+            format!("https://www.{}/security/sub-processors", domain),
+            format!("https://{}/security/vendors", domain),
+            format!("https://www.{}/security/vendors", domain),
+            format!("https://{}/security/third-party", domain),
+            format!("https://www.{}/security/third-party", domain),
+
+            // F001: Trust center with various path variations
+            format!("https://{}/trust-center/sub-processors", domain),
+            format!("https://www.{}/trust-center/sub-processors", domain),
+            format!("https://{}/trust-center/vendors", domain),
+            format!("https://www.{}/trust-center/vendors", domain),
+            format!("https://{}/trust-center/third-party", domain),
+            format!("https://www.{}/trust-center/third-party", domain),
+            format!("https://{}/trustcenter/subprocessors", domain),
+            format!("https://www.{}/trustcenter/subprocessors", domain),
+
+            // F001: Trust subdomain patterns (popular pattern)
+            format!("https://trust.{}/sub-processors", base_domain),
+            format!("https://trust.{}/vendors", base_domain),
+            format!("https://trust.{}/third-party", base_domain),
+            format!("https://trust.{}/data-processors", base_domain),
+            format!("https://trust.{}/security/subprocessors", base_domain),
+            format!("https://trust.{}/compliance/subprocessors", base_domain),
+
+            // F001: Compliance page variations
+            format!("https://{}/compliance/sub-processors", domain),
+            format!("https://www.{}/compliance/sub-processors", domain),
+            format!("https://{}/compliance/vendors", domain),
+            format!("https://www.{}/compliance/vendors", domain),
+            format!("https://{}/compliance/third-party-vendors", domain),
+            format!("https://www.{}/compliance/third-party-vendors", domain),
+            format!("https://{}/compliance/data-processors", domain),
+            format!("https://www.{}/compliance/data-processors", domain),
+
+            // F001: GDPR-specific page variations
+            format!("https://{}/gdpr/sub-processors", domain),
+            format!("https://www.{}/gdpr/sub-processors", domain),
+            format!("https://{}/gdpr/vendors", domain),
+            format!("https://www.{}/gdpr/vendors", domain),
+            format!("https://{}/gdpr/third-party", domain),
+            format!("https://www.{}/gdpr/third-party", domain),
+            format!("https://{}/gdpr/data-processors", domain),
+            format!("https://www.{}/gdpr/data-processors", domain),
+
+            // F001: Privacy section variations
+            format!("https://{}/privacy/sub-processors", domain),
+            format!("https://www.{}/privacy/sub-processors", domain),
+            format!("https://{}/privacy/vendors", domain),
+            format!("https://www.{}/privacy/vendors", domain),
+            format!("https://{}/privacy/third-party", domain),
+            format!("https://www.{}/privacy/third-party", domain),
+            format!("https://{}/privacy/data-processors", domain),
+            format!("https://www.{}/privacy/data-processors", domain),
+            format!("https://{}/privacy-policy/subprocessors", domain),
+            format!("https://www.{}/privacy-policy/subprocessors", domain),
+
+            // F001: Legal section variations (sub-processors with hyphen)
+            format!("https://{}/legal/third-party", domain),
+            format!("https://www.{}/legal/third-party", domain),
+            format!("https://{}/legal/vendors", domain),
+            format!("https://www.{}/legal/vendors", domain),
+            format!("https://{}/legal/data-processors", domain),
+            format!("https://www.{}/legal/data-processors", domain),
+            format!("https://{}/legal/third-party-vendors", domain),
+            format!("https://www.{}/legal/third-party-vendors", domain),
+
+            // F001: About section variations
+            format!("https://{}/about/security", domain),
+            format!("https://www.{}/about/security", domain),
+            format!("https://{}/about/security/subprocessors", domain),
+            format!("https://www.{}/about/security/subprocessors", domain),
+            format!("https://{}/about/compliance", domain),
+            format!("https://www.{}/about/compliance", domain),
+            format!("https://{}/about/privacy", domain),
+            format!("https://www.{}/about/privacy", domain),
+
+            // F001: DPA/Agreement section variations
+            format!("https://{}/dpa/sub-processors", domain),
+            format!("https://www.{}/dpa/sub-processors", domain),
+            format!("https://{}/data-processing-agreement/subprocessors", domain),
+            format!("https://www.{}/data-processing-agreement/subprocessors", domain),
+            format!("https://{}/dpa", domain),  // Sometimes DPA page lists subprocessors inline
+            format!("https://www.{}/dpa", domain),
+
+            // F001: Resources/docs section patterns
+            format!("https://{}/resources/subprocessors", domain),
+            format!("https://www.{}/resources/subprocessors", domain),
+            format!("https://{}/docs/subprocessors", domain),
+            format!("https://www.{}/docs/subprocessors", domain),
+            format!("https://{}/documentation/subprocessors", domain),
+            format!("https://www.{}/documentation/subprocessors", domain),
+            format!("https://docs.{}/subprocessors", base_domain),  // docs subdomain
+            format!("https://docs.{}/legal/subprocessors", base_domain),
+
+            // F001: Help center patterns
+            format!("https://help.{}/subprocessors", base_domain),
+            format!("https://help.{}/legal/subprocessors", base_domain),
+            format!("https://support.{}/subprocessors", base_domain),
+            format!("https://support.{}/legal/subprocessors", base_domain),
+
+            // F001: Info/information section patterns
+            format!("https://{}/info/subprocessors", domain),
+            format!("https://www.{}/info/subprocessors", domain),
+            format!("https://{}/information/subprocessors", domain),
+            format!("https://www.{}/information/subprocessors", domain),
+
+            // F001: Service providers variations (like Stripe uses)
+            format!("https://{}/service-providers", domain),
+            format!("https://www.{}/service-providers", domain),
+            format!("https://{}/legal/service-providers", domain),  // Already exists but adding www
+            format!("https://{}/privacy/service-providers", domain),
+            format!("https://www.{}/privacy/service-providers", domain),
+
+            // F001: Partners/vendors pages that may list subprocessors
+            format!("https://{}/partners/subprocessors", domain),
+            format!("https://www.{}/partners/subprocessors", domain),
+            format!("https://{}/technology-partners", domain),
+            format!("https://www.{}/technology-partners", domain),
+
+            // F001: Enterprise section patterns
+            format!("https://{}/enterprise/subprocessors", domain),
+            format!("https://www.{}/enterprise/subprocessors", domain),
+            format!("https://{}/enterprise/security", domain),
+            format!("https://www.{}/enterprise/security", domain),
+            format!("https://{}/enterprise/compliance", domain),
+            format!("https://www.{}/enterprise/compliance", domain),
+
+            // F001: Processor list variations
+            format!("https://{}/processor-list", domain),
+            format!("https://www.{}/processor-list", domain),
+            format!("https://{}/processors", domain),
+            format!("https://www.{}/processors", domain),
+            format!("https://{}/data-processor-list", domain),
+            format!("https://www.{}/data-processor-list", domain),
+
+            // F001: Additional PDF patterns with more year/date variations
+            format!("https://{}/legal/subprocessors.pdf", domain),
+            format!("https://www.{}/legal/subprocessors.pdf", domain),
+            format!("https://{}/subprocessors.pdf", domain),
+            format!("https://www.{}/subprocessors.pdf", domain),
+            format!("https://{}/legal/sub-processors.pdf", domain),
+            format!("https://www.{}/legal/sub-processors.pdf", domain),
+            format!("https://{}/content/dam/legal/subprocessors.pdf", domain),
+            format!("https://www.{}/content/dam/legal/subprocessors.pdf", domain),
+
+            // F001: Sitemap and robots patterns for discovery
+            format!("https://{}/sitemap.xml", domain),
+            format!("https://www.{}/sitemap.xml", domain),
+
+            // F001: Trailing slash variations for existing patterns
+            format!("https://{}/legal/subprocessors/", domain),
+            format!("https://www.{}/legal/subprocessors/", domain),
+            format!("https://{}/privacy/subprocessors/", domain),
+            format!("https://www.{}/privacy/subprocessors/", domain),
+            format!("https://{}/trust/subprocessors/", domain),
+            format!("https://www.{}/trust/subprocessors/", domain),
+            format!("https://{}/security/subprocessors/", domain),
+            format!("https://www.{}/security/subprocessors/", domain),
+            format!("https://{}/compliance/subprocessors/", domain),
+            format!("https://www.{}/compliance/subprocessors/", domain),
+            format!("https://{}/gdpr/subprocessors/", domain),
+            format!("https://www.{}/gdpr/subprocessors/", domain),
         ]);
         
         urls
@@ -964,15 +1217,33 @@ impl SubprocessorAnalyzer {
 
     /// Scrape a single subprocessor page and extract vendor domains
     pub async fn scrape_subprocessor_page(&self, url: &str, logger: Option<&dyn LogFailure>, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
+        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None).await
+    }
+
+    /// Scrape a single subprocessor page with configurable retry and backoff
+    pub async fn scrape_subprocessor_page_with_retry(
+        &self,
+        url: &str,
+        logger: Option<&dyn LogFailure>,
+        source_domain: &str,
+        rate_limit_ctx: Option<&RateLimitContext>,
+    ) -> Result<Vec<SubprocessorDomain>> {
         debug!("🔥🔥🔥 SCRAPE_SUBPROCESSOR_PAGE CALLED: {}", url);
         debug!("🚀🚀🚀 STARTING DETAILED SCRAPE of subprocessor page: {}", url);
 
-        // Fetch the webpage with retry mechanism (3 attempts max, 10s timeout each)
+        // Get retry configuration from rate_limit_ctx or use defaults
+        let (max_retries, backoff_config) = if let Some(ctx) = rate_limit_ctx {
+            (ctx.config.max_retries, Some(&ctx.config))
+        } else {
+            (3, None) // Default: 3 retries
+        };
+
+        // Fetch the webpage with configurable retry mechanism
         let mut last_error = None;
         let mut response = None;
-        
-        for attempt in 1..=3 {
-            debug!("HTTP request attempt {}/3 for URL: {}", attempt, url);
+
+        for attempt in 1..=max_retries {
+            debug!("HTTP request attempt {}/{} for URL: {}", attempt, max_retries, url);
             match self.client.get(url)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9")
@@ -987,17 +1258,25 @@ impl SubprocessorAnalyzer {
                     break;
                 },
                 Err(e) => {
-                    debug!("HTTP request attempt {}/3 failed for URL {}: {}", attempt, url, e);
+                    debug!("HTTP request attempt {}/{} failed for URL {}: {}", attempt, max_retries, url, e);
                     last_error = Some(e);
-                    if attempt < 3 {
-                        tokio::time::sleep(Duration::from_millis(100)).await; // Brief pause between retries
+                    if attempt < max_retries {
+                        // Calculate backoff delay using config or default
+                        let delay = if let Some(config) = backoff_config {
+                            config.calculate_backoff_delay(attempt)
+                        } else {
+                            // Default: linear backoff starting at 100ms
+                            Duration::from_millis(100 * attempt as u64)
+                        };
+                        debug!("Waiting {:?} before retry attempt {}", delay, attempt + 1);
+                        tokio::time::sleep(delay).await;
                     }
                 }
             }
         }
-        
+
         let response = response.ok_or_else(|| {
-            anyhow::anyhow!("All 3 HTTP attempts failed for URL {}: {}", url, last_error.unwrap())
+            anyhow::anyhow!("All {} HTTP attempts failed for URL {}: {}", max_retries, url, last_error.unwrap())
         })?;
         
         if !response.status().is_success() {
@@ -1042,8 +1321,7 @@ impl SubprocessorAnalyzer {
         debug!("🔥🔥🔥 HTML CONTENT PREVIEW: {}", &content[..std::cmp::min(content.len(), 1000)]);
         
         // Debug: Check for div elements that might contain subprocessor info
-        let div_selector = Selector::parse("div").unwrap();
-        let divs: Vec<_> = document.select(&div_selector).collect();
+        let divs: Vec<_> = document.select(&DIV_SELECTOR).collect();
         debug!("🔥🔥🔥 Found {} div elements total", divs.len());
         
         // Check for specific div patterns that might contain subprocessors
@@ -1339,7 +1617,7 @@ impl SubprocessorAnalyzer {
 
                 // Only fall back to generic * selector if no content found in focused areas
                 if !found_in_content {
-                    for text_element in document.select(&Selector::parse("*").unwrap()) {
+                    for text_element in document.select(&ALL_ELEMENTS_SELECTOR) {
                         // Skip navigation containers
                         if self.is_in_navigation_container(&text_element) {
                             continue;
@@ -1909,13 +2187,12 @@ impl SubprocessorAnalyzer {
             adaptive_patterns: None,
         };
         
-        // Check for subprocessor context using cached patterns  
+        // Check for subprocessor context using cached patterns
         debug!("🚀🚀🚀 STARTING CONTEXT DETECTION");
         debug!("🔥🔥🔥 STARTING CONTEXT DETECTION - looking for subprocessor indicators");
-        let paragraph_selector = Selector::parse("p").unwrap();
         let mut found_subprocessor_context = false;
-        
-        let paragraphs: Vec<_> = document.select(&paragraph_selector).collect();
+
+        let paragraphs: Vec<_> = document.select(&PARAGRAPH_SELECTOR).collect();
         debug!("🚀🚀🚀 Found {} paragraph elements for context detection", paragraphs.len());
         debug!("🔥🔥🔥 Found {} paragraph elements to search for context", paragraphs.len());
         
@@ -1964,13 +2241,13 @@ impl SubprocessorAnalyzer {
                     let mut entity_name_column = 0; // Default to first column
                     
                     // Look for table headers to identify the correct column for entity names
-                    let header_rows: Vec<_> = table.select(&Selector::parse("thead tr, tr:first-child").unwrap()).collect();
+                    let header_rows: Vec<_> = table.select(&HEADER_ROW_SELECTOR).collect();
                     debug!("🔍 Found {} header row(s)", header_rows.len());
-                    
+
                     if !header_rows.is_empty() {
                         let first_header_row = header_rows[0];
                         // Handle both <th> and <td> headers (some sites use <td> for headers)
-                        let headers: Vec<_> = first_header_row.select(&Selector::parse("th, td").unwrap()).collect();
+                        let headers: Vec<_> = first_header_row.select(&HEADER_CELL_SELECTOR).collect();
                         debug!("📋 Found {} header cell(s) in first row", headers.len());
                         
                         // Log all header texts for debugging
@@ -2008,16 +2285,12 @@ impl SubprocessorAnalyzer {
                     }
                     
                     // Process data rows
-                    let row_selector = Selector::parse("tbody tr, tr").unwrap();
-                    let cell_selector = Selector::parse("td, th").unwrap();
-                    let header_selector = Selector::parse("th").unwrap();
-                    
-                    let all_rows: Vec<_> = table.select(&row_selector).collect();
+                    let all_rows: Vec<_> = table.select(&DATA_ROW_SELECTOR).collect();
                     debug!("🔍 Found {} total rows in table", all_rows.len());
-                    
+
                     for (row_index, row) in all_rows.iter().enumerate() {
-                        let cells: Vec<_> = row.select(&cell_selector).collect();
-                        let has_th_elements = row.select(&header_selector).next().is_some();
+                        let cells: Vec<_> = row.select(&CELL_SELECTOR).collect();
+                        let has_th_elements = row.select(&TH_SELECTOR).next().is_some();
                         
                         debug!("🔍 Row {}: {} cells, has_th_elements={}", row_index, cells.len(), has_th_elements);
                         
@@ -2117,10 +2390,9 @@ impl SubprocessorAnalyzer {
         let mut vendors = Vec::new();
         
         // Check for subprocessor context using cached patterns
-        let paragraph_selector = Selector::parse("p").unwrap();
         let mut found_subprocessor_context = false;
-        
-        for paragraph in document.select(&paragraph_selector) {
+
+        for paragraph in document.select(&PARAGRAPH_SELECTOR) {
             let text = paragraph.text().collect::<String>().to_lowercase();
             for context_pattern in &patterns.context_patterns {
                 if text.contains(context_pattern) {
@@ -2463,10 +2735,9 @@ impl SubprocessorAnalyzer {
         }
 
         // Strategy 1: Extract from paragraph text containing common company patterns
-        let paragraph_selector = Selector::parse("p, div").unwrap();
-        for paragraph in document.select(&paragraph_selector) {
+        for paragraph in document.select(&PARAGRAPH_DIV_SELECTOR) {
             let text = paragraph.text().collect::<String>();
-            
+
             // More precise company name patterns that include proper business suffixes
             let company_patterns = vec![
                 // Standard business suffixes with more specific patterns
@@ -2792,8 +3063,8 @@ impl SubprocessorAnalyzer {
                     // Analyze table structure
                     if let Ok(td_selector) = scraper::Selector::parse("td") {
                         let mut column_analysis = std::collections::HashMap::new();
-                        
-                        for (_row_idx, row) in table.select(&scraper::Selector::parse("tr").unwrap()).enumerate() {
+
+                        for (_row_idx, row) in table.select(&TR_SELECTOR).enumerate() {
                             for (col_idx, cell) in row.select(&td_selector).enumerate() {
                                 let cell_text = cell.text().collect::<String>().trim().to_string();
                                 

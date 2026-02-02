@@ -1,30 +1,66 @@
 # =============================================================================
-# nthpartyfinder Configuration
+# nthpartyfinder Configuration File
 # =============================================================================
-# This file contains all configurable settings for nthpartyfinder.
-# Location: ./config/nthpartyfinder.toml
 #
-# Docker usage: Mount this directory as a volume
+# This file contains all configurable settings for nthpartyfinder.
+#
+# LOCATION:
+#   Default location: ./config/nthpartyfinder.toml (relative to working directory)
+#   Create with: nthpartyfinder --init
+#
+# CONFIGURATION SEARCH PATH:
+#   nthpartyfinder looks for configuration in this order:
+#   1. ./config/nthpartyfinder.toml (current working directory)
+#
+# CLI OVERRIDES:
+#   Most settings can be overridden via command line arguments.
+#   CLI arguments take precedence over config file values.
+#   See: nthpartyfinder --help
+#
+# DOCKER USAGE:
+#   Mount this directory as a volume to use your custom configuration:
 #   docker run -v /host/config:/app/config nthpartyfinder ...
+#
 # =============================================================================
 
 # =============================================================================
-# HTTP Client Settings
+# [http] - HTTP Client Settings
 # =============================================================================
+# Controls how nthpartyfinder makes HTTP requests for web page analysis,
+# subprocessor page fetching, and organization name extraction.
+
 [http]
 # User-Agent header sent with all HTTP requests
+# Identifies the tool to web servers (some servers block unknown user agents)
+# Format: "tool-name/version (optional description)"
+# Tip: Some sites require a browser-like user agent for access
 user_agent = "nthpartyfinder/1.0 (Security Research Tool)"
 
 # Default timeout for HTTP requests in seconds
+# Applies to all HTTP requests unless a more specific timeout is set
+# Higher values are more tolerant of slow servers but delay overall analysis
+# Recommended: 15-60 seconds depending on network conditions
 request_timeout_secs = 30
 
 # =============================================================================
-# DNS Configuration
+# [dns] - DNS Configuration
 # =============================================================================
+# Controls DNS resolution for analyzing vendor domains.
+# nthpartyfinder uses both DNS-over-HTTPS (DoH) and traditional DNS servers.
+
 [dns]
 
-# DNS-over-HTTPS servers (tried in order until one succeeds)
-# These are used for secure, encrypted DNS lookups
+# -----------------------------------------------------------------------------
+# DNS-over-HTTPS (DoH) Servers
+# -----------------------------------------------------------------------------
+# DoH provides encrypted DNS lookups, protecting query privacy.
+# Servers are tried in order until one succeeds.
+# At least one DoH or traditional DNS server must be configured.
+#
+# Each entry requires:
+#   - name: Human-readable identifier for logs
+#   - url: Full HTTPS URL to the DoH endpoint (must start with https://)
+#   - timeout_secs: Request timeout for this specific server
 
 [[dns.doh_servers]]
 name = "Cloudflare DoH"
@@ -46,8 +82,16 @@ name = "OpenDNS DoH"
 url = "https://doh.opendns.com/dns-query"
 timeout_secs = 4
 
-# Traditional DNS servers (fallback when DoH fails)
-# Format: "ip:port"
+# -----------------------------------------------------------------------------
+# Traditional DNS Servers (Fallback)
+# -----------------------------------------------------------------------------
+# Used when DoH servers fail or are unavailable.
+# Format: "ip:port" (typically port 53 for DNS)
+#
+# Each entry requires:
+#   - name: Human-readable identifier for logs
+#   - address: IP address and port in "ip:port" format
+#   - timeout_secs: Query timeout for this specific server
 
 [[dns.dns_servers]]
 name = "Cloudflare"
@@ -70,68 +114,94 @@ address = "208.67.222.222:53"
 timeout_secs = 3
 
 # =============================================================================
-# Regex Patterns for Dynamic TXT Record Parsing
+# [patterns.regex] - Regex Patterns for Dynamic TXT Record Parsing
 # =============================================================================
 # These patterns extract vendor names from unknown/new verification records.
 # They enable discovery of new vendors without requiring code changes.
-# All patterns use Rust regex syntax.
+#
+# All patterns use Rust regex syntax: https://docs.rs/regex/latest/regex/#syntax
+#
+# HOW IT WORKS:
+# When a TXT record doesn't match any static verification pattern (below),
+# these regex patterns attempt to extract the provider name dynamically.
+# The extracted name is then resolved to a domain using provider_mappings.
 
 [patterns.regex]
 
-# Strips SPF macro variables (e.g., %{ir}.%{v}.domain.com -> domain.com)
+# Strips SPF macro variables before domain extraction
+# Example: "%{ir}.%{v}.domain.com" -> "domain.com"
+# SPF macros: %{d}, %{i}, %{p}, %{v}, etc.
 spf_macro_strip = '%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?'
 
-# Matches: {provider}-domain-verification= or {provider}-verification=
+# Pattern: {provider}-domain-verification= or {provider}-verification=
+# Example: "anthropic-domain-verification=xyz" captures "anthropic"
+# Example: "slack-verification=abc123" captures "slack"
 # Captures: provider name (group 1)
 domain_verification = '([a-zA-Z0-9]+)(?:-domain)?-verification='
 
-# Matches: verification-{provider}=
+# Pattern: verification-{provider}=
+# Example: "verification-mailchimp=abc123" captures "mailchimp"
 # Captures: provider name (group 1)
 verification_prefix = 'verification-([a-zA-Z0-9]+)='
 
-# Matches: {provider}-site-verification=
+# Pattern: {provider}-site-verification=
+# Example: "google-site-verification=xyz" captures "google"
 # Captures: provider name (group 1)
 site_verification = '([a-zA-Z0-9]+)-site-verification='
 
-# Matches: {PROVIDER}_verify_ (e.g., ZOOM_verify_)
+# Pattern: {PROVIDER}_verify_ (uppercase with underscore)
+# Example: "ZOOM_verify_abc123" captures "ZOOM"
 # Captures: provider name (group 1)
 provider_verify = '([A-Z0-9]+)_verify_'
 
-# Validates extracted domain format
+# Validates that extracted domains have a valid format
+# Used to filter out malformed or obviously invalid domain extractions
+# Allows: alphanumeric, hyphens, underscores, and dots
 domain_validation = '^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$'
 
 # =============================================================================
-# Static Verification Patterns
+# [patterns.verification] - Static Verification Patterns
 # =============================================================================
 # Maps known TXT record prefixes directly to vendor domains.
 # Used for exact-match lookups (faster than regex for known vendors).
+#
 # Format: "pattern" = "domain"
 #
-# The pattern is matched against the beginning of TXT records.
-# When matched, the record is attributed to the specified domain.
+# HOW IT WORKS:
+# The pattern is matched against the beginning of TXT records (prefix match).
+# When matched, the record is attributed to the specified vendor domain.
+#
+# EXAMPLES:
+#   TXT record: "google-site-verification=abc123xyz"
+#   Pattern: "google-site-verification=" = "google.com"
+#   Result: Record attributed to google.com
+#
+# ADD NEW VENDORS:
+# To add a new vendor, identify their TXT record prefix and add:
+#   "vendor-verification-prefix=" = "vendor.com"
 
 [patterns.verification]
-# Major platforms
+# ----- Major Platforms -----
 "google-site-verification=" = "google.com"
 "facebook-domain-verification=" = "facebook.com"
 "MS=" = "microsoft.com"
 "apple-domain-verification=" = "apple.com"
 "adobe-idp-site-verification=" = "adobe.com"
 
-# Payment & Finance
+# ----- Payment & Finance -----
 "stripe-verification=" = "stripe.com"
 "docusign=" = "docusign.com"
 
-# Security & Certificates
+# ----- Security & Certificates -----
 "globalsign-domain-verification=" = "globalsign.com"
 "have-i-been-pwned-verification=" = "haveibeenpwned.com"
 
-# Cloud & Infrastructure
+# ----- Cloud & Infrastructure -----
 "dropbox-domain-verification=" = "dropbox.com"
 "heroku-domain-verification=" = "heroku.com"
 "atlassian-domain-verification=" = "atlassian.com"
 
-# Communication & Collaboration
+# ----- Communication & Collaboration -----
 "ZOOM_verify_" = "zoom.us"
 "zoom-domain-verification=" = "zoom.us"
 "slack-domain-verification=" = "slack.com"
@@ -140,76 +210,86 @@ domain_validation = '^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\
 "notion-domain-verification=" = "notion.so"
 "wework-site-verification=" = "wework.com"
 
-# Developer Tools
+# ----- Developer Tools -----
 "browserstack-domain-verification=" = "browserstack.com"
 "cursor-domain-verification" = "cursor.com"
 "postman-domain-verification=" = "postman.com"
 "jetbrains-domain-verification=" = "jetbrains.com"
 
-# Marketing & Analytics
+# ----- Marketing & Analytics -----
 "hubspot-domain-verification=" = "hubspot.com"
 "klaviyo-site-verification=" = "klaviyo.com"
 "drift-domain-verification=" = "drift.com"
 "canva-site-verification=" = "canva.com"
 
-# AI & ML
+# ----- AI & ML Platforms -----
 "openai-domain-verification=" = "openai.com"
 "anthropic-domain-verification" = "anthropic.com"
 "gc-ai-domain-verification" = "gc-ai.com"
 
-# Privacy & Compliance
+# ----- Privacy & Compliance -----
 "onetrust-domain-verification=" = "onetrust.com"
 "datadome-domain-verify=" = "datadome.co"
 
-# Email Services
+# ----- Email Services -----
 "mgverify=" = "mailgun.com"
 
-# Device Management
+# ----- Device Management -----
 "jamf-site-verification=" = "jamf.com"
 
-# Other Services
+# ----- Other Services -----
 "intacct-esk=" = "sage.com"
 "neat-pulse-domain-verification" = "neat.co"
 "<whimsical=" = "whimsical.com"
 
 # =============================================================================
-# Provider Name to Domain Mappings
+# [patterns.provider_mappings] - Provider Name to Domain Mappings
 # =============================================================================
 # Used by dynamic regex extraction: when a regex captures a provider name
 # (e.g., "anthropic" from "anthropic-domain-verification=xyz"), this mapping
 # resolves it to the vendor's actual domain (e.g., "anthropic.com").
 #
 # Format: provider_name = "domain"
-# Provider names should be lowercase.
+# Provider names should be lowercase (case-insensitive matching is used).
+#
+# EXAMPLES:
+#   Regex extracts: "anthropic" from "anthropic-domain-verification=xyz"
+#   Mapping: anthropic = "anthropic.com"
+#   Result: Record attributed to anthropic.com
+#
+# ADD NEW MAPPINGS:
+# When a new vendor is discovered via regex but has an unusual domain:
+#   vendorname = "vendor-actual-domain.com"
 
 [patterns.provider_mappings]
-# Major platforms
+# ----- Major Platforms -----
 google = "google.com"
 microsoft = "microsoft.com"
 apple = "apple.com"
 facebook = "facebook.com"
 adobe = "adobe.com"
 
-# Cloud providers (aliases)
+# ----- Cloud Providers (aliases) -----
+# These map common abbreviations to their parent companies
 aws = "amazon.com"
 gcp = "google.com"
 azure = "microsoft.com"
 
-# Payment & Finance
+# ----- Payment & Finance -----
 stripe = "stripe.com"
 docusign = "docusign.com"
 
-# Security & Certificates
+# ----- Security & Certificates -----
 globalsign = "globalsign.com"
 
-# Cloud & Infrastructure
+# ----- Cloud & Infrastructure -----
 dropbox = "dropbox.com"
 heroku = "heroku.com"
 atlassian = "atlassian.com"
 salesforce = "salesforce.com"
 shopify = "shopify.com"
 
-# Communication & Collaboration
+# ----- Communication & Collaboration -----
 zoom = "zoom.us"
 slack = "slack.com"
 webex = "webex.com"
@@ -218,150 +298,434 @@ notion = "notion.so"
 wework = "wework.com"
 whimsical = "whimsical.com"
 
-# Developer Tools
+# ----- Developer Tools -----
 browserstack = "browserstack.com"
 cursor = "cursor.com"
 postman = "postman.com"
 jetbrains = "jetbrains.com"
 
-# Marketing & Analytics
+# ----- Marketing & Analytics -----
 hubspot = "hubspot.com"
 klaviyo = "klaviyo.com"
 drift = "drift.com"
 canva = "canva.com"
 zendesk = "zendesk.com"
 
-# AI & ML
+# ----- AI & ML Platforms -----
 openai = "openai.com"
 anthropic = "anthropic.com"
 
-# Privacy & Compliance
+# ----- Privacy & Compliance -----
 onetrust = "onetrust.com"
 datadome = "datadome.co"
 
-# Email Services
+# ----- Email Services -----
 mailgun = "mailgun.com"
 
-# Device Management
+# ----- Device Management -----
 jamf = "jamf.com"
 
-# Other Services
+# ----- Other Services -----
 intacct = "sage.com"
 neat = "neat.co"
 
 # =============================================================================
-# Analysis Resource Management
+# [analysis] - Analysis Resource Management
 # =============================================================================
 # Controls how nthpartyfinder manages resources during recursive vendor analysis.
-# These settings prevent overwhelming target servers and local system resources.
+# These settings prevent overwhelming target servers and manage local resources.
+#
+# The analysis process discovers vendors recursively:
+#   Depth 1: Direct vendors of your target domain
+#   Depth 2: Vendors of your vendors (4th parties)
+#   Depth 3: Vendors of 4th parties (5th parties)
+#   And so on...
 
 [analysis]
-# Resource management strategy
+
+# Resource management strategy - determines how vendor processing is limited
+#
 # Options:
-#   "unlimited" - Process ALL vendors at every depth (uses concurrency/rate limiting)
-#   "limits"    - Apply hard vendor count limits per depth (original behavior)
-#   "budget"    - Stop after processing a total number of vendors across all depths
+#   "unlimited" - Process ALL discovered vendors at every depth
+#                 Only limited by concurrency and rate settings
+#                 Best for: Complete analysis when you need full visibility
+#                 Warning: Can take a long time for domains with many vendors
+#
+#   "limits"    - Apply hard vendor count limits per depth level
+#                 Uses vendor_limits_per_depth setting
+#                 Best for: Controlled analysis with predictable runtime
+#
+#   "budget"    - Stop after processing a total number of vendors
+#                 Uses total_vendor_budget setting across all depths
+#                 Best for: Time-boxed analysis with resource constraints
 strategy = "unlimited"
 
 # Maximum concurrent vendor analyses at each depth level
-# Lower values = less resource usage but slower execution
+# Controls how many vendors are analyzed simultaneously at each depth
+#
 # Format: [depth_1, depth_2, depth_3, depth_4_plus]
-# Example: [50, 20, 10, 5] means 50 concurrent at depth 1, 20 at depth 2, etc.
+# Values: Higher = faster but more resource usage
+#
+# Example: [50, 20, 10, 5] means:
+#   - Depth 1: 50 concurrent analyses
+#   - Depth 2: 20 concurrent analyses
+#   - Depth 3: 10 concurrent analyses
+#   - Depth 4+: 5 concurrent analyses
+#
+# Recommendations:
+#   - Fast machine, good network: [100, 50, 25, 10]
+#   - Normal usage: [50, 20, 10, 5]
+#   - Limited resources: [20, 10, 5, 3]
 concurrency_per_depth = [50, 20, 10, 5]
 
 # Delay between starting new vendor analyses (milliseconds)
-# Helps prevent overwhelming target servers and reduces local resource spikes
-# Set to 0 for no delay (fastest but most resource-intensive)
+# Prevents overwhelming target servers with rapid-fire requests
+# Also reduces local resource spikes (memory, CPU, network)
+#
+# Values:
+#   0    = No delay (fastest, highest resource usage)
+#   50   = Light throttling
+#   100  = Normal (recommended)
+#   250+ = Gentle on servers, slower analysis
 request_delay_ms = 100
 
+# Maximum vendors to process at each depth level
 # Only used when strategy = "limits"
-# Maximum vendors to process at each depth level (0 = no limit for that depth)
+#
 # Format: [depth_1, depth_2, depth_3, depth_4_plus]
+# Value 0 = no limit for that depth
+#
+# Example: [0, 20, 10, 5] means:
+#   - Depth 1: No limit (process all direct vendors)
+#   - Depth 2: Maximum 20 vendors
+#   - Depth 3: Maximum 10 vendors
+#   - Depth 4+: Maximum 5 vendors per depth
 vendor_limits_per_depth = [0, 20, 10, 5]
 
-# Only used when strategy = "budget"
 # Maximum total vendors to process across ALL depth levels combined
-# Once this limit is reached, no new vendors are processed
+# Only used when strategy = "budget"
+#
+# Once this limit is reached, no new vendors are queued for processing
+# Already-running analyses complete, but no new ones start
+#
+# Recommendations:
+#   - Quick scan: 50-100
+#   - Normal analysis: 200-500
+#   - Deep analysis: 1000+
 total_vendor_budget = 200
 
 # =============================================================================
-# Discovery Features
+# [discovery] - Discovery Features
 # =============================================================================
 # Optional features for discovering additional vendor relationships through
-# subdomain enumeration and SaaS tenant probing.
+# various methods beyond basic DNS TXT record analysis.
+#
+# These features can be enabled/disabled independently and provide
+# different types of vendor discovery capabilities.
 
 [discovery]
-# Enable subprocessor web page analysis for enhanced vendor discovery
-# When enabled, fetches and analyzes vendor subprocessor/third-party pages
-# to discover additional vendor relationships not visible in DNS records
+
+# -----------------------------------------------------------------------------
+# Subprocessor Web Page Analysis
+# -----------------------------------------------------------------------------
+# Fetches and analyzes vendor subprocessor/third-party pages to discover
+# additional vendor relationships not visible in DNS records.
+#
+# How it works:
+#   1. Looks for known subprocessor page URLs for each vendor
+#   2. Fetches the page content
+#   3. Extracts vendor names using NER and pattern matching
+#   4. Adds discovered vendors to the analysis
+#
 # Default: true (enabled)
+# CLI override: --enable-subprocessor-analysis / --disable-subprocessor-analysis
 subprocessor_enabled = true
 
-# Enable subdomain discovery via subfinder
-# When enabled, runs subfinder against discovered vendor domains to find
-# additional subdomains that may reveal more third-party relationships
-# Default: false (disabled)
+# -----------------------------------------------------------------------------
+# Subdomain Discovery (via subfinder)
+# -----------------------------------------------------------------------------
+# Uses the external tool 'subfinder' to discover subdomains of vendor domains.
+# Subdomains can reveal additional third-party relationships.
+#
+# Prerequisites:
+#   - Install subfinder: https://github.com/projectdiscovery/subfinder
+#   - Ensure it's in your PATH or specify the path below
+#
+# Default: false (disabled - requires external tool)
+# CLI override: --enable-subdomain-discovery / --disable-subdomain-discovery
 subdomain_enabled = true
 
 # Path to the subfinder binary
 # Can be an absolute path or just "subfinder" if it's in your PATH
-# Default: "subfinder"
+#
+# Examples:
+#   "subfinder"                    - Use PATH
+#   "/usr/local/bin/subfinder"     - Linux/macOS absolute path
+#   "C:\\tools\\subfinder.exe"     - Windows absolute path
 subfinder_path = "subfinder"
 
 # Timeout for subfinder execution in seconds
 # Subfinder can take a while for domains with many subdomains
-# Default: 300 (5 minutes)
+# Increase for domains with extensive subdomain infrastructure
+#
+# Recommendations:
+#   - Normal domains: 300 (5 minutes)
+#   - Large domains: 600-900 (10-15 minutes)
 subfinder_timeout_secs = 300
 
-# Enable SaaS tenant discovery
-# When enabled, probes known SaaS platforms to discover if the target
-# organization has active tenants (e.g., checking for okta.com/mycompany)
+# -----------------------------------------------------------------------------
+# SaaS Tenant Discovery
+# -----------------------------------------------------------------------------
+# Probes known SaaS platforms to discover if the target organization has
+# active tenants. This reveals vendor relationships not visible in DNS.
+#
+# How it works:
+#   1. Takes the organization name from the target domain
+#   2. Probes SaaS platforms for tenant patterns (e.g., okta.com/{org})
+#   3. Checks for valid responses indicating an active tenant
+#
 # Default: false (disabled)
+# CLI override: --enable-saas-tenant-discovery / --disable-saas-tenant-discovery
 saas_tenant_enabled = true
 
 # Timeout for tenant probe HTTP requests in seconds
 # Each probe makes an HTTP request to check for tenant existence
-# Default: 10
+#
+# Lower values = faster but may miss slow-responding servers
+# Higher values = more thorough but slower overall
 tenant_probe_timeout_secs = 10
 
 # Maximum concurrent tenant probe requests
-# Higher values speed up probing but use more resources
-# Default: 20
+# Controls how many SaaS platforms are probed simultaneously
+#
+# Higher values = faster probing but more resource usage
+# Lower values = slower but gentler on network and target servers
 tenant_probe_concurrency = 20
 
-# Enable web page analysis for organization name extraction
-# When enabled, fetches vendor homepages to extract organization names from:
-# - Schema.org JSON-LD structured data
-# - OpenGraph meta tags (og:site_name)
-# - HTML meta tags (author, application-name)
-# - Title tag patterns
-# - Copyright/footer notices
+# -----------------------------------------------------------------------------
+# Certificate Transparency (CT) Log Discovery
+# -----------------------------------------------------------------------------
+# Queries Certificate Transparency logs to discover SSL certificates issued
+# for vendor domains. This can reveal subdomains and related domains.
+#
+# Default: false (disabled)
+# CLI override: --enable-ct-discovery / --disable-ct-discovery
+ct_discovery_enabled = false
+
+# Timeout for CT log queries in seconds
+# CT log APIs can be slow; increase if queries frequently timeout
+ct_timeout_secs = 30
+
+# -----------------------------------------------------------------------------
+# Web Page Organization Extraction
+# -----------------------------------------------------------------------------
+# Fetches vendor homepages to extract organization names when WHOIS fails.
+# Uses multiple extraction methods for reliability.
+#
+# Extraction methods (in order of confidence):
+#   1. Schema.org JSON-LD structured data
+#   2. OpenGraph meta tags (og:site_name)
+#   3. HTML meta tags (author, application-name)
+#   4. Title tag patterns
+#   5. Copyright/footer notices
+#
 # Default: true (enabled)
+# CLI override: --enable-web-org / --disable-web-org
 web_org_enabled = true
 
 # Timeout for web org lookup requests in seconds
-# Default: 10
 web_org_timeout_secs = 10
 
 # Minimum confidence level (0.0-1.0) for web org extraction to be accepted
-# Higher values = more reliable but fewer matches
-# Recommended: 0.6 for balanced accuracy
-# Default: 0.6
+# Higher values = more reliable matches but fewer total matches
+#
+# Recommendations:
+#   0.4 = Accept most extractions (may include false positives)
+#   0.6 = Balanced accuracy (recommended)
+#   0.8 = High confidence only (may miss valid extractions)
 web_org_min_confidence = 0.6
 
-# =============================================================================
-# Embedded NER Organization Extraction
-# =============================================================================
-# Uses GLiNER (embedded at compile time) for organization name extraction.
-# Requires the binary to be compiled with --features embedded-ner
-# No external service required - model is embedded in the binary.
-
-# Enable NER-based organization extraction
-# Only works when binary is compiled with --features embedded-ner
-# Default: true (enabled when available)
+# -----------------------------------------------------------------------------
+# NER (Named Entity Recognition) Organization Extraction
+# -----------------------------------------------------------------------------
+# Uses GLiNER model (embedded at compile time) for intelligent organization
+# name extraction from text. Works completely offline.
+#
+# Requirements:
+#   - Binary must be compiled with --features embedded-ner
+#   - Model files are embedded (~175MB binary size increase)
+#
+# Default: true (enabled when feature is compiled in)
+# CLI override: --enable-slm / --disable-slm
 ner_enabled = true
 
 # Minimum confidence level (0.0-1.0) for NER extraction
-# Higher values = more reliable but fewer matches
-# Default: 0.6
+# The NER model assigns confidence scores to extracted entities
+#
+# Recommendations:
+#   0.4 = Accept most extractions
+#   0.6 = Balanced (recommended)
+#   0.8 = High confidence only
 ner_min_confidence = 0.6
+
+# -----------------------------------------------------------------------------
+# WHOIS Organization Lookup
+# -----------------------------------------------------------------------------
+# Controls concurrent WHOIS queries for organization name resolution.
+# WHOIS servers are rate-limited and may block excessive queries.
+
+# Maximum concurrent WHOIS/organization lookups
+# Limits parallel WHOIS queries to avoid overwhelming servers
+#
+# Recommendations:
+#   3-5  = Conservative (avoids rate limiting)
+#   5-10 = Normal usage
+#   10+  = Fast but may trigger rate limits
+#
+# CLI override: --whois-concurrency <N>
+whois_concurrency = 5
+
+# =============================================================================
+# [rate_limits] - Rate Limiting Configuration
+# =============================================================================
+# Controls request rates to prevent overwhelming servers and getting blocked.
+# These limits apply to DNS queries and HTTP requests made during analysis.
+#
+# Rate limiting protects:
+#   - Target servers from being overwhelmed
+#   - Your IP from being blocked by target servers
+#   - DNS resolvers from rejecting your queries
+
+[rate_limits]
+
+# Maximum DNS queries per second
+# Applies to all DNS lookups (both DoH and traditional DNS)
+#
+# Values:
+#   0   = Unlimited (not recommended)
+#   50  = Normal (recommended)
+#   100 = Aggressive (may trigger rate limits)
+#
+# CLI override: --dns-rate-limit <QPS>
+dns_queries_per_second = 50
+
+# Maximum HTTP requests per second per domain
+# Applies to web page fetching (subprocessor pages, org extraction)
+# Limit is per-domain, not global, so different domains can be fetched in parallel
+#
+# Values:
+#   0  = Unlimited (not recommended)
+#   10 = Normal (recommended)
+#   20 = Aggressive (may trigger rate limits or blocking)
+#
+# CLI override: --http-rate-limit <RPS>
+http_requests_per_second = 10
+
+# Maximum WHOIS queries per second
+# WHOIS servers are very rate-sensitive and may block rapid queries
+# This limit is global (not per-server) to prevent IP-based rate limiting
+#
+# Values:
+#   0 = Unlimited (not recommended - WHOIS servers will likely block you)
+#   2 = Conservative (recommended - avoids most rate limiting)
+#   5 = Aggressive (may trigger blocks on some WHOIS servers)
+#
+# Note: No CLI override available - set in config file only
+whois_queries_per_second = 2
+
+# Backoff strategy for retries when requests fail
+# Determines how wait times increase between retry attempts
+#
+# Options:
+#   "linear"      - Wait time = base_delay * attempt_number
+#                   Example: 1s, 2s, 3s, 4s, 5s...
+#                   Predictable, good for transient failures
+#
+#   "exponential" - Wait time = base_delay * 2^(attempt_number - 1)
+#                   Example: 1s, 2s, 4s, 8s, 16s...
+#                   Backs off quickly, good for rate limiting
+#
+# CLI override: --backoff-strategy <linear|exponential>
+backoff_strategy = "exponential"
+
+# Maximum retry attempts for failed requests
+# After this many attempts, the request is abandoned and marked as failed
+#
+# Recommendations:
+#   2-3 = Normal (fast failure)
+#   5   = Persistent (handles intermittent issues)
+#
+# CLI override: --max-retries <COUNT>
+max_retries = 3
+
+# Base delay for backoff in milliseconds
+# This is the initial wait time before the first retry
+#
+# For linear: wait = base_delay * attempt
+# For exponential: wait = base_delay * 2^(attempt-1)
+backoff_base_delay_ms = 1000
+
+# Maximum delay for backoff in milliseconds
+# Caps the exponential growth to prevent extremely long waits
+# After reaching this cap, all subsequent retries use this delay
+#
+# Recommendations:
+#   10000  = 10 seconds (fast retry cycle)
+#   30000  = 30 seconds (normal)
+#   60000  = 60 seconds (patient)
+backoff_max_delay_ms = 30000
+
+# =============================================================================
+# [organization] - Organization Name Normalization
+# =============================================================================
+# Controls how company/organization names are standardized and deduplicated.
+# This helps merge duplicate vendors with different name formats.
+#
+# Normalization automatically handles:
+# - Corporate suffixes: Inc., Inc, LLC, Ltd., GmbH, Corp., etc.
+# - Case variations: GOOGLE vs Google vs google
+# - Punctuation: O'Reilly vs OReilly vs O Reilly
+# - "The" prefix: The New York Times -> New York Times
+# - Ampersand: AT&T vs AT and T
+
+[organization]
+
+# Enable organization name normalization during analysis
+# When enabled, vendor names are normalized before comparison
+# This reduces duplicate entries in results
+#
+# Default: true
+enabled = true
+
+# Fuzzy matching similarity threshold (0.0 - 1.0)
+# Names with similarity above this threshold are considered the same
+#
+# Values:
+#   0.90 = Very strict (only near-identical names match)
+#   0.85 = Recommended (catches common variations)
+#   0.80 = Relaxed (may catch false positives)
+#
+# Default: 0.85
+similarity_threshold = 0.85
+
+# =============================================================================
+# [organization.aliases] - Manual Organization Aliases
+# =============================================================================
+# Override automatic normalization with known aliases.
+# Use this for abbreviations, ticker symbols, or common alternate names.
+#
+# Format: alias = "Canonical Name"
+# Aliases are case-insensitive (AWS, Aws, aws all match)
+#
+# Built-in aliases include common ones like:
+#   MSFT -> Microsoft
+#   AWS -> Amazon Web Services
+#   GOOG -> Google
+#
+# Add your own below to extend or override the built-in mappings:
+
+[organization.aliases]
+# Examples (uncomment to use):
+# acme = "Acme Corporation"
+# widgetco = "Widget Company International"
+# internal-tooling = "Internal IT Department"
