@@ -153,12 +153,16 @@ async fn main() -> Result<()> {
 
     // Initialize embedded NER for organization extraction (if feature enabled)
     let ner_enabled: bool;
+    let mut ner_init_error: Option<String> = None;
     #[cfg(feature = "embedded-ner")]
     {
         ner_enabled = if !args.disable_slm {
             match ner_org::init_with_config(0.6) {
                 Ok(()) => true,
-                Err(_) => false,
+                Err(e) => {
+                    ner_init_error = Some(e.to_string());
+                    false
+                }
             }
         } else {
             false
@@ -209,6 +213,8 @@ async fn main() -> Result<()> {
         {
             if args.disable_slm {
                 eprintln!("❌ DISABLED: NER-based organization name extraction (via --disable-slm)");
+            } else if let Some(ref err) = ner_init_error {
+                eprintln!("❌ DISABLED: NER-based organization name extraction ({})", err);
             } else {
                 eprintln!("❌ DISABLED: NER-based organization name extraction (initialization failed)");
             }
@@ -717,16 +723,15 @@ async fn main() -> Result<()> {
             _app_config.discovery.tenant_probe_concurrency,
         );
         let platforms_path = Path::new("config/saas_platforms.json");
-        if platforms_path.exists() {
-            if let Err(e) = discovery.load_platforms(platforms_path) {
-                logger.warn(&format!("Failed to load SaaS platforms: {}", e));
-                None
-            } else {
-                Some(discovery)
-            }
-        } else {
-            logger.warn("SaaS tenant discovery requested but platforms file not found");
+        // Use load_platforms_with_fallback to prefer VendorRegistry over legacy JSON file
+        if let Err(e) = discovery.load_platforms_with_fallback(platforms_path) {
+            logger.warn(&format!("Failed to load SaaS platforms: {}", e));
             None
+        } else if discovery.platform_count() == 0 {
+            logger.warn("SaaS tenant discovery enabled but no platforms loaded");
+            None
+        } else {
+            Some(discovery)
         }
     } else {
         None
