@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::sync::RwLock;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::fs::OpenOptions;
 use std::path::Path;
 use colored::{Colorize, control};
@@ -62,7 +62,7 @@ impl AnalysisLogger {
         }
 
         // Disable colors when stdout is not a tty
-        if !atty::is(atty::Stream::Stdout) {
+        if !std::io::stdout().is_terminal() {
             return false;
         }
 

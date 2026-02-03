@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use thiserror::Error;
 use regex::Regex;
 
@@ -522,7 +522,7 @@ impl AppConfig {
 
     /// Check if stdin is a TTY (interactive terminal)
     pub fn is_interactive() -> bool {
-        atty::is(atty::Stream::Stdin)
+        std::io::stdin().is_terminal()
     }
 
     /// Prompt user to create default config (only in interactive mode)
