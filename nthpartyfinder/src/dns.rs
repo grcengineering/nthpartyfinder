@@ -43,9 +43,34 @@ static MAILTO_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap()
 });
 
-// DMARC sp= tag extraction regex (fixes B020)
-static SP_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"sp=([^;\s]+)").unwrap()
+// SP_TAG_REGEX removed - sp= contains policy values, not domains (C001 fix)
+
+// Pre-compiled SPF mechanism regexes to avoid recompilation in loops (H001 fix)
+static SPF_INCLUDE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"include:\s*([^\s]+)").unwrap()
+});
+static SPF_REDIRECT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"redirect=\s*([^\s]+)").unwrap()
+});
+static SPF_A_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"a:\s*([^\s]+)").unwrap()
+});
+static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"mx:\s*([^\s]+)").unwrap()
+});
+static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"exists:\s*([^\s]+)").unwrap()
+});
+
+// Pre-compiled DKIM pattern regexes (H002 fix)
+static DKIM_P_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"p=([A-Za-z0-9+/=]+)").unwrap()
+});
+static DKIM_H_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"h=([^;]+)").unwrap()
+});
+static DKIM_S_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"s=([^;]+)").unwrap()
 });
 
 pub trait LogFailure {
@@ -232,7 +257,7 @@ impl DnsServerPool {
                 if answer["type"].as_u64() == Some(16) { // TXT record type
                     if let Some(data) = answer["data"].as_str() {
                         // Remove quotes and handle escaped characters
-                        let cleaned = data.trim_matches('"').replace("\\\\", "\\").replace("\\\"", "\"");
+                        let cleaned = unescape_dns_txt(data.trim_matches('"'));
                         records.push(cleaned);
                     }
                 }
@@ -280,21 +305,23 @@ impl DnsServerPool {
         Ok(records)
     }
 
-    /// Create a traditional DNS resolver for the given server config
-    fn create_dns_resolver(&self, server: &DnsServerConfig, use_tcp: bool) -> TokioAsyncResolver {
+    /// Create a traditional DNS resolver for the given server config (C002 fix: returns Result)
+    fn create_dns_resolver(&self, server: &DnsServerConfig, use_tcp: bool) -> Result<TokioAsyncResolver> {
         let mut config = ResolverConfig::new();
-        
+
+        let socket_addr = server.address.parse()
+            .map_err(|e| anyhow::anyhow!("Invalid DNS server address '{}' for server '{}': {}",
+                server.address, server.name, e))?;
+
         config.add_name_server(NameServerConfig {
-            socket_addr: server.address.parse().expect(&format!(
-                "Invalid DNS server address '{}' for server '{}'", server.address, server.name
-            )),
+            socket_addr,
             protocol: if use_tcp { Protocol::Tcp } else { Protocol::Udp },
             tls_dns_name: None,
             trust_negative_responses: true,
             bind_addr: None,
             tls_config: None,
         });
-        
+
         let mut opts = ResolverOpts::default();
         opts.timeout = std::time::Duration::from_secs(server.timeout_secs);
         opts.attempts = 1; // Single attempt for speed
@@ -304,8 +331,8 @@ impl DnsServerPool {
         opts.validate = false;
         opts.num_concurrent_reqs = 4; // Increased concurrency
         opts.rotate = true; // Enable rotation for better load distribution
-        
-        TokioAsyncResolver::tokio(config, opts)
+
+        Ok(TokioAsyncResolver::tokio(config, opts))
     }
 }
 
@@ -356,30 +383,42 @@ pub async fn get_txt_records_with_rate_limit(
         let dns_server = dns_pool.next_dns_server();
         debug!("DNS attempt {} for {}: using {}", attempt + 1, domain, dns_server.name);
         
-        // Try UDP first (faster)
-        let resolver = dns_pool.create_dns_resolver(dns_server, false);
+        // Try UDP first (faster) - handle resolver creation failure gracefully (C002 fix)
+        let resolver = match dns_pool.create_dns_resolver(dns_server, false) {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Failed to create UDP resolver for {}: {}", dns_server.name, e);
+                continue;
+            }
+        };
         match resolver.txt_lookup(domain).await {
             Ok(txt_lookup) => {
                 let records: Vec<String> = txt_lookup
                     .iter()
                     .map(|record| record.to_string())
                     .collect();
-                
+
                 debug!("Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
                 return Ok(records);
             },
             Err(e) => {
                 debug!("UDP lookup failed for {} via {}: {}", domain, dns_server.name, e);
-                
+
                 // Try TCP fallback for this server
-                let tcp_resolver = dns_pool.create_dns_resolver(dns_server, true);
+                let tcp_resolver = match dns_pool.create_dns_resolver(dns_server, true) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        debug!("Failed to create TCP resolver for {}: {}", dns_server.name, e);
+                        continue;
+                    }
+                };
                 match tcp_resolver.txt_lookup(domain).await {
                     Ok(txt_lookup) => {
                         let records: Vec<String> = txt_lookup
                             .iter()
                             .map(|record| record.to_string())
                             .collect();
-                        
+
                         debug!("Found {} TXT records for {} via {} (TCP)", records.len(), domain, dns_server.name);
                         return Ok(records);
                     },
@@ -477,7 +516,11 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
     let mut seen_entries: HashSet<(String, String, String)> = HashSet::new();
 
     for record in txt_records {
-        let record_clean = record.replace("\\", "").replace("\"", "");
+        // Strip wrapping quotes, then unescape DNS TXT backslash sequences (H004 fix)
+        // DNS TXT records use backslash-escaping: \X -> X for any char X
+        // Process in one pass to handle all escape sequences correctly
+        let record_trimmed = record.trim_matches('"');
+        let record_clean = unescape_dns_txt(record_trimmed);
         let mut record_matched = false;
 
         // Extract vendor domains based on record patterns
@@ -537,17 +580,36 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
             }
         }
 
-        // Log unmatched TXT records for debugging and pattern discovery
-        if !record_matched && logger.is_some() {
-            // Skip very short records (likely not vendor verification records)
-            if record_clean.len() > 5 {
-                let logger = logger.unwrap();
-                logger.log_failure(source_domain, "UNMATCHED_TXT", &record, None, "No pattern matched this TXT record");
+        // Log unmatched TXT records for debugging and pattern discovery (M004 fix: use if-let)
+        if !record_matched {
+            if let Some(logger) = logger {
+                // Skip very short records (likely not vendor verification records)
+                if record_clean.len() > 5 {
+                    logger.log_failure(source_domain, "UNMATCHED_TXT", &record, None, "No pattern matched this TXT record");
+                }
             }
         }
     }
 
     vendor_domains
+}
+
+/// Unescape DNS TXT record backslash sequences: \X -> X for any char X.
+/// This handles \\, \", \_, and any other backslash-escaped character.
+fn unescape_dns_txt(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Consume the next char as-is (unescaped)
+            if let Some(next) = chars.next() {
+                result.push(next);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn strip_spf_macros(domain: &str) -> String {
@@ -565,33 +627,30 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
     }
 
     let mut domains = Vec::new();
-    let spf_mechanisms = vec!["include:", "redirect=", "a:", "mx:", "exists:"];
+    // Use pre-compiled regexes instead of compiling in loop (H001 fix)
+    let spf_regexes: &[&Lazy<Regex>] = &[
+        &SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX, &SPF_A_REGEX, &SPF_MX_REGEX, &SPF_EXISTS_REGEX,
+    ];
 
-    for mechanism in &spf_mechanisms {
-        let pattern = format!(r"{}\s*([^\s]+)", regex::escape(mechanism));
-        if let Ok(re) = Regex::new(&pattern) {
-            for cap in re.captures_iter(&record_lower) {
-                if let Some(domain_match) = cap.get(1) {
-                    let raw_domain = domain_match.as_str();
-                    
-                    // Strip SPF macros to get the actual domain (e.g., %{ir}.%{v}.%{d}.spf.has.pphosted.com -> spf.has.pphosted.com)
-                    let cleaned_domain = strip_spf_macros(raw_domain);
-                    
-                    if is_valid_domain(&cleaned_domain) {
-                        // Extract base domain from SPF subdomains (e.g., _spf.google.com -> google.com)
-                        let base_domain = domain_utils::extract_base_domain(&cleaned_domain);
-                        
-                        if let Some(_logger) = logger {
-                            // Success logging removed - only failures are logged
-                        }
-                        domains.push(VendorDomain {
-                            domain: base_domain,
-                            source_type: RecordType::DnsTxtSpf,
-                            raw_record: raw_record.to_string(),
-                        });
-                    } else if let Some(logger) = logger {
-                        logger.log_failure(source_domain, "SPF", raw_record, Some(raw_domain), "Invalid domain format");
-                    }
+    for re in spf_regexes {
+        for cap in re.captures_iter(&record_lower) {
+            if let Some(domain_match) = cap.get(1) {
+                let raw_domain = domain_match.as_str();
+
+                // Strip SPF macros to get the actual domain (e.g., %{ir}.%{v}.%{d}.spf.has.pphosted.com -> spf.has.pphosted.com)
+                let cleaned_domain = strip_spf_macros(raw_domain);
+
+                if is_valid_domain(&cleaned_domain) {
+                    // Extract base domain from SPF subdomains (e.g., _spf.google.com -> google.com)
+                    let base_domain = domain_utils::extract_base_domain(&cleaned_domain);
+
+                    domains.push(VendorDomain {
+                        domain: base_domain,
+                        source_type: RecordType::DnsTxtSpf,
+                        raw_record: raw_record.to_string(),
+                    });
+                } else if let Some(logger) = logger {
+                    logger.log_failure(source_domain, "SPF", raw_record, Some(raw_domain), "Invalid domain format");
                 }
             }
         }
@@ -606,28 +665,22 @@ fn extract_from_dkim_record(record: &str, _logger: Option<&dyn LogFailure>, _sou
     }
 
     let mut domains = Vec::new();
-    
-    // Look for domain indicators in DKIM records
-    let domain_patterns = vec![
-        r"p=([A-Za-z0-9+/=]+)",
-        r"h=([^;]+)",
-        r"s=([^;]+)",
-    ];
 
-    for pattern in &domain_patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            for cap in re.captures_iter(record) {
-                if let Some(value_match) = cap.get(1) {
-                    let value = value_match.as_str();
-                    // DKIM records usually don't contain direct domain references
-                    // This is a simplified extraction that may need refinement
-                    if value.contains(".") && is_valid_domain(value) {
-                        domains.push(VendorDomain {
-                            domain: value.to_string(),
-                            source_type: RecordType::DnsTxtDkim,
-                            raw_record: raw_record.to_string(),
-                        });
-                    }
+    // Use pre-compiled DKIM regexes instead of compiling in loop (H002 fix)
+    let dkim_regexes: &[&Lazy<Regex>] = &[&DKIM_P_REGEX, &DKIM_H_REGEX, &DKIM_S_REGEX];
+
+    for re in dkim_regexes {
+        for cap in re.captures_iter(record) {
+            if let Some(value_match) = cap.get(1) {
+                let value = value_match.as_str();
+                // DKIM records usually don't contain direct domain references
+                // This is a simplified extraction that may need refinement
+                if value.contains('.') && is_valid_domain(value) {
+                    domains.push(VendorDomain {
+                        domain: value.to_string(),
+                        source_type: RecordType::DnsTxtDkim,
+                        raw_record: raw_record.to_string(),
+                    });
                 }
             }
         }
@@ -646,16 +699,18 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
 
     // Extract domains from rua and ruf tags (which can have comma-separated mailto addresses)
     // e.g., rua=mailto:a@domain1.com,mailto:b@domain2.com
+    // Use lowercase copy consistently to avoid byte index mismatch on mixed-case records (H003 fix)
+    // and to prevent UTF-8 boundary panics on multi-byte chars (C004 fix)
+    let record_lower = record.to_lowercase();
     for tag in &["rua=", "ruf="] {
-        // Find the tag value (case-insensitive search)
-        let record_lower = record.to_lowercase();
+        // Find the tag value (case-insensitive search on lowercase copy)
         if let Some(tag_pos) = record_lower.find(*tag) {
             let value_start = tag_pos + tag.len();
-            // Find end of value (next semicolon or end of string)
-            let value_end = record[value_start..].find(';')
+            // Find end of value (next semicolon or end of string) - search lowercase copy
+            let value_end = record_lower[value_start..].find(';')
                 .map(|p| value_start + p)
-                .unwrap_or(record.len());
-            let tag_value = &record[value_start..value_end];
+                .unwrap_or(record_lower.len());
+            let tag_value = &record_lower[value_start..value_end];
 
             // Extract all mailto: addresses (comma-separated)
             // Pattern: mailto:localpart@domain or mailto:domain
@@ -676,19 +731,8 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
         }
     }
 
-    // Also check sp= tag for subdomain policy domain references (less common)
-    if let Some(sp_match) = SP_TAG_REGEX.captures(record) {
-        if let Some(domain_match) = sp_match.get(1) {
-            let domain = domain_match.as_str();
-            if is_valid_domain(domain) {
-                domains.push(VendorDomain {
-                    domain: domain.to_string(),
-                    source_type: RecordType::DnsTxtDmarc,
-                    raw_record: raw_record.to_string(),
-                });
-            }
-        }
-    }
+    // Note: sp= tag contains policy values ("none", "quarantine", "reject"), not domains.
+    // Removed dead code that attempted to extract domains from sp= (C001 fix).
 
     if domains.is_empty() { None } else { Some(domains) }
 }
@@ -764,15 +808,14 @@ fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailur
 
     let mut domains = Vec::new();
 
+    // These patterns are all literal strings, use contains() instead of regex for speed
     for (pattern, domain, record_type) in &verification_patterns {
-        if let Ok(re) = Regex::new(pattern) {
-            if re.is_match(record) {
-                domains.push(VendorDomain {
-                    domain: domain.to_string(),
-                    source_type: record_type.clone(),
-                    raw_record: raw_record.to_string(),
-                });
-            }
+        if record.contains(pattern) {
+            domains.push(VendorDomain {
+                domain: domain.to_string(),
+                source_type: record_type.clone(),
+                raw_record: raw_record.to_string(),
+            });
         }
     }
 

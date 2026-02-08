@@ -231,6 +231,9 @@ pub struct SubprocessorUrlCacheEntry {
     pub extraction_patterns: Option<ExtractionPatterns>,
     /// Metadata about successful extractions to help optimize patterns
     pub extraction_metadata: Option<ExtractionMetadata>,
+    /// Trust center extraction strategy (auto-discovered or manually configured)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_center_strategy: Option<crate::trust_center::TrustCenterStrategy>,
 }
 
 /// Metadata about extraction success to help optimize patterns
@@ -413,9 +416,10 @@ impl SubprocessorCache {
                 cache_version: Self::CACHE_VERSION,
                 extraction_patterns: Some(ExtractionPatterns::default()),
                 extraction_metadata: None,
+                trust_center_strategy: None,
             }
         });
-        
+
         // Update URL and timestamp while preserving patterns and metadata
         entry.working_subprocessor_url = subprocessor_url.to_string();
         entry.last_successful_access = SystemTime::now()
@@ -447,9 +451,10 @@ impl SubprocessorCache {
                 cache_version: Self::CACHE_VERSION,
                 extraction_patterns: None,
                 extraction_metadata: None,
+                trust_center_strategy: None,
             }
         });
-        
+
         entry.extraction_patterns = Some(patterns);
         entry.extraction_metadata = Some(metadata);
         entry.last_successful_access = SystemTime::now()
@@ -466,9 +471,24 @@ impl SubprocessorCache {
     
     /// Get cache file path for a specific domain
     fn get_cache_file_path(&self, domain: &str) -> PathBuf {
-        // Sanitize domain for filesystem
-        let safe_domain = domain.replace(":", "_").replace("/", "_");
-        self.cache_dir.join(format!("{}.json", safe_domain))
+        // Sanitize domain for filesystem - prevent path traversal (M005 fix)
+        let safe_domain: String = domain.chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+                _ => '_',
+            })
+            .collect();
+        // Ensure no path traversal via ".." sequences
+        let safe_domain = safe_domain.replace("..", "_");
+        let path = self.cache_dir.join(format!("{}.json", safe_domain));
+        // Final check: ensure the resolved path is within cache_dir
+        if let (Ok(resolved), Ok(cache_dir)) = (path.canonicalize().or(Ok::<_, std::io::Error>(path.clone())), self.cache_dir.canonicalize().or(Ok::<_, std::io::Error>(self.cache_dir.clone()))) {
+            if !resolved.starts_with(&cache_dir) {
+                // Path traversal attempt detected - return a safe default
+                return self.cache_dir.join("_invalid_domain_.json");
+            }
+        }
+        path
     }
     
     /// Clear cache for a specific domain
@@ -523,6 +543,7 @@ impl SubprocessorCache {
                 cache_version: Self::CACHE_VERSION,
                 extraction_patterns: None,
                 extraction_metadata: None,
+                trust_center_strategy: None,
             })
         } else {
             SubprocessorUrlCacheEntry {
@@ -532,6 +553,7 @@ impl SubprocessorCache {
                 cache_version: Self::CACHE_VERSION,
                 extraction_patterns: None,
                 extraction_metadata: None,
+                trust_center_strategy: None,
             }
         };
 
@@ -899,6 +921,15 @@ impl SubprocessorAnalyzer {
             "browserstack.com" => urls.push("https://www.browserstack.com/sub-processors".to_string()),
             "sage.com" => urls.push("https://www.sage.com/en-gb/trust-security/privacy/customer-due-diligence/".to_string()),
             "heroku.com" => urls.push("https://compliance.salesforce.com/en/services/heroku".to_string()),
+            // Trust Center product companies - their own subprocessor pages
+            "vanta.com" => urls.push("https://trust.vanta.com/subprocessors".to_string()),
+            "drata.com" => urls.push("https://drata.com/trust/subprocessors".to_string()),
+            "secureframe.com" => urls.push("https://secureframe.com/trust/subprocessors".to_string()),
+            "thoropass.com" => urls.push("https://thoropass.com/trust/subprocessors".to_string()),
+            "safebase.io" => urls.push("https://safebase.io/trust/subprocessors".to_string()),
+            "onetrust.com" => urls.push("https://www.onetrust.com/trust-center/subprocessors".to_string()),
+            "sprinto.com" => urls.push("https://sprinto.com/trust/subprocessors".to_string()),
+            "scrut.io" => urls.push("https://scrut.io/trust/subprocessors".to_string()),
             _ => {}
         }
         
@@ -1211,6 +1242,142 @@ impl SubprocessorAnalyzer {
             format!("https://{}/gdpr/subprocessors/", domain),
             format!("https://www.{}/gdpr/subprocessors/", domain),
         ]);
+
+        // ========================================================================
+        // TRUST CENTER PRODUCTS (Vanta, Drata, SecureFrame, Thoropass, SafeBase, etc.)
+        // These products provide hosted trust centers for companies to publish their
+        // security documentation and subprocessor lists.
+        // ========================================================================
+
+        // Extract company name from domain (e.g., "acme" from "acme.com", "acme-corp" from "acme-corp.io")
+        let company_name = base_domain.split('.').next().unwrap_or(base_domain);
+
+        // Vanta Trust Center patterns
+        // Vanta's own trust center: https://trust.vanta.com/subprocessors
+        // Customer trust centers: https://trust.vanta.com/[company]/subprocessors
+        //                        https://[company].vanta.com/trust/subprocessors
+        urls.extend(vec![
+            // Vanta-hosted trust centers
+            format!("https://trust.vanta.com/{}/subprocessors", company_name),
+            format!("https://trust.vanta.com/{}/sub-processors", company_name),
+            format!("https://trust.vanta.com/{}", company_name), // Main trust page may list subprocessors
+            format!("https://{}.vanta.com/subprocessors", company_name),
+            format!("https://{}.vanta.com/trust/subprocessors", company_name),
+            // Vanta app-hosted (some companies use app subdomain)
+            format!("https://app.vanta.com/{}/trust/subprocessors", company_name),
+            format!("https://app.vanta.com/{}/trust-center/subprocessors", company_name),
+        ]);
+
+        // Drata Trust Center patterns
+        // Drata trust centers: https://[company].drata.com/trust-center/subprocessors
+        //                     https://trust.drata.com/[company]/subprocessors
+        urls.extend(vec![
+            format!("https://{}.drata.com/trust-center/subprocessors", company_name),
+            format!("https://{}.drata.com/trust-center/sub-processors", company_name),
+            format!("https://{}.drata.com/trust-center/vendors", company_name),
+            format!("https://{}.drata.com/trust-center", company_name), // Main page may list
+            format!("https://{}.drata.com/subprocessors", company_name),
+            format!("https://trust.drata.com/{}/subprocessors", company_name),
+            format!("https://app.drata.com/{}/trust-center/subprocessors", company_name),
+        ]);
+
+        // SecureFrame Trust Center patterns
+        // SecureFrame trust centers: https://[company].secureframe.com/trust/subprocessors
+        //                           https://trust.secureframe.com/[company]/subprocessors
+        urls.extend(vec![
+            format!("https://{}.secureframe.com/trust/subprocessors", company_name),
+            format!("https://{}.secureframe.com/trust/sub-processors", company_name),
+            format!("https://{}.secureframe.com/trust/vendors", company_name),
+            format!("https://{}.secureframe.com/trust", company_name),
+            format!("https://{}.secureframe.com/subprocessors", company_name),
+            format!("https://trust.secureframe.com/{}/subprocessors", company_name),
+            format!("https://app.secureframe.com/{}/trust/subprocessors", company_name),
+        ]);
+
+        // Thoropass (formerly Laika) Trust Center patterns
+        // Thoropass trust centers: https://[company].thoropass.com/trust/subprocessors
+        urls.extend(vec![
+            format!("https://{}.thoropass.com/trust/subprocessors", company_name),
+            format!("https://{}.thoropass.com/trust/sub-processors", company_name),
+            format!("https://{}.thoropass.com/trust/vendors", company_name),
+            format!("https://{}.thoropass.com/trust", company_name),
+            format!("https://{}.thoropass.com/subprocessors", company_name),
+            format!("https://trust.thoropass.com/{}/subprocessors", company_name),
+            // Legacy Laika patterns (Thoropass was formerly Laika)
+            format!("https://{}.heylaika.com/trust/subprocessors", company_name),
+            format!("https://{}.laika.com/trust/subprocessors", company_name),
+        ]);
+
+        // SafeBase Trust Center patterns
+        // SafeBase trust centers: https://[company].safebase.io/subprocessors
+        //                        https://security.[company].com (hosted by SafeBase)
+        urls.extend(vec![
+            format!("https://{}.safebase.io/subprocessors", company_name),
+            format!("https://{}.safebase.io/sub-processors", company_name),
+            format!("https://{}.safebase.io/vendors", company_name),
+            format!("https://{}.safebase.io/", company_name), // Main page may list
+            format!("https://security.{}/subprocessors", base_domain), // SafeBase often powers security.* subdomains
+            format!("https://security.{}/sub-processors", base_domain),
+            format!("https://security.{}/vendors", base_domain),
+        ]);
+
+        // OneTrust Trust Center patterns
+        // OneTrust provides various trust center solutions
+        urls.extend(vec![
+            format!("https://{}.onetrust.com/trust/subprocessors", company_name),
+            format!("https://{}.onetrust.com/trust-center/subprocessors", company_name),
+            format!("https://{}.onetrust.com/subprocessors", company_name),
+            format!("https://privacyportal.{}.com/subprocessors", company_name), // OneTrust privacy portal pattern
+            format!("https://privacyportal-{}.onetrust.com/subprocessors", company_name),
+        ]);
+
+        // Conveyor Trust Center patterns
+        // Conveyor trust hubs: https://[company].trusthub.io/subprocessors
+        urls.extend(vec![
+            format!("https://{}.trusthub.io/subprocessors", company_name),
+            format!("https://{}.trusthub.io/sub-processors", company_name),
+            format!("https://{}.trusthub.io/vendors", company_name),
+            format!("https://{}.conveyor.com/trust/subprocessors", company_name),
+        ]);
+
+        // Scytale Trust Center patterns
+        urls.extend(vec![
+            format!("https://{}.scytale.ai/trust/subprocessors", company_name),
+            format!("https://{}.scytale.ai/trust-center/subprocessors", company_name),
+            format!("https://trust.scytale.ai/{}/subprocessors", company_name),
+        ]);
+
+        // Sprinto Trust Center patterns
+        urls.extend(vec![
+            format!("https://{}.sprinto.com/trust/subprocessors", company_name),
+            format!("https://{}.sprinto.com/trust-center/subprocessors", company_name),
+            format!("https://trust.sprinto.com/{}/subprocessors", company_name),
+        ]);
+
+        // Scrut Trust Center patterns
+        urls.extend(vec![
+            format!("https://{}.scrut.io/trust/subprocessors", company_name),
+            format!("https://{}.scrut.io/trust-center/subprocessors", company_name),
+            format!("https://trust.scrut.io/{}/subprocessors", company_name),
+        ]);
+
+        // Strike Graph Trust Center patterns
+        urls.extend(vec![
+            format!("https://{}.strikegraph.com/trust/subprocessors", company_name),
+            format!("https://{}.strikegraph.com/trust-center/subprocessors", company_name),
+        ]);
+
+        // Anecdotes Trust Center patterns
+        urls.extend(vec![
+            format!("https://{}.anecdotes.ai/trust/subprocessors", company_name),
+            format!("https://{}.anecdotes.ai/trust-center/subprocessors", company_name),
+        ]);
+
+        // Delve (now part of OneTrust) patterns
+        urls.extend(vec![
+            format!("https://{}.delve.com/trust/subprocessors", company_name),
+            format!("https://trust.delve.com/{}/subprocessors", company_name),
+        ]);
         
         urls
     }
@@ -1313,6 +1480,71 @@ impl SubprocessorAnalyzer {
         if is_pdf {
             debug!("Processing PDF document from URL: {}", url);
             return self.extract_from_pdf_content(&content, url, source_domain).await;
+        }
+
+        // ================================================================
+        // Trust Center Strategy: Check cached strategy or auto-discover
+        // ================================================================
+        {
+            // Check for a cached trust center strategy first
+            let cached_strategy = {
+                let cache = self.cache.read().await;
+                let entry = cache.get_cached_entry(source_domain).await;
+                entry.and_then(|e| e.trust_center_strategy.clone())
+            };
+
+            if let Some(ref strategy) = cached_strategy {
+                // Check if strategy is not stale or unreliable
+                if !strategy.discovery_metadata.is_stale(30)
+                    && !strategy.discovery_metadata.is_unreliable(3)
+                {
+                    debug!("Found cached trust center strategy for {}, executing", source_domain);
+                    match crate::trust_center::executor::execute_strategy(
+                        strategy, &self.client, Some(&content), source_domain
+                    ).await {
+                        Ok(vendors) if !vendors.is_empty() => {
+                            debug!("Trust center strategy returned {} vendors for {}", vendors.len(), source_domain);
+                            return Ok(vendors);
+                        }
+                        Ok(_) => debug!("Trust center strategy returned no vendors for {}", source_domain),
+                        Err(e) => debug!("Trust center strategy failed for {}: {}", source_domain, e),
+                    }
+                }
+            }
+
+            // If no cached strategy and HTML looks like an SPA, try auto-discovery
+            if cached_strategy.is_none() && crate::trust_center::discovery::is_likely_spa(&content) {
+                debug!("SPA detected for {}, running trust center auto-discovery", source_domain);
+                match crate::trust_center::discovery::discover_strategy(url, &content).await {
+                    Ok(Some(strategy)) => {
+                        debug!("Auto-discovered trust center strategy for {}", source_domain);
+                        match crate::trust_center::executor::execute_strategy(
+                            &strategy, &self.client, Some(&content), source_domain
+                        ).await {
+                            Ok(vendors) if !vendors.is_empty() => {
+                                debug!("Auto-discovered strategy returned {} vendors for {}", vendors.len(), source_domain);
+                                // Cache the strategy for future use
+                                let cache = self.cache.write().await;
+                                if let Ok(mut entry) = cache.get_cached_entry(source_domain).await
+                                    .ok_or_else(|| anyhow::anyhow!("no cache entry"))
+                                {
+                                    entry.trust_center_strategy = Some(strategy);
+                                    let cache_file = cache.get_cache_file_path(source_domain);
+                                    let _ = tokio::fs::write(
+                                        &cache_file,
+                                        serde_json::to_string_pretty(&entry).unwrap_or_default(),
+                                    ).await;
+                                }
+                                return Ok(vendors);
+                            }
+                            Ok(_) => debug!("Auto-discovered strategy returned no vendors for {}", source_domain),
+                            Err(e) => debug!("Auto-discovered strategy execution failed: {}", e),
+                        }
+                    }
+                    Ok(None) => debug!("No trust center strategy discovered for {}", source_domain),
+                    Err(e) => debug!("Trust center auto-discovery failed for {}: {}", source_domain, e),
+                }
+            }
         }
 
         // Process HTML content
@@ -1505,6 +1737,40 @@ impl SubprocessorAnalyzer {
                 Err(e) => {
                     debug!("🔥🔥🔥 HEADLESS BROWSER ERROR: {}", e);
                     debug!("Headless browser fallback failed: {}", e);
+                }
+            }
+
+            // NER fallback: extract organization names from rendered/static HTML as last resort
+            if vendors.is_empty() && crate::ner_org::is_available() {
+                debug!("Attempting NER-based org extraction as final fallback for {}", source_domain);
+                // Extract text content from HTML for NER processing
+                let text_content = extract_text_from_html(&content);
+                if text_content.len() >= 100 {
+                    match crate::ner_org::extract_all_organizations(&text_content, Some(0.7)) {
+                        Ok(ner_results) if !ner_results.is_empty() => {
+                            debug!("NER fallback found {} organizations for {}", ner_results.len(), source_domain);
+                            for org in &ner_results {
+                                // Skip if the org name matches the source domain's own org
+                                let org_lower = org.organization.to_lowercase();
+                                let domain_parts: Vec<&str> = source_domain.split('.').collect();
+                                let domain_name = domain_parts.first().unwrap_or(&"");
+                                if org_lower == domain_name.to_lowercase() {
+                                    continue;
+                                }
+                                vendors.push(SubprocessorDomain {
+                                    domain: format!("_org:{}", org.organization),
+                                    source_type: crate::vendor::RecordType::HttpSubprocessor,
+                                    raw_record: format!("NER:{:.2}:{}", org.confidence, org.organization),
+                                });
+                            }
+                            if !vendors.is_empty() {
+                                debug!("NER fallback returning {} vendors for {}", vendors.len(), source_domain);
+                                return Ok(vendors);
+                            }
+                        }
+                        Ok(_) => debug!("NER found no organizations for {}", source_domain),
+                        Err(e) => debug!("NER extraction failed for {}: {}", source_domain, e),
+                    }
                 }
             }
         } else {
@@ -3408,15 +3674,23 @@ impl SubprocessorAnalyzer {
         true
     }
     
-    /// Create enhanced evidence with full HTML context and highlight URL
+    /// Create enhanced evidence with text content (stripped HTML) and highlight URL (H005 fix)
     pub fn create_enhanced_evidence(&self, element: &scraper::ElementRef, entity_name: &str, base_url: &str) -> String {
-        // Get focused HTML - just the element containing the organization name and its immediate context
-        let html = self.create_focused_html_evidence(element, entity_name);
-        
+        // Get text content from the element instead of raw HTML to prevent stored XSS
+        let text = element.text().collect::<String>();
+        let text = text.trim();
+
+        // Truncate to reasonable length
+        let evidence_text = if text.len() > 200 {
+            format!("{}...", &text[..200])
+        } else {
+            text.to_string()
+        };
+
         // Create URL with text highlight
         let highlight_url = self.create_highlight_url(base_url, entity_name);
-        
-        format!("HTML: {}; URL: {}", html.trim(), highlight_url)
+
+        format!("Found '{}' in: {}; URL: {}", entity_name, evidence_text, highlight_url)
     }
     
     /// Create focused HTML evidence showing just the organization name and its immediate surrounding elements
@@ -3634,4 +3908,37 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
     debug_logger: &crate::logger::AnalysisLogger,
 ) -> Result<Vec<SubprocessorDomain>> {
     analyzer.analyze_domain_with_logging(domain, logger, Some(debug_logger)).await
+}
+
+/// Extract visible text content from HTML, stripping tags and scripts.
+/// Used for NER-based organization extraction from subprocessor pages.
+fn extract_text_from_html(html: &str) -> String {
+    let document = Html::parse_document(html);
+
+    // Try to select main content areas first for better signal
+    let content_selectors = ["main", "article", "[role='main']", ".content", "#content"];
+    for sel_str in &content_selectors {
+        if let Ok(sel) = Selector::parse(sel_str) {
+            let texts: Vec<String> = document.select(&sel)
+                .flat_map(|el| el.text())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            if texts.join(" ").len() > 200 {
+                return texts.join(" ");
+            }
+        }
+    }
+
+    // Fallback: extract all text from body
+    if let Ok(body_sel) = Selector::parse("body") {
+        let texts: Vec<String> = document.select(&body_sel)
+            .flat_map(|el| el.text())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        return texts.join(" ");
+    }
+
+    String::new()
 }

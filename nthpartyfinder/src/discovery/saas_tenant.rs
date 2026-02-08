@@ -187,8 +187,15 @@ impl SaasTenantDiscovery {
             .collect()
             .await;
 
-        debug!("Found {} likely/confirmed tenants", results.len());
-        Ok(results)
+        // Deduplicate by vendor_domain - multiple patterns for the same vendor
+        // can produce duplicate entries (R002 fix). Keep first (highest confidence) match.
+        let mut seen_vendors = std::collections::HashSet::new();
+        let deduped_results: Vec<TenantProbeResult> = results.into_iter()
+            .filter(|r| seen_vendors.insert(r.vendor_domain.clone()))
+            .collect();
+
+        debug!("Found {} unique likely/confirmed tenants (after dedup)", deduped_results.len());
+        Ok(deduped_results)
     }
 }
 

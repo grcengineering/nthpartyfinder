@@ -6,7 +6,7 @@ use anyhow::Result;
 use ctrlc;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -30,6 +30,7 @@ mod rate_limit;
 mod batch;
 mod org_normalizer;
 mod checkpoint;
+mod trust_center;
 
 use cli::{Args, Cli, Commands, CacheCommands};
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
@@ -271,7 +272,9 @@ async fn main() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(2));
         eprintln!("⚠️  Force exiting (checkpoint may be incomplete).");
         std::process::exit(130); // 130 = 128 + SIGINT(2), standard exit code for Ctrl-C
-    }).expect("Error setting Ctrl-C handler");
+    }).unwrap_or_else(|e| {
+        eprintln!("⚠️  Warning: Failed to set Ctrl-C handler: {}. Interrupt signals may not be handled gracefully.", e);
+    });
 
     // Validate arguments
     if let Err(e) = args.validate() {
@@ -319,20 +322,28 @@ async fn main() -> Result<()> {
     let output_path = Path::new(&output_dir).join(&output_filename);
     let output_path_str = output_path.to_string_lossy();
 
-    // Prompt user for directory confirmation (no progress bar during user input)
+    // Prompt user for directory confirmation (R006 fix: skip when stdin is not a terminal)
     println!("📁 Output file will be saved to: {}", output_path_str);
-    print!("Press Enter to continue or type a different directory path: ");
-    io::Write::flush(&mut io::stdout()).unwrap();
+    let is_interactive = std::io::stdin().is_terminal();
+    let final_output_path = if is_interactive {
+        print!("Press Enter to continue or type a different directory path: ");
+        io::Write::flush(&mut io::stdout()).unwrap();
 
-    let mut user_input = String::new();
-    io::stdin().read_line(&mut user_input).unwrap();
-    let user_input = user_input.trim();
+        let mut user_input = String::new();
+        if let Err(e) = io::stdin().read_line(&mut user_input) {
+            logger.warn(&format!("Failed to read stdin: {}, using default output path", e));
+        }
+        let user_input = user_input.trim();
 
-    let final_output_path = if user_input.is_empty() {
-        output_path_str.to_string()
+        if user_input.is_empty() {
+            output_path_str.to_string()
+        } else {
+            let custom_path = Path::new(user_input).join(&output_filename);
+            custom_path.to_string_lossy().to_string()
+        }
     } else {
-        let custom_path = Path::new(user_input).join(&output_filename);
-        custom_path.to_string_lossy().to_string()
+        // Non-interactive mode: use default path without prompting
+        output_path_str.to_string()
     };
 
     println!("✅ Results will be saved to: {}", final_output_path);
@@ -383,49 +394,60 @@ async fn main() -> Result<()> {
                         println!();
                     }
                     ResumeMode::Prompt => {
-                        println!();
-                        println!("╔════════════════════════════════════════════════════════════════╗");
-                        println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
-                        println!("╚════════════════════════════════════════════════════════════════╝");
-                        println!();
-                        println!("   {}", summary);
-                        println!("   Created: {}", existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
-                        println!();
-
-                        if is_compatible {
-                            print!("Resume from checkpoint? [Y/n]: ");
-                            io::Write::flush(&mut io::stdout()).unwrap();
-
-                            let mut resume_input = String::new();
-                            io::stdin().read_line(&mut resume_input).unwrap();
-                            let resume_input = resume_input.trim().to_lowercase();
-
-                            if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
-                                println!("✅ Resuming from checkpoint...");
-                                println!();
+                        // R006 fix: auto-resume compatible checkpoints in non-interactive mode
+                        if !std::io::stdin().is_terminal() {
+                            if is_compatible {
+                                println!("📋 Auto-resuming from compatible checkpoint (non-interactive mode)");
                                 checkpoint = Some(existing_checkpoint);
                             } else {
-                                println!("🔄 Starting fresh analysis...");
+                                println!("⚠️  Incompatible checkpoint deleted (non-interactive mode)");
                                 let _ = Checkpoint::delete(output_dir_path);
-                                println!();
                             }
                         } else {
-                            println!("⚠️  Checkpoint is incompatible with current settings.");
-                            println!("   (Different domain or analysis options)");
-                            print!("Delete checkpoint and start fresh? [Y/n]: ");
-                            io::Write::flush(&mut io::stdout()).unwrap();
+                            println!();
+                            println!("╔════════════════════════════════════════════════════════════════╗");
+                            println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
+                            println!("╚════════════════════════════════════════════════════════════════╝");
+                            println!();
+                            println!("   {}", summary);
+                            println!("   Created: {}", existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                            println!();
 
-                            let mut delete_input = String::new();
-                            io::stdin().read_line(&mut delete_input).unwrap();
-                            let delete_input = delete_input.trim().to_lowercase();
+                            if is_compatible {
+                                print!("Resume from checkpoint? [Y/n]: ");
+                                io::Write::flush(&mut io::stdout()).unwrap();
 
-                            if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
-                                let _ = Checkpoint::delete(output_dir_path);
-                                println!("🔄 Starting fresh analysis...");
-                                println!();
+                                let mut resume_input = String::new();
+                                let _ = io::stdin().read_line(&mut resume_input);
+                                let resume_input = resume_input.trim().to_lowercase();
+
+                                if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
+                                    println!("✅ Resuming from checkpoint...");
+                                    println!();
+                                    checkpoint = Some(existing_checkpoint);
+                                } else {
+                                    println!("🔄 Starting fresh analysis...");
+                                    let _ = Checkpoint::delete(output_dir_path);
+                                    println!();
+                                }
                             } else {
-                                println!("❌ Cannot proceed with incompatible checkpoint. Exiting.");
-                                std::process::exit(1);
+                                println!("⚠️  Checkpoint is incompatible with current settings.");
+                                println!("   (Different domain or analysis options)");
+                                print!("Delete checkpoint and start fresh? [Y/n]: ");
+                                io::Write::flush(&mut io::stdout()).unwrap();
+
+                                let mut delete_input = String::new();
+                                let _ = io::stdin().read_line(&mut delete_input);
+                                let delete_input = delete_input.trim().to_lowercase();
+
+                                if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
+                                    let _ = Checkpoint::delete(output_dir_path);
+                                    println!("🔄 Starting fresh analysis...");
+                                    println!();
+                                } else {
+                                    println!("❌ Cannot proceed with incompatible checkpoint. Exiting.");
+                                    std::process::exit(1);
+                                }
                             }
                         }
                     }
@@ -760,6 +782,11 @@ async fn main() -> Result<()> {
     let checkpoint_for_analysis = checkpoint.clone();
     let output_dir_for_checkpoint = output_dir.clone();
 
+    // Start progress bar immediately when analysis begins (analysis duration timer starts here)
+    // Use 100 as total for percentage-based progress (discovery = 0-20%, vendor processing = 20-100%)
+    logger.start_progress(100).await;
+    logger.update_progress("Starting vendor discovery...").await;
+
     let new_results = discover_nth_parties(
         domain,
         args.depth,
@@ -794,16 +821,31 @@ async fn main() -> Result<()> {
     }
 
     // Combine resumed results with new results
+    // Deduplicate by (vendor_domain, customer_domain) and merge evidence from multiple
+    // discovery methods into a single entry (R003 fix - eliminates duplicate report rows)
     let results: Vec<VendorRelationship> = {
         let mut all_results = resumed_results;
         all_results.extend(new_results);
-        // Deduplicate results by (vendor_domain, customer_domain, record_type)
-        let mut seen = HashSet::new();
-        all_results.retain(|r| {
-            let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone(), format!("{:?}", r.nth_party_record_type));
-            seen.insert(key)
-        });
-        all_results
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        let mut deduped: Vec<VendorRelationship> = Vec::new();
+        for r in all_results {
+            let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone());
+            if let Some(&idx) = seen.get(&key) {
+                // Merge evidence from additional discovery methods
+                let existing = &mut deduped[idx];
+                if !existing.evidence.contains(&r.evidence) {
+                    existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
+                }
+                // Keep the more specific record type if the existing one is generic
+                if existing.nth_party_record.is_empty() && !r.nth_party_record.is_empty() {
+                    existing.nth_party_record = r.nth_party_record;
+                }
+            } else {
+                seen.insert(key, deduped.len());
+                deduped.push(r);
+            }
+        }
+        deduped
     };
 
     let unique_vendors = results.iter()
@@ -975,7 +1017,14 @@ async fn discover_nth_parties(
         }
     }
 
-    // Check if we've exceeded max depth
+    // Check if we've exceeded max depth (C005 fix: clarified semantics + defensive cap)
+    // max_depth=1 means "analyze root's vendors" (depth 1), not their vendors (depth 2)
+    // Defensive cap at 10 levels to prevent unbounded recursion
+    const ABSOLUTE_MAX_DEPTH: u32 = 10;
+    if current_depth > ABSOLUTE_MAX_DEPTH {
+        logger.warn(&format!("Hit absolute depth cap ({}) for domain {}", ABSOLUTE_MAX_DEPTH, domain));
+        return Ok(vec![]);
+    }
     if let Some(max) = max_depth {
         if current_depth > max {
             logger.debug(&format!("Reached max depth {} for domain {}", max, domain));
@@ -995,8 +1044,12 @@ async fn discover_nth_parties(
     let mut results = Vec::new();
     
     // Analyze DNS TXT records using the DNS server pool
+    if current_depth == 1 {
+        logger.update_progress("Analyzing DNS records...").await;
+        logger.advance_progress(2).await; // 0% -> 2%
+    }
     logger.log_dns_lookup_start(domain);
-    
+
     match dns::get_txt_records_with_pool(domain, &dns_pool).await {
         Ok(txt_records) => {
             if !txt_records.is_empty() {
@@ -1022,6 +1075,10 @@ async fn discover_nth_parties(
             
             // Subprocessor web page analysis (if enabled)
             if subprocessor_enabled && subprocessor_analyzer.is_some() {
+                if current_depth == 1 {
+                    logger.update_progress("Checking subprocessor pages...").await;
+                    logger.advance_progress(6).await; // 2% -> 8%
+                }
                 logger.debug(&format!("Starting subprocessor web page analysis for {}", domain));
                 
                 match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), subprocessor_analyzer.unwrap()).await {
@@ -1059,6 +1116,7 @@ async fn discover_nth_parties(
             if current_depth == 1 {
                 // Subdomain discovery via subfinder
                 if let Some(subfinder) = subdomain_discovery {
+                    logger.update_progress("Running subdomain discovery...").await;
                     logger.info("Running subdomain discovery via subfinder...");
                     match subfinder.discover(domain).await {
                         Ok(subdomains) => {
@@ -1145,10 +1203,12 @@ async fn discover_nth_parties(
                             logger.warn(&format!("Subdomain discovery failed: {}", e));
                         }
                     }
+                    logger.advance_progress(6).await; // 8% -> 14%
                 }
 
                 // SaaS tenant discovery
                 if let Some(tenant_disc) = saas_tenant_discovery {
+                    logger.update_progress("Running SaaS tenant discovery...").await;
                     logger.info("Running SaaS tenant discovery...");
                     match tenant_disc.probe(domain).await {
                         Ok(tenants) => {
@@ -1172,10 +1232,12 @@ async fn discover_nth_parties(
                             logger.warn(&format!("SaaS tenant discovery failed: {}", e));
                         }
                     }
+                    logger.advance_progress(4).await; // 14% -> 18%
                 }
 
                 // Certificate Transparency log discovery
                 if let Some(ct_disc) = ct_discovery {
+                    logger.update_progress("Running CT log discovery...").await;
                     logger.info("Running Certificate Transparency log discovery...");
                     match ct_disc.discover(domain).await {
                         Ok(ct_results) => {
@@ -1196,22 +1258,42 @@ async fn discover_nth_parties(
                             logger.warn(&format!("CT log discovery failed: {}", e));
                         }
                     }
+                    logger.advance_progress(2).await; // 18% -> 20%
                 }
             }
 
-            // Initialize progress bar based on total work units found (only for root domain at depth 1)
-            if current_depth == 1 {
-                let total_work_units = all_vendor_domains.len() as u64;
-                if total_work_units > 0 {
-                    logger.start_progress(total_work_units).await;
-                    logger.update_progress(&format!("🔍 Analyzing {} vendor domains...", total_work_units)).await;
-                } else {
-                    logger.start_progress(1).await;
-                    logger.update_progress("🔍 No vendor domains found to analyze").await;
-                    logger.advance_progress(1).await;
-                    logger.finish_progress("Analysis completed").await;
+            // Deduplicate vendor domains by base domain before processing (R001 fix)
+            // Multiple discovery methods (DNS, SaaS tenant, subfinder CNAME) can find the same vendor
+            {
+                let pre_dedup_count = all_vendor_domains.len();
+                let mut seen_domains: HashSet<String> = HashSet::new();
+                all_vendor_domains.retain(|vd| {
+                    let base = domain_utils::extract_base_domain(&vd.domain);
+                    seen_domains.insert(base)
+                });
+                if all_vendor_domains.len() < pre_dedup_count {
+                    logger.debug(&format!("Deduplicated vendor domains: {} -> {} (removed {} duplicates)",
+                        pre_dedup_count, all_vendor_domains.len(), pre_dedup_count - all_vendor_domains.len()));
                 }
             }
+
+            // Calculate progress increment per vendor for the 20-100% range (80 percentage points)
+            // We're at 20% after discovery, need to reach 100% after processing all vendors
+            let progress_per_vendor: u64 = if current_depth == 1 {
+                let vendor_count = all_vendor_domains.len() as u64;
+                if vendor_count > 0 {
+                    logger.update_progress(&format!("🔍 Analyzing {} vendor domains...", vendor_count)).await;
+                    // Distribute 80 percentage points across all vendors
+                    (80_u64).max(vendor_count) / vendor_count.max(1)
+                } else {
+                    logger.update_progress("🔍 No vendor domains found to analyze").await;
+                    logger.advance_progress(80).await; // Jump to 100%
+                    logger.finish_progress("Analysis completed").await;
+                    0
+                }
+            } else {
+                0 // Non-root depth doesn't update the main progress bar
+            };
             
             // Resource management based on configured strategy
             match analysis_config.strategy {
@@ -1265,6 +1347,7 @@ async fn discover_nth_parties(
                     let analysis_config_inner = analysis_config_clone.clone();
                     let checkpoint_clone = checkpoint.clone();
                     let checkpoint_output_dir_clone = checkpoint_output_dir_owned.clone();
+                    let vendor_progress_increment = progress_per_vendor;
 
                     async move {
                         // Apply rate limiting delay if configured (helps prevent server/resource overwhelming)
@@ -1307,8 +1390,8 @@ async fn discover_nth_parties(
                             index + 1, total_vendors, vendor_domain_clone, elapsed.as_secs_f64(), result.len()));
                         
                         // Advance progress for root-level analysis only
-                        if current_depth == 1 {
-                            logger_clone.advance_progress(1).await;
+                        if current_depth == 1 && vendor_progress_increment > 0 {
+                            logger_clone.advance_progress(vendor_progress_increment).await;
                         }
 
                         result

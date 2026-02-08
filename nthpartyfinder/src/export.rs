@@ -351,7 +351,17 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
 }
 
 fn sanitize_mermaid_id(domain: &str) -> String {
-    domain.replace(".", "_").replace("-", "_").chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+    // L008 fix: ensure IDs are valid Mermaid identifiers (alphanumeric + underscore, no leading digit)
+    let id: String = domain.replace('.', "_").replace('-', "_")
+        .chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+    // Prefix with 'n' if ID starts with a digit (Mermaid doesn't allow numeric-start IDs)
+    if id.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("n{}", id)
+    } else if id.is_empty() {
+        "unknown".to_string()
+    } else {
+        id
+    }
 }
 
 fn escape_markdown(text: &str) -> String {
@@ -360,6 +370,7 @@ fn escape_markdown(text: &str) -> String {
 
 // XYFlow Svelte vendor graph bundle - embedded at compile time
 const VENDOR_GRAPH_JS: &str = include_str!("../static/vendor-graph.js");
+const VENDOR_GRAPH_CSS: &str = include_str!("../static/vendor-graph.css");
 
 #[derive(Template)]
 #[template(path = "report.html")]
@@ -369,6 +380,7 @@ struct HtmlReportTemplate {
     relationships_json: String,
     summary_json: String,
     vendor_graph_js: &'static str,
+    vendor_graph_css: &'static str,
 }
 
 #[derive(serde::Serialize)]
@@ -400,6 +412,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
             vendor_graph_js: VENDOR_GRAPH_JS,
+            vendor_graph_css: VENDOR_GRAPH_CSS,
         };
         
         let html_content = empty_template.render()?;
@@ -434,6 +447,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
         relationships_json,
         summary_json,
         vendor_graph_js: VENDOR_GRAPH_JS,
+        vendor_graph_css: VENDOR_GRAPH_CSS,
     };
     
     let html_content = template.render()?;
