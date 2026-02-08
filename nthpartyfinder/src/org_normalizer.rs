@@ -66,6 +66,15 @@ const CORPORATE_SUFFIXES: &[&str] = &[
     "l.p.",
     "llp",
     "l.l.p.",
+    // M011 fix: dotted acronym forms used by European companies
+    "s.r.l.",
+    "s.r.l",
+    "s.a.s.",
+    "s.a.s",
+    "s.a.",
+    "s.p.a.",
+    "s.p.a",
+    "l.l.c.",
 ];
 
 /// Configuration for organization aliases.
@@ -476,12 +485,19 @@ fn normalize_whitespace(name: &str) -> String {
 /// Convert string to title case (capitalize first letter of each word).
 /// Known acronyms and very short all-caps words (2 chars) are preserved.
 /// Longer all-caps words are converted to title case since they're more likely normal words.
+/// L011 fix: Common English prepositions/articles stay lowercase when not the first word.
 fn to_title_case(name: &str) -> String {
     // Known acronyms that should be preserved regardless of length
     let known_acronyms = ["IBM", "AT", "AWS", "GCP", "USA", "UK", "EU", "AI", "IT", "HR", "PR", "QA", "HP"];
 
-    name.split_whitespace()
-        .map(|word| {
+    // L011 fix: common prepositions/articles/conjunctions that should stay lowercase
+    // in title case (except when they're the first word)
+    let lowercase_words = ["of", "and", "the", "in", "for", "on", "at", "to", "by", "or", "an", "a"];
+
+    let words: Vec<&str> = name.split_whitespace().collect();
+    words.iter()
+        .enumerate()
+        .map(|(i, word)| {
             let chars: Vec<char> = word.chars().collect();
             let len = chars.len();
 
@@ -497,6 +513,11 @@ fn to_title_case(name: &str) -> String {
             // e.g., IT, HR, etc. Words like NEW, THE are too common as normal words
             if is_all_upper && len == 2 && chars.iter().any(|c| c.is_alphabetic()) {
                 return word.to_string();
+            }
+
+            // L011: lowercase prepositions/articles when not the first word
+            if i > 0 && lowercase_words.iter().any(|lw| lw.eq_ignore_ascii_case(word)) {
+                return word.to_lowercase();
             }
 
             // Convert to title case
@@ -696,8 +717,8 @@ mod tests {
         // AWS has a builtin alias -> "Amazon Web Services"
         assert_eq!(n.normalize("AWS"), "Amazon Web Services");
 
-        // AT&T: "AT" is in known_acronyms, "and" becomes title case, "T" stays single char
-        assert_eq!(n.normalize("AT&T"), "AT And T");
+        // AT&T: "AT" is in known_acronyms, "and" stays lowercase (L011), "T" stays single char
+        assert_eq!(n.normalize("AT&T"), "AT and T");
     }
 
     // =========================================================================
@@ -748,9 +769,9 @@ mod tests {
         // "The" at the beginning should be removed
         assert_eq!(n.normalize("The Widget Company"), "Widget");
 
-        // "The" in the middle should stay
+        // "The" in the middle should stay lowercase (L011 fix: articles lowercase mid-sentence)
         let result = n.normalize("Over The Top");
-        assert!(result.contains("The"));
+        assert!(result.contains("the"));
     }
 
     // =========================================================================

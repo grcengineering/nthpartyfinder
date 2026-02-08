@@ -245,7 +245,7 @@ impl SubfinderDiscovery {
                 let download_arch = if arch == "x86_64" { "amd64" } else { arch };
                 instructions.push_str(&format!(
                     "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_windows_{}.zip\n\n",
-                    "2.6.7", download_arch
+                    SUBFINDER_VERSION, download_arch
                 ));
             }
             "macos" | "darwin" => {
@@ -255,7 +255,7 @@ impl SubfinderDiscovery {
                 let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
                 instructions.push_str(&format!(
                     "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_darwin_{}.zip\n\n",
-                    "2.6.7", download_arch
+                    SUBFINDER_VERSION, download_arch
                 ));
             }
             "linux" => {
@@ -265,7 +265,7 @@ impl SubfinderDiscovery {
                 let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
                 instructions.push_str(&format!(
                     "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_linux_{}.zip\n\n",
-                    "2.6.7", download_arch
+                    SUBFINDER_VERSION, download_arch
                 ));
             }
             _ => {
@@ -440,6 +440,11 @@ impl SubfinderDiscovery {
         let mut reader = BufReader::new(stdout).lines();
         let mut results = Vec::new();
 
+        // M017 known limitation: if the timeout fires while output is being read, the results
+        // may be incomplete (partial last line is dropped by the JSON parser). This is acceptable
+        // because: (1) each line is a complete JSON object, so we never get corrupt data, and
+        // (2) partial results are still useful for discovery. The timeout wraps the entire read
+        // loop, so all lines read before timeout are captured.
         let read_future = async {
             while let Ok(Some(line)) = reader.next_line().await {
                 if let Ok(parsed) = serde_json::from_str::<SubfinderJsonLine>(&line) {

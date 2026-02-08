@@ -257,8 +257,17 @@ async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig) -> T
     }
 }
 
-/// Check if a URL was redirected to the main company site
-/// This detects cases like klaviyo.auth0.com -> auth0.com
+/// Check if a URL was redirected to the main company site.
+/// This detects cases like klaviyo.auth0.com -> auth0.com.
+///
+/// M008 known limitations:
+/// - Redirect detection uses heuristic domain comparison, which may produce false positives
+///   when a legitimate tenant page redirects to a different subdomain of the same platform
+///   (e.g., tenant.platform.com -> app.platform.com could be a valid tenant page).
+/// - The `known_redirects` list is manually maintained and may not cover all platform-specific
+///   redirect patterns (e.g., duosecurity.com -> duo.com).
+/// - The redirect policy is `Policy::limited(3)`, so chains longer than 3 hops are not followed,
+///   which could cause both false positives (incomplete redirect) and false negatives.
 fn was_redirected_to_main_site(original_url: &str, final_url: &str) -> bool {
     // Parse URLs to extract domains
     let original_host = extract_host_from_url(original_url);

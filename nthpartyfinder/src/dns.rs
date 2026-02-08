@@ -34,6 +34,9 @@ static PROVIDER_VERIFY_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"([A-Z0-9]+)_verify_").unwrap()
 });
 
+// M016: Underscores are intentionally allowed at the start of labels to support
+// SPF/DMARC/DKIM underscore-prefixed subdomains (e.g., _spf.google.com, _dmarc.domain.com,
+// _domainkey.domain.com). This is correct per RFC 7208 and RFC 6376.
 static DOMAIN_VALIDATION_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$").unwrap()
 });
@@ -60,6 +63,10 @@ static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"exists:\s*([^\s]+)").unwrap()
+});
+// M003: ptr: mechanism contains a domain (unlike ip4:/ip6: which contain IP addresses)
+static SPF_PTR_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"ptr:\s*([^\s]+)").unwrap()
 });
 
 // Pre-compiled DKIM pattern regexes (H002 fix)
@@ -438,7 +445,9 @@ pub async fn get_txt_records_with_rate_limit(
             Ok(records)
         },
         Err(e) => {
-            warn!("All DNS resolution attempts failed for {}: {}", domain, e);
+            // M001: Distinguish "all DNS resolution failed" from "no records found" (which
+            // returns Ok(vec![]) via a successful lookup with zero results above).
+            warn!("All DNS resolution failed for {} (DoH, UDP, TCP, system resolver all errored) — returning empty results to continue analysis. Last error: {}", domain, e);
             Ok(vec![]) // Return empty instead of error to continue analysis
         }
     }
@@ -628,8 +637,15 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
 
     let mut domains = Vec::new();
     // Use pre-compiled regexes instead of compiling in loop (H001 fix)
+    // Note: ip4:/ip6: mechanisms are intentionally excluded — they contain IP addresses,
+    // not domains, so they are not relevant to vendor domain extraction.
+    // L009: RFC 7208 limits SPF to 10 DNS-querying mechanisms (include, a, mx, ptr, exists,
+    // redirect). This tool does not recursively resolve SPF chains, it only extracts domains
+    // from a single record, so the 10-lookup limit is not enforced here. A future recursive
+    // SPF resolver would need to track and enforce this limit.
     let spf_regexes: &[&Lazy<Regex>] = &[
         &SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX, &SPF_A_REGEX, &SPF_MX_REGEX, &SPF_EXISTS_REGEX,
+        &SPF_PTR_REGEX,
     ];
 
     for re in spf_regexes {
@@ -790,11 +806,12 @@ fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailur
         // Additional patterns found in klaviyo.com analysis
         (r"anthropic-domain-verification", "anthropic.com", RecordType::DnsTxtVerification),
         (r"jetbrains-domain-verification=", "jetbrains.com", RecordType::DnsTxtVerification),
-        (r"gc-ai-domain-verification", "gc-ai.com", RecordType::DnsTxtVerification), // Possible AI vendor
+        (r"gc-ai-domain-verification", "gc-ai.com", RecordType::DnsTxtVerification), // Unverified vendor - kept for completeness
 
         // Special mappings discovered from research
         (r"intacct-esk=", "sage.com", RecordType::DnsTxtVerification), // Sage Intacct
         (r"mgverify=", "mailgun.com", RecordType::DnsTxtVerification), // Mailgun verification
+        // L002: neat.co is correct — Neat's actual domain is neat.co (not .com)
         (r"neat-pulse-domain-verification", "neat.co", RecordType::DnsTxtVerification),
         
         // Pattern variations
@@ -802,7 +819,8 @@ fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailur
         (r"zoom-domain-verification=", "zoom.us", RecordType::DnsTxtVerification),
         (r"have-i-been-pwned-verification=", "haveibeenpwned.com", RecordType::DnsTxtVerification),
         
-        // Whimsical pattern (discovered in klaviyo data)
+        // L001: Whimsical uses angle bracket format in TXT records — this is an actual
+        // record format observed in the wild (e.g., klaviyo.com DNS), not a parsing error.
         (r"<whimsical=", "whimsical.com", RecordType::DnsTxtVerification),
     ];
 
@@ -828,62 +846,62 @@ fn try_dynamic_verification_patterns(record: &str, _logger: Option<&dyn LogFailu
     // Dynamic pattern 1: "*-verification=" or "*-domain-verification="
     // Use pre-compiled regex for performance (B020 fix)
     for cap in DOMAIN_VERIFICATION_REGEX.captures_iter(record) {
-            if let Some(provider_match) = cap.get(1) {
-                let provider_name = provider_match.as_str().to_lowercase();
-                if let Some(domain) = infer_provider_domain(&provider_name) {
-                        domains.push(VendorDomain {
-                        domain,
-                        source_type: RecordType::DnsTxtVerification,
-                        raw_record: raw_record.to_string(),
-                    });
-                }
+        if let Some(provider_match) = cap.get(1) {
+            let provider_name = provider_match.as_str().to_lowercase();
+            if let Some(domain) = infer_provider_domain(&provider_name) {
+                domains.push(VendorDomain {
+                    domain,
+                    source_type: RecordType::DnsTxtVerification,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
+    }
 
     // Dynamic pattern 2: "verification-*="
     // Use pre-compiled regex for performance (B020 fix)
     for cap in VERIFICATION_PREFIX_REGEX.captures_iter(record) {
-            if let Some(provider_match) = cap.get(1) {
-                let provider_name = provider_match.as_str().to_lowercase();
-                if let Some(domain) = infer_provider_domain(&provider_name) {
-                        domains.push(VendorDomain {
-                        domain,
-                        source_type: RecordType::DnsTxtVerification,
-                        raw_record: raw_record.to_string(),
-                    });
-                }
+        if let Some(provider_match) = cap.get(1) {
+            let provider_name = provider_match.as_str().to_lowercase();
+            if let Some(domain) = infer_provider_domain(&provider_name) {
+                domains.push(VendorDomain {
+                    domain,
+                    source_type: RecordType::DnsTxtVerification,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
+    }
 
     // Dynamic pattern 3: "*-site-verification="
     // Use pre-compiled regex for performance (B020 fix)
     for cap in SITE_VERIFICATION_REGEX.captures_iter(record) {
-            if let Some(provider_match) = cap.get(1) {
-                let provider_name = provider_match.as_str().to_lowercase();
-                if let Some(domain) = infer_provider_domain(&provider_name) {
-                        domains.push(VendorDomain {
-                        domain,
-                        source_type: RecordType::DnsTxtVerification,
-                        raw_record: raw_record.to_string(),
-                    });
-                }
+        if let Some(provider_match) = cap.get(1) {
+            let provider_name = provider_match.as_str().to_lowercase();
+            if let Some(domain) = infer_provider_domain(&provider_name) {
+                domains.push(VendorDomain {
+                    domain,
+                    source_type: RecordType::DnsTxtVerification,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
+    }
 
     // Dynamic pattern 4: "PROVIDER_verify_" (like ZOOM_verify_)
     // Use pre-compiled regex for performance (B020 fix)
     for cap in PROVIDER_VERIFY_REGEX.captures_iter(record) {
-            if let Some(provider_match) = cap.get(1) {
-                let provider_name = provider_match.as_str().to_lowercase();
-                if let Some(domain) = infer_provider_domain(&provider_name) {
-                        domains.push(VendorDomain {
-                        domain,
-                        source_type: RecordType::DnsTxtVerification,
-                        raw_record: raw_record.to_string(),
-                    });
-                }
+        if let Some(provider_match) = cap.get(1) {
+            let provider_name = provider_match.as_str().to_lowercase();
+            if let Some(domain) = infer_provider_domain(&provider_name) {
+                domains.push(VendorDomain {
+                    domain,
+                    source_type: RecordType::DnsTxtVerification,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
+    }
 
     // Dynamic pattern 5: "letters=" (preceded by letters, like EU5VQe53KTDQgPby023o4w)
     // This is more challenging as it requires heuristic analysis - skip for now to avoid false positives
@@ -928,6 +946,15 @@ fn infer_provider_domain(provider_name: &str) -> Option<String> {
         ("facebook", "facebook.com"),
         ("anthropic", "anthropic.com"),
         ("jetbrains", "jetbrains.com"),
+        ("github", "github.com"),
+        ("gitlab", "gitlab.com"),
+        ("bitbucket", "bitbucket.org"),
+        ("okta", "okta.com"),
+        ("auth0", "auth0.com"),
+        ("twilio", "twilio.com"),
+        ("segment", "segment.com"),
+        ("sentry", "sentry.io"),
+        ("pagerduty", "pagerduty.com"),
 
         // Common generic mappings
         ("aws", "amazon.com"),
@@ -949,7 +976,7 @@ fn infer_provider_domain(provider_name: &str) -> Option<String> {
         // Only do this for well-formed provider names to avoid false positives
         match provider_name {
             // Known cases where .com works
-            "twilio" | "sendgrid" | "mailchimp" | "constantcontact" | "pardot" | 
+            "sendgrid" | "mailchimp" | "constantcontact" | "pardot" |
             "marketo" | "hubspot" | "intercom" | "freshdesk" | "typeform" => {
                 Some(format!("{}.com", provider_name))
             },

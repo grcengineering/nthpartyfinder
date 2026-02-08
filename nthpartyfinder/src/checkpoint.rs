@@ -109,11 +109,20 @@ impl Checkpoint {
         Self::get_checkpoint_path(output_dir).exists()
     }
 
-    /// Load a checkpoint from the given output directory
+    /// Load a checkpoint from the given output directory.
+    /// Returns an error if the checkpoint version is incompatible (M012 fix).
     pub fn load(output_dir: &Path) -> Result<Self> {
         let path = Self::get_checkpoint_path(output_dir);
         let content = std::fs::read_to_string(&path)?;
         let mut checkpoint: Checkpoint = serde_json::from_str(&content)?;
+        if checkpoint.version != CHECKPOINT_VERSION {
+            anyhow::bail!(
+                "Incompatible checkpoint version: file has version {} but current version is {}. \
+                 Delete the checkpoint file to start fresh.",
+                checkpoint.version,
+                CHECKPOINT_VERSION
+            );
+        }
         checkpoint.checkpoint_dir = Some(output_dir.to_path_buf());
         Ok(checkpoint)
     }

@@ -9,14 +9,13 @@ pub enum RecordType {
     DnsTxtDkim,          // DNS::TXT::DKIM
     
     // DNS other record types
-    DnsCname,            // DNS::CNAME
     DnsSubdomain,        // DNS::SUBDOMAIN
     DnsMx,               // DNS::MX
     DnsA,                // DNS::A
     DnsAaaa,             // DNS::AAAA
     
     // HTTP-based verifications
-    HttpWellKnown,       // HTTP::.well-known
+    HttpWellKnown,       // HTTP::WELL_KNOWN
     HttpMeta,            // HTTP::META
     HttpFile,            // HTTP::FILE
     
@@ -36,6 +35,9 @@ pub enum RecordType {
     SaasTenantProbe,     // DISCOVERY::SAAS_TENANT
     CtLogDiscovery,      // DISCOVERY::CT_LOG
 
+    // Trust Center API extraction
+    TrustCenterApi,      // TRUST_CENTER::API
+
     // Unknown/Other
     Unknown,             // UNKNOWN
 }
@@ -53,12 +55,11 @@ impl RecordType {
             RecordType::DnsTxtVerification => "DNS::TXT::VERIFICATION".to_string(),
             RecordType::DnsTxtDmarc => "DNS::TXT::DMARC".to_string(),
             RecordType::DnsTxtDkim => "DNS::TXT::DKIM".to_string(),
-            RecordType::DnsCname => "DNS::CNAME".to_string(),
             RecordType::DnsSubdomain => "DNS::SUBDOMAIN".to_string(),
             RecordType::DnsMx => "DNS::MX".to_string(),
             RecordType::DnsA => "DNS::A".to_string(),
             RecordType::DnsAaaa => "DNS::AAAA".to_string(),
-            RecordType::HttpWellKnown => "HTTP::.well-known".to_string(),
+            RecordType::HttpWellKnown => "HTTP::WELL_KNOWN".to_string(),
             RecordType::HttpMeta => "HTTP::META".to_string(),
             RecordType::HttpFile => "HTTP::FILE".to_string(),
             RecordType::CertDomain => "CERT::DOMAIN".to_string(),
@@ -69,6 +70,7 @@ impl RecordType {
             RecordType::SubfinderDiscovery => "DISCOVERY::SUBFINDER".to_string(),
             RecordType::SaasTenantProbe => "DISCOVERY::SAAS_TENANT".to_string(),
             RecordType::CtLogDiscovery => "DISCOVERY::CT_LOG".to_string(),
+            RecordType::TrustCenterApi => "TRUST_CENTER::API".to_string(),
             RecordType::Unknown => "UNKNOWN".to_string(),
         }
     }
@@ -85,11 +87,12 @@ impl RecordType {
     pub fn get_category(&self) -> &'static str {
         match self {
             RecordType::DnsTxtSpf | RecordType::DnsTxtVerification | RecordType::DnsTxtDmarc | RecordType::DnsTxtDkim => "Email & Authentication",
-            RecordType::DnsCname | RecordType::DnsSubdomain | RecordType::DnsMx | RecordType::DnsA | RecordType::DnsAaaa => "DNS Infrastructure",
+            RecordType::DnsSubdomain | RecordType::DnsMx | RecordType::DnsA | RecordType::DnsAaaa => "DNS Infrastructure",
             RecordType::HttpWellKnown | RecordType::HttpMeta | RecordType::HttpFile | RecordType::HttpSubprocessor => "HTTP Verification",
             RecordType::CertDomain | RecordType::CertSan => "Certificate Authority",
             RecordType::ApiEndpoint | RecordType::ApiWebhook => "API Integration",
             RecordType::SubfinderDiscovery | RecordType::SaasTenantProbe | RecordType::CtLogDiscovery => "Discovery",
+            RecordType::TrustCenterApi => "Trust Center",
             RecordType::Unknown => "Other",
         }
     }
@@ -100,7 +103,6 @@ impl RecordType {
             RecordType::DnsTxtVerification => "Domain ownership verification record",
             RecordType::DnsTxtDmarc => "Email authentication policy record",
             RecordType::DnsTxtDkim => "Email signature verification record",
-            RecordType::DnsCname => "Canonical name record",
             RecordType::DnsSubdomain => "Subdomain delegation",
             RecordType::DnsMx => "Mail exchange record",
             RecordType::DnsA => "IPv4 address record",
@@ -116,6 +118,7 @@ impl RecordType {
             RecordType::SubfinderDiscovery => "Subdomain discovered via subfinder",
             RecordType::SaasTenantProbe => "SaaS tenant probe discovery",
             RecordType::CtLogDiscovery => "Certificate Transparency log discovery",
+            RecordType::TrustCenterApi => "Trust center API extraction",
             RecordType::Unknown => "Unknown or unclassified record type",
         }
     }

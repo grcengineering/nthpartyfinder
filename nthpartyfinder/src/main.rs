@@ -326,6 +326,8 @@ async fn main() -> Result<()> {
     println!("📁 Output file will be saved to: {}", output_path_str);
     let is_interactive = std::io::stdin().is_terminal();
     let final_output_path = if is_interactive {
+        // R007 fix: flush stderr before interactive prompt to prevent log/prompt interleaving
+        eprintln!();
         print!("Press Enter to continue or type a different directory path: ");
         io::Write::flush(&mut io::stdout()).unwrap();
 
@@ -787,7 +789,15 @@ async fn main() -> Result<()> {
     logger.start_progress(100).await;
     logger.update_progress("Starting vendor discovery...").await;
 
-    let new_results = discover_nth_parties(
+    // R004 fix: global analysis timeout prevents indefinite hangs (e.g., vanta.com case).
+    // Default 10 minutes, configurable via NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
+    let analysis_timeout_secs: u64 = std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    let analysis_timeout = std::time::Duration::from_secs(analysis_timeout_secs);
+
+    let analysis_future = discover_nth_parties(
         domain,
         args.depth,
         discovered_vendors.clone(),
@@ -811,7 +821,30 @@ async fn main() -> Result<()> {
         ct_discovery.as_ref(),
         checkpoint_for_analysis.clone(),
         &output_dir_for_checkpoint,
-    ).await?;
+    );
+
+    let new_results = match tokio::time::timeout(analysis_timeout, analysis_future).await {
+        Ok(result) => result?,
+        Err(_) => {
+            logger.warn(&format!(
+                "Analysis timed out after {} seconds. Saving checkpoint with partial results.",
+                analysis_timeout_secs
+            ));
+            // Save checkpoint before exiting so progress is preserved
+            {
+                let cp = checkpoint.lock().await;
+                if let Err(e) = cp.save(Path::new(&output_dir)) {
+                    logger.warn(&format!("Failed to save checkpoint on timeout: {}", e));
+                }
+            }
+            logger.finish_progress("Analysis timed out - partial results saved").await;
+            eprintln!();
+            eprintln!("Analysis exceeded the {} second timeout.", analysis_timeout_secs);
+            eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
+            eprintln!("To increase the timeout: export NTHPARTY_ANALYSIS_TIMEOUT_SECS=1200");
+            std::process::exit(1);
+        }
+    };
 
     // Check if interrupted - save checkpoint and exit
     if is_interrupted() {
@@ -1454,10 +1487,15 @@ async fn discover_nth_parties(
                             let processed = processed_domains.lock().await;
                             cp.completed_domains = processed.clone();
                             drop(processed);
-                            // Add results to checkpoint
+                            // Add results to checkpoint (M013 fix: use HashSet for O(1) dedup
+                            // instead of O(n) linear scan per result)
+                            let existing_keys: HashSet<(String, String)> = cp.partial_results.iter()
+                                .map(|pr| (pr.nth_party_domain.clone(), pr.nth_party_customer_domain.clone()))
+                                .collect();
                             for batch in &vendor_results {
                                 for r in batch {
-                                    if !cp.partial_results.iter().any(|pr| pr.nth_party_domain == r.nth_party_domain && pr.nth_party_customer_domain == r.nth_party_customer_domain) {
+                                    let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone());
+                                    if !existing_keys.contains(&key) {
                                         cp.add_result(r.clone());
                                     }
                                 }

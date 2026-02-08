@@ -183,10 +183,15 @@ impl CtLogDiscovery {
         }
     }
 
-    /// Check if a domain is infrastructure/CDN that shouldn't be reported as a vendor
+    /// Check if a domain is infrastructure/CDN that shouldn't be reported as a vendor.
+    ///
+    /// NOTE(M009): This list intentionally excludes hosting platforms like heroku.com and
+    /// wpengine.com because organizations may legitimately use them as vendors. Only pure
+    /// infrastructure domains (CDNs, cloud primitives, certificate issuers) that would create
+    /// noise in vendor reports are filtered here.
     fn is_infrastructure_domain(domain: &str) -> bool {
         let infrastructure_domains = [
-            // CDN providers
+            // CDN providers - these appear in certs due to CDN termination, not vendor relationships
             "cloudflare.com",
             "cloudflare.net",
             "cloudfront.net",
@@ -196,7 +201,7 @@ impl CtLogDiscovery {
             "fastly.com",
             "edgekey.net",
             "edgesuite.net",
-            // Cloud providers (as infrastructure)
+            // Cloud infrastructure primitives - raw cloud hostnames, not meaningful vendor signals
             "amazonaws.com",
             "azure.com",
             "azurewebsites.net",
@@ -204,7 +209,7 @@ impl CtLogDiscovery {
             "googleusercontent.com",
             "googlesyndication.com",
             "gstatic.com",
-            // SSL/TLS providers (issuers)
+            // SSL/TLS certificate issuers - appear as cert issuers, not actual vendor relationships
             "letsencrypt.org",
             "digicert.com",
             "comodo.com",
@@ -213,9 +218,10 @@ impl CtLogDiscovery {
             "geotrust.com",
             "thawte.com",
             "entrust.net",
-            "globalsign.com",
+            // M009 fix: removed globalsign.com - it's a legitimate SSL vendor that organizations
+            // may want to track as a third-party relationship
             "sectigo.com",
-            // Other infrastructure
+            // Non-routable / test domains
             "localhost",
             "local",
             "test",

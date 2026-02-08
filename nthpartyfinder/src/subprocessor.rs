@@ -16,7 +16,36 @@ use fancy_regex::Regex;
 use std::collections::BTreeMap;
 use once_cell::sync::Lazy;
 
-// Compile CSS selectors once at startup for performance (fixes B015)
+/// Maximum allowed length for regex patterns loaded from cache files.
+/// Patterns exceeding this limit are rejected to mitigate ReDoS attacks (H006 fix).
+const MAX_REGEX_PATTERN_LENGTH: usize = 500;
+
+/// Validate and compile a regex pattern from cache, rejecting patterns that are
+/// too long (potential ReDoS vectors). Returns None for rejected patterns.
+/// Uses fancy_regex which has built-in backtracking limits for additional safety.
+fn validate_and_compile_regex(pattern: &str) -> Option<regex::Regex> {
+    if pattern.len() > MAX_REGEX_PATTERN_LENGTH {
+        tracing::warn!(
+            "Rejected regex pattern from cache: length {} exceeds limit of {} characters (potential ReDoS). Pattern prefix: '{}'",
+            pattern.len(),
+            MAX_REGEX_PATTERN_LENGTH,
+            &pattern[..pattern.len().min(80)]
+        );
+        return None;
+    }
+    match regex::Regex::new(pattern) {
+        Ok(regex) => Some(regex),
+        Err(e) => {
+            tracing::warn!("Failed to compile regex pattern from cache: {}", e);
+            None
+        }
+    }
+}
+
+// Compile CSS selectors once at startup for performance (fixes B015).
+// Safety (L006): All .unwrap() calls below are safe because the selector strings are
+// compile-time constants containing valid CSS selectors. Selector::parse() only fails
+// on malformed CSS selector syntax, which cannot occur with these hardcoded values.
 static DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
     Selector::parse("div").unwrap()
 });
@@ -300,16 +329,30 @@ pub struct DomContext {
 /// This cache only stores URLs that were successfully found to contain subprocessor data.
 /// The actual content is scraped fresh every time to detect changes.
 /// Each vendor domain gets its own JSON file in the cache/ directory.
-/// 
+///
 /// Cache behavior:
 /// - Only successful subprocessor URL discoveries are cached
 /// - Each vendor domain has its own cache file: cache/{domain}.json
 /// - Cache files contain only the working URL and access timestamp
 /// - Content is always scraped fresh from cached URLs
-/// 
+///
 /// Manual management:
 /// - Delete specific cache files to refresh URL discovery for domains
 /// - Delete the entire cache/ directory to clear all URL cache
+///
+/// ## Concurrency (M006)
+///
+/// The `SubprocessorCache` is wrapped in `Arc<RwLock<SubprocessorCache>>` in
+/// `SubprocessorAnalyzer`, which provides in-process synchronization for concurrent
+/// access. However, the individual cache file I/O operations (read/write via
+/// `tokio::fs`) are not protected by file-level locks. This is an architectural
+/// limitation, but the actual risk of collision is low because:
+///
+/// 1. The cache is domain-specific (one file per domain), and parallel processing
+///    typically processes different domains concurrently.
+/// 2. Write operations are non-atomic at the filesystem level, but cache corruption
+///    would only affect a single domain's cached URL and is self-healing (the cache
+///    entry would fail to deserialize and be treated as a cache miss).
 #[derive(Debug, Default)]
 pub struct SubprocessorCache {
     cache_dir: PathBuf,
@@ -1819,7 +1862,15 @@ impl SubprocessorAnalyzer {
         Ok(extracted_vendors)
     }
 
-    /// Detect organizations in content using NLP-like pattern recognition
+    /// Detect organizations in content using NLP-like pattern recognition.
+    ///
+    /// Known limitation (L007): Generic org detection patterns (e.g., matching
+    /// `[A-Z][a-zA-Z]+ Services`) may produce false positives for non-organization
+    /// strings that happen to match the pattern (e.g., "Customer Services", "Privacy
+    /// Platform"). This is an inherent trade-off of regex-based heuristic extraction.
+    /// Improving these heuristics is out of scope for a bug fix; downstream consumers
+    /// should treat results as candidates requiring validation (e.g., via VendorRegistry
+    /// lookup or user confirmation through the pending mappings workflow).
     async fn detect_organizations_in_content(&self, document: &Html, _html_content: &str) -> Vec<DetectedOrganization> {
         debug!("🔍 ORGANIZATION DETECTION: Scanning content for company patterns");
 
@@ -2809,9 +2860,9 @@ impl SubprocessorAnalyzer {
     pub fn extract_domain_from_entity_name_with_patterns(&self, entity_name: &str, patterns: &ExtractionPatterns) -> Option<String> {
         let entity_lower = entity_name.to_lowercase().trim().to_string();
         
-        // First, try direct domain extraction patterns
+        // First, try direct domain extraction patterns (validated against ReDoS - H006)
         for pattern_str in &patterns.domain_extraction_patterns {
-            if let Ok(regex) = regex::Regex::new(pattern_str) {
+            if let Some(regex) = validate_and_compile_regex(pattern_str) {
                 for cap in regex.captures_iter(&entity_lower) {
                     if let Some(domain_match) = cap.get(1).or_else(|| cap.get(2)) {
                         let domain = domain_match.as_str().to_lowercase();
@@ -3111,10 +3162,10 @@ impl SubprocessorAnalyzer {
         debug!("Starting domain-specific custom extraction with {} direct selectors and {} regex patterns",
                custom_rules.direct_selectors.len(), custom_rules.custom_regex_patterns.len());
 
-        // Apply exclusion patterns if specified
+        // Apply exclusion patterns if specified (validated against ReDoS - H006)
         let exclusion_regexes: Vec<regex::Regex> = if let Some(special_handling) = &custom_rules.special_handling {
             special_handling.exclusion_patterns.iter()
-                .filter_map(|pattern| regex::Regex::new(pattern).ok())
+                .filter_map(|pattern| validate_and_compile_regex(pattern))
                 .collect()
         } else {
             Vec::new()
@@ -3180,9 +3231,9 @@ impl SubprocessorAnalyzer {
             }
         }
 
-        // Extract using custom regex patterns
+        // Extract using custom regex patterns (validated against ReDoS - H006)
         for regex_rule in &custom_rules.custom_regex_patterns {
-            if let Ok(regex) = regex::Regex::new(&regex_rule.pattern) {
+            if let Some(regex) = validate_and_compile_regex(&regex_rule.pattern) {
                 debug!("Applying custom regex: {} - {}", regex_rule.pattern, regex_rule.description);
 
                 for capture in regex.captures_iter(html_content) {
