@@ -24,9 +24,10 @@
         ],
         "failure_indicators": [
           "This account doesn't exist",
-          "account doesn't exist"
+          "account doesn't exist",
+          "slug_not_found"
         ],
-        "notes": "Check for account existence message"
+        "notes": "Invalid tenants redirect to auth.monday.com/slug_not_found. Valid tenants redirect to auth login."
       }
     }
   ]

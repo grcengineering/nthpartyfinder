@@ -37,6 +37,21 @@
         ],
         "notes": "Check HTTP status - many invalid tenants return 404"
       }
+    },
+    {
+      "name": "Freshservice",
+      "patterns": [
+        "{tenant}.freshservice.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Freshservice",
+          "freshservice",
+          "support/home"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404. Valid tenants return HTTP 200 and redirect to /support/home."
+      }
     }
   ]
 }

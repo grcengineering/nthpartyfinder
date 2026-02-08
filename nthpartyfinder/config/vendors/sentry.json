@@ -11,5 +11,21 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Sentry",
+      "patterns": [
+        "{tenant}.sentry.io"
+      ],
+      "detection": {
+        "success_indicators": [
+          "sentry.io",
+          "Sentry",
+          "customerDomain"
+        ],
+        "failure_indicators": [],
+        "notes": "Both valid and invalid tenants return login pages, but valid tenants include tenant-specific org slug in URL path and customerDomain in response body JSON. Wildcard detection handles the baseline comparison."
+      }
+    }
+  ]
 }

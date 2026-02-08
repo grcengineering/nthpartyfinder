@@ -12,5 +12,21 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Qualtrics",
+      "patterns": [
+        "{tenant}.qualtrics.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "identity-provider-select",
+          "qualtrics.com",
+          "Qualtrics"
+        ],
+        "failure_indicators": [],
+        "notes": "Valid tenants redirect through datacenter-specific subdomain (e.g., tenant.co1.qualtrics.com) to identity-provider-select. Invalid tenants redirect only to /login on the base domain."
+      }
+    }
+  ]
 }

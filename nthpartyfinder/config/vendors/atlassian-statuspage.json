@@ -11,5 +11,24 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Statuspage",
+      "patterns": [
+        "{tenant}.statuspage.io"
+      ],
+      "detection": {
+        "success_indicators": [
+          "statuspage.io",
+          "Status",
+          "All Systems Operational",
+          "Operational"
+        ],
+        "failure_indicators": [
+          "atlassian.com/software/statuspage"
+        ],
+        "notes": "Invalid tenants redirect to atlassian.com marketing site. Valid tenants stay on {tenant}.statuspage.io and show system status."
+      }
+    }
+  ]
 }

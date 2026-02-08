@@ -11,5 +11,21 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Chargebee",
+      "patterns": [
+        "{tenant}.chargebee.com"
+      ],
+      "detection": {
+        "success_indicators": [
+          "User Login - Chargebee",
+          "app.chargebee.com/login",
+          "Chargebee"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404. Valid tenants redirect to app.chargebee.com/login with a login page."
+      }
+    }
+  ]
 }

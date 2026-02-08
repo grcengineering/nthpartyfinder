@@ -11,5 +11,23 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "JFrog Platform",
+      "patterns": [
+        "{tenant}.jfrog.io"
+      ],
+      "detection": {
+        "success_indicators": [
+          "jfrog.io",
+          "JFrog"
+        ],
+        "failure_indicators": [
+          "landing.jfrog.com",
+          "reactivate-server"
+        ],
+        "notes": "Invalid/deactivated tenants redirect to landing.jfrog.com/reactivate-server/. Valid tenants stay on {tenant}.jfrog.io."
+      }
+    }
+  ]
 }

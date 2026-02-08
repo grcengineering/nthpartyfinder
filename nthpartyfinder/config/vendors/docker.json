@@ -11,5 +11,20 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Docker Hub",
+      "patterns": [
+        "hub.docker.com/u/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "docker.com",
+          "Docker Hub"
+        ],
+        "failure_indicators": [],
+        "notes": "Uses API endpoint hub.docker.com/v2/orgs/{tenant}. Invalid orgs return 404 JSON, valid orgs return 200 with org details. The HTML endpoint also works."
+      }
+    }
+  ]
 }

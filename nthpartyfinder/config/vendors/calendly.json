@@ -11,5 +11,20 @@
   },
   "verification_patterns": [],
   "provider_aliases": [],
-  "saas_tenants": []
+  "saas_tenants": [
+    {
+      "name": "Calendly",
+      "patterns": [
+        "calendly.com/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Calendly",
+          "calendly.com"
+        ],
+        "failure_indicators": [],
+        "notes": "Invalid tenants return HTTP 404. Valid tenants return HTTP 200 with user profile/scheduling page."
+      }
+    }
+  ]
 }

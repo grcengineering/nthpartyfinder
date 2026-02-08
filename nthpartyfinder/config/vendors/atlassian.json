@@ -43,6 +43,24 @@
         "failure_indicators": [],
         "notes": "Invalid tenants return HTTP 404"
       }
+    },
+    {
+      "name": "Bitbucket",
+      "patterns": [
+        "bitbucket.org/{tenant}"
+      ],
+      "detection": {
+        "success_indicators": [
+          "Bitbucket",
+          "repositories",
+          "workspace"
+        ],
+        "failure_indicators": [
+          "Resource not found",
+          "404"
+        ],
+        "notes": "Invalid workspaces return HTTP 404 with 'Resource not found'. Valid workspaces return HTTP 200 and redirect to workspace/repositories."
+      }
     }
   ]
 }
