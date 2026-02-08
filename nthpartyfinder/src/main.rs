@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
         eprintln!("❌ DISABLED: Subprocessor web page analysis");
     }
     if subdomain_will_be_enabled {
-        eprintln!("✅ ENABLED: Subdomain discovery (via subfinder)");
+        eprintln!("⏳ PENDING: Subdomain discovery (via subfinder — checking binary...)");
     } else {
         eprintln!("❌ DISABLED: Subdomain discovery");
     }
@@ -568,7 +568,13 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
         );
         if discovery.is_available() {
+            eprintln!("✅ ENABLED: Subdomain discovery (via subfinder)");
             Some(discovery)
+        } else if !std::io::stdin().is_terminal() {
+            // Non-interactive mode: skip installation prompt, log clear warning
+            logger.warn("Subfinder binary not found — subdomain discovery disabled (non-interactive mode, cannot prompt for installation)");
+            eprintln!("⚠️  SKIPPED: Subdomain discovery (subfinder not found, non-interactive mode)");
+            None
         } else {
             // Subfinder not found - show interactive installation menu
             eprintln!();
@@ -732,6 +738,7 @@ async fn main() -> Result<()> {
                 }
                 None => {
                     eprintln!("Invalid selection. Continuing without subdomain discovery.");
+                    eprintln!("❌ DISABLED: Subdomain discovery (subfinder not installed)");
                     None
                 }
             }
@@ -869,8 +876,15 @@ async fn main() -> Result<()> {
                 if !existing.evidence.contains(&r.evidence) {
                     existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
                 }
-                // Keep the more specific record type if the existing one is generic
-                if existing.nth_party_record.is_empty() && !r.nth_party_record.is_empty() {
+                // Prefer HttpSubprocessor record type when merging (subprocessor page
+                // is stronger evidence than DNS-based discovery)
+                if matches!(r.nth_party_record_type, RecordType::HttpSubprocessor)
+                    && !matches!(existing.nth_party_record_type, RecordType::HttpSubprocessor)
+                {
+                    existing.nth_party_record_type = r.nth_party_record_type;
+                    existing.nth_party_record = r.nth_party_record;
+                } else if existing.nth_party_record.is_empty() && !r.nth_party_record.is_empty() {
+                    // Fallback: keep the more specific record if existing is empty
                     existing.nth_party_record = r.nth_party_record;
                 }
             } else {
@@ -1254,7 +1268,7 @@ async fn discover_nth_parties(
                                     all_vendor_domains.push(dns::VendorDomain {
                                         domain: tenant.vendor_domain.clone(),
                                         source_type: RecordType::SaasTenantProbe,
-                                        raw_record: format!("Tenant URL: {} ({:?})", tenant.tenant_url, tenant.status),
+                                        raw_record: format!("Tenant URL: {} ({:?}) | {}", tenant.tenant_url, tenant.status, tenant.evidence),
                                     });
                                 }
                             } else {
@@ -1296,14 +1310,40 @@ async fn discover_nth_parties(
             }
 
             // Deduplicate vendor domains by base domain before processing (R001 fix)
-            // Multiple discovery methods (DNS, SaaS tenant, subfinder CNAME) can find the same vendor
+            // Multiple discovery methods (DNS, SaaS tenant, subfinder CNAME) can find the same vendor.
+            // We keep one entry per vendor to avoid duplicate processing, but merge evidence
+            // from all discovery methods so no information is lost.
+            // Priority: HttpSubprocessor > SaasTenantProbe > other record types.
             {
                 let pre_dedup_count = all_vendor_domains.len();
-                let mut seen_domains: HashSet<String> = HashSet::new();
-                all_vendor_domains.retain(|vd| {
+                let mut seen_domains: HashMap<String, usize> = HashMap::new();
+                let mut deduped: Vec<dns::VendorDomain> = Vec::new();
+                for vd in all_vendor_domains {
                     let base = domain_utils::extract_base_domain(&vd.domain);
-                    seen_domains.insert(base)
-                });
+                    if let Some(&existing_idx) = seen_domains.get(&base) {
+                        let existing = &mut deduped[existing_idx];
+                        // Merge evidence: append the new raw_record to the existing one
+                        if !existing.raw_record.contains(&vd.raw_record) {
+                            existing.raw_record = format!("{} | {}", existing.raw_record, vd.raw_record);
+                        }
+                        // Promote source_type if the new entry has stronger evidence
+                        if matches!(vd.source_type, RecordType::HttpSubprocessor)
+                            && !matches!(existing.source_type, RecordType::HttpSubprocessor)
+                        {
+                            existing.source_type = vd.source_type;
+                            existing.domain = vd.domain;
+                        } else if matches!(vd.source_type, RecordType::SaasTenantProbe)
+                            && !matches!(existing.source_type, RecordType::HttpSubprocessor | RecordType::SaasTenantProbe)
+                        {
+                            existing.source_type = vd.source_type;
+                            existing.domain = vd.domain;
+                        }
+                    } else {
+                        seen_domains.insert(base, deduped.len());
+                        deduped.push(vd);
+                    }
+                }
+                all_vendor_domains = deduped;
                 if all_vendor_domains.len() < pre_dedup_count {
                     logger.debug(&format!("Deduplicated vendor domains: {} -> {} (removed {} duplicates)",
                         pre_dedup_count, all_vendor_domains.len(), pre_dedup_count - all_vendor_domains.len()));

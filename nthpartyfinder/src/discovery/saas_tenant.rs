@@ -41,6 +41,7 @@ pub struct TenantProbeResult {
     pub vendor_domain: String,
     pub tenant_url: String,
     pub status: TenantStatus,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +65,7 @@ impl SaasTenantDiscovery {
         let client = Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::limited(3))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .build()
             .unwrap_or_default();
 
@@ -169,13 +171,15 @@ impl SaasTenantDiscovery {
         let results: Vec<TenantProbeResult> = stream::iter(probe_tasks)
             .map(|(name, vendor, url, detection)| {
                 let client = self.client.clone();
+                let vendor_domain = vendor.clone();
                 async move {
-                    let status = probe_url(&client, &url, &detection).await;
+                    let (status, evidence) = probe_url(&client, &url, &detection, &vendor_domain).await;
                     TenantProbeResult {
                         platform_name: name,
                         vendor_domain: vendor,
                         tenant_url: url,
                         status,
+                        evidence,
                     }
                 }
             })
@@ -223,120 +227,148 @@ pub fn construct_probe_url(pattern: &str, tenant: &str) -> String {
     }
 }
 
-async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig) -> TenantStatus {
+async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig, vendor_domain: &str) -> (TenantStatus, String) {
     match client.get(url).send().await {
         Ok(response) => {
             let status_code = response.status().as_u16();
             let final_url = response.url().to_string();
+            let was_redirected = extract_host_from_url(url) != extract_host_from_url(&final_url);
 
             // Check if we were redirected to the main company site
-            // This indicates the tenant doesn't exist (e.g., auth0.com/duo.com redirect invalid tenants)
             if was_redirected_to_main_site(url, &final_url) {
+                let evidence = format!(
+                    "HTTP {} | Redirected to {} (vendor main site)",
+                    status_code, final_url
+                );
                 debug!("Tenant URL {} redirected to main site {}, marking as NotFound", url, final_url);
-                return TenantStatus::NotFound;
+                return (TenantStatus::NotFound, evidence);
+            }
+
+            // Defense-in-depth: detect wildcard DNS where final URL host is the vendor's main domain
+            let final_host = extract_host_from_url(&final_url).unwrap_or_default();
+            let vendor_bare = vendor_domain.to_lowercase();
+            let final_stripped = final_host.strip_prefix("www.").unwrap_or(&final_host);
+            if final_stripped == vendor_bare && final_host != extract_host_from_url(url).unwrap_or_default() {
+                let evidence = format!(
+                    "HTTP {} | Resolved to vendor main site {} (wildcard DNS)",
+                    status_code, final_url
+                );
+                debug!("Tenant URL {} resolved to vendor main site {}, likely wildcard DNS - marking NotFound", url, final_url);
+                return (TenantStatus::NotFound, evidence);
             }
 
             match response.text().await {
-                Ok(body) => analyze_response(status_code, &body, detection),
-                Err(_) => {
-                    if status_code == 200 {
-                        TenantStatus::Likely
+                Ok(body) => {
+                    let (status, matched) = analyze_response_with_evidence(status_code, &body, detection);
+                    let redirect_info = if was_redirected {
+                        format!(" | Redirected to {}", final_url)
                     } else {
-                        TenantStatus::NotFound
+                        String::new()
+                    };
+                    let match_info = if matched.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" | Matched: [{}]", matched.join(", "))
+                    };
+                    let evidence = format!("HTTP {}{} | {:?}{}", status_code, redirect_info, status, match_info);
+                    (status, evidence)
+                }
+                Err(e) => {
+                    let evidence = format!("HTTP {} | Body read error: {}", status_code, e);
+                    if status_code == 200 {
+                        (TenantStatus::Likely, evidence)
+                    } else {
+                        (TenantStatus::NotFound, evidence)
                     }
                 }
             }
         }
         Err(e) => {
+            let evidence = format!("Request failed: {}", e);
             if e.is_timeout() {
-                TenantStatus::Unknown
+                (TenantStatus::Unknown, evidence)
             } else {
-                TenantStatus::NotFound
+                (TenantStatus::NotFound, evidence)
             }
         }
     }
 }
 
 /// Check if a URL was redirected to the main company site.
-/// This detects cases like klaviyo.auth0.com -> auth0.com.
-///
-/// M008 known limitations:
-/// - Redirect detection uses heuristic domain comparison, which may produce false positives
-///   when a legitimate tenant page redirects to a different subdomain of the same platform
-///   (e.g., tenant.platform.com -> app.platform.com could be a valid tenant page).
-/// - The `known_redirects` list is manually maintained and may not cover all platform-specific
-///   redirect patterns (e.g., duosecurity.com -> duo.com).
-/// - The redirect policy is `Policy::limited(3)`, so chains longer than 3 hops are not followed,
-///   which could cause both false positives (incomplete redirect) and false negatives.
+/// Detects cases like:
+/// - klaviyo.bamboohr.com -> www.bamboohr.com (www prefix replacement)
+/// - klaviyo.auth0.com -> auth0.com (subdomain stripped)
+/// - klaviyo.duosecurity.com -> duo.com (cross-domain redirect)
+/// - jobs.lever.co/klaviyo -> jobs.lever.co/ (path-based redirect)
 fn was_redirected_to_main_site(original_url: &str, final_url: &str) -> bool {
-    // Parse URLs to extract domains
-    let original_host = extract_host_from_url(original_url);
-    let final_host = extract_host_from_url(final_url);
+    let original_host = match extract_host_from_url(original_url) {
+        Some(h) => h,
+        None => return false,
+    };
+    let final_host = match extract_host_from_url(final_url) {
+        Some(h) => h,
+        None => return false,
+    };
 
-    if original_host.is_none() || final_host.is_none() {
-        return false;
-    }
-
-    let original_host = original_host.unwrap();
-    let final_host = final_host.unwrap();
-
-    // If hosts are the same, no redirect to main site
-    if original_host == final_host {
-        return false;
-    }
-
-    // Check if the final host is the "base" domain of the original
-    // e.g., klaviyo.auth0.com -> auth0.com
-    // e.g., klaviyo.duosecurity.com -> duo.com
-    let original_parts: Vec<&str> = original_host.split('.').collect();
-    let final_parts: Vec<&str> = final_host.split('.').collect();
-
-    // Main sites usually have 2 parts (domain.tld) or www.domain.tld
-    // Check if final URL looks like a main company site
-    let is_main_site = final_parts.len() <= 3 &&
-        (final_parts.first() == Some(&"www") || final_parts.len() == 2);
-
-    if !is_main_site {
-        return false;
-    }
-
-    // Check if the original URL's subdomain was the tenant identifier
-    // e.g., if original is "tenant.auth0.com" and final is "auth0.com"
-    if original_parts.len() > final_parts.len() {
-        // Check if the "core" domain matches
-        let original_core = if original_parts.len() >= 2 {
-            format!("{}.{}", original_parts[original_parts.len()-2], original_parts[original_parts.len()-1])
+    let core_domain = |host: &str| -> String {
+        let parts: Vec<&str> = host.split('.').collect();
+        if parts.len() >= 2 {
+            format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1])
         } else {
-            original_host.clone()
-        };
-
-        let final_core = if final_parts.len() >= 2 {
-            let last = final_parts.len();
-            format!("{}.{}", final_parts[last-2], final_parts[last-1])
-        } else {
-            final_host.clone()
-        };
-
-        // Known redirect patterns: some services redirect to different domains
-        // e.g., duosecurity.com -> duo.com
-        let known_redirects = [
-            ("duosecurity.com", "duo.com"),
-            ("auth0.com", "auth0.com"),
-        ];
-
-        for (from_domain, to_domain) in known_redirects {
-            if original_core.ends_with(from_domain) && final_core.ends_with(to_domain) {
-                return true;
-            }
+            host.to_string()
         }
+    };
 
-        // If core domains match, it's likely a redirect to main site
-        if original_core == final_core {
+    // Same host: check for path-based redirect (e.g., /klaviyo -> /)
+    if original_host == final_host {
+        let original_path = extract_path_from_url(original_url);
+        let final_path = extract_path_from_url(final_url);
+        // Original had a meaningful path but final is just root
+        if original_path.len() > 1 && (final_path == "/" || final_path.is_empty()) {
+            return true;
+        }
+        return false;
+    }
+
+    let original_core = core_domain(&original_host);
+    let final_core = core_domain(&final_host);
+
+    // Same core domain: final host is the bare domain or www.domain
+    // e.g., klaviyo.bamboohr.com -> www.bamboohr.com (both core: bamboohr.com)
+    // e.g., klaviyo.auth0.com -> auth0.com (both core: auth0.com)
+    if original_core == final_core {
+        let final_stripped = final_host.strip_prefix("www.").unwrap_or(&final_host);
+        if final_stripped == original_core {
+            return true;
+        }
+    }
+
+    // Known cross-domain redirects (e.g., duosecurity.com -> duo.com)
+    let known_redirects = [
+        ("duosecurity.com", "duo.com"),
+    ];
+    for (from_domain, to_domain) in known_redirects {
+        if original_core == from_domain && final_core == to_domain {
             return true;
         }
     }
 
     false
+}
+
+/// Extract path from URL string
+fn extract_path_from_url(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    if let Some(slash_pos) = without_scheme.find('/') {
+        let path = &without_scheme[slash_pos..];
+        path.split('?').next().unwrap_or(path).to_string()
+    } else {
+        "/".to_string()
+    }
 }
 
 /// Extract host from URL string
@@ -377,13 +409,48 @@ pub fn analyze_response(status_code: u16, body: &str, detection: &DetectionConfi
 
         if has_success {
             TenantStatus::Confirmed
-        } else {
+        } else if detection.success_indicators.is_empty() {
+            // No success indicators defined — HTTP 200 alone is a signal
             TenantStatus::Likely
+        } else {
+            // Success indicators defined but none matched — insufficient evidence
+            TenantStatus::Unknown
         }
     } else if status_code == 404 || status_code >= 400 {
         TenantStatus::NotFound
     } else {
         TenantStatus::Unknown
+    }
+}
+
+/// Analyze HTTP response and return matched indicator names for evidence
+fn analyze_response_with_evidence(status_code: u16, body: &str, detection: &DetectionConfig) -> (TenantStatus, Vec<String>) {
+    let body_lower = body.to_lowercase();
+
+    // Check for failure indicators first
+    for indicator in &detection.failure_indicators {
+        if body_lower.contains(&indicator.to_lowercase()) {
+            return (TenantStatus::NotFound, vec![format!("failure:{}", indicator)]);
+        }
+    }
+
+    if status_code == 200 {
+        let matched: Vec<String> = detection.success_indicators.iter()
+            .filter(|ind| body_lower.contains(&ind.to_lowercase()))
+            .map(|ind| ind.clone())
+            .collect();
+
+        if !matched.is_empty() {
+            (TenantStatus::Confirmed, matched)
+        } else if detection.success_indicators.is_empty() {
+            (TenantStatus::Likely, vec![])
+        } else {
+            (TenantStatus::Unknown, vec![])
+        }
+    } else if status_code == 404 || status_code >= 400 {
+        (TenantStatus::NotFound, vec![format!("http_status:{}", status_code)])
+    } else {
+        (TenantStatus::Unknown, vec![format!("http_status:{}", status_code)])
     }
 }
 
@@ -434,13 +501,26 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_response_likely() {
+    fn test_analyze_response_indicators_defined_but_unmatched_is_unknown() {
+        // When success indicators are defined but none match, should be Unknown (not Likely)
         let detection = DetectionConfig {
             success_indicators: vec!["Specific Brand".to_string()],
             failure_indicators: vec!["not found".to_string()],
             notes: None,
         };
         let status = analyze_response(200, "Some generic page content", &detection);
+        assert_eq!(status, TenantStatus::Unknown);
+    }
+
+    #[test]
+    fn test_analyze_response_no_indicators_defined_is_likely() {
+        // When no success indicators are defined, HTTP 200 alone is a signal -> Likely
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let status = analyze_response(200, "Some page content", &detection);
         assert_eq!(status, TenantStatus::Likely);
     }
 
@@ -454,5 +534,79 @@ mod tests {
         // Even with Okta in the body, "not found" should trigger NotFound
         let status = analyze_response(200, "Okta tenant not found", &detection);
         assert_eq!(status, TenantStatus::NotFound);
+    }
+
+    // --- Redirect detection tests ---
+
+    #[test]
+    fn test_redirect_www_prefix_replaces_tenant_subdomain() {
+        // Bug 1: klaviyo.bamboohr.com -> www.bamboohr.com (same part count)
+        assert!(was_redirected_to_main_site(
+            "https://klaviyo.bamboohr.com",
+            "https://www.bamboohr.com"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_subdomain_stripped_to_bare_domain() {
+        // klaviyo.auth0.com -> auth0.com
+        assert!(was_redirected_to_main_site(
+            "https://klaviyo.auth0.com",
+            "https://auth0.com"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_cross_domain() {
+        // Known redirect: duosecurity.com -> duo.com
+        assert!(was_redirected_to_main_site(
+            "https://klaviyo.duosecurity.com",
+            "https://duo.com"
+        ));
+    }
+
+    #[test]
+    fn test_no_redirect_same_host() {
+        // Same host, no redirect
+        assert!(!was_redirected_to_main_site(
+            "https://klaviyo.okta.com",
+            "https://klaviyo.okta.com"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_path_based_to_root() {
+        // Same host but path changed from tenant-specific to root
+        assert!(was_redirected_to_main_site(
+            "https://jobs.lever.co/klaviyo",
+            "https://jobs.lever.co/"
+        ));
+    }
+
+    #[test]
+    fn test_no_redirect_app_subdomain() {
+        // Redirect to app.platform.com is NOT a main-site redirect
+        assert!(!was_redirected_to_main_site(
+            "https://klaviyo.platform.com",
+            "https://app.platform.com/login"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_www_with_path() {
+        // Redirect to www.bamboohr.com/ (with trailing slash)
+        assert!(was_redirected_to_main_site(
+            "https://klaviyo.bamboohr.com/home/",
+            "https://www.bamboohr.com/"
+        ));
+    }
+
+    #[test]
+    fn test_no_redirect_same_host_with_path() {
+        // Same host, different paths — not a main-site redirect
+        assert!(!was_redirected_to_main_site(
+            "https://klaviyo.okta.com",
+            "https://klaviyo.okta.com/login"
+        ));
     }
 }
