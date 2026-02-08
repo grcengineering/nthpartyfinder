@@ -20,13 +20,10 @@
       "detection": {
         "success_indicators": [
           "Greenhouse",
-          "Jobs",
-          "Careers",
-          "careers",
-          "jobs"
+          "boards.greenhouse.io"
         ],
         "failure_indicators": [],
-        "notes": "Valid tenants often redirect to company's own careers page; invalid return HTTP 404"
+        "notes": "Valid tenants often redirect to company's own careers page. Only confirm if Greenhouse branding is present — generic terms like 'Jobs'/'Careers' match the redirect target, not Greenhouse."
       }
     }
   ]

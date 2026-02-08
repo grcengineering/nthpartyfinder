@@ -6,6 +6,8 @@
 
 use anyhow::Result;
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Duration;
 use futures::{stream, StreamExt};
@@ -151,6 +153,36 @@ impl SaasTenantDiscovery {
         let tenant_names = generate_tenant_names(target_domain);
         debug!("Generated tenant name candidates: {:?}", tenant_names);
 
+        // Phase 1: Baseline canary probes — one per unique pattern
+        // Detects wildcard platforms that return identical responses for any tenant
+        let mut baselines: HashMap<String, BaselineResponse> = HashMap::new();
+        let unique_patterns: Vec<String> = self.platforms.iter()
+            .flat_map(|p| p.tenant_patterns.iter().cloned())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let baseline_results: Vec<(String, Option<BaselineResponse>)> = stream::iter(unique_patterns)
+            .map(|pattern| {
+                let client = self.client.clone();
+                async move {
+                    let baseline = probe_baseline(&client, &pattern).await;
+                    (pattern, baseline)
+                }
+            })
+            .buffer_unordered(self.concurrency)
+            .collect()
+            .await;
+
+        for (pattern, baseline) in baseline_results {
+            if let Some(b) = baseline {
+                debug!("Baseline established for pattern {}: HTTP {} | {} bytes", pattern, b.status_code, b.body_length);
+                baselines.insert(pattern, b);
+            }
+        }
+        debug!("Established {} baselines from {} patterns", baselines.len(), self.platforms.iter().flat_map(|p| &p.tenant_patterns).count());
+
+        // Phase 2: Real tenant probes with baseline comparison
         let mut probe_tasks = Vec::new();
         for platform in &self.platforms {
             for tenant_name in &tenant_names {
@@ -161,6 +193,7 @@ impl SaasTenantDiscovery {
                         platform.vendor_domain.clone(),
                         url,
                         platform.detection.clone(),
+                        pattern.clone(),
                     ));
                 }
             }
@@ -168,12 +201,16 @@ impl SaasTenantDiscovery {
 
         debug!("Probing {} URLs for tenant discovery", probe_tasks.len());
 
+        let baselines_ref = &baselines;
         let results: Vec<TenantProbeResult> = stream::iter(probe_tasks)
-            .map(|(name, vendor, url, detection)| {
+            .map(|(name, vendor, url, detection, pattern)| {
                 let client = self.client.clone();
                 let vendor_domain = vendor.clone();
+                let baseline = baselines_ref.get(&pattern).cloned();
                 async move {
-                    let (status, evidence) = probe_url(&client, &url, &detection, &vendor_domain).await;
+                    let (status, evidence) = probe_url_with_baseline(
+                        &client, &url, &detection, &vendor_domain, baseline.as_ref()
+                    ).await;
                     TenantProbeResult {
                         platform_name: name,
                         vendor_domain: vendor,
@@ -227,7 +264,15 @@ pub fn construct_probe_url(pattern: &str, tenant: &str) -> String {
     }
 }
 
-async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig, vendor_domain: &str) -> (TenantStatus, String) {
+/// Probe a URL with optional baseline comparison for wildcard detection.
+/// If a baseline exists and the response matches it, the probe is downgraded to NotFound.
+async fn probe_url_with_baseline(
+    client: &Client,
+    url: &str,
+    detection: &DetectionConfig,
+    vendor_domain: &str,
+    baseline: Option<&BaselineResponse>,
+) -> (TenantStatus, String) {
     match client.get(url).send().await {
         Ok(response) => {
             let status_code = response.status().as_u16();
@@ -259,6 +304,19 @@ async fn probe_url(client: &Client, url: &str, detection: &DetectionConfig, vend
 
             match response.text().await {
                 Ok(body) => {
+                    // Wildcard detection: compare against baseline canary response
+                    if let Some(baseline) = baseline {
+                        if matches_baseline(status_code, &body, &final_url, baseline) {
+                            let evidence = format!(
+                                "HTTP {} | {} bytes | Wildcard: response matches baseline canary (baseline: {} bytes, hash match={})",
+                                status_code, body.len(), baseline.body_length,
+                                compute_body_hash(&body) == baseline.body_hash
+                            );
+                            debug!("Tenant URL {} matches baseline canary — wildcard platform, marking NotFound", url);
+                            return (TenantStatus::NotFound, evidence);
+                        }
+                    }
+
                     let (status, matched) = analyze_response_with_evidence(status_code, &body, detection);
                     let redirect_info = if was_redirected {
                         format!(" | Redirected to {}", final_url)
@@ -454,6 +512,89 @@ fn analyze_response_with_evidence(status_code: u16, body: &str, detection: &Dete
     }
 }
 
+/// Baseline response captured from a canary probe (known-nonexistent tenant)
+#[derive(Debug, Clone)]
+struct BaselineResponse {
+    status_code: u16,
+    body_hash: u64,
+    body_length: usize,
+    final_url: String,
+}
+
+/// Compute a fast hash of response body using Rust's built-in DefaultHasher
+fn compute_body_hash(body: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Probe a platform pattern with a canary tenant name to establish baseline response
+async fn probe_baseline(client: &Client, pattern: &str) -> Option<BaselineResponse> {
+    let canary_name = "nthparty-canary-8f3a2b";
+    let url = construct_probe_url(pattern, canary_name);
+
+    match client.get(&url).send().await {
+        Ok(response) => {
+            let status_code = response.status().as_u16();
+            let final_url = response.url().to_string();
+            match response.text().await {
+                Ok(body) => {
+                    let body_hash = compute_body_hash(&body);
+                    let body_length = body.len();
+                    debug!(
+                        "Baseline for pattern {}: HTTP {} | {} bytes | hash {} | final_url {}",
+                        pattern, status_code, body_length, body_hash, final_url
+                    );
+                    Some(BaselineResponse {
+                        status_code,
+                        body_hash,
+                        body_length,
+                        final_url,
+                    })
+                }
+                Err(_) => None,
+            }
+        }
+        Err(e) => {
+            debug!("Baseline probe failed for pattern {}: {} (platform likely rejects invalid tenants)", pattern, e);
+            None
+        }
+    }
+}
+
+/// Check if a probe response matches the baseline (wildcard detection)
+fn matches_baseline(
+    status_code: u16,
+    body: &str,
+    final_url: &str,
+    baseline: &BaselineResponse,
+) -> bool {
+    // Exact body hash match — same content as canary
+    let body_hash = compute_body_hash(body);
+    if body_hash == baseline.body_hash {
+        return true;
+    }
+
+    // Body length within 5% tolerance (handles dynamic CSRF tokens, timestamps)
+    // Only if status codes also match
+    if status_code == baseline.status_code && baseline.body_length > 0 {
+        let length_ratio = body.len() as f64 / baseline.body_length as f64;
+        if (0.95..=1.05).contains(&length_ratio) {
+            return true;
+        }
+    }
+
+    // Same final redirect URL (both redirected to identical login page)
+    if !final_url.is_empty() && final_url == baseline.final_url {
+        let original_different = true; // We're comparing a real probe vs canary — URLs started different
+        if original_different {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -608,5 +749,100 @@ mod tests {
             "https://klaviyo.okta.com",
             "https://klaviyo.okta.com/login"
         ));
+    }
+
+    // --- Wildcard / baseline detection tests ---
+
+    #[test]
+    fn test_baseline_exact_hash_match_is_wildcard() {
+        // Box-like: canary and real probe return identical content
+        let body = "<html><head><title>Box Login</title></head><body>Log in to Box</body></html>";
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(body),
+            body_length: body.len(),
+            final_url: "https://account.box.com/login".to_string(),
+        };
+        assert!(matches_baseline(200, body, "https://account.box.com/login", &baseline));
+    }
+
+    #[test]
+    fn test_baseline_length_tolerance_is_wildcard() {
+        // Platform with dynamic CSRF tokens: body differs slightly but length is ~same
+        let canary_body = "x".repeat(10000);
+        let real_body = "y".repeat(10200); // 2% larger — within 5% tolerance
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://app.example.com/login".to_string(),
+        };
+        // Hash won't match, but length is within tolerance
+        assert!(matches_baseline(200, &real_body, "https://app.example.com/other", &baseline));
+    }
+
+    #[test]
+    fn test_baseline_length_outside_tolerance_is_not_wildcard() {
+        // Real tenant returns significantly different response size
+        let canary_body = "x".repeat(1000);
+        let real_body = "y".repeat(5000); // 5x larger — way outside tolerance
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://app.example.com/login".to_string(),
+        };
+        assert!(!matches_baseline(200, &real_body, "https://app.example.com/dashboard", &baseline));
+    }
+
+    #[test]
+    fn test_baseline_same_redirect_url_is_wildcard() {
+        // Both canary and real probe redirect to same login page
+        let baseline = BaselineResponse {
+            status_code: 302,
+            body_hash: 12345,
+            body_length: 100,
+            final_url: "https://account.box.com/login".to_string(),
+        };
+        // Different body but same final redirect URL
+        assert!(matches_baseline(200, "different content entirely", "https://account.box.com/login", &baseline));
+    }
+
+    #[test]
+    fn test_baseline_different_response_is_not_wildcard() {
+        // Canary fails (404 page) but real tenant gets unique content
+        let canary_body = "Page not found";
+        let real_body = "Welcome to Klaviyo's Okta portal - Sign In";
+        let baseline = BaselineResponse {
+            status_code: 404,
+            body_hash: compute_body_hash(canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://klaviyo.okta.com/404".to_string(),
+        };
+        assert!(!matches_baseline(200, real_body, "https://klaviyo.okta.com/login", &baseline));
+    }
+
+    #[test]
+    fn test_compute_body_hash_deterministic() {
+        let body = "Hello, World!";
+        assert_eq!(compute_body_hash(body), compute_body_hash(body));
+    }
+
+    #[test]
+    fn test_compute_body_hash_different_content() {
+        assert_ne!(compute_body_hash("content A"), compute_body_hash("content B"));
+    }
+
+    #[test]
+    fn test_baseline_status_code_mismatch_skips_length_check() {
+        // Same body length but different status codes — should NOT match on length alone
+        let baseline = BaselineResponse {
+            status_code: 302,
+            body_hash: 99999, // different hash
+            body_length: 100,
+            final_url: "https://example.com/a".to_string(),
+        };
+        // Status 200 vs baseline 302, same length, different hash, different URL
+        assert!(!matches_baseline(200, &"x".repeat(100), "https://example.com/b", &baseline));
     }
 }
