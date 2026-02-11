@@ -1,31 +1,70 @@
-# Slim build without embedded NER (faster, smaller)
-# Use --no-default-features to exclude the NER model
-FROM docker.io/library/rust:1.83-alpine AS builder
+# =============================================================================
+# nthpartyfinder Docker Build - Development
+# Full feature parity minus NER (faster builds)
+#
+# Build stage uses official Rust slim-bookworm (glibc matches runtime)
+# Download stages use Chainguard hardened images (free, zero-CVE)
+# Runtime uses Debian slim (required for Chromium, manually hardened)
+# =============================================================================
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+# -----------------------------------------------------------------------------
+# Stage 1: Build (Debian bookworm-based Rust — glibc matches runtime)
+# -----------------------------------------------------------------------------
+FROM rust:slim-bookworm AS builder
 
-ENV RUSTFLAGS="-C target-feature=+crt-static"
-ENV OPENSSL_STATIC=1
-ENV OPENSSL_DIR=/usr
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY config/ config/
 COPY templates/ templates/
+COPY static/ static/
 
 # Build WITHOUT NER (--no-default-features excludes embedded-ner)
-RUN cargo build --release --target x86_64-unknown-linux-musl --no-default-features
-RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
+RUN cargo build --release --no-default-features
+RUN strip target/release/nthpartyfinder
 
-FROM dhi.io/alpine:3.22
-RUN addgroup -S nthparty && adduser -S -G nthparty nthparty
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder /usr/local/bin/
-COPY --from=builder /build/config/ /etc/nthpartyfinder/
-RUN chown -R nthparty:nthparty /etc/nthpartyfinder
-RUN mkdir -p /output && chown nthparty:nthparty /output
-USER nthparty
-ENV NTHPARTYFINDER_CONFIG_DIR=/etc/nthpartyfinder
-WORKDIR /output
+# -----------------------------------------------------------------------------
+# Stage 2: Download subfinder (Chainguard hardened base)
+# -----------------------------------------------------------------------------
+FROM cgr.dev/chainguard/wolfi-base:latest AS subfinder-dl
+USER root
+RUN apk add curl unzip && \
+    curl -fsSL -o /tmp/subfinder.zip \
+      "https://github.com/projectdiscovery/subfinder/releases/download/v2.11.0/subfinder_2.11.0_linux_amd64.zip" && \
+    unzip /tmp/subfinder.zip -d /tmp/subfinder && \
+    chmod +x /tmp/subfinder/subfinder
+
+# -----------------------------------------------------------------------------
+# Stage 3: Runtime (Debian slim, manually hardened)
+# -----------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    whois \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info \
+    && groupadd -g 10001 nthparty \
+    && useradd -u 10001 -g nthparty -d /home/nthparty -m -s /usr/sbin/nologin nthparty
+
+COPY --from=builder /build/target/release/nthpartyfinder /usr/local/bin/nthpartyfinder
+COPY --from=subfinder-dl /tmp/subfinder/subfinder /usr/local/bin/subfinder
+COPY --from=builder /build/config/ /app/config/
+
+RUN mkdir -p /output /cache && \
+    chown -R nthparty:nthparty /app /output /cache
+
+ENV CHROME_PATH=/usr/bin/chromium
+ENV NTHPARTYFINDER_CONTAINER=1
+
+USER 10001:10001
+WORKDIR /app
+
 ENTRYPOINT ["nthpartyfinder"]
 CMD ["--help"]

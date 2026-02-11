@@ -242,6 +242,553 @@ async fn test_ct_log_discovery_nonexistent_domain() {
 }
 
 // ============================================================================
+// SUBPROCESSOR RECORD TYPE PRESERVATION TESTS (Regression for Klaviyo bug)
+// ============================================================================
+// Regression test: When a vendor domain is discovered via BOTH DNS TXT records
+// AND a subprocessor page, the pre-processing dedup must preserve the
+// HttpSubprocessor record type. Previously, the dedup kept the first entry
+// (DNS), causing subprocessor-sourced vendors to be invisible in the report's
+// Subprocessors tab. This caused Klaviyo to show 18 instead of 24 subprocessors.
+
+#[test]
+fn test_subprocessor_record_type_survives_preprocess_dedup() {
+    // Simulate the pre-processing dedup from main.rs lines 1305-1318.
+    // DNS TXT records come BEFORE subprocessor results in all_vendor_domains.
+    // The dedup must prefer HttpSubprocessor over DNS-based record types.
+    use std::collections::HashMap;
+    use nthpartyfinder::domain_utils;
+
+    let all_vendor_domains: Vec<dns::VendorDomain> = vec![
+        // DNS TXT records (added first in the pipeline)
+        dns::VendorDomain {
+            domain: "anthropic.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "anthropic-domain-verification=abc123".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "dropbox.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "dropbox-domain-verification=xyz".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "microsoft.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "MS=ms41847412".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "openai.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "openai-domain-verification=abc".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "zendesk.com".to_string(),
+            source_type: RecordType::DnsTxtSpf,
+            raw_record: "v=spf1 include:mail.zendesk.com ~all".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "mailgun.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "mgverify=abc123".to_string(),
+        },
+        // Non-overlapping DNS entries
+        dns::VendorDomain {
+            domain: "google.com".to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: "google-site-verification=abc".to_string(),
+        },
+        // Subprocessor page results (added second in the pipeline)
+        dns::VendorDomain {
+            domain: "anthropic.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "anthropic.com".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "dropbox.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "dropbox.com".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "microsoft.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "microsoft.com".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "openai.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "openai.com".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "zendesk.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "zendesk.com".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "mailgun.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "mailgun.com".to_string(),
+        },
+        // Subprocessor-only entries (no DNS overlap)
+        dns::VendorDomain {
+            domain: "ada.cx".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "ada.cx".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "chronosphere.io".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "chronosphere.io".to_string(),
+        },
+        dns::VendorDomain {
+            domain: "snowflake.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "snowflake.com".to_string(),
+        },
+    ];
+
+    // Apply the same dedup logic as main.rs (prefer HttpSubprocessor)
+    let mut seen_domains: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<dns::VendorDomain> = Vec::new();
+    for vd in all_vendor_domains {
+        let base = domain_utils::extract_base_domain(&vd.domain);
+        if let Some(&existing_idx) = seen_domains.get(&base) {
+            if matches!(vd.source_type, RecordType::HttpSubprocessor)
+                && !matches!(deduped[existing_idx].source_type, RecordType::HttpSubprocessor)
+            {
+                deduped[existing_idx] = vd;
+            }
+        } else {
+            seen_domains.insert(base, deduped.len());
+            deduped.push(vd);
+        }
+    }
+
+    // Total unique base domains: 10 (anthropic, dropbox, microsoft, openai, zendesk,
+    // mailgun, google, ada, chronosphere, snowflake)
+    assert_eq!(deduped.len(), 10, "Should have 10 unique vendor domains after dedup");
+
+    // All 6 overlapping vendors MUST be HttpSubprocessor (the core regression check)
+    let overlapping_domains = ["anthropic.com", "dropbox.com", "microsoft.com",
+                               "openai.com", "zendesk.com", "mailgun.com"];
+    for domain in &overlapping_domains {
+        let entry = deduped.iter().find(|vd| vd.domain == *domain)
+            .unwrap_or_else(|| panic!("Missing domain: {}", domain));
+        assert_eq!(
+            entry.source_type,
+            RecordType::HttpSubprocessor,
+            "Domain {} should have HttpSubprocessor record type, got {:?}",
+            domain, entry.source_type
+        );
+    }
+
+    // Subprocessor-only entries should remain HttpSubprocessor
+    for domain in &["ada.cx", "chronosphere.io", "snowflake.com"] {
+        let entry = deduped.iter().find(|vd| vd.domain == *domain)
+            .unwrap_or_else(|| panic!("Missing domain: {}", domain));
+        assert_eq!(entry.source_type, RecordType::HttpSubprocessor,
+            "Subprocessor-only domain {} should remain HttpSubprocessor", domain);
+    }
+
+    // google.com (DNS-only, no subprocessor overlap) should keep its DNS type
+    let google = deduped.iter().find(|vd| vd.domain == "google.com").unwrap();
+    assert_eq!(google.source_type, RecordType::DnsTxtVerification,
+        "DNS-only domain should keep its original record type");
+
+    // Count total HttpSubprocessor entries
+    let subprocessor_count = deduped.iter()
+        .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
+        .count();
+    assert_eq!(subprocessor_count, 9,
+        "Should have 9 HttpSubprocessor entries (6 overlapping + 3 subprocessor-only)");
+}
+
+#[test]
+fn test_postprocess_dedup_preserves_subprocessor_record_type() {
+    // Regression test for the post-processing VendorRelationship dedup.
+    // With type-aware dedup (R003 fix), different source types produce SEPARATE rows.
+    // DNS Verification and HttpSubprocessor for the same domain are preserved independently.
+    use nthpartyfinder::vendor::VendorRelationship;
+    use std::collections::HashMap;
+
+    let relationships = vec![
+        // DNS-sourced entry comes first
+        VendorRelationship::new(
+            "anthropic.com".to_string(),
+            "Anthropic".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "anthropic-domain-verification=abc".to_string(),
+            RecordType::DnsTxtVerification,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "anthropic-domain-verification=abc".to_string(),
+        ),
+        // Subprocessor-sourced entry comes second
+        VendorRelationship::new(
+            "anthropic.com".to_string(),
+            "Anthropic".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "anthropic.com".to_string(),
+            RecordType::HttpSubprocessor,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "Found on subprocessor page".to_string(),
+        ),
+    ];
+
+    // Apply the same type-aware post-processing dedup logic as main.rs
+    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut deduped: Vec<VendorRelationship> = Vec::new();
+    for r in relationships {
+        let key = (
+            r.nth_party_domain.clone(),
+            r.nth_party_customer_domain.clone(),
+            r.nth_party_record_type.as_hierarchy_string(),
+        );
+        if let Some(&idx) = seen.get(&key) {
+            let existing = &mut deduped[idx];
+            if !existing.evidence.contains(&r.evidence) {
+                existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
+            }
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(r);
+        }
+    }
+
+    // With type-aware dedup, different source types are SEPARATE rows
+    assert_eq!(deduped.len(), 2, "Different source types should produce separate rows");
+
+    // Find each row by record type
+    let verification_row = deduped.iter().find(|r| r.nth_party_record_type == RecordType::DnsTxtVerification)
+        .expect("Should have a DnsTxtVerification row");
+    let subprocessor_row = deduped.iter().find(|r| r.nth_party_record_type == RecordType::HttpSubprocessor)
+        .expect("Should have an HttpSubprocessor row");
+
+    assert!(verification_row.evidence.contains("anthropic-domain-verification"),
+        "Verification row should have DNS evidence");
+    assert!(subprocessor_row.evidence.contains("Found on subprocessor page"),
+        "Subprocessor row should have subprocessor evidence");
+}
+
+#[test]
+fn test_postprocess_dedup_spf_preserved_alongside_verification() {
+    // Regression test for SPF vendors being lost in post-processing dedup.
+    // When google.com appears from both SPF and Verification sources,
+    // both must survive as separate rows in the final output.
+    // This was the root cause of missing SPF vendors in the Klaviyo report.
+    use nthpartyfinder::vendor::VendorRelationship;
+    use std::collections::HashMap;
+
+    let relationships = vec![
+        // Google from SPF
+        VendorRelationship::new(
+            "google.com".to_string(),
+            "Google".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            RecordType::DnsTxtSpf,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+        ),
+        // Google from Verification
+        VendorRelationship::new(
+            "google.com".to_string(),
+            "Google".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "google-site-verification=abc123".to_string(),
+            RecordType::DnsTxtVerification,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "google-site-verification=abc123".to_string(),
+        ),
+        // Google from SaaS Tenant probe
+        VendorRelationship::new(
+            "google.com".to_string(),
+            "Google".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "SaaS tenant: klaviyo.google.com".to_string(),
+            RecordType::SaasTenantProbe,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "SaaS tenant: klaviyo.google.com".to_string(),
+        ),
+        // Zendesk from SPF
+        VendorRelationship::new(
+            "zendesk.com".to_string(),
+            "Zendesk".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:mail.zendesk.com ~all".to_string(),
+            RecordType::DnsTxtSpf,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:mail.zendesk.com ~all".to_string(),
+        ),
+        // Zendesk from SaaS Tenant probe
+        VendorRelationship::new(
+            "zendesk.com".to_string(),
+            "Zendesk".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "SaaS tenant: klaviyo.zendesk.com".to_string(),
+            RecordType::SaasTenantProbe,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "SaaS tenant: klaviyo.zendesk.com".to_string(),
+        ),
+        // Salesforce from SPF only
+        VendorRelationship::new(
+            "salesforce.com".to_string(),
+            "Salesforce".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.salesforce.com ~all".to_string(),
+            RecordType::DnsTxtSpf,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.salesforce.com ~all".to_string(),
+        ),
+    ];
+
+    // Apply type-aware post-processing dedup (same logic as main.rs)
+    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut deduped: Vec<VendorRelationship> = Vec::new();
+    for r in relationships {
+        let key = (
+            r.nth_party_domain.clone(),
+            r.nth_party_customer_domain.clone(),
+            r.nth_party_record_type.as_hierarchy_string(),
+        );
+        if let Some(&idx) = seen.get(&key) {
+            let existing = &mut deduped[idx];
+            if !existing.evidence.contains(&r.evidence) {
+                existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
+            }
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(r);
+        }
+    }
+
+    // Google: 3 separate rows (SPF, Verification, SaaS Tenant)
+    let google_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "google.com").collect();
+    assert_eq!(google_rows.len(), 3,
+        "Google should have 3 separate rows (SPF + Verification + SaaS Tenant), got {}",
+        google_rows.len());
+    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
+        "Google must have an SPF row");
+    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtVerification),
+        "Google must have a Verification row");
+    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::SaasTenantProbe),
+        "Google must have a SaaS Tenant row");
+
+    // Zendesk: 2 separate rows (SPF, SaaS Tenant)
+    let zendesk_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "zendesk.com").collect();
+    assert_eq!(zendesk_rows.len(), 2,
+        "Zendesk should have 2 separate rows (SPF + SaaS Tenant), got {}",
+        zendesk_rows.len());
+    assert!(zendesk_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
+        "Zendesk must have an SPF row");
+
+    // Salesforce: 1 row (SPF only)
+    let salesforce_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "salesforce.com").collect();
+    assert_eq!(salesforce_rows.len(), 1,
+        "Salesforce should have 1 row (SPF only), got {}",
+        salesforce_rows.len());
+    assert_eq!(salesforce_rows[0].nth_party_record_type, RecordType::DnsTxtSpf,
+        "Salesforce row must be SPF");
+
+    // Total: 6 rows (3 google + 2 zendesk + 1 salesforce)
+    assert_eq!(deduped.len(), 6, "Total should be 6 rows");
+}
+
+#[test]
+fn test_postprocess_dedup_merges_evidence_within_same_source_type() {
+    // Verify that within the SAME source type, evidence is merged (not duplicated).
+    // Two SPF records for google.com should produce one row with combined evidence.
+    use nthpartyfinder::vendor::VendorRelationship;
+    use std::collections::HashMap;
+
+    let relationships = vec![
+        VendorRelationship::new(
+            "google.com".to_string(),
+            "Google".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            RecordType::DnsTxtSpf,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+        ),
+        VendorRelationship::new(
+            "google.com".to_string(),
+            "Google".to_string(),
+            1,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:mail.google.com ~all".to_string(),
+            RecordType::DnsTxtSpf,
+            "klaviyo.com".to_string(),
+            "Klaviyo".to_string(),
+            "v=spf1 include:mail.google.com ~all".to_string(),
+        ),
+    ];
+
+    // Apply type-aware dedup
+    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut deduped: Vec<VendorRelationship> = Vec::new();
+    for r in relationships {
+        let key = (
+            r.nth_party_domain.clone(),
+            r.nth_party_customer_domain.clone(),
+            r.nth_party_record_type.as_hierarchy_string(),
+        );
+        if let Some(&idx) = seen.get(&key) {
+            let existing = &mut deduped[idx];
+            if !existing.evidence.contains(&r.evidence) {
+                existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
+            }
+        } else {
+            seen.insert(key, deduped.len());
+            deduped.push(r);
+        }
+    }
+
+    // Same source type → merged into 1 row with combined evidence
+    assert_eq!(deduped.len(), 1, "Same source type should merge into 1 row");
+    assert!(deduped[0].evidence.contains("_spf.google.com"), "Should contain first SPF evidence");
+    assert!(deduped[0].evidence.contains("mail.google.com"), "Should contain second SPF evidence");
+}
+
+#[test]
+fn test_klaviyo_scenario_24_subprocessors_preserved() {
+    // End-to-end regression test simulating the exact Klaviyo scenario:
+    // 24 subprocessors extracted, 6 overlap with DNS TXT records.
+    // All 24 must survive the pre-processing dedup as HttpSubprocessor.
+    use std::collections::HashMap;
+    use nthpartyfinder::domain_utils;
+
+    // The 24 subprocessors from Klaviyo's subprocessor page
+    let subprocessor_domains = vec![
+        "ada.cx", "aws.amazon.com", "anthropic.com", "chronosphere.io",
+        "cloudflare.com", "concentrix.com", "dropbox.com", "ectusa.net",
+        "fivetran.com", "sentry.io", "glean.com", "infobip.com",
+        "loom.com", "mailgun.com", "meta.com", "microsoft.com",
+        "openai.com", "sendgrid.com", "sendsafely.com", "snowflake.com",
+        "splunk.com", "statsig.com", "twilio.com", "zendesk.com",
+    ];
+
+    // The 6 that overlap with DNS TXT records
+    let dns_overlap_domains = vec![
+        ("anthropic.com", "anthropic-domain-verification=abc"),
+        ("dropbox.com", "dropbox-domain-verification=xyz"),
+        ("microsoft.com", "MS=ms41847412"),
+        ("openai.com", "openai-domain-verification=def"),
+        ("zendesk.com", "v=spf1 include:mail.zendesk.com ~all"),
+        ("mailgun.com", "mgverify=abc123"),
+    ];
+
+    // Build all_vendor_domains in the same order as the production pipeline
+    let mut all_vendor_domains: Vec<dns::VendorDomain> = Vec::new();
+
+    // 1. DNS TXT records (added first)
+    for (domain, raw) in &dns_overlap_domains {
+        all_vendor_domains.push(dns::VendorDomain {
+            domain: domain.to_string(),
+            source_type: if raw.starts_with("v=spf1") {
+                RecordType::DnsTxtSpf
+            } else {
+                RecordType::DnsTxtVerification
+            },
+            raw_record: raw.to_string(),
+        });
+    }
+    // Additional DNS-only entries (not on subprocessor page)
+    for domain in &["google.com", "whimsical.com", "zoom.us", "adobe.com"] {
+        all_vendor_domains.push(dns::VendorDomain {
+            domain: domain.to_string(),
+            source_type: RecordType::DnsTxtVerification,
+            raw_record: format!("{}-verification=test", domain),
+        });
+    }
+
+    // 2. Subprocessor page results (added second)
+    for domain in &subprocessor_domains {
+        all_vendor_domains.push(dns::VendorDomain {
+            domain: domain.to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: domain.to_string(),
+        });
+    }
+
+    let total_before_dedup = all_vendor_domains.len();
+
+    // Apply dedup logic (must prefer HttpSubprocessor)
+    let mut seen_domains: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<dns::VendorDomain> = Vec::new();
+    for vd in all_vendor_domains {
+        let base = domain_utils::extract_base_domain(&vd.domain);
+        if let Some(&existing_idx) = seen_domains.get(&base) {
+            if matches!(vd.source_type, RecordType::HttpSubprocessor)
+                && !matches!(deduped[existing_idx].source_type, RecordType::HttpSubprocessor)
+            {
+                deduped[existing_idx] = vd;
+            }
+        } else {
+            seen_domains.insert(base, deduped.len());
+            deduped.push(vd);
+        }
+    }
+
+    // Count how many HttpSubprocessor entries survived
+    let subprocessor_count = deduped.iter()
+        .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
+        .count();
+
+    // THE KEY ASSERTION: All 24 subprocessors must be present as HttpSubprocessor
+    // (not 18, which was the bug)
+    // Note: aws.amazon.com dedupes to amazon.com base domain, so we count unique bases
+    let subprocessor_bases: std::collections::HashSet<String> = deduped.iter()
+        .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
+        .map(|vd| domain_utils::extract_base_domain(&vd.domain))
+        .collect();
+    assert!(
+        subprocessor_bases.len() >= 23,
+        "Expected at least 23 unique subprocessor base domains (24 domains, \
+         aws.amazon.com shares base with amazon.com), got {}. \
+         Subprocessor domains found: {:?}",
+        subprocessor_bases.len(), subprocessor_bases
+    );
+
+    // Verify the 6 overlapping domains specifically
+    for (domain, _) in &dns_overlap_domains {
+        let base = domain_utils::extract_base_domain(domain);
+        let entry = deduped.iter().find(|vd| domain_utils::extract_base_domain(&vd.domain) == base)
+            .unwrap_or_else(|| panic!("Missing domain: {}", domain));
+        assert_eq!(
+            entry.source_type, RecordType::HttpSubprocessor,
+            "Overlapping domain {} (base: {}) must be HttpSubprocessor after dedup, got {:?}",
+            domain, base, entry.source_type
+        );
+    }
+}
+
+// ============================================================================
 // COMBINED WORKFLOW TESTS
 // ============================================================================
 

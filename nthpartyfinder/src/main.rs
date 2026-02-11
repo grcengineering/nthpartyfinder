@@ -38,6 +38,25 @@ use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
 use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery};
 use checkpoint::{Checkpoint, ResumeMode, generate_settings_hash};
+
+/// Create a headless Chrome browser instance.
+/// Automatically disables sandbox when running inside a container.
+fn create_browser() -> anyhow::Result<headless_chrome::Browser> {
+    let is_container = std::env::var("NTHPARTYFINDER_CONTAINER").is_ok()
+        || std::path::Path::new("/.dockerenv").exists();
+
+    if is_container {
+        let options = headless_chrome::LaunchOptions::default_builder()
+            .sandbox(false)
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
+        headless_chrome::Browser::new(options)
+            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome (container mode): {}", e))
+    } else {
+        headless_chrome::Browser::default()
+            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))
+    }
+}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,7 +70,12 @@ pub fn is_interrupted() -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Print banner + status immediately for instant user feedback
+    eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  Parsing arguments...");
+
     let cli = Cli::parse();
+    eprintln!("  Loading configuration...");
 
     // Handle cache subcommand first (before any other processing)
     if let Some(Commands::Cache { action }) = &cli.command {
@@ -98,7 +122,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Load configuration
+    // Initialize logging system early so init progress bar can start immediately
+    eprintln!("  Starting logger...");
+    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
+    let logger = Arc::new(match &args.log_file {
+        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
+        None => AnalysisLogger::new(verbosity),
+    });
+
+    // Start initialization progress bar (6 steps: config, NER spawn, vendor registry,
+    // known vendors, org normalizer, feature detection)
+    logger.start_init_progress(6).await;
+
+    // Step 1: Load configuration
     let _app_config = match AppConfig::load() {
         Ok(cfg) => cfg,
         Err(config::ConfigError::FileNotFound(path)) => {
@@ -125,8 +161,32 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    logger.complete_init_step("Configuration loaded").await;
 
-    // Initialize vendor registry (consolidated vendor JSON files)
+    // Step 2: Spawn NER initialization in background (takes ~0.8s)
+    // This runs concurrently with vendor_registry and known_vendors init below
+    #[cfg(feature = "embedded-ner")]
+    let ner_bg_handle = if !args.disable_slm {
+        Some(tokio::task::spawn_blocking(|| {
+            ner_org::init_with_config(0.6)
+        }))
+    } else {
+        None
+    };
+    #[cfg(feature = "embedded-ner")]
+    {
+        if !args.disable_slm {
+            logger.complete_init_step("NER model loading in background").await;
+        } else {
+            logger.complete_init_step("NER disabled (--disable-slm)").await;
+        }
+    }
+    #[cfg(not(feature = "embedded-ner"))]
+    {
+        logger.complete_init_step("NER not compiled in").await;
+    }
+
+    // Step 3: Initialize vendor registry (consolidated vendor JSON files)
     let vendor_registry_loaded = match vendor_registry::init() {
         Ok(()) => {
             if let Some(reg) = vendor_registry::get() {
@@ -137,9 +197,17 @@ async fn main() -> Result<()> {
         }
         Err(_) => false,
     };
+    if vendor_registry_loaded {
+        if let Some(reg) = vendor_registry::get() {
+            logger.complete_init_step(&format!("Vendor registry ({} vendors, {} domains)", reg.vendor_count(), reg.domain_count())).await;
+        } else {
+            logger.complete_init_step("Vendor registry loaded").await;
+        }
+    } else {
+        logger.complete_init_step("Vendor registry (fallback mode)").await;
+    }
 
-    // Initialize known vendors database for reliable org lookups
-    // (now uses vendor_registry as primary source with JSON fallback)
+    // Step 4: Initialize known vendors database for reliable org lookups
     let known_vendors_loaded = match known_vendors::init() {
         Ok(()) => {
             if let Some(kv) = known_vendors::get() {
@@ -151,32 +219,27 @@ async fn main() -> Result<()> {
         }
         Err(_) => vendor_registry_loaded,
     };
-
-    // Initialize embedded NER for organization extraction (if feature enabled)
-    let ner_enabled: bool;
-    let mut ner_init_error: Option<String> = None;
-    #[cfg(feature = "embedded-ner")]
-    {
-        ner_enabled = if !args.disable_slm {
-            match ner_org::init_with_config(0.6) {
-                Ok(()) => true,
-                Err(e) => {
-                    ner_init_error = Some(e.to_string());
-                    false
-                }
-            }
+    if known_vendors_loaded {
+        if let Some(kv) = known_vendors::get() {
+            let stats = kv.stats();
+            logger.complete_init_step(&format!("Known vendors database ({} vendors)", stats.base_count)).await;
         } else {
-            false
-        };
+            logger.complete_init_step("Known vendors database loaded").await;
+        }
+    } else {
+        logger.complete_init_step("Known vendors database (not available)").await;
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
-    {
-        ner_enabled = false;
+    // Step 5: Initialize organization name normalizer from config (global singleton)
+    org_normalizer::init(&_app_config.organization);
+    if org_normalizer::is_enabled() {
+        logger.complete_init_step(&format!("Organization normalizer (threshold: {:.0}%)",
+            _app_config.organization.similarity_threshold * 100.0)).await;
+    } else {
+        logger.complete_init_step("Organization normalizer (disabled)").await;
     }
 
-    // Determine feature enablement status for display
-    // (actual initialization happens later, but we show status to user first)
+    // Step 6: Feature detection
     let web_org_will_be_enabled = args.enable_web_org
         || (!args.disable_web_org && _app_config.discovery.web_org_enabled);
     let subprocessor_will_be_enabled = args.enable_subprocessor_analysis
@@ -185,83 +248,29 @@ async fn main() -> Result<()> {
         || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled);
     let saas_tenant_will_be_enabled = args.enable_saas_tenant_discovery
         || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled);
+    logger.complete_init_step("Feature detection complete").await;
 
-    // Print consolidated initialization status block
-    eprintln!();
+    // Finish init progress bar
+    logger.finish_init().await;
+
+    // Print feature status summary above the unified progress bar
     if vendor_registry_loaded {
         if let Some(reg) = vendor_registry::get() {
-            eprintln!("✅ ENABLED: Vendor registry ({} vendors, {} domains)", reg.vendor_count(), reg.domain_count());
-        }
-    } else {
-        eprintln!("⚠️  Vendor registry not loaded (using legacy known_vendors.json)");
-    }
-    if known_vendors_loaded {
-        if let Some(kv) = known_vendors::get() {
-            let stats = kv.stats();
-            if vendor_registry_loaded {
-                eprintln!("✅ ENABLED: Known vendors fallback ({} vendors in legacy JSON)", stats.base_count);
-            } else {
-                eprintln!("✅ ENABLED: Known vendors database ({} vendors)", stats.base_count);
-            }
-        }
-    } else {
-        eprintln!("❌ DISABLED: Known vendors database (will use WHOIS/domain inference)");
-    }
-    if ner_enabled {
-        eprintln!("✅ ENABLED: NER-based organization name extraction (via embedded GLiNER model)");
-    } else {
-        #[cfg(feature = "embedded-ner")]
-        {
-            if args.disable_slm {
-                eprintln!("❌ DISABLED: NER-based organization name extraction (via --disable-slm)");
-            } else if let Some(ref err) = ner_init_error {
-                eprintln!("❌ DISABLED: NER-based organization name extraction ({})", err);
-            } else {
-                eprintln!("❌ DISABLED: NER-based organization name extraction (initialization failed)");
-            }
-        }
-        #[cfg(not(feature = "embedded-ner"))]
-        {
-            eprintln!("❌ DISABLED: NER-based organization name extraction (not compiled in)");
+            logger.info(&format!("Vendor registry: {} vendors, {} domains", reg.vendor_count(), reg.domain_count()));
         }
     }
     if web_org_will_be_enabled {
-        eprintln!("✅ ENABLED: Deterministic organization name extraction (via HTTP & headless browser)");
-    } else {
-        eprintln!("❌ DISABLED: Deterministic organization name extraction (via --disable-web-org)");
+        logger.info("Web organization extraction enabled");
     }
     if subprocessor_will_be_enabled {
-        eprintln!("✅ ENABLED: Subprocessor web page analysis");
-    } else {
-        eprintln!("❌ DISABLED: Subprocessor web page analysis");
+        logger.info("Subprocessor web page analysis enabled");
     }
     if subdomain_will_be_enabled {
-        eprintln!("⏳ PENDING: Subdomain discovery (via subfinder — checking binary...)");
-    } else {
-        eprintln!("❌ DISABLED: Subdomain discovery");
+        logger.info("Subdomain discovery enabled");
     }
     if saas_tenant_will_be_enabled {
-        eprintln!("✅ ENABLED: SaaS tenant discovery");
-    } else {
-        eprintln!("❌ DISABLED: SaaS tenant discovery");
+        logger.info("SaaS tenant discovery enabled");
     }
-
-    // Initialize organization name normalizer from config (global singleton)
-    org_normalizer::init(&_app_config.organization);
-    if org_normalizer::is_enabled() {
-        eprintln!("✅ ENABLED: Organization name normalization (threshold: {:.0}%)",
-            _app_config.organization.similarity_threshold * 100.0);
-    } else {
-        eprintln!("❌ DISABLED: Organization name normalization");
-    }
-    eprintln!();
-
-    // Initialize new logging system
-    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
-    let logger = Arc::new(match &args.log_file {
-        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
-        None => AnalysisLogger::new(verbosity),
-    });
 
     // Set up Ctrl-C handler that signals interruption (checkpoint save happens in main loop)
     ctrlc::set_handler(move || {
@@ -323,32 +332,37 @@ async fn main() -> Result<()> {
     let output_path_str = output_path.to_string_lossy();
 
     // Prompt user for directory confirmation (R006 fix: skip when stdin is not a terminal)
-    println!("📁 Output file will be saved to: {}", output_path_str);
+    // All output during active progress bar MUST go through logger or suspend_for_io
+    // to avoid ghost/duplicate progress bar artifacts from raw println!/eprintln!
     let is_interactive = std::io::stdin().is_terminal();
     let final_output_path = if is_interactive {
-        // R007 fix: flush stderr before interactive prompt to prevent log/prompt interleaving
-        eprintln!();
-        print!("Press Enter to continue or type a different directory path: ");
-        io::Write::flush(&mut io::stdout()).unwrap();
+        // Suspend progress bars during interactive prompt to prevent ghost bars
+        logger.suspend_for_io(|| {
+            println!("📁 Output file will be saved to: {}", output_path_str);
+            println!();
+            print!("Press Enter to continue or type a different directory path: ");
+            io::Write::flush(&mut io::stdout()).unwrap();
 
-        let mut user_input = String::new();
-        if let Err(e) = io::stdin().read_line(&mut user_input) {
-            logger.warn(&format!("Failed to read stdin: {}, using default output path", e));
-        }
-        let user_input = user_input.trim();
+            let mut user_input = String::new();
+            if let Err(e) = io::stdin().read_line(&mut user_input) {
+                eprintln!("Warning: Failed to read stdin: {}, using default output path", e);
+            }
+            let user_input = user_input.trim();
 
-        if user_input.is_empty() {
-            output_path_str.to_string()
-        } else {
-            let custom_path = Path::new(user_input).join(&output_filename);
-            custom_path.to_string_lossy().to_string()
-        }
+            if user_input.is_empty() {
+                output_path_str.to_string()
+            } else {
+                let custom_path = Path::new(user_input).join(&output_filename);
+                custom_path.to_string_lossy().to_string()
+            }
+        })
     } else {
         // Non-interactive mode: use default path without prompting
+        logger.info(&format!("Output file: {}", output_path_str));
         output_path_str.to_string()
     };
 
-    println!("✅ Results will be saved to: {}", final_output_path);
+    logger.info(&format!("Results will be saved to: {}", final_output_path));
 
     logger.log_initialization(domain);
 
@@ -376,80 +390,79 @@ async fn main() -> Result<()> {
                 match resume_mode {
                     ResumeMode::AutoResume => {
                         if is_compatible {
-                            println!();
-                            println!("📋 Resuming from checkpoint:");
-                            println!("   {}", summary);
-                            println!();
+                            logger.info(&format!("Resuming from checkpoint: {}", summary));
                             checkpoint = Some(existing_checkpoint);
                         } else {
-                            println!();
-                            println!("⚠️  Existing checkpoint is incompatible (different domain or settings).");
-                            println!("   Starting fresh analysis.");
-                            println!();
+                            logger.info("Existing checkpoint is incompatible (different domain or settings). Starting fresh.");
                             let _ = Checkpoint::delete(output_dir_path);
                         }
                     }
                     ResumeMode::Fresh => {
-                        println!();
-                        println!("🔄 Starting fresh analysis (--no-resume specified).");
+                        logger.info("Starting fresh analysis (--no-resume specified).");
                         let _ = Checkpoint::delete(output_dir_path);
-                        println!();
                     }
                     ResumeMode::Prompt => {
                         // R006 fix: auto-resume compatible checkpoints in non-interactive mode
                         if !std::io::stdin().is_terminal() {
                             if is_compatible {
-                                println!("📋 Auto-resuming from compatible checkpoint (non-interactive mode)");
+                                logger.info("Auto-resuming from compatible checkpoint (non-interactive mode)");
                                 checkpoint = Some(existing_checkpoint);
                             } else {
-                                println!("⚠️  Incompatible checkpoint deleted (non-interactive mode)");
+                                logger.info("Incompatible checkpoint deleted (non-interactive mode)");
                                 let _ = Checkpoint::delete(output_dir_path);
                             }
                         } else {
-                            println!();
-                            println!("╔════════════════════════════════════════════════════════════════╗");
-                            println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
-                            println!("╚════════════════════════════════════════════════════════════════╝");
-                            println!();
-                            println!("   {}", summary);
-                            println!("   Created: {}", existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
-                            println!();
+                            // Suspend progress bars for interactive checkpoint prompt
+                            let created_at = existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+                            let resume_result = logger.suspend_for_io(|| {
+                                println!();
+                                println!("╔════════════════════════════════════════════════════════════════╗");
+                                println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
+                                println!("╚════════════════════════════════════════════════════════════════╝");
+                                println!();
+                                println!("   {}", summary);
+                                println!("   Created: {}", created_at);
+                                println!();
 
-                            if is_compatible {
-                                print!("Resume from checkpoint? [Y/n]: ");
-                                io::Write::flush(&mut io::stdout()).unwrap();
+                                if is_compatible {
+                                    print!("Resume from checkpoint? [Y/n]: ");
+                                    io::Write::flush(&mut io::stdout()).unwrap();
 
-                                let mut resume_input = String::new();
-                                let _ = io::stdin().read_line(&mut resume_input);
-                                let resume_input = resume_input.trim().to_lowercase();
+                                    let mut resume_input = String::new();
+                                    let _ = io::stdin().read_line(&mut resume_input);
+                                    let resume_input = resume_input.trim().to_lowercase();
 
-                                if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
-                                    println!("✅ Resuming from checkpoint...");
-                                    println!();
-                                    checkpoint = Some(existing_checkpoint);
+                                    if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
+                                        println!("Resuming from checkpoint...");
+                                        Some(true) // resume
+                                    } else {
+                                        println!("Starting fresh analysis...");
+                                        Some(false) // fresh
+                                    }
                                 } else {
-                                    println!("🔄 Starting fresh analysis...");
-                                    let _ = Checkpoint::delete(output_dir_path);
-                                    println!();
-                                }
-                            } else {
-                                println!("⚠️  Checkpoint is incompatible with current settings.");
-                                println!("   (Different domain or analysis options)");
-                                print!("Delete checkpoint and start fresh? [Y/n]: ");
-                                io::Write::flush(&mut io::stdout()).unwrap();
+                                    println!("Checkpoint is incompatible with current settings.");
+                                    println!("   (Different domain or analysis options)");
+                                    print!("Delete checkpoint and start fresh? [Y/n]: ");
+                                    io::Write::flush(&mut io::stdout()).unwrap();
 
-                                let mut delete_input = String::new();
-                                let _ = io::stdin().read_line(&mut delete_input);
-                                let delete_input = delete_input.trim().to_lowercase();
+                                    let mut delete_input = String::new();
+                                    let _ = io::stdin().read_line(&mut delete_input);
+                                    let delete_input = delete_input.trim().to_lowercase();
 
-                                if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
-                                    let _ = Checkpoint::delete(output_dir_path);
-                                    println!("🔄 Starting fresh analysis...");
-                                    println!();
-                                } else {
-                                    println!("❌ Cannot proceed with incompatible checkpoint. Exiting.");
-                                    std::process::exit(1);
+                                    if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
+                                        println!("Starting fresh analysis...");
+                                        None // delete and continue
+                                    } else {
+                                        println!("Cannot proceed with incompatible checkpoint. Exiting.");
+                                        std::process::exit(1);
+                                    }
                                 }
+                            });
+
+                            match resume_result {
+                                Some(true) => checkpoint = Some(existing_checkpoint),
+                                Some(false) => { let _ = Checkpoint::delete(output_dir_path); }
+                                None => { let _ = Checkpoint::delete(output_dir_path); }
                             }
                         }
                     }
@@ -512,26 +525,62 @@ async fn main() -> Result<()> {
 
     let mut unverified_orgs: Vec<UnverifiedOrgMapping> = Vec::new();
 
-    // Get initial organization for the root domain (if not already in checkpoint)
-    if !discovered_vendors.contains_key(domain) {
-        if let Ok(org_result) = whois::get_organization_with_status_and_config(domain, web_org_enabled, web_org_min_confidence).await {
-            // Apply organization name normalization if enabled (uses global normalizer)
-            let normalized_name = org_normalizer::normalize(&org_result.name);
-            discovered_vendors.insert(domain.clone(), normalized_name.clone());
-            logger.log_whois_lookup(domain, true);
-            if !org_result.is_verified {
-                unverified_orgs.push(UnverifiedOrgMapping {
-                    domain: domain.clone(),
-                    inferred_org: normalized_name,
-                });
+    // Start WHOIS lookup in background BEFORE NER await so they run concurrently.
+    // This overlaps NER model loading (~0.8s) with WHOIS network call (~2-5s),
+    // reducing total init time by up to the NER duration.
+    let whois_handle = if !discovered_vendors.contains_key(domain) {
+        let whois_domain = domain.clone();
+        Some(tokio::spawn(async move {
+            whois::get_organization_with_status_and_config(&whois_domain, web_org_enabled, web_org_min_confidence).await
+        }))
+    } else {
+        None
+    };
+
+    // Await background NER initialization (overlaps with WHOIS above)
+    #[cfg(feature = "embedded-ner")]
+    {
+        if let Some(handle) = ner_bg_handle {
+            match handle.await {
+                Ok(Ok(())) => {
+                    logger.info("NER model loaded (GLiNER ready)");
+                }
+                Ok(Err(e)) => {
+                    logger.warn(&format!("NER initialization failed: {}", e));
+                }
+                Err(e) => {
+                    logger.warn(&format!("NER task panicked: {}", e));
+                }
             }
-            // Update checkpoint with root organization
-            {
-                let mut cp = checkpoint.lock().await;
-                cp.root_organization = discovered_vendors.get(domain).cloned();
+        }
+    }
+
+    // Collect WHOIS result (already running in background)
+    if let Some(handle) = whois_handle {
+        match handle.await {
+            Ok(Ok(org_result)) => {
+                let normalized_name = org_normalizer::normalize(&org_result.name);
+                discovered_vendors.insert(domain.clone(), normalized_name.clone());
+                logger.log_whois_lookup(domain, true);
+                if !org_result.is_verified {
+                    unverified_orgs.push(UnverifiedOrgMapping {
+                        domain: domain.clone(),
+                        inferred_org: normalized_name,
+                    });
+                }
+                // Update checkpoint with root organization
+                {
+                    let mut cp = checkpoint.lock().await;
+                    cp.root_organization = discovered_vendors.get(domain).cloned();
+                }
             }
-        } else {
-            logger.log_whois_lookup(domain, false);
+            Ok(Err(_)) => {
+                logger.log_whois_lookup(domain, false);
+            }
+            Err(e) => {
+                logger.warn(&format!("WHOIS lookup task failed: {}", e));
+                logger.log_whois_lookup(domain, false);
+            }
         }
     }
 
@@ -568,43 +617,41 @@ async fn main() -> Result<()> {
             std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
         );
         if discovery.is_available() {
-            eprintln!("✅ ENABLED: Subdomain discovery (via subfinder)");
             Some(discovery)
         } else if !std::io::stdin().is_terminal() {
             // Non-interactive mode: skip installation prompt, log clear warning
             logger.warn("Subfinder binary not found — subdomain discovery disabled (non-interactive mode, cannot prompt for installation)");
-            eprintln!("⚠️  SKIPPED: Subdomain discovery (subfinder not found, non-interactive mode)");
             None
         } else {
             // Subfinder not found - show interactive installation menu
-            eprintln!();
-            eprintln!("╔══════════════════════════════════════════════════════════════════╗");
-            eprintln!("║           Subfinder Not Found                                    ║");
-            eprintln!("╚══════════════════════════════════════════════════════════════════╝");
-            eprintln!();
-            eprintln!("Subfinder is required for subdomain discovery.");
-            eprintln!("It's a subdomain enumeration tool by Project Discovery.");
-            eprintln!();
-
-            // Get available installation options for this platform
+            // Suspend progress bars for interactive prompt to avoid ghost bars
             let options = SubfinderDiscovery::get_available_install_options();
+            let selected_option = logger.suspend_for_io(|| {
+                eprintln!();
+                eprintln!("╔══════════════════════════════════════════════════════════════════╗");
+                eprintln!("║           Subfinder Not Found                                    ║");
+                eprintln!("╚══════════════════════════════════════════════════════════════════╝");
+                eprintln!();
+                eprintln!("Subfinder is required for subdomain discovery.");
+                eprintln!("It's a subdomain enumeration tool by Project Discovery.");
+                eprintln!();
+                eprintln!("Would you like to install subfinder now?");
+                eprintln!();
+                for (i, option) in options.iter().enumerate() {
+                    eprintln!("  [{}] {}", i + 1, option.display_name());
+                }
+                eprintln!();
+                eprint!("Select option [1-{}]: ", options.len());
 
-            eprintln!("Would you like to install subfinder now?");
-            eprintln!();
-            for (i, option) in options.iter().enumerate() {
-                eprintln!("  [{}] {}", i + 1, option.display_name());
-            }
-            eprintln!();
-            eprint!("Select option [1-{}]: ", options.len());
-
-            let mut input = String::new();
-            let selected_option = if io::stdin().read_line(&mut input).is_ok() {
-                input.trim().parse::<usize>()
-                    .ok()
-                    .and_then(|n| if n >= 1 && n <= options.len() { Some(options[n - 1]) } else { None })
-            } else {
-                None
-            };
+                let mut input = String::new();
+                if io::stdin().read_line(&mut input).is_ok() {
+                    input.trim().parse::<usize>()
+                        .ok()
+                        .and_then(|n| if n >= 1 && n <= options.len() { Some(options[n - 1]) } else { None })
+                } else {
+                    None
+                }
+            });
 
             match selected_option {
                 Some(InstallOption::AutoDownload) => {
@@ -791,10 +838,9 @@ async fn main() -> Result<()> {
     let checkpoint_for_analysis = checkpoint.clone();
     let output_dir_for_checkpoint = output_dir.clone();
 
-    // Start progress bar immediately when analysis begins (analysis duration timer starts here)
-    // Use 100 as total for percentage-based progress (discovery = 0-20%, vendor processing = 20-100%)
-    logger.start_progress(100).await;
-    logger.update_progress("Starting vendor discovery...").await;
+    // Transition unified progress bar to scanning phase (adds ↳ sub-progress detail line)
+    // Init occupied 0-10%, discovery uses 10-30%, vendor processing uses 30-100%
+    logger.start_scan_progress(100).await;
 
     // R004 fix: global analysis timeout prevents indefinite hangs (e.g., vanta.com case).
     // Default 10 minutes, configurable via NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
@@ -861,31 +907,28 @@ async fn main() -> Result<()> {
     }
 
     // Combine resumed results with new results
-    // Deduplicate by (vendor_domain, customer_domain) and merge evidence from multiple
-    // discovery methods into a single entry (R003 fix - eliminates duplicate report rows)
+    // Deduplicate by (vendor_domain, customer_domain, record_type) so that different
+    // discovery sources (SPF, verification, SaaS tenant, etc.) for the same vendor are
+    // preserved as separate rows. Each source type conveys a distinct security signal
+    // (e.g., SPF = "can send email", verification = "owns domain"), so merging them
+    // would lose information. Within the same source type, duplicates are merged and
+    // evidence is combined. (R003 fix refined: type-aware dedup)
     let results: Vec<VendorRelationship> = {
         let mut all_results = resumed_results;
         all_results.extend(new_results);
-        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
         let mut deduped: Vec<VendorRelationship> = Vec::new();
         for r in all_results {
-            let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone());
+            let key = (
+                r.nth_party_domain.clone(),
+                r.nth_party_customer_domain.clone(),
+                r.nth_party_record_type.as_hierarchy_string(),
+            );
             if let Some(&idx) = seen.get(&key) {
-                // Merge evidence from additional discovery methods
+                // Merge evidence from same source type (e.g., two SPF records for same vendor)
                 let existing = &mut deduped[idx];
                 if !existing.evidence.contains(&r.evidence) {
                     existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
-                }
-                // Prefer HttpSubprocessor record type when merging (subprocessor page
-                // is stronger evidence than DNS-based discovery)
-                if matches!(r.nth_party_record_type, RecordType::HttpSubprocessor)
-                    && !matches!(existing.nth_party_record_type, RecordType::HttpSubprocessor)
-                {
-                    existing.nth_party_record_type = r.nth_party_record_type;
-                    existing.nth_party_record = r.nth_party_record;
-                } else if existing.nth_party_record.is_empty() && !r.nth_party_record.is_empty() {
-                    // Fallback: keep the more specific record if existing is empty
-                    existing.nth_party_record = r.nth_party_record;
                 }
             } else {
                 seen.insert(key, deduped.len());
@@ -1092,8 +1135,9 @@ async fn discover_nth_parties(
     
     // Analyze DNS TXT records using the DNS server pool
     if current_depth == 1 {
-        logger.update_progress("Analyzing DNS records...").await;
-        logger.advance_progress(2).await; // 0% -> 2%
+        logger.update_progress("DNS record analysis").await;
+        logger.show_sub_progress(&format!("Querying TXT/SPF/DMARC/DKIM records for {} via DNS-over-HTTPS", domain)).await;
+        logger.set_progress_position(12).await; // 10% -> 12%
     }
     logger.log_dns_lookup_start(domain);
 
@@ -1102,10 +1146,13 @@ async fn discover_nth_parties(
             if !txt_records.is_empty() {
                 logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
                 logger.debug(&format!("Raw TXT records for {}: {:?}", domain, txt_records));
+                if current_depth == 1 {
+                    logger.show_sub_progress(&format!("Found {} TXT records for {}", txt_records.len(), domain)).await;
+                }
             } else {
                 logger.log_dns_lookup_success(domain, "DoH/DNS", 0);
             }
-            
+
             let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(&txt_records, Some(verification_logger), domain);
             
             // Also include base domain if we're analyzing a subdomain
@@ -1123,8 +1170,10 @@ async fn discover_nth_parties(
             // Subprocessor web page analysis (if enabled)
             if subprocessor_enabled && subprocessor_analyzer.is_some() {
                 if current_depth == 1 {
-                    logger.update_progress("Checking subprocessor pages...").await;
-                    logger.advance_progress(6).await; // 2% -> 8%
+                    let dns_vendor_count = all_vendor_domains.len();
+                    logger.update_progress("Subprocessor page analysis").await;
+                    logger.show_sub_progress(&format!("Scraping subprocessor pages for {} ({} DNS vendors found so far)", domain, dns_vendor_count)).await;
+                    logger.set_progress_position(16).await; // 12% -> 16%
                 }
                 logger.debug(&format!("Starting subprocessor web page analysis for {}", domain));
                 
@@ -1132,12 +1181,15 @@ async fn discover_nth_parties(
                     Ok(subprocessor_domains) => {
                         if !subprocessor_domains.is_empty() {
                             logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
-                            logger.debug(&format!("Subprocessor domains discovered: {:?}", 
+                            if current_depth == 1 {
+                                logger.show_sub_progress(&format!("Found {} subprocessors for {}", subprocessor_domains.len(), domain)).await;
+                            }
+                            logger.debug(&format!("Subprocessor domains discovered: {:?}",
                                 subprocessor_domains.iter().map(|d| &d.domain).collect::<Vec<_>>()));
-                            
+
                             let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains.into_iter()
                                 .map(|sub_domain| {
-                                    logger.debug(&format!("Converting subprocessor domain: {} ({})", 
+                                    logger.debug(&format!("Converting subprocessor domain: {} ({})",
                                         sub_domain.domain, sub_domain.source_type));
                                     dns::VendorDomain {
                                         domain: sub_domain.domain,
@@ -1149,6 +1201,9 @@ async fn discover_nth_parties(
                             all_vendor_domains.extend(converted_domains);
                         } else {
                             logger.log_subprocessor_analysis(domain, 0);
+                            if current_depth == 1 {
+                                logger.show_sub_progress(&format!("No subprocessors found on {} pages", domain)).await;
+                            }
                             logger.debug(&format!("Subprocessor analysis completed: No vendor domains found in any subprocessor pages"));
                         }
                     }
@@ -1163,78 +1218,97 @@ async fn discover_nth_parties(
             if current_depth == 1 {
                 // Subdomain discovery via subfinder
                 if let Some(subfinder) = subdomain_discovery {
-                    logger.update_progress("Running subdomain discovery...").await;
+                    logger.update_progress("Subdomain discovery").await;
+                    logger.show_sub_progress(&format!("Running subfinder for {}", domain)).await;
                     logger.info("Running subdomain discovery via subfinder...");
                     match subfinder.discover(domain).await {
                         Ok(subdomains) => {
                             if !subdomains.is_empty() {
                                 logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
 
-                                // Analyze TXT and CNAME records for each subdomain with concurrency limiting
-                                let subdomain_concurrency = 10; // Limit concurrent DNS queries
-                                let subdomain_chunks: Vec<_> = subdomains.chunks(subdomain_concurrency).collect();
+                                // Analyze TXT and CNAME records for each subdomain with high concurrency
+                                // Uses fast combined TXT+CNAME lookup with buffer_unordered for throughput
+                                use futures::{stream, StreamExt};
+
+                                let subdomain_concurrency = 50; // Increased for better throughput
                                 let mut subdomain_txt_vendors_found = 0;
                                 let mut subdomain_cname_vendors_found = 0;
                                 let domain_base = domain_utils::extract_base_domain(domain);
 
-                                for chunk in subdomain_chunks {
-                                    let chunk_futures: Vec<_> = chunk.iter().map(|sub| {
-                                        let subdomain = sub.subdomain.clone();
-                                        let source = sub.source.clone();
-                                        let dns_pool = dns_pool.clone();
-                                        let domain_base = domain_base.clone();
-                                        async move {
-                                            let mut txt_vendors = Vec::new();
-                                            let mut cname_vendors = Vec::new();
+                                let total_subdomains = subdomains.len();
+                                logger.show_sub_progress(&format!("Running subfinder for {} (0/{} subdomains)", domain, total_subdomains)).await;
+                                let domain_for_closure = domain.to_string();
 
-                                            // Query TXT records for this subdomain
-                                            if let Ok(txt_records) = dns::get_txt_records_with_pool(&subdomain, &dns_pool).await {
-                                                if !txt_records.is_empty() {
-                                                    txt_vendors = dns::extract_vendor_domains_with_source(&txt_records);
-                                                }
-                                            }
+                                let subdomain_results: Vec<_> = stream::iter(subdomains.iter().enumerate().map(|(i, sub)| {
+                                    let subdomain = sub.subdomain.clone();
+                                    let source = sub.source.clone();
+                                    let dns_pool = dns_pool.clone();
+                                    let domain_base = domain_base.clone();
+                                    let logger_sub = logger.clone();
+                                    let total = total_subdomains;
+                                    let root_domain = domain_for_closure.clone();
+                                    async move {
+                                        // Show which subdomain is actively being scanned
+                                        logger_sub.show_sub_progress(&format!(
+                                            "Running subfinder for {} ({}/{} subdomains: {})",
+                                            root_domain, i + 1, total, subdomain
+                                        )).await;
+                                        // Combined TXT+CNAME lookup (concurrent, fast timeouts)
+                                        let (txt_records, cname_records) = dns_pool.get_txt_and_cname_fast(&subdomain).await;
 
-                                            // Query CNAME records to find third-party infrastructure
-                                            if let Ok(cname_records) = dns::get_cname_records_with_pool(&subdomain, &dns_pool).await {
-                                                for cname in cname_records {
-                                                    let cname_base = domain_utils::extract_base_domain(&cname);
-                                                    // Only add if CNAME points to different infrastructure
-                                                    if cname_base != domain_base {
-                                                        cname_vendors.push((cname.clone(), cname_base));
-                                                    }
-                                                }
-                                            }
+                                        let mut txt_vendors = Vec::new();
+                                        let mut cname_vendors = Vec::new();
 
-                                            (subdomain, source, txt_vendors, cname_vendors)
+                                        if !txt_records.is_empty() {
+                                            txt_vendors = dns::extract_vendor_domains_with_source(&txt_records);
                                         }
-                                    }).collect();
 
-                                    let chunk_results = futures::future::join_all(chunk_futures).await;
-
-                                    for (subdomain, source, txt_vendors, cname_vendors) in chunk_results {
-                                        // Add TXT-derived vendors
-                                        for vd in txt_vendors {
-                                            let vd_base = domain_utils::extract_base_domain(&vd.domain);
-                                            if vd_base != domain_base {
-                                                subdomain_txt_vendors_found += 1;
-                                                all_vendor_domains.push(dns::VendorDomain {
-                                                    domain: vd.domain,
-                                                    source_type: vd.source_type,
-                                                    raw_record: format!("Via subdomain {} (subfinder:{}): {}", subdomain, source, vd.raw_record),
-                                                });
+                                        for cname in &cname_records {
+                                            let cname_base = domain_utils::extract_base_domain(cname);
+                                            if cname_base != domain_base {
+                                                cname_vendors.push((cname.clone(), cname_base));
                                             }
                                         }
 
-                                        // Add CNAME-derived vendors (third-party infrastructure)
-                                        // Use SubfinderDiscovery type to indicate these were found via subfinder
-                                        for (cname_target, cname_base) in cname_vendors {
-                                            subdomain_cname_vendors_found += 1;
+                                        // Update substatus with result if vendors found
+                                        if let Some(first_vendor) = txt_vendors.first() {
+                                            logger_sub.show_sub_progress(&format!(
+                                                "Running subfinder for {} ({}/{} subdomains: {} --> {})",
+                                                root_domain, i + 1, total, subdomain, first_vendor.domain
+                                            )).await;
+                                        } else if let Some((cname_target, _)) = cname_vendors.first() {
+                                            logger_sub.show_sub_progress(&format!(
+                                                "Running subfinder for {} ({}/{} subdomains: {} --> {})",
+                                                root_domain, i + 1, total, subdomain, cname_target
+                                            )).await;
+                                        }
+
+                                        (subdomain, source, txt_vendors, cname_vendors)
+                                    }
+                                }))
+                                .buffer_unordered(subdomain_concurrency)
+                                .collect()
+                                .await;
+
+                                for (subdomain, source, txt_vendors, cname_vendors) in subdomain_results {
+                                    for vd in txt_vendors {
+                                        let vd_base = domain_utils::extract_base_domain(&vd.domain);
+                                        if vd_base != domain_base {
+                                            subdomain_txt_vendors_found += 1;
                                             all_vendor_domains.push(dns::VendorDomain {
-                                                domain: cname_base,
-                                                source_type: RecordType::SubfinderDiscovery,
-                                                raw_record: format!("Subdomain {} CNAMEs to {} (subfinder:{})", subdomain, cname_target, source),
+                                                domain: vd.domain,
+                                                source_type: vd.source_type,
+                                                raw_record: format!("Via subdomain {} (subfinder:{}): {}", subdomain, source, vd.raw_record),
                                             });
                                         }
+                                    }
+                                    for (cname_target, cname_base) in cname_vendors {
+                                        subdomain_cname_vendors_found += 1;
+                                        all_vendor_domains.push(dns::VendorDomain {
+                                            domain: cname_base,
+                                            source_type: RecordType::SubfinderDiscovery,
+                                            raw_record: format!("Subdomain {} CNAMEs to {} (subfinder:{})", subdomain, cname_target, source),
+                                        });
                                     }
                                 }
 
@@ -1250,14 +1324,16 @@ async fn discover_nth_parties(
                             logger.warn(&format!("Subdomain discovery failed: {}", e));
                         }
                     }
-                    logger.advance_progress(6).await; // 8% -> 14%
+                    logger.clear_sub_progress().await;
+                    logger.set_progress_position(22).await; // -> 22%
                 }
 
                 // SaaS tenant discovery
                 if let Some(tenant_disc) = saas_tenant_discovery {
-                    logger.update_progress("Running SaaS tenant discovery...").await;
+                    logger.update_progress("SaaS tenant discovery").await;
+                    logger.show_sub_progress(&format!("Probing SaaS platforms for {}", domain)).await;
                     logger.info("Running SaaS tenant discovery...");
-                    match tenant_disc.probe(domain).await {
+                    match tenant_disc.probe_with_logger(domain, Some(&logger)).await {
                         Ok(tenants) => {
                             let confirmed_tenants: Vec<_> = tenants.iter()
                                 .filter(|t| matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely))
@@ -1279,12 +1355,14 @@ async fn discover_nth_parties(
                             logger.warn(&format!("SaaS tenant discovery failed: {}", e));
                         }
                     }
-                    logger.advance_progress(4).await; // 14% -> 18%
+                    logger.clear_sub_progress().await;
+                    logger.set_progress_position(26).await; // -> 26%
                 }
 
                 // Certificate Transparency log discovery
                 if let Some(ct_disc) = ct_discovery {
-                    logger.update_progress("Running CT log discovery...").await;
+                    logger.update_progress("Certificate Transparency discovery").await;
+                    logger.show_sub_progress(&format!("Querying crt.sh for {} certificates", domain)).await;
                     logger.info("Running Certificate Transparency log discovery...");
                     match ct_disc.discover(domain).await {
                         Ok(ct_results) => {
@@ -1305,68 +1383,47 @@ async fn discover_nth_parties(
                             logger.warn(&format!("CT log discovery failed: {}", e));
                         }
                     }
-                    logger.advance_progress(2).await; // 18% -> 20%
+                    logger.clear_sub_progress().await;
+                    logger.set_progress_position(30).await; // -> 30%
                 }
             }
 
-            // Deduplicate vendor domains by base domain before processing (R001 fix)
-            // Multiple discovery methods (DNS, SaaS tenant, subfinder CNAME) can find the same vendor.
-            // We keep one entry per vendor to avoid duplicate processing, but merge evidence
-            // from all discovery methods so no information is lost.
-            // Priority: HttpSubprocessor > SaasTenantProbe > other record types.
+            // Deduplicate vendor domains: only remove entries with identical
+            // (base_domain, source_type, evidence). Vendors found by different discovery
+            // sources are ALWAYS kept as separate records to preserve attribution.
+            // Same source with different evidence is also kept (different records).
             {
                 let pre_dedup_count = all_vendor_domains.len();
-                let mut seen_domains: HashMap<String, usize> = HashMap::new();
+                let mut seen: HashSet<(String, String, String)> = HashSet::new();
                 let mut deduped: Vec<dns::VendorDomain> = Vec::new();
                 for vd in all_vendor_domains {
                     let base = domain_utils::extract_base_domain(&vd.domain);
-                    if let Some(&existing_idx) = seen_domains.get(&base) {
-                        let existing = &mut deduped[existing_idx];
-                        // Merge evidence: append the new raw_record to the existing one
-                        if !existing.raw_record.contains(&vd.raw_record) {
-                            existing.raw_record = format!("{} | {}", existing.raw_record, vd.raw_record);
-                        }
-                        // Promote source_type if the new entry has stronger evidence
-                        if matches!(vd.source_type, RecordType::HttpSubprocessor)
-                            && !matches!(existing.source_type, RecordType::HttpSubprocessor)
-                        {
-                            existing.source_type = vd.source_type;
-                            existing.domain = vd.domain;
-                        } else if matches!(vd.source_type, RecordType::SaasTenantProbe)
-                            && !matches!(existing.source_type, RecordType::HttpSubprocessor | RecordType::SaasTenantProbe)
-                        {
-                            existing.source_type = vd.source_type;
-                            existing.domain = vd.domain;
-                        }
-                    } else {
-                        seen_domains.insert(base, deduped.len());
+                    let source_key = format!("{:?}", vd.source_type);
+                    let key = (base, source_key, vd.raw_record.clone());
+                    if seen.insert(key) {
                         deduped.push(vd);
                     }
                 }
                 all_vendor_domains = deduped;
                 if all_vendor_domains.len() < pre_dedup_count {
-                    logger.debug(&format!("Deduplicated vendor domains: {} -> {} (removed {} duplicates)",
+                    logger.debug(&format!("Deduplicated vendor domains: {} -> {} (removed {} exact duplicates)",
                         pre_dedup_count, all_vendor_domains.len(), pre_dedup_count - all_vendor_domains.len()));
                 }
             }
 
-            // Calculate progress increment per vendor for the 20-100% range (80 percentage points)
-            // We're at 20% after discovery, need to reach 100% after processing all vendors
-            let progress_per_vendor: u64 = if current_depth == 1 {
+            // Progress tracking for the 30-100% range (70 percentage points across all vendors).
+            // Uses position-based tracking instead of increments to avoid exceeding 100%.
+            if current_depth == 1 {
                 let vendor_count = all_vendor_domains.len() as u64;
                 if vendor_count > 0 {
-                    logger.update_progress(&format!("🔍 Analyzing {} vendor domains...", vendor_count)).await;
-                    // Distribute 80 percentage points across all vendors
-                    (80_u64).max(vendor_count) / vendor_count.max(1)
+                    logger.update_progress(&format!("Analyzing {} vendor domains (WHOIS + org lookup)", vendor_count)).await;
+                    logger.show_sub_progress(&format!("Processing vendor 0/{} — resolving organizations", vendor_count)).await;
                 } else {
-                    logger.update_progress("🔍 No vendor domains found to analyze").await;
-                    logger.advance_progress(80).await; // Jump to 100%
+                    logger.update_progress("No vendor domains found to analyze").await;
+                    logger.set_progress_position(100).await;
                     logger.finish_progress("Analysis completed").await;
-                    0
                 }
-            } else {
-                0 // Non-root depth doesn't update the main progress bar
-            };
+            }
             
             // Resource management based on configured strategy
             match analysis_config.strategy {
@@ -1420,7 +1477,6 @@ async fn discover_nth_parties(
                     let analysis_config_inner = analysis_config_clone.clone();
                     let checkpoint_clone = checkpoint.clone();
                     let checkpoint_output_dir_clone = checkpoint_output_dir_owned.clone();
-                    let vendor_progress_increment = progress_per_vendor;
 
                     async move {
                         // Apply rate limiting delay if configured (helps prevent server/resource overwhelming)
@@ -1429,6 +1485,26 @@ async fn discover_nth_parties(
                         }
 
                         let start_time = std::time::Instant::now();
+                        if current_depth == 1 {
+                            let source_label = match vendor_domain_info.source_type {
+                                RecordType::HttpSubprocessor => "subprocessor",
+                                RecordType::DnsTxtSpf => "SPF",
+                                RecordType::DnsTxtVerification => "DNS verification",
+                                RecordType::DnsTxtDmarc => "DMARC",
+                                RecordType::SubfinderDiscovery => "subfinder",
+                                RecordType::SaasTenantProbe => "SaaS tenant",
+                                RecordType::CtLogDiscovery => "CT log",
+                                _ => "discovery",
+                            };
+                            // Show raw record context (truncated) for richer substatus
+                            let record_hint = if vendor_domain_info.raw_record.len() > 50 {
+                                format!("{}...", &vendor_domain_info.raw_record[..50])
+                            } else {
+                                vendor_domain_info.raw_record.clone()
+                            };
+                            logger_clone.show_sub_progress(&format!("WHOIS + org lookup {}/{}: {} (via {}: {})",
+                                index + 1, total_vendors, vendor_domain_clone, source_label, record_hint)).await;
+                        }
                         logger_clone.debug(&format!("🔍 Starting analysis for vendor {}/{}: {} (depth {}, source: {:?})",
                             index + 1, total_vendors, vendor_domain_clone, current_depth, vendor_domain_info.source_type));
 
@@ -1462,9 +1538,10 @@ async fn discover_nth_parties(
                         logger_clone.debug(&format!("✅ Completed analysis for vendor {}/{}: {} in {:.2}s (found {} relationships)", 
                             index + 1, total_vendors, vendor_domain_clone, elapsed.as_secs_f64(), result.len()));
                         
-                        // Advance progress for root-level analysis only
-                        if current_depth == 1 && vendor_progress_increment > 0 {
-                            logger_clone.advance_progress(vendor_progress_increment).await;
+                        // Set progress position for root-level analysis (position-based to avoid >100%)
+                        if current_depth == 1 && total_vendors > 0 {
+                            let position = 30 + ((index as u64 + 1) * 70) / total_vendors as u64;
+                            logger_clone.set_progress_position(position).await;
                         }
 
                         result
@@ -1483,6 +1560,7 @@ async fn discover_nth_parties(
                 
                 // Process all vendors to completion without timeout
                 let mut processed_count = 0;
+                let mut total_relationships_found = 0usize;
                 let checkpoint_path = Path::new(checkpoint_output_dir);
                 while let Some(result) = vendor_stream.next().await {
                     // Check for interrupt signal
@@ -1515,9 +1593,16 @@ async fn discover_nth_parties(
                     }
 
                     processed_count += 1;
+                    total_relationships_found += result.len();
                     vendor_results.push(result);
+                    // Update main progress bar with running stats
+                    if current_depth == 1 {
+                        logger.update_progress(&format!("Analyzing vendors ({}/{}) — {} relationships found",
+                            processed_count, vendor_count, total_relationships_found)).await;
+                    }
                     if processed_count % 5 == 0 || processed_count == vendor_count {
-                        logger.debug(&format!("📊 Progress: {}/{} vendors processed", processed_count, vendor_count));
+                        logger.debug(&format!("📊 Progress: {}/{} vendors processed, {} relationships found",
+                            processed_count, vendor_count, total_relationships_found));
                         // Save checkpoint periodically (every 5 domains at depth 1)
                         if current_depth == 1 {
                             let mut cp = checkpoint.lock().await;
@@ -1562,7 +1647,8 @@ async fn discover_nth_parties(
                 
                 // Finish progress bar for root-level analysis
                 if current_depth == 1 {
-                    logger.finish_progress("Vendor analysis completed").await;
+                    logger.finish_progress(&format!("Vendor analysis completed — {} relationships from {} vendors",
+                        total_relationships, vendor_count)).await;
                 }
             }
         },

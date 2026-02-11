@@ -1,6 +1,7 @@
 //! Vendor Registry - Consolidated vendor configuration management
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -93,16 +94,52 @@ impl VendorRegistry {
         let mut registry = Self::new();
         registry.config_dir = config_dir.to_path_buf();
 
-        for entry in std::fs::read_dir(&vendors_dir)
+        // Collect all JSON file paths first
+        let json_files: Vec<PathBuf> = std::fs::read_dir(&vendors_dir)
             .with_context(|| format!("Failed to read: {:?}", vendors_dir))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().map_or(true, |e| e != "json") { continue; }
-            if path.file_name().map_or(false, |n| n == "_schema.json") { continue; }
-            match registry.load_vendor_file(&path) {
-                Ok(c) => debug!("Loaded vendor: {} with {} domains", c.id, c.domains.len()),
-                Err(e) => warn!("Failed to load {:?}: {}", path, e),
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().map_or(true, |e| e != "json") { return None; }
+                if path.file_name().map_or(false, |n| n == "_schema.json") { return None; }
+                Some(path)
+            })
+            .collect();
+
+        // Read and parse all files in parallel using rayon
+        let parsed_configs: Vec<Result<VendorConfig>> = json_files.par_iter()
+            .map(|path| {
+                let content = std::fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read: {:?}", path))?;
+                let config: VendorConfig = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse: {:?}", path))?;
+                Ok(config)
+            })
+            .collect();
+
+        // Merge results into registry (single-threaded, fast)
+        for result in parsed_configs {
+            match result {
+                Ok(config) => {
+                    let vendor_id = config.id.clone();
+                    let config = Arc::new(config);
+                    for domain in config.domains.keys() {
+                        registry.domain_to_vendor.insert(domain.to_lowercase(), vendor_id.clone());
+                    }
+                    let primary = config.primary_domain.to_lowercase();
+                    if !registry.domain_to_vendor.contains_key(&primary) {
+                        registry.domain_to_vendor.insert(primary, vendor_id.clone());
+                    }
+                    for alias in &config.provider_aliases {
+                        registry.alias_to_vendor.insert(alias.to_lowercase(), vendor_id.clone());
+                    }
+                    for pattern in &config.verification_patterns {
+                        registry.verification_patterns.push((pattern.clone(), vendor_id.clone()));
+                    }
+                    debug!("Loaded vendor: {} with {} domains", config.id, config.domains.len());
+                    registry.vendors.insert(vendor_id, config);
+                }
+                Err(e) => warn!("Failed to load vendor: {}", e),
             }
         }
         info!("Loaded {} vendors", registry.vendors.len());

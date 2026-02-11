@@ -475,3 +475,88 @@ async fn test_extraction_performance() {
     assert!(vendors.len() <= 50, "Should not exceed reasonable extraction count, found: {}", vendors.len());
     println!("Performance test extracted {} vendors in {}ms", vendors.len(), elapsed.as_millis());
 }
+
+/// Test that custom rules matching prefers earliest-position match for ambiguous org names.
+/// This is critical for entries like "Loom, Inc. (Atlassian)" where both "loom" and "atlassian"
+/// are valid mapping keys — the primary entity (Loom) appears first and should win.
+#[tokio::test]
+async fn test_custom_rules_earliest_position_matching() {
+    use nthpartyfinder::subprocessor::{
+        CustomExtractionRules, DirectSelector, SpecialHandling,
+    };
+    use std::collections::HashMap;
+
+    let analyzer = SubprocessorAnalyzer::new().await;
+
+    // Build custom rules with ambiguous mappings
+    let mut custom_mappings = HashMap::new();
+    custom_mappings.insert("loom".to_string(), "loom.com".to_string());
+    custom_mappings.insert("atlassian".to_string(), "atlassian.com".to_string());
+    custom_mappings.insert("mailgun technologies".to_string(), "mailgun.com".to_string());
+    custom_mappings.insert("sinch email".to_string(), "sinch.com".to_string());
+    custom_mappings.insert("functional software".to_string(), "sentry.io".to_string());
+    custom_mappings.insert("sentry".to_string(), "sentry.io".to_string());
+
+    let custom_rules = CustomExtractionRules {
+        direct_selectors: vec![DirectSelector {
+            selector: "table tbody tr td:first-child".to_string(),
+            attribute: None,
+            transform: Some("trim".to_string()),
+            description: "Test selector".to_string(),
+        }],
+        custom_regex_patterns: Vec::new(),
+        special_handling: Some(SpecialHandling {
+            skip_generic_methods: true,
+            custom_org_to_domain_mapping: Some(custom_mappings),
+            exclusion_patterns: Vec::new(),
+        }),
+    };
+
+    // HTML with ambiguous organization names
+    let html_content = r#"
+    <html><body>
+        <table><tbody>
+            <tr><td>Loom, Inc. (Atlassian)</td><td>Support</td></tr>
+            <tr><td>Mailgun Technologies, Inc. (d/b/a Sinch Email)</td><td>Email</td></tr>
+            <tr><td>Functional Software, Inc. (Sentry.io)</td><td>Error tracking</td></tr>
+        </tbody></table>
+    </body></html>
+    "#;
+
+    let document = scraper::Html::parse_document(html_content);
+    let result = analyzer.extract_with_custom_rules(
+        &document, html_content, "https://test.com/subprocessors", &custom_rules, "test.com",
+    );
+
+    assert!(result.is_ok(), "Custom rules extraction should succeed");
+    let extraction = result.unwrap();
+    let domains: Vec<String> = extraction.subprocessors.iter().map(|v| v.domain.clone()).collect();
+
+    assert_eq!(domains.len(), 3, "Should extract exactly 3 vendors, found: {:?}", domains);
+
+    // "Loom, Inc. (Atlassian)" -> "loom" at position 0 beats "atlassian" at position ~12
+    assert!(
+        domains.contains(&"loom.com".to_string()),
+        "Should map 'Loom, Inc. (Atlassian)' to loom.com (earliest match), found: {:?}",
+        domains
+    );
+    assert!(
+        !domains.contains(&"atlassian.com".to_string()),
+        "Should NOT map to atlassian.com (later match) when loom.com is earlier, found: {:?}",
+        domains
+    );
+
+    // "Mailgun Technologies, Inc. (d/b/a Sinch Email)" -> "mailgun technologies" at pos 0 beats "sinch email"
+    assert!(
+        domains.contains(&"mailgun.com".to_string()),
+        "Should map Mailgun entry to mailgun.com (earliest match), found: {:?}",
+        domains
+    );
+
+    // "Functional Software, Inc. (Sentry.io)" -> "functional software" at pos 0 beats "sentry"
+    assert!(
+        domains.contains(&"sentry.io".to_string()),
+        "Should map Functional Software entry to sentry.io, found: {:?}",
+        domains
+    );
+}

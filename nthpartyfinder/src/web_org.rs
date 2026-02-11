@@ -10,7 +10,7 @@
 //! This provides a reliable fallback when WHOIS data is unavailable or protected.
 
 use anyhow::{Result, anyhow};
-use headless_chrome::Browser;
+
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Deserialize;
@@ -167,8 +167,7 @@ pub async fn extract_organization_with_fallback(
 fn fetch_page_with_headless(domain: &str) -> Result<String> {
     let url = format!("https://{}", domain);
 
-    let browser = Browser::default()
-        .map_err(|e| anyhow!("Failed to launch headless Chrome: {}", e))?;
+    let browser = crate::create_browser()?;
 
     let tab = browser.new_tab()
         .map_err(|e| anyhow!("Failed to create browser tab: {}", e))?;

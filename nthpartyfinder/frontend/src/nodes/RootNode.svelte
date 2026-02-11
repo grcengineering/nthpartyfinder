@@ -20,12 +20,12 @@
     {/if}
     {#if data.hasChildren}
       <div class="node-children">
-        {data.expanded ? '◀' : '▶'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
+        {data.expanded ? '▲' : '▼'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
       </div>
     {/if}
   </div>
-  <!-- Right handle for horizontal layout -->
-  <Handle type="source" position={Position.Right} />
+  <!-- Bottom handle for vertical (top-down) layout -->
+  <Handle type="source" position={Position.Bottom} />
 </div>
 
 <style>
@@ -41,6 +41,8 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    overflow: hidden;
+    box-sizing: border-box;
   }
 
   .root-node:hover {
@@ -58,17 +60,24 @@
 
   .node-content {
     flex: 1;
+    overflow: hidden;
   }
 
   .node-domain {
     font-weight: 600;
     font-size: 14px;
     margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .node-org {
     font-size: 11px;
     opacity: 0.9;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .node-children {

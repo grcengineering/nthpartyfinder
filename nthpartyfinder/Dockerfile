@@ -1,62 +1,103 @@
 # =============================================================================
-# nthpartyfinder Docker Build - Production (Distroless)
-# Uses Docker Hardened Images (dhi.io) for build, scratch for runtime
+# nthpartyfinder Docker Build - Production
+# Full feature parity: NER/GLiNER, headless Chrome, subfinder, all discovery
+#
+# Build stage uses official Rust slim-bookworm (glibc matches runtime)
+# Download stages use Chainguard hardened images (free, zero-CVE, SLSA provenance)
+# Runtime uses Debian slim because no hardened image supports Chromium installation
+# (hardened images are distroless with no package manager — Chromium needs 30+ libs)
+# Runtime is manually hardened: non-root, cap-drop ALL, post-install cleanup
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1: Build stage using DHI Rust with musl for static binary
+# Stage 1: Build (Debian bookworm-based Rust — glibc matches runtime)
 # -----------------------------------------------------------------------------
-FROM dhi.io/rust:1.83-alpine AS builder
+FROM rust:slim-bookworm AS builder
 
-# Install build dependencies
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
-
-# Set up cargo for static linking
-ENV RUSTFLAGS="-C target-feature=+crt-static"
-ENV PKG_CONFIG_ALLOW_CROSS=1
-ENV OPENSSL_STATIC=1
-ENV OPENSSL_DIR=/usr
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs && \
+    cargo build --release 2>/dev/null || true
 
-# Create dummy main.rs to cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release --target x86_64-unknown-linux-musl 2>/dev/null || true
-
-# Copy actual source
+# Copy actual source and assets
 COPY src/ src/
 COPY config/ config/
 COPY templates/ templates/
-
-# Copy model files for embedded NER
+COPY static/ static/
 COPY models/ models/
 
-# Build the real binary (NER is included by default)
-RUN touch src/main.rs && \
-    cargo build --release --target x86_64-unknown-linux-musl
-
-# Strip the binary for minimal size
-RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
+# Build with default features (includes embedded-ner)
+RUN touch src/main.rs && cargo build --release
+RUN strip target/release/nthpartyfinder
 
 # -----------------------------------------------------------------------------
-# Stage 2: Runtime stage using scratch (true distroless - 0 bytes overhead)
+# Stage 2: Download ONNX Runtime (Chainguard hardened base)
 # -----------------------------------------------------------------------------
-FROM scratch
+FROM cgr.dev/chainguard/wolfi-base:latest AS onnx-dl
+USER root
+RUN apk add curl && \
+    curl -fsSL -o /tmp/onnxruntime.tgz \
+      "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz" && \
+    tar -xzf /tmp/onnxruntime.tgz -C /tmp/
 
-# Copy the static binary
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder /nthpartyfinder
+# -----------------------------------------------------------------------------
+# Stage 3: Download subfinder (Chainguard hardened base)
+# -----------------------------------------------------------------------------
+FROM cgr.dev/chainguard/wolfi-base:latest AS subfinder-dl
+USER root
+RUN apk add curl unzip && \
+    curl -fsSL -o /tmp/subfinder.zip \
+      "https://github.com/projectdiscovery/subfinder/releases/download/v2.11.0/subfinder_2.11.0_linux_amd64.zip" && \
+    unzip /tmp/subfinder.zip -d /tmp/subfinder && \
+    chmod +x /tmp/subfinder/subfinder
+
+# -----------------------------------------------------------------------------
+# Stage 4: Runtime (Debian slim — required for Chromium, manually hardened)
+# No free hardened image supports Chromium: Chainguard/Wolfi has no Chromium
+# package (request closed as "not planned"), Distroless has no package manager.
+# -----------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+# Install runtime dependencies, then harden by removing package manager cache
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    whois \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/info \
+    && groupadd -g 10001 nthparty \
+    && useradd -u 10001 -g nthparty -d /home/nthparty -m -s /usr/sbin/nologin nthparty
+
+# Copy binaries
+COPY --from=builder /build/target/release/nthpartyfinder /usr/local/bin/nthpartyfinder
+COPY --from=subfinder-dl /tmp/subfinder/subfinder /usr/local/bin/subfinder
+
+# Copy ONNX Runtime shared library
+COPY --from=onnx-dl /tmp/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1 /usr/local/lib/
+COPY --from=onnx-dl /tmp/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime_providers_shared.so /usr/local/lib/
+RUN ln -s /usr/local/lib/libonnxruntime.so.1.20.1 /usr/local/lib/libonnxruntime.so && ldconfig
 
 # Copy config files
-COPY --from=builder /build/config/ /etc/nthpartyfinder/
+COPY --from=builder /build/config/ /app/config/
 
-# Copy CA certificates for HTTPS
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Create output and cache directories
+RUN mkdir -p /output /cache && \
+    chown -R nthparty:nthparty /app /output /cache
 
-# Set environment
-ENV NTHPARTYFINDER_CONFIG_DIR=/etc/nthpartyfinder
+# Environment
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so.1.20.1
+ENV CHROME_PATH=/usr/bin/chromium
+ENV NTHPARTYFINDER_CONTAINER=1
 
-ENTRYPOINT ["/nthpartyfinder"]
+USER 10001:10001
+WORKDIR /app
+
+ENTRYPOINT ["nthpartyfinder"]
 CMD ["--help"]

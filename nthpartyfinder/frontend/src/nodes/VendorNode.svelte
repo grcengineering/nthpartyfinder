@@ -12,37 +12,37 @@
     expanded: boolean;
     discoveryCount: number;
     sources: DiscoverySource[];
-    onShowInfo?: (domain: string, sources: DiscoverySource[]) => void;
   };
 
-  // Color based on layer depth
-  const layerColors: Record<number, { bg: string; border: string; shadow: string; icon: string }> = {
-    1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', border: '#2563eb', shadow: 'rgba(59, 130, 246, 0.3)', icon: '🔗' },
-    2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', border: '#059669', shadow: 'rgba(16, 185, 129, 0.3)', icon: '🔗' },
-    3: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', border: '#d97706', shadow: 'rgba(245, 158, 11, 0.3)', icon: '🔗' },
-    4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', border: '#dc2626', shadow: 'rgba(239, 68, 68, 0.3)', icon: '🔗' }
+  // Color based on layer depth - same icon as root, different gradient colors
+  const layerColors: Record<number, { bg: string; shadow: string }> = {
+    1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', shadow: 'rgba(59, 130, 246, 0.3)' },
+    2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', shadow: 'rgba(16, 185, 129, 0.3)' },
+    3: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', shadow: 'rgba(245, 158, 11, 0.3)' },
+    4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', shadow: 'rgba(239, 68, 68, 0.3)' }
   };
 
   $: colors = layerColors[data.layer] || layerColors[4];
 
   function handleInfoClick(event: MouseEvent) {
     event.stopPropagation();
-    if (data.onShowInfo) {
-      data.onShowInfo(data.domain, data.sources);
-    }
+    event.preventDefault();
+    // Use global event bus to bypass xyflow's data pipeline (callbacks on node.data get lost)
+    window.dispatchEvent(new CustomEvent('show-vendor-info', {
+      detail: { domain: data.domain, sources: data.sources }
+    }));
   }
 </script>
 
 <div
   class="vendor-node"
   class:expanded={data.expanded}
-  class:has-children={data.hasChildren}
   style="background: {colors.bg}; --shadow-color: {colors.shadow};"
 >
-  <!-- Left handle for incoming edges (horizontal layout) -->
-  <Handle type="target" position={Position.Left} />
+  <!-- Top handle for incoming edges (vertical layout) -->
+  <Handle type="target" position={Position.Top} />
 
-  <div class="node-icon">{colors.icon}</div>
+  <div class="node-icon">🏢</div>
   <div class="node-content">
     <div class="node-domain">{data.domain}</div>
     {#if data.organization && data.organization !== data.domain}
@@ -57,65 +57,65 @@
     <!-- Child count indicator -->
     {#if data.hasChildren}
       <div class="node-children">
-        {data.expanded ? '◀' : '▶'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
+        {data.expanded ? '▲' : '▼'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
       </div>
     {/if}
   </div>
 
   <!-- Info button -->
-  <button class="info-btn" on:click={handleInfoClick} title="View discovery details">
+  <button class="info-btn nodrag nopan" on:click={handleInfoClick} title="View discovery details">
     ℹ
   </button>
 
-  <!-- Right handle for outgoing edges (horizontal layout) -->
+  <!-- Bottom handle for outgoing edges (vertical layout) -->
   {#if data.hasChildren}
-    <Handle type="source" position={Position.Right} />
+    <Handle type="source" position={Position.Bottom} />
   {/if}
 </div>
 
 <style>
+  /* Styling identical to RootNode except for background color (set via style attribute) */
   .vendor-node {
     color: white;
     padding: 16px 20px;
     border-radius: 12px;
     min-width: 180px;
-    box-shadow: 0 4px 12px var(--shadow-color, rgba(0,0,0,0.3));
+    box-shadow: 0 4px 12px var(--shadow-color, rgba(99, 102, 241, 0.3));
     cursor: pointer;
     transition: transform 0.2s, box-shadow 0.2s;
     display: flex;
     align-items: center;
     gap: 12px;
-    position: relative;
+    /* Ensure content stays within bounds */
+    overflow: hidden;
+    box-sizing: border-box;
   }
 
   .vendor-node:hover {
     transform: translateY(-2px);
-    box-shadow: 0 6px 16px var(--shadow-color, rgba(0,0,0,0.4));
-  }
-
-  .vendor-node.has-children {
-    cursor: pointer;
+    box-shadow: 0 6px 16px var(--shadow-color, rgba(99, 102, 241, 0.4));
   }
 
   .vendor-node.expanded {
-    box-shadow: 0 4px 12px var(--shadow-color, rgba(0,0,0,0.4));
+    box-shadow: 0 4px 12px var(--shadow-color, rgba(99, 102, 241, 0.4));
   }
 
   .node-icon {
     font-size: 24px;
-    flex-shrink: 0;
   }
 
   .node-content {
     flex: 1;
-    min-width: 0;
+    overflow: hidden;
   }
 
   .node-domain {
     font-weight: 600;
     font-size: 14px;
     margin-bottom: 2px;
-    word-break: break-all;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .node-org {

@@ -1,34 +1,74 @@
 # =============================================================================
-# nthpartyfinder Docker Build - Debug (with shell)
-# Uses Docker Hardened Images (dhi.io) for both build and runtime
+# nthpartyfinder Docker Build - Debug (with shell for troubleshooting)
+# Full feature parity: NER, headless Chrome, subfinder, all discovery
+#
+# Build stage uses official Rust slim-bookworm (glibc matches runtime)
+# Download stages use Chainguard hardened images (free, zero-CVE)
+# Runtime uses Debian slim (required for Chromium) with debug tools
 # =============================================================================
 
-FROM dhi.io/rust:1.83-alpine AS builder
+FROM rust:slim-bookworm AS builder
 
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
-
-ENV RUSTFLAGS="-C target-feature=+crt-static"
-ENV OPENSSL_STATIC=1
-ENV OPENSSL_DIR=/usr
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY config/ config/
 COPY templates/ templates/
+COPY static/ static/
 COPY models/ models/
 
-RUN cargo build --release --target x86_64-unknown-linux-musl --features embedded-ner
-RUN strip /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder
+RUN cargo build --release
+RUN strip target/release/nthpartyfinder
 
-# Runtime with busybox for debugging capability
-FROM dhi.io/busybox:latest
+# Download ONNX Runtime
+FROM cgr.dev/chainguard/wolfi-base:latest AS onnx-dl
+USER root
+RUN apk add curl && \
+    curl -fsSL -o /tmp/onnxruntime.tgz \
+      "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz" && \
+    tar -xzf /tmp/onnxruntime.tgz -C /tmp/
 
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/nthpartyfinder /usr/local/bin/
-COPY --from=builder /build/config/ /etc/nthpartyfinder/
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# Download subfinder
+FROM cgr.dev/chainguard/wolfi-base:latest AS subfinder-dl
+USER root
+RUN apk add curl unzip && \
+    curl -fsSL -o /tmp/subfinder.zip \
+      "https://github.com/projectdiscovery/subfinder/releases/download/v2.11.0/subfinder_2.11.0_linux_amd64.zip" && \
+    unzip /tmp/subfinder.zip -d /tmp/subfinder && \
+    chmod +x /tmp/subfinder/subfinder
 
-ENV NTHPARTYFINDER_CONFIG_DIR=/etc/nthpartyfinder
+# Runtime with debug tools
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    whois \
+    fonts-liberation \
+    procps \
+    curl \
+    dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/nthpartyfinder /usr/local/bin/nthpartyfinder
+COPY --from=subfinder-dl /tmp/subfinder/subfinder /usr/local/bin/subfinder
+COPY --from=onnx-dl /tmp/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1 /usr/local/lib/
+COPY --from=onnx-dl /tmp/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime_providers_shared.so /usr/local/lib/
+RUN ln -s /usr/local/lib/libonnxruntime.so.1.20.1 /usr/local/lib/libonnxruntime.so && ldconfig
+
+COPY --from=builder /build/config/ /app/config/
+
+RUN mkdir -p /output /cache
+
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so.1.20.1
+ENV CHROME_PATH=/usr/bin/chromium
+ENV NTHPARTYFINDER_CONTAINER=1
+
+WORKDIR /app
 
 ENTRYPOINT ["nthpartyfinder"]
 CMD ["--help"]

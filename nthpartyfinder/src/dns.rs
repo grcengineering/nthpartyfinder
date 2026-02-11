@@ -341,6 +341,93 @@ impl DnsServerPool {
 
         Ok(TokioAsyncResolver::tokio(config, opts))
     }
+
+    /// Fast bulk DNS lookup optimized for subdomain scanning.
+    /// Uses DoH as primary with a single attempt, then falls back to traditional DNS.
+    /// Runs TXT and CNAME lookups concurrently via tokio::join!.
+    pub async fn get_txt_and_cname_fast(&self, domain: &str) -> (Vec<String>, Vec<String>) {
+        let (txt_result, cname_result) = tokio::join!(
+            self.fast_txt_lookup(domain),
+            self.fast_cname_lookup(domain),
+        );
+        (txt_result.unwrap_or_default(), cname_result.unwrap_or_default())
+    }
+
+    /// Fast TXT lookup: try one DoH server, then one DNS server. Short timeouts.
+    async fn fast_txt_lookup(&self, domain: &str) -> Result<Vec<String>> {
+        // Try DoH first with a single attempt
+        let doh_server = self.next_doh_server();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(2000),
+            self.doh_txt_lookup(domain, doh_server)
+        ).await {
+            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
+            _ => {}
+        }
+
+        // Fallback to traditional DNS (single attempt, UDP only)
+        let dns_server = self.next_dns_server();
+        match self.create_dns_resolver(dns_server, false) {
+            Ok(resolver) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(2000),
+                    resolver.txt_lookup(domain)
+                ).await {
+                    Ok(Ok(txt_lookup)) => {
+                        let records: Vec<String> = txt_lookup.iter()
+                            .map(|r| r.to_string())
+                            .collect();
+                        return Ok(records);
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => {}
+        }
+
+        Ok(vec![])
+    }
+
+    /// Fast CNAME lookup: single DoH attempt with short timeout, then traditional DNS fallback.
+    async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
+        let doh_server = self.next_doh_server();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(2000),
+            self.doh_cname_lookup(domain, doh_server)
+        ).await {
+            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
+            _ => {}
+        }
+
+        // Fallback to traditional DNS
+        let dns_server = self.next_dns_server();
+        match self.create_dns_resolver(dns_server, false) {
+            Ok(resolver) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(2000),
+                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME)
+                ).await {
+                    Ok(Ok(lookup)) => {
+                        use hickory_resolver::proto::rr::RData;
+                        let records: Vec<String> = lookup.record_iter()
+                            .filter_map(|r| {
+                                if let Some(RData::CNAME(ref cname)) = r.data() {
+                                    Some(cname.to_string().trim_end_matches('.').to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        return Ok(records);
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => {}
+        }
+
+        Ok(vec![])
+    }
 }
 
 pub async fn get_txt_records(domain: &str) -> Result<Vec<String>> {

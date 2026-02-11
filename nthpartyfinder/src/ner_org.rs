@@ -73,19 +73,24 @@ impl NerOrganizationExtractor {
 
         // Try to find onnxruntime.dll in common locations
         // IMPORTANT: Use absolute paths to avoid loading wrong system DLLs
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let cwd = std::env::current_dir().ok();
+
+        // For Rust projects, exe is typically in target/release/ or target/debug/
+        // So project root is 2 directories up from the executable
+        let project_root_from_exe = exe_dir.as_ref().and_then(|d| d.parent()).and_then(|d| d.parent());
+
         let search_paths = vec![
             // Next to executable (absolute path)
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll"))),
+            exe_dir.as_ref().map(|d| d.join("onnxruntime.dll")),
+            // Project root (2 dirs up from exe for target/release/ layout)
+            project_root_from_exe.map(|d| d.join("onnxruntime.dll")),
+            // Project's onnxruntime directory relative to project root
+            project_root_from_exe.map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
             // Current working directory (absolute path)
-            std::env::current_dir()
-                .ok()
-                .map(|d| d.join("onnxruntime.dll")),
-            // Project's onnxruntime directory (absolute path)
-            std::env::current_dir()
-                .ok()
-                .map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
+            cwd.as_ref().map(|d| d.join("onnxruntime.dll")),
+            // Project's onnxruntime directory relative to cwd
+            cwd.as_ref().map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
             // User's local app data
             dirs::data_local_dir().map(|d| d.join("onnxruntime").join("onnxruntime.dll")),
         ];
@@ -114,8 +119,50 @@ impl NerOrganizationExtractor {
 
     #[cfg(not(target_os = "windows"))]
     fn setup_onnx_runtime() -> Result<()> {
-        // On Linux/macOS, the runtime is typically available or statically linked
-        Ok(())
+        // If ORT_DYLIB_PATH is already set, use it
+        if std::env::var("ORT_DYLIB_PATH").is_ok() {
+            debug!("ORT_DYLIB_PATH already set");
+            return Ok(());
+        }
+
+        let lib_name = if cfg!(target_os = "macos") {
+            "libonnxruntime.dylib"
+        } else {
+            "libonnxruntime.so"
+        };
+
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let cwd = std::env::current_dir().ok();
+        let project_root_from_exe = exe_dir.as_ref().and_then(|d| d.parent()).and_then(|d| d.parent());
+
+        let search_paths = vec![
+            exe_dir.as_ref().map(|d| d.join(lib_name)),
+            project_root_from_exe.map(|d| d.join(lib_name)),
+            project_root_from_exe.map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
+            cwd.as_ref().map(|d| d.join(lib_name)),
+            cwd.as_ref().map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
+        ];
+
+        for path_opt in search_paths {
+            if let Some(path) = path_opt {
+                if path.exists() {
+                    let abs_path = path.canonicalize().unwrap_or(path.clone());
+                    let path_str = abs_path.to_string_lossy().to_string();
+                    info!("Found ONNX Runtime at: {}", path_str);
+                    std::env::set_var("ORT_DYLIB_PATH", &path_str);
+                    return Ok(());
+                }
+            }
+        }
+
+        // Not found - provide helpful error
+        Err(anyhow!(
+            "ONNX Runtime shared library not found. On Linux, you need to:\n\
+             1. Place {} next to the executable or in the working directory\n\
+             2. Or set ORT_DYLIB_PATH to point to {}\n\
+             3. Or install onnxruntime system-wide",
+            lib_name, lib_name
+        ))
     }
 
     /// Create a new NER extractor with custom minimum confidence threshold
@@ -242,6 +289,78 @@ impl NerOrganizationExtractor {
 
         result
     }
+
+    /// Extract ALL organization entities from text content above the confidence threshold.
+    ///
+    /// Unlike `extract_organization()` which returns only the single best match,
+    /// this returns all detected organizations, deduplicated by normalized name
+    /// (keeping the highest confidence for each).
+    pub fn extract_all_organizations(&self, text: &str, min_confidence: Option<f32>) -> Result<Vec<NerOrgResult>> {
+        let threshold = min_confidence.unwrap_or(self.min_confidence);
+
+        // GLiNER truncates at ~4000 chars, so chunk long text
+        let chunks: Vec<&str> = if text.len() <= 4000 {
+            vec![text]
+        } else {
+            // Split into ~3000 char chunks with overlap for boundary entities
+            let mut result = Vec::new();
+            let mut start = 0;
+            while start < text.len() {
+                let end = std::cmp::min(start + 3000, text.len());
+                // Try to break at a whitespace boundary
+                let actual_end = if end < text.len() {
+                    text[start..end].rfind(char::is_whitespace)
+                        .map(|pos| start + pos + 1)
+                        .unwrap_or(end)
+                } else {
+                    end
+                };
+                result.push(&text[start..actual_end]);
+                start = if actual_end > start + 500 { actual_end - 500 } else { actual_end }; // 500 char overlap
+            }
+            result
+        };
+
+        let mut all_orgs: std::collections::HashMap<String, NerOrgResult> = std::collections::HashMap::new();
+
+        for chunk in &chunks {
+            let input = TextInput::from_str(
+                &[*chunk],
+                &["organization", "company"],
+            ).map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+
+            let output = self.model.inference(input)
+                .map_err(|e| anyhow!("NER inference failed: {}", e))?;
+
+            for spans in &output.spans {
+                for span in spans {
+                    let entity_type = span.class().to_lowercase();
+                    if entity_type == "organization" || entity_type == "company" {
+                        let confidence = span.probability();
+                        if confidence >= threshold {
+                            let org_name = span.text().trim().to_string();
+                            if org_name.len() >= 2 {
+                                let key = org_name.to_lowercase();
+                                let existing = all_orgs.get(&key);
+                                if existing.is_none() || existing.unwrap().confidence < confidence {
+                                    all_orgs.insert(key, NerOrgResult {
+                                        organization: org_name,
+                                        confidence,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut results: Vec<NerOrgResult> = all_orgs.into_values().collect();
+        results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+
+        debug!("NER extracted {} organizations from {} chars of text", results.len(), text.len());
+        Ok(results)
+    }
 }
 
 // ============================================================================
@@ -284,6 +403,16 @@ pub fn extract_organization(domain: &str, page_content: Option<&str>) -> anyhow:
     }
 }
 
+/// Extract all organizations from text using the global NER extractor.
+/// Returns all detected organizations above min_confidence threshold.
+#[cfg(feature = "embedded-ner")]
+pub fn extract_all_organizations(text: &str, min_confidence: Option<f32>) -> anyhow::Result<Vec<NerOrgResult>> {
+    match NER_EXTRACTOR.get() {
+        Some(extractor) => extractor.extract_all_organizations(text, min_confidence),
+        None => Ok(Vec::new()),
+    }
+}
+
 // ============================================================================
 // Stub implementations when embedded-ner feature is disabled
 // ============================================================================
@@ -310,6 +439,12 @@ pub fn is_available() -> bool {
 #[cfg(not(feature = "embedded-ner"))]
 pub fn extract_organization(_domain: &str, _page_content: Option<&str>) -> anyhow::Result<Option<NerOrgResult>> {
     Ok(None)
+}
+
+/// Stub: Extract all organizations (always returns empty when disabled)
+#[cfg(not(feature = "embedded-ner"))]
+pub fn extract_all_organizations(_text: &str, _min_confidence: Option<f32>) -> anyhow::Result<Vec<NerOrgResult>> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

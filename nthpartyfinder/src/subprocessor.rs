@@ -5,12 +5,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 use serde::{Deserialize, Serialize};
 use crate::dns::LogFailure;
 use crate::vendor::RecordType;
 use crate::rate_limit::RateLimitContext;
-use headless_chrome::Browser;
+
 use fancy_regex::Regex;
 // rayon available if needed for parallel processing
 use std::collections::BTreeMap;
@@ -822,8 +822,8 @@ impl SubprocessorAnalyzer {
         let subprocessor_urls = self.generate_subprocessor_urls(domain);
         
         // Limit URL testing to prevent performance degradation
-        const MAX_URLS_TO_TEST: usize = 10;
-        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+        const MAX_URLS_TO_TEST: usize = 25;
+        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(15);
         
         let urls_to_test = if subprocessor_urls.len() > MAX_URLS_TO_TEST {
             debug!("Limiting URL testing to first {} URLs out of {} generated for performance", MAX_URLS_TO_TEST, subprocessor_urls.len());
@@ -1644,6 +1644,28 @@ impl SubprocessorAnalyzer {
                 debug!("🔥🔥🔥 DOMAIN-SPECIFIC EXTRACTION FOUND {} vendors ({} pending confirmations)",
                        extraction_result.subprocessors.len(), extraction_result.pending_mappings.len());
 
+                // Warn if extraction count is lower than what was previously successful
+                // This helps detect when page content changes break extraction patterns
+                {
+                    let cache = self.cache.read().await;
+                    if let Some(entry) = cache.get_cached_entry(source_domain).await {
+                        if let Some(ref metadata) = entry.extraction_metadata {
+                            if extraction_result.subprocessors.len() < metadata.successful_extractions as usize
+                                && metadata.successful_extractions > 0
+                            {
+                                warn!("Subprocessor extraction for {} found {} vendors, but cache records {} successful extractions. \
+                                       Page content may have changed or extraction patterns may need updating.",
+                                      source_domain, extraction_result.subprocessors.len(), metadata.successful_extractions);
+                                // Log which vendors were found to help debug
+                                let found_domains: Vec<&str> = extraction_result.subprocessors.iter()
+                                    .map(|s| s.domain.as_str())
+                                    .collect();
+                                debug!("Extracted domains for {}: {:?}", source_domain, found_domains);
+                            }
+                        }
+                    }
+                }
+
                 // Store pending mappings for later confirmation
                 for mapping in extraction_result.pending_mappings {
                     self.add_pending_mapping(mapping).await;
@@ -2340,10 +2362,8 @@ impl SubprocessorAnalyzer {
         debug!("🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}", url);
         debug!("Starting headless browser scraping for: {}", url);
 
-        // Launch headless Chrome
-        let browser = Browser::default().map_err(|e| {
-            anyhow::anyhow!("Failed to launch headless Chrome: {}. Make sure Chrome is installed.", e)
-        })?;
+        // Launch headless Chrome (auto-detects container for sandbox config)
+        let browser = crate::create_browser()?;
 
         let tab = browser.new_tab().map_err(|e| {
             anyhow::anyhow!("Failed to create new browser tab: {}", e)
@@ -3174,9 +3194,11 @@ impl SubprocessorAnalyzer {
         // Extract using direct CSS selectors
         for selector_rule in &custom_rules.direct_selectors {
             if let Ok(selector) = scraper::Selector::parse(&selector_rule.selector) {
-                debug!("Applying custom selector: {} - {}", selector_rule.selector, selector_rule.description);
+                let matched_elements: Vec<_> = document.select(&selector).collect();
+                debug!("Applying custom selector: {} - {} (matched {} elements)",
+                       selector_rule.selector, selector_rule.description, matched_elements.len());
 
-                for element in document.select(&selector) {
+                for element in matched_elements {
                     let mut text = if let Some(attr) = &selector_rule.attribute {
                         element.value().attr(attr).unwrap_or("").to_string()
                     } else {
@@ -3223,6 +3245,8 @@ impl SubprocessorAnalyzer {
                                 source_type: RecordType::HttpSubprocessor,
                                 raw_record: evidence,
                             });
+                        } else {
+                            debug!("Custom extraction: no domain mapping found for '{}' (skipped)", text);
                         }
                     }
                 }
@@ -3288,16 +3312,33 @@ impl SubprocessorAnalyzer {
         let cleaned_org = org_name.trim().to_lowercase();
 
         // First, check custom organization-to-domain mappings
+        // Use earliest-position matching to handle ambiguous names like "Loom, Inc. (Atlassian)"
+        // where both "loom" and "atlassian" are valid patterns. The primary entity appears first
+        // in the organization name, so we prefer the match closest to the start of the string.
+        // Ties are broken by preferring the longest (most specific) pattern.
         if let Some(special_handling) = &custom_rules.special_handling {
             if let Some(custom_mappings) = &special_handling.custom_org_to_domain_mapping {
+                let mut best_match: Option<(usize, usize, &str)> = None; // (position, pattern_len, domain)
                 for (org_pattern, domain) in custom_mappings {
-                    if cleaned_org.contains(&org_pattern.to_lowercase()) {
-                        debug!("Used custom mapping: '{}' -> '{}'", org_name, domain);
-                        return Some(DomainExtractionResult {
-                            domain: domain.clone(),
-                            is_fallback: false,
-                        });
+                    let pattern_lower = org_pattern.to_lowercase();
+                    if let Some(pos) = cleaned_org.find(&pattern_lower) {
+                        let is_better = match best_match {
+                            None => true,
+                            Some((best_pos, best_len, _)) => {
+                                pos < best_pos || (pos == best_pos && pattern_lower.len() > best_len)
+                            }
+                        };
+                        if is_better {
+                            best_match = Some((pos, pattern_lower.len(), domain.as_str()));
+                        }
                     }
+                }
+                if let Some((pos, _, domain)) = best_match {
+                    debug!("Used custom mapping: '{}' -> '{}' (matched at position {})", org_name, domain, pos);
+                    return Some(DomainExtractionResult {
+                        domain: domain.to_string(),
+                        is_fallback: false,
+                    });
                 }
             }
         }
@@ -3904,10 +3945,8 @@ impl SubprocessorAnalyzer {
 
     /// Helper method to get rendered content from headless browser
     async fn get_rendered_content_from_browser(&self, url: &str) -> Result<String> {
-        let browser = Browser::default().map_err(|e| {
-            anyhow::anyhow!("Failed to launch headless Chrome: {}. Make sure Chrome is installed.", e)
-        })?;
-        
+        let browser = crate::create_browser()?;
+
         let tab = browser.new_tab().map_err(|e| {
             anyhow::anyhow!("Failed to create new browser tab: {}", e)
         })?;

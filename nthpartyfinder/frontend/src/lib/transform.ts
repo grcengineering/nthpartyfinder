@@ -38,7 +38,6 @@ export interface XYFlowNode {
     discoveryCount: number;
     sources: DiscoverySource[];
     parentId?: string;
-    onShowInfo?: (domain: string, sources: DiscoverySource[]) => void;
   };
   position: { x: number; y: number };
   hidden?: boolean;
@@ -127,12 +126,12 @@ export function buildRelationshipMap(relationships: Relationship[]): Map<string,
   return map;
 }
 
-// Layout constants - HORIZONTAL left-to-right
-const HORIZONTAL_SPACING = 300;  // Distance between layers (columns)
-const VERTICAL_SPACING = 90;     // Distance between nodes in same layer (rows)
+// Layout constants - VERTICAL top-to-bottom
+const LAYER_SPACING = 180;  // Vertical distance between layers (rows)
+const NODE_SPACING = 280;   // Horizontal distance between sibling nodes (columns)
 
-// Calculate horizontal positions (left-to-right layout)
-function calculateHorizontalPositions(
+// Calculate vertical positions (top-to-bottom layout)
+function calculateVerticalPositions(
   vendors: Map<string, AggregatedVendor>,
   childrenMap: Map<string, Set<string>>,
   rootDomain: string
@@ -154,15 +153,15 @@ function calculateHorizontalPositions(
     layerNodes.get(vendor.layer)!.push(domain);
   }
 
-  // Calculate positions for each layer
+  // Calculate positions for each layer (top-to-bottom)
   for (const [layer, domains] of layerNodes) {
-    const totalHeight = (domains.length - 1) * VERTICAL_SPACING;
-    const startY = -totalHeight / 2;
+    const totalWidth = (domains.length - 1) * NODE_SPACING;
+    const startX = -totalWidth / 2;
 
     domains.forEach((domain, index) => {
       positions.set(domain, {
-        x: layer * HORIZONTAL_SPACING,
-        y: startY + index * VERTICAL_SPACING
+        x: startX + index * NODE_SPACING,
+        y: layer * LAYER_SPACING
       });
     });
   }
@@ -190,7 +189,7 @@ export function transformToXyflow(
   }
 
   // Calculate positions
-  const positions = calculateHorizontalPositions(vendors, childrenMap, rootDomain);
+  const positions = calculateVerticalPositions(vendors, childrenMap, rootDomain);
 
   // Add root node
   const rootChildren = childrenMap.get(rootDomain) || new Set();
@@ -217,7 +216,7 @@ export function transformToXyflow(
     if (domain === rootDomain) continue;
 
     const children = childrenMap.get(domain) || new Set();
-    const position = positions.get(domain) || { x: vendor.layer * HORIZONTAL_SPACING, y: 0 };
+    const position = positions.get(domain) || { x: 0, y: vendor.layer * LAYER_SPACING };
 
     nodes.push({
       id: domain,

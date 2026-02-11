@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { writable } from 'svelte/store';
   import { SvelteFlow, Controls, Background, MiniMap, BackgroundVariant } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
@@ -18,31 +19,8 @@
   // Pagination constant
   const VENDORS_PER_PAGE = 10;
 
-  // Callback for showing vendor info (passed to nodes)
-  function showVendorInfo(domain: string, sources: DiscoverySource[]) {
-    const vendor = vendors.get(domain);
-
-    tooltipDomain = domain;
-    tooltipOrganization = vendor?.organization || '';
-    tooltipSources = sources || [];
-
-    // Position tooltip near the center of the viewport
-    tooltipPosition = {
-      x: window.innerWidth / 2 - 140,
-      y: window.innerHeight / 3
-    };
-    tooltipVisible = true;
-  }
-
   // Transform data with deduplication
   const { nodes: initialNodes, edges: initialEdges, vendors } = transformToXyflow(relationships, rootDomain);
-
-  // Add callback to all vendor nodes
-  for (const node of initialNodes) {
-    if (node.type === 'vendor') {
-      node.data.onShowInfo = showVendorInfo;
-    }
-  }
 
   // Stores
   const nodes = writable<XYFlowNode[]>(initialNodes);
@@ -61,6 +39,30 @@
   let tooltipOrganization = '';
   let tooltipSources: DiscoverySource[] = [];
   let tooltipPosition = { x: 0, y: 0 };
+
+  // Listen for vendor info events from VendorNode (global event bus bypasses xyflow data pipeline)
+  function handleShowVendorInfo(e: Event) {
+    const detail = (e as CustomEvent).detail;
+    const vendor = vendors.get(detail.domain);
+
+    tooltipDomain = detail.domain;
+    tooltipOrganization = vendor?.organization || '';
+    tooltipSources = detail.sources || [];
+
+    tooltipPosition = {
+      x: window.innerWidth / 2 - 140,
+      y: window.innerHeight / 3
+    };
+    tooltipVisible = true;
+  }
+
+  onMount(() => {
+    window.addEventListener('show-vendor-info', handleShowVendorInfo);
+  });
+
+  onDestroy(() => {
+    window.removeEventListener('show-vendor-info', handleShowVendorInfo);
+  });
 
   // Node types (cast to any to avoid strict type checking with SvelteFlow)
   const nodeTypes: any = {
@@ -115,22 +117,25 @@
     const parentPos = parentNode?.position || { x: 0, y: 0 };
     const parentLayer = parentNode?.data.layer || 0;
 
+    // Layout constants for vertical (top-down) layout
+    const LAYER_SPACING = 180;  // Vertical distance between layers
+    const NODE_SPACING = 280;   // Horizontal distance between siblings
+
     // Show nodes
     nodes.update(ns => {
       return ns.map(n => {
         if (toShow.includes(n.id)) {
-          // Calculate vertical position based on visible siblings
-          const visibleSiblings = toShow.filter(id => id !== n.id).length;
+          // Calculate horizontal position based on visible siblings (top-down layout)
           const siblingIndex = toShow.indexOf(n.id);
-          const totalHeight = (toShow.length - 1) * 90;
-          const startY = parentPos.y - totalHeight / 2;
+          const totalWidth = (toShow.length - 1) * NODE_SPACING;
+          const startX = parentPos.x - totalWidth / 2;
 
           return {
             ...n,
             hidden: false,
             position: {
-              x: parentPos.x + 300,
-              y: startY + siblingIndex * 90
+              x: startX + siblingIndex * NODE_SPACING,
+              y: parentPos.y + LAYER_SPACING
             }
           };
         }
@@ -208,6 +213,8 @@
 
   function updateLoadMoreNode(parentId: string, remaining: number, layer: number, parentPos: { x: number; y: number }) {
     const loadMoreId = `loadMore-${parentId}`;
+    const LAYER_SPACING = 180;
+    const NODE_SPACING = 280;
 
     // Remove existing load more node
     nodes.update(ns => ns.filter(n => n.id !== loadMoreId));
@@ -215,11 +222,11 @@
 
     if (remaining <= 0) return;
 
-    // Calculate position at bottom of siblings
+    // Calculate position at right of siblings (top-down layout)
     const pagination = paginationState.get(parentId);
     const shown = pagination?.shown || VENDORS_PER_PAGE;
-    const totalHeight = (shown) * 90;
-    const loadMoreY = parentPos.y - totalHeight / 2 + shown * 90;
+    const totalWidth = (shown) * NODE_SPACING;
+    const loadMoreX = parentPos.x - totalWidth / 2 + shown * NODE_SPACING;
 
     // Add new load more node
     const newNode: XYFlowNode = {
@@ -237,7 +244,7 @@
         sources: [],
         parentId: parentId
       },
-      position: { x: parentPos.x + 300, y: loadMoreY },
+      position: { x: loadMoreX, y: parentPos.y + LAYER_SPACING },
       hidden: false
     };
 

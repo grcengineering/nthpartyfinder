@@ -97,6 +97,28 @@ impl RecordType {
         }
     }
     
+    /// Evidence strength priority for dedup merging. Higher = stronger evidence.
+    /// HttpSubprocessor is strongest because it's a direct listing on the company's
+    /// own subprocessor page. TrustCenterApi is next, then SaaS tenant, etc.
+    pub fn evidence_priority(&self) -> u8 {
+        match self {
+            RecordType::HttpSubprocessor => 10,
+            RecordType::TrustCenterApi => 9,
+            RecordType::DnsTxtVerification => 8,
+            RecordType::SaasTenantProbe => 7,
+            RecordType::DnsTxtSpf => 6,
+            RecordType::DnsTxtDmarc => 5,
+            RecordType::DnsTxtDkim => 5,
+            RecordType::SubfinderDiscovery => 4,
+            RecordType::CtLogDiscovery => 3,
+            RecordType::DnsSubdomain | RecordType::DnsMx | RecordType::DnsA | RecordType::DnsAaaa => 2,
+            RecordType::HttpWellKnown | RecordType::HttpMeta | RecordType::HttpFile => 2,
+            RecordType::CertDomain | RecordType::CertSan => 2,
+            RecordType::ApiEndpoint | RecordType::ApiWebhook => 2,
+            RecordType::Unknown => 0,
+        }
+    }
+
     pub fn get_description(&self) -> &'static str {
         match self {
             RecordType::DnsTxtSpf => "Email sending authorization record",

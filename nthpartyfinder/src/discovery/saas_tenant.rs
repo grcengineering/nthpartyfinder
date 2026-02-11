@@ -9,11 +9,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use futures::{stream, StreamExt};
 use reqwest::Client;
 use tracing::{debug, info};
 
+use crate::logger::AnalysisLogger;
 use crate::vendor_registry;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +152,10 @@ impl SaasTenantDiscovery {
     }
 
     pub async fn probe(&self, target_domain: &str) -> Result<Vec<TenantProbeResult>> {
+        self.probe_with_logger(target_domain, None).await
+    }
+
+    pub async fn probe_with_logger(&self, target_domain: &str, logger: Option<&AnalysisLogger>) -> Result<Vec<TenantProbeResult>> {
         let tenant_names = generate_tenant_names(target_domain);
         debug!("Generated tenant name candidates: {:?}", tenant_names);
 
@@ -161,6 +167,13 @@ impl SaasTenantDiscovery {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+
+        if let Some(log) = logger {
+            log.show_sub_progress(&format!(
+                "Probing SaaS platforms for {} (baselining {} patterns)",
+                target_domain, unique_patterns.len()
+            )).await;
+        }
 
         let baseline_results: Vec<(String, Option<BaselineResponse>)> = stream::iter(unique_patterns)
             .map(|pattern| {
@@ -199,18 +212,39 @@ impl SaasTenantDiscovery {
             }
         }
 
-        debug!("Probing {} URLs for tenant discovery", probe_tasks.len());
+        let total_probes = probe_tasks.len();
+        let platform_count = self.platforms.len();
+        debug!("Probing {} URLs for tenant discovery", total_probes);
+
+        if let Some(log) = logger {
+            log.show_sub_progress(&format!(
+                "Probing SaaS platforms for {} (0/{} probes across {} platforms)",
+                target_domain, total_probes, platform_count
+            )).await;
+        }
 
         let baselines_ref = &baselines;
+        let completed = AtomicUsize::new(0);
+        let target_domain_owned = target_domain.to_string();
         let results: Vec<TenantProbeResult> = stream::iter(probe_tasks)
             .map(|(name, vendor, url, detection, pattern)| {
                 let client = self.client.clone();
                 let vendor_domain = vendor.clone();
                 let baseline = baselines_ref.get(&pattern).cloned();
+                let completed_ref = &completed;
+                let logger_clone = logger.cloned();
+                let target_ref = &target_domain_owned;
                 async move {
                     let (status, evidence) = probe_url_with_baseline(
                         &client, &url, &detection, &vendor_domain, baseline.as_ref()
                     ).await;
+                    let done = completed_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref log) = logger_clone {
+                        log.show_sub_progress(&format!(
+                            "Probing SaaS platforms for {} ({}/{} probes: {})",
+                            target_ref, done, total_probes, name
+                        )).await;
+                    }
                     TenantProbeResult {
                         platform_name: name,
                         vendor_domain: vendor,

@@ -1,28 +1,31 @@
 version: '3.8'
 
 services:
+  # Production: full build with embedded NER
   nthpartyfinder:
     build:
       context: .
       dockerfile: Dockerfile
     image: nthpartyfinder:latest
     container_name: nthpartyfinder
-    # Mount output directory
     volumes:
       - ./output:/output
+      - ./cache:/cache
     # Example: analyze a domain
-    # command: ["-d", "example.com", "-r", "2", "-f", "json", "-o", "/output/results"]
-
-    # Security settings
+    # command: ["-d", "example.com", "--depth", "1", "-f", "html", "-o", "/output"]
     security_opt:
       - no-new-privileges:true
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64M
     cap_drop:
       - ALL
+    # DNS resolution needed for analysis
+    cap_add:
+      - NET_RAW
+    user: "10001:10001"
 
-  # Development build without embedded NER (faster iteration)
+  # Development: no NER, faster build
   nthpartyfinder-dev:
     build:
       context: .
@@ -30,3 +33,28 @@ services:
     image: nthpartyfinder:dev
     volumes:
       - ./output:/output
+      - ./cache:/cache
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    user: "10001:10001"
+
+  # Debug: with shell access for troubleshooting
+  nthpartyfinder-debug:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug
+    image: nthpartyfinder:debug
+    volumes:
+      - ./output:/output
+      - ./cache:/cache
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
