@@ -36,7 +36,7 @@ use cli::{Args, Cli, Commands, CacheCommands};
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
 use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
-use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery};
+use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery, WebTrafficDiscovery};
 use checkpoint::{Checkpoint, ResumeMode, generate_settings_hash};
 
 /// Create a headless Chrome browser instance.
@@ -248,6 +248,8 @@ async fn main() -> Result<()> {
         || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled);
     let saas_tenant_will_be_enabled = args.enable_saas_tenant_discovery
         || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled);
+    let web_traffic_will_be_enabled = args.enable_web_traffic_discovery
+        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled);
     logger.complete_init_step("Feature detection complete").await;
 
     // Finish init progress bar
@@ -270,6 +272,9 @@ async fn main() -> Result<()> {
     }
     if saas_tenant_will_be_enabled {
         logger.info("SaaS tenant discovery enabled");
+    }
+    if web_traffic_will_be_enabled {
+        logger.info("Webpage source & network request discovery enabled");
     }
 
     // Set up Ctrl-C handler that signals interruption (checkpoint save happens in main loop)
@@ -374,6 +379,7 @@ async fn main() -> Result<()> {
         saas_tenant_will_be_enabled,
         args.enable_ct_discovery || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled),
         web_org_will_be_enabled,
+        web_traffic_will_be_enabled,
     );
 
     // Check for existing checkpoint and handle resume
@@ -825,6 +831,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Set up Webpage Source & Network Request discovery
+    let web_traffic_discovery = if args.enable_web_traffic_discovery
+        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled) {
+        Some(WebTrafficDiscovery::new(
+            _app_config.discovery.web_traffic_timeout_secs,
+        ))
+    } else {
+        None
+    };
+
     // Configure concurrency based on analysis config
     // For recursive processing, use depth-1 concurrency as initial limit (CLI --parallel-jobs can override)
     let recursive_limit = _app_config.analysis.get_concurrency_for_depth(1).min(args.parallel_jobs);
@@ -872,6 +888,7 @@ async fn main() -> Result<()> {
         subdomain_discovery.as_ref(),
         saas_tenant_discovery.as_ref(),
         ct_discovery.as_ref(),
+        web_traffic_discovery.as_ref(),
         checkpoint_for_analysis.clone(),
         &output_dir_for_checkpoint,
     );
@@ -1082,6 +1099,7 @@ async fn discover_nth_parties(
     subdomain_discovery: Option<&SubfinderDiscovery>,
     saas_tenant_discovery: Option<&SaasTenantDiscovery>,
     ct_discovery: Option<&CtLogDiscovery>,
+    web_traffic_discovery: Option<&WebTrafficDiscovery>,
     checkpoint: Arc<Mutex<Checkpoint>>,
     checkpoint_output_dir: &str,
 ) -> Result<Vec<VendorRelationship>> {
@@ -1154,10 +1172,19 @@ async fn discover_nth_parties(
             }
 
             let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(&txt_records, Some(verification_logger), domain);
-            
+
+            // Recursive SPF resolution: follow include chains to discover nested mail senders
+            // (e.g., EasyDMARC-hosted SPF → Salesforce, Google, SendGrid)
+            let spf_recursive_domains = dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
+            if !spf_recursive_domains.is_empty() {
+                logger.debug(&format!("SPF recursive resolution found {} additional domains for {}", spf_recursive_domains.len(), domain));
+            }
+
             // Also include base domain if we're analyzing a subdomain
             let current_base_domain = domain_utils::extract_base_domain(domain);
             let mut all_vendor_domains = vendor_domains_with_source;
+            // Merge recursive SPF domains (dedup happens later in the pipeline)
+            all_vendor_domains.extend(spf_recursive_domains);
             if current_base_domain != domain {
                 all_vendor_domains.push(dns::VendorDomain {
                     domain: current_base_domain.clone(),
@@ -1382,6 +1409,32 @@ async fn discover_nth_parties(
                         Err(e) => {
                             logger.warn(&format!("CT log discovery failed: {}", e));
                         }
+                    }
+                    logger.clear_sub_progress().await;
+                    logger.set_progress_position(28).await; // -> 28%
+                }
+
+                // Webpage source & network request discovery
+                if let Some(web_traffic_disc) = web_traffic_discovery {
+                    logger.update_progress("Webpage source & network request discovery").await;
+                    logger.show_sub_progress(&format!("Analyzing webpage source and network requests for {}", domain)).await;
+                    logger.info("Running webpage source & network request discovery...");
+                    let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
+                    if !web_traffic_results.is_empty() {
+                        logger.info(&format!("Found {} vendors from webpage analysis", web_traffic_results.len()));
+                        for result in web_traffic_results {
+                            let record_type = match result.source {
+                                discovery::web_traffic::WebTrafficSource::PageSource => RecordType::WebTrafficSource,
+                                discovery::web_traffic::WebTrafficSource::NetworkTraffic => RecordType::WebTrafficNetwork,
+                            };
+                            all_vendor_domains.push(dns::VendorDomain {
+                                domain: result.vendor_domain,
+                                source_type: record_type,
+                                raw_record: result.evidence,
+                            });
+                        }
+                    } else {
+                        logger.debug("No vendors discovered from webpage analysis");
                     }
                     logger.clear_sub_progress().await;
                     logger.set_progress_position(30).await; // -> 30%
@@ -1822,6 +1875,7 @@ async fn process_vendor_domain(
         None,  // subdomain_discovery - only runs at depth 1
         None,  // saas_tenant_discovery - only runs at depth 1
         None,  // ct_discovery - only runs at depth 1
+        None,  // web_traffic_discovery - only runs at depth 1
         checkpoint,
         &checkpoint_output_dir,
     ).await {
@@ -2573,9 +2627,13 @@ async fn discover_nth_parties_minimal(
     // DNS TXT record analysis
     match dns::get_txt_records_with_pool(domain, &dns_pool).await {
         Ok(txt_records) => {
-            let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
+            let mut vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
                 &txt_records, Some(verification_logger), domain
             );
+
+            // Recursive SPF resolution for deeper-depth domains too
+            let spf_recursive = dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
+            vendor_domains_with_source.extend(spf_recursive);
 
             // Process vendor domains
             for vendor_domain_info in vendor_domains_with_source {

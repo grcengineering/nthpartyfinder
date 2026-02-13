@@ -546,6 +546,60 @@ fn test_table_rows_have_data_type_attribute() {
 }
 
 // =============================================================================
+// CSS COLLISION REGRESSION TESTS
+// =============================================================================
+
+#[test]
+fn test_no_global_tooltip_css_class_collision() {
+    // Regression test: The template's global .tooltip CSS rule had `opacity: 0` and
+    // `pointer-events: none`, which collided with the Svelte VendorTooltip component's
+    // .tooltip class, making the "View discovery details" button's tooltip invisible.
+    // The global tooltip was renamed to .hover-tooltip to avoid the collision.
+    let dir = tempdir().unwrap();
+    let output_path = dir.path().join("test_report.html");
+    let relationships = create_test_relationships();
+
+    export_html(&relationships, output_path.to_str().unwrap()).unwrap();
+
+    let html_content = fs::read_to_string(&output_path).unwrap();
+
+    // The template should NOT have a global .tooltip CSS rule (renamed to .hover-tooltip)
+    // Look for the specific pattern that would cause the collision:
+    // a CSS rule starting with ".tooltip {" that sets opacity: 0
+    let has_global_tooltip_rule = html_content.contains(".tooltip {")
+        && html_content.contains("opacity: 0");
+    assert!(
+        !has_global_tooltip_rule,
+        "Template must not have a global .tooltip CSS rule with opacity: 0 — \
+         this collides with the Svelte VendorTooltip component's .tooltip class"
+    );
+
+    // Verify the renamed .hover-tooltip class exists instead
+    assert!(
+        html_content.contains(".hover-tooltip {"),
+        "Template should use .hover-tooltip for the global hover tooltip"
+    );
+
+    // Verify the hover-tooltip element uses the correct ID
+    assert!(
+        html_content.contains(r#"id="hover-tooltip""#),
+        "Hover tooltip element should have id='hover-tooltip'"
+    );
+
+    // Verify JS references use the renamed ID
+    assert!(
+        html_content.contains("getElementById('hover-tooltip')"),
+        "JavaScript should reference 'hover-tooltip' not 'tooltip'"
+    );
+
+    // Verify no JS still references the old tooltip ID
+    assert!(
+        !html_content.contains("getElementById('tooltip')"),
+        "No JavaScript should reference the old 'tooltip' ID"
+    );
+}
+
+// =============================================================================
 // EMPTY REPORT TESTS
 // =============================================================================
 

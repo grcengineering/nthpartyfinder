@@ -222,8 +222,10 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
             // Add edge with record type styling
             let edge_style = match rel.nth_party_record_type.as_hierarchy_string().as_str() {
                 "DNS::TXT::SPF" => "-.->",
-                "DNS::TXT::VERIFICATION" => "-->", 
+                "DNS::TXT::VERIFICATION" => "-->",
                 "DNS::SUBDOMAIN" => "==>",
+                "DISCOVERY::WEBPAGE_SOURCE" => "-..->",
+                "DISCOVERY::WEBPAGE_NETWORK" => "-.->",
                 _ => "-->"
             };
             
@@ -251,6 +253,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     content.push_str("- **Solid arrows (→):** Verification relationships (domain/site verification)\n");
     content.push_str("- **Dashed arrows (⇢):** SPF relationships (email sending authorization)\n");
     content.push_str("- **Double arrows (⇒):** Subdomain relationships\n");
+    content.push_str("- **Dotted arrows (⇢⇢):** Webpage discovery (source references, network requests)\n");
     content.push_str("- **Numbers on edges:** Layer depth and record type\n\n");
     
     // Detailed tables
@@ -259,12 +262,14 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     // Group by record type
     let mut spf_relationships = Vec::new();
     let mut verification_relationships = Vec::new();
+    let mut web_traffic_relationships = Vec::new();
     let mut other_relationships = Vec::new();
-    
+
     for rel in relationships {
         match rel.nth_party_record_type.as_hierarchy_string().as_str() {
             "DNS::TXT::SPF" => spf_relationships.push(rel),
             "DNS::TXT::VERIFICATION" => verification_relationships.push(rel),
+            "DISCOVERY::WEBPAGE_SOURCE" | "DISCOVERY::WEBPAGE_NETWORK" => web_traffic_relationships.push(rel),
             _ => other_relationships.push(rel),
         }
     }
@@ -307,6 +312,31 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
         content.push_str("\n");
     }
     
+    // Webpage discovery relationships table
+    if !web_traffic_relationships.is_empty() {
+        content.push_str("### Webpage Discovery\n\n");
+        content.push_str("These vendors were discovered through webpage source analysis or runtime network request capture:\n\n");
+        content.push_str("| Vendor | Organization | Layer | Discovery Method | Customer | Evidence |\n");
+        content.push_str("|--------|--------------|-------|-----------------|----------|----------|\n");
+
+        for rel in &web_traffic_relationships {
+            let method = match rel.nth_party_record_type.as_hierarchy_string().as_str() {
+                "DISCOVERY::WEBPAGE_SOURCE" => "Webpage Source",
+                "DISCOVERY::WEBPAGE_NETWORK" => "Webpage Network Requests",
+                _ => "Webpage Discovery",
+            };
+            content.push_str(&format!("| {} | {} | {} | {} | {} | {} |\n",
+                escape_markdown(&rel.nth_party_domain),
+                escape_markdown(&rel.nth_party_organization),
+                rel.nth_party_layer,
+                method,
+                escape_markdown(&rel.nth_party_customer_domain),
+                escape_markdown(&rel.nth_party_record)
+            ));
+        }
+        content.push_str("\n");
+    }
+
     // Other relationships
     if !other_relationships.is_empty() {
         content.push_str("### Other Relationships\n\n");
@@ -331,6 +361,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     content.push_str("### High-Risk Considerations\n\n");
     content.push_str("- **Email providers (SPF)** can send emails as your organization\n");
     content.push_str("- **Verification services** have confirmed domain ownership and likely access to sensitive data\n");
+    content.push_str("- **Webpage components** load external scripts, send data to third-party servers, or phone home to vendor APIs — potential data exfiltration vectors\n");
     content.push_str("- **Multi-layer relationships** may create complex dependency chains\n\n");
     
     content.push_str("### Recommendations\n\n");

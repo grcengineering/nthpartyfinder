@@ -315,23 +315,30 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
     let sample = &items[..sample_size];
 
     let name_fields = ["name", "companyName", "company_name", "vendor_name", "vendorName",
-                        "organization", "entity", "entityName", "entity_name"];
-    let url_fields = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url"];
+                        "organization", "entity", "entityName", "entity_name",
+                        "company.name"]; // SafeBase: nested company object
+    let url_fields = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url",
+                       "company.domain"]; // SafeBase: nested company object
     let purpose_fields = ["purpose", "service", "description", "category", "type",
                           "serviceDescription", "service_description"];
     let location_fields = ["location", "country", "region", "geography"];
 
+    /// Check if a field path (possibly dot-separated) resolves to a non-empty string.
+    fn has_field_value(item: &serde_json::Value, field_path: &str) -> bool {
+        get_nested_str(item, field_path).map_or(false, |s| !s.is_empty())
+    }
+
     let has_name_field = sample.iter().any(|item| {
-        name_fields.iter().any(|f| item.get(f).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+        name_fields.iter().any(|f| has_field_value(item, f))
     });
     let has_url_field = sample.iter().any(|item| {
-        url_fields.iter().any(|f| item.get(f).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+        url_fields.iter().any(|f| has_field_value(item, f))
     });
     let has_purpose_field = sample.iter().any(|item| {
-        purpose_fields.iter().any(|f| item.get(f).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+        purpose_fields.iter().any(|f| has_field_value(item, f))
     });
     let has_location_field = sample.iter().any(|item| {
-        location_fields.iter().any(|f| item.get(f).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+        location_fields.iter().any(|f| has_field_value(item, f))
     });
 
     if has_name_field { score += 0.25; }
@@ -343,12 +350,15 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
 }
 
 /// Detect which fields in a JSON array map to subprocessor name, URL, purpose, location.
+/// Supports nested dot-notation fields (e.g., "company.name" for SafeBase).
 pub fn detect_field_mapping(items: &[serde_json::Value]) -> DetectedFieldMapping {
     let sample = if items.len() > 5 { &items[..5] } else { items };
 
     let name_candidates = ["name", "companyName", "company_name", "vendor_name", "vendorName",
-                            "organization", "entity", "entityName", "entity_name"];
-    let url_candidates = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url"];
+                            "organization", "entity", "entityName", "entity_name",
+                            "company.name"]; // SafeBase
+    let url_candidates = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url",
+                           "company.domain"]; // SafeBase
     let purpose_candidates = ["purpose", "service", "description", "category", "type",
                                "serviceDescription", "service_description"];
     let location_candidates = ["location", "country", "region", "geography"];
@@ -356,7 +366,7 @@ pub fn detect_field_mapping(items: &[serde_json::Value]) -> DetectedFieldMapping
     let find_field = |candidates: &[&str]| -> Option<String> {
         for field in candidates {
             let match_count = sample.iter()
-                .filter(|item| item.get(field).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()))
+                .filter(|item| get_nested_str(item, field).map_or(false, |s| !s.is_empty()))
                 .count();
             if match_count as f64 / sample.len() as f64 > 0.5 {
                 return Some(field.to_string());
@@ -370,5 +380,49 @@ pub fn detect_field_mapping(items: &[serde_json::Value]) -> DetectedFieldMapping
         url_field: find_field(&url_candidates),
         purpose_field: find_field(&purpose_candidates),
         location_field: find_field(&location_candidates),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_score_subprocessor_array_with_nested_fields() {
+        // SafeBase-style entries with nested company.name and company.domain
+        let items: Vec<serde_json::Value> = vec![
+            serde_json::json!({"company": {"name": "Algolia", "domain": "algolia.com"}, "purpose": "Search", "location": "US"}),
+            serde_json::json!({"company": {"name": "AWS", "domain": "amazonaws.com"}, "purpose": "Cloud", "location": "US"}),
+            serde_json::json!({"company": {"name": "Datadog", "domain": "datadoghq.com"}, "purpose": "Monitoring", "location": "US"}),
+            serde_json::json!({"company": {"name": "Stripe", "domain": "stripe.com"}, "purpose": "Payments", "location": "US"}),
+            serde_json::json!({"company": {"name": "Okta", "domain": "okta.com"}, "purpose": "Auth", "location": "US"}),
+        ];
+
+        let score = score_subprocessor_array(&items, "items.listEntries");
+        // Should score >= 0.4 thanks to nested company.name detection
+        assert!(score >= 0.4, "Score {:.2} should be >= 0.4 for SafeBase-style entries", score);
+    }
+
+    #[test]
+    fn test_detect_field_mapping_nested() {
+        let items: Vec<serde_json::Value> = vec![
+            serde_json::json!({"company": {"name": "Algolia", "domain": "algolia.com"}, "purpose": "Search", "location": "US"}),
+            serde_json::json!({"company": {"name": "AWS", "domain": "amazonaws.com"}, "purpose": "Cloud", "location": "US"}),
+            serde_json::json!({"company": {"name": "Datadog", "domain": "datadoghq.com"}, "purpose": "Monitoring", "location": "US"}),
+        ];
+
+        let mapping = detect_field_mapping(&items);
+        assert_eq!(mapping.name_field, Some("company.name".to_string()), "Should detect nested company.name");
+        assert_eq!(mapping.url_field, Some("company.domain".to_string()), "Should detect nested company.domain");
+        assert_eq!(mapping.purpose_field, Some("purpose".to_string()));
+        assert_eq!(mapping.location_field, Some("location".to_string()));
+    }
+
+    #[test]
+    fn test_navigate_json_path_nested() {
+        let json = serde_json::json!({"company": {"name": "Algolia", "domain": "algolia.com"}});
+        assert_eq!(get_nested_str(&json, "company.name"), Some("Algolia"));
+        assert_eq!(get_nested_str(&json, "company.domain"), Some("algolia.com"));
+        assert_eq!(get_nested_str(&json, "company.missing"), None);
     }
 }

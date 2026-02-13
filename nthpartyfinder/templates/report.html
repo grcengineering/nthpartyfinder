@@ -244,10 +244,25 @@
             vertical-align: middle;
         }
 
-        .data-table td code:hover {
-            max-width: none;
-            white-space: normal;
+        /* Record value tooltip — positioned via JS on <body> to avoid overflow clipping */
+        #record-value-tooltip {
+            display: none;
+            position: fixed;
+            z-index: 10000;
+            max-width: 500px;
+            min-width: 250px;
+            padding: 0.5rem 0.75rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.375rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            white-space: pre-wrap;
             word-break: break-all;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            color: var(--text-primary);
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            pointer-events: none;
         }
 
         .data-table td strong {
@@ -292,6 +307,8 @@
         .record-type-HTTP\:\:SUBPROCESSOR { background: #dc2626; }
         .record-type-DISCOVERY\:\:SUBFINDER { background: #a855f7; }
         .record-type-DISCOVERY\:\:SAAS_TENANT { background: #eab308; }
+        .record-type-DISCOVERY\:\:WEBPAGE_SOURCE { background: #f97316; }
+        .record-type-DISCOVERY\:\:WEBPAGE_NETWORK { background: #ef4444; }
         .record-type-default { background: var(--text-secondary); }
 
         .search-box {
@@ -432,7 +449,7 @@
             }
         }
 
-        .tooltip {
+        .hover-tooltip {
             position: absolute;
             background: var(--dark-bg);
             color: white;
@@ -1073,6 +1090,8 @@
                                 <option value="HTTP::SUBPROCESSOR">Subprocessor Page</option>
                                 <option value="DISCOVERY::SUBFINDER">Subdomains</option>
                                 <option value="DISCOVERY::SAAS_TENANT">SaaS Tenant</option>
+                                <option value="DISCOVERY::WEBPAGE_SOURCE">Webpage Source</option>
+                                <option value="DISCOVERY::WEBPAGE_NETWORK">Webpage Network Requests</option>
                             </select>
                         </div>
                     </div>
@@ -1097,7 +1116,7 @@
                                     <td><span class="layer-badge layer-{{ rel.nth_party_layer }}">Layer {{ rel.nth_party_layer }}</span></td>
                                     <td><span class="record-type-badge record-type-{{ rel.nth_party_record_type.as_hierarchy_string() }}">{{ rel.nth_party_record_type.as_hierarchy_string() }}</span></td>
                                     <td>{{ rel.nth_party_customer_domain }}</td>
-                                    <td><code>{{ rel.nth_party_record }}</code></td>
+                                    <td class="record-value-cell"><code>{{ rel.nth_party_record }}</code></td>
                                     <td class="evidence-cell">
                                         <button class="evidence-btn evidence-btn-reveal" onclick="openEvidenceModal({{ loop.index0 }})" title="View full evidence">👁 Show</button>
                                     </td>
@@ -1134,7 +1153,7 @@
         </div>
     </div>
 
-    <div class="tooltip" id="tooltip"></div>
+    <div class="hover-tooltip" id="hover-tooltip"></div>
 
     <script>
         // Data from Rust - exposed as window.graphData for Svelte bundle
@@ -1637,8 +1656,8 @@
                 window.visibleEdges = new vis.DataSet();
                 window.expandedNodes = new Set();
 
-                // Per-layer vendor display limits (defaults: layer 1 = 100, layer 2 = 10, layer 3+ = 5)
-                window.LAYER_LIMITS = { 1: 100, 2: 10, 3: 5, default: 5 };
+                // Per-layer vendor display limits (show 5 at a time, click "load more" for next batch)
+                window.LAYER_LIMITS = { 1: 5, 2: 5, 3: 5, default: 5 };
 
                 // Track how many vendors are currently shown per parent node
                 // Key: parentId, Value: { shown: number, total: number }
@@ -1844,6 +1863,11 @@
                 network.on('stabilizationIterationsDone', function() {
                     console.log('Graph stabilization complete');
                     loadingIndicator.style.display = 'none';
+
+                    // Auto-expand root node to show first batch of vendors on load
+                    if (rootChildCount > 0) {
+                        expandNode(summary.root_domain);
+                    }
                 });
                 
                 console.log('Graph initialized successfully');
@@ -1880,6 +1904,12 @@
                 case 'SaasTenantProbe':
                 case 'DISCOVERY::SAAS_TENANT':
                     return '#eab308';
+                case 'WebTrafficSource':
+                case 'DISCOVERY::WEBPAGE_SOURCE':
+                    return '#f97316';
+                case 'WebTrafficNetwork':
+                case 'DISCOVERY::WEBPAGE_NETWORK':
+                    return '#ef4444';
                 default:
                     return '#6b7280';
             }
@@ -1944,12 +1974,13 @@
             }
 
             const layerLimit = getLayerLimit(layer);
+            const showCount = Math.min(remainingCount, layerLimit);
             const nodeData = {
                 id: loadMoreId,
-                label: '+ ' + remainingCount + ' more\nvendors',
+                label: 'Show ' + showCount + ' more\n(' + remainingCount + ' remaining)',
                 group: 'loadMore',
                 level: layer,
-                title: 'Click to load ' + Math.min(remainingCount, layerLimit) + ' more vendors<br>(Layer ' + layer + ', ' + remainingCount + ' total remaining)',
+                title: 'Click to show ' + showCount + ' more vendors<br>(' + remainingCount + ' total remaining)',
                 hasChildren: false,
                 expanded: false,
                 isLoadMore: true,
@@ -2520,15 +2551,15 @@
         }
         
         function showTooltip(event, text) {
-            const tooltip = document.getElementById('tooltip');
+            const tooltip = document.getElementById('hover-tooltip');
             tooltip.textContent = text;
             tooltip.style.left = (event.clientX + window.scrollX + 10) + 'px';
             tooltip.style.top = (event.clientY + window.scrollY - 30) + 'px';
             tooltip.style.opacity = '1';
         }
-        
+
         function hideTooltip() {
-            const tooltip = document.getElementById('tooltip');
+            const tooltip = document.getElementById('hover-tooltip');
             tooltip.style.opacity = '0';
         }
 
@@ -2677,7 +2708,11 @@
                 'DNS::CNAME': 'Subdomains',
                 'HTTP::SUBPROCESSOR': 'Subprocessor Page',
                 'DISCOVERY::SUBFINDER': 'Subdomains',
-                'DISCOVERY::SAAS_TENANT': 'SaaS Tenant'
+                'DISCOVERY::SAAS_TENANT': 'SaaS Tenant',
+                'WebTrafficSource': 'Webpage Source',
+                'WebTrafficNetwork': 'Webpage Network Requests',
+                'DISCOVERY::WEBPAGE_SOURCE': 'Webpage Source',
+                'DISCOVERY::WEBPAGE_NETWORK': 'Webpage Network Requests'
             };
             return types[type] || type;
         }
@@ -2796,6 +2831,8 @@
             const isCname = recordType === 'DnsCname' || recordType === 'DNS::CNAME';
             const isSubfinder = recordType === 'SubfinderDiscovery' || recordType === 'DISCOVERY::SUBFINDER';
             const isSaasTenant = recordType === 'SaasTenantProbe' || recordType === 'DISCOVERY::SAAS_TENANT';
+            const isWebTrafficSource = recordType === 'WebTrafficSource' || recordType === 'DISCOVERY::WEBPAGE_SOURCE';
+            const isWebTrafficNetwork = recordType === 'WebTrafficNetwork' || recordType === 'DISCOVERY::WEBPAGE_NETWORK';
 
             let commands = {};
 
@@ -2965,6 +3002,39 @@
                     'Terminal Command',
                     tenantCommand,
                     tenantExplanation
+                );
+            } else if (isWebTrafficSource || isWebTrafficNetwork) {
+                // Web traffic discovery - validate by visiting the website
+                const webTrafficDiv = document.createElement('div');
+                webTrafficDiv.className = 'browser-validation';
+                const sourceType = isWebTrafficSource ? 'webpage source analysis' : 'runtime network request capture';
+                const webTrafficTitle = createTextElement('div', '🌐 Webpage Discovery Validation', 'browser-validation-title');
+                webTrafficDiv.appendChild(webTrafficTitle);
+                const webTrafficDesc = createTextElement('p', 'This vendor was discovered via ' + sourceType + '. ' + (isWebTrafficSource ? 'The webpage loads external resources (scripts, stylesheets, images) from this vendor domain.' : 'Runtime JavaScript on the webpage sends network requests to this vendor domain (e.g., analytics, monitoring, SDKs phoning home).'));
+                webTrafficDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
+                webTrafficDiv.appendChild(webTrafficDesc);
+                commands.browser = webTrafficDiv;
+
+                const curlCommand = 'curl -sL "https://' + domain + '" | grep -oi "' + rel.nth_party_domain + '"';
+                const curlExplanation = isWebTrafficSource
+                    ? 'Fetch the page source and search for references to the vendor domain.'
+                    : 'Fetch the page source to check for vendor references. Note: runtime network traffic requires a browser with DevTools to fully validate.';
+                commands.macos = createCommandContainer(
+                    'Terminal Command',
+                    curlCommand,
+                    curlExplanation
+                );
+                commands.windows = createCommandContainer(
+                    'PowerShell Command',
+                    '(Invoke-WebRequest -Uri "https://' + domain + '").Content | Select-String "' + rel.nth_party_domain + '"',
+                    isWebTrafficSource
+                        ? 'Fetch the page and search for vendor domain references.'
+                        : 'Fetch the page source. For runtime traffic, use browser DevTools Network tab.'
+                );
+                commands.linux = createCommandContainer(
+                    'Terminal Command',
+                    curlCommand,
+                    curlExplanation
                 );
             } else {
                 const manualDiv = document.createElement('div');
@@ -3137,5 +3207,40 @@
             </div>
         </div>
     </div>
+
+    <!-- Global record-value tooltip (appended to body to avoid overflow clipping) -->
+    <div id="record-value-tooltip"></div>
+    <script>
+    (function() {
+        var tip = document.getElementById('record-value-tooltip');
+        document.addEventListener('mouseover', function(e) {
+            var cell = e.target.closest('.record-value-cell');
+            if (!cell) return;
+            var code = cell.querySelector('code');
+            if (!code) return;
+            tip.textContent = code.textContent;
+            tip.style.display = 'block';
+            var rect = cell.getBoundingClientRect();
+            var tipRect = tip.getBoundingClientRect();
+            var left = rect.left;
+            var top = rect.bottom + 4;
+            // Keep tooltip within viewport
+            if (left + tipRect.width > window.innerWidth - 8) {
+                left = window.innerWidth - tipRect.width - 8;
+            }
+            if (top + tipRect.height > window.innerHeight - 8) {
+                top = rect.top - tipRect.height - 4;
+            }
+            tip.style.left = Math.max(4, left) + 'px';
+            tip.style.top = top + 'px';
+        });
+        document.addEventListener('mouseout', function(e) {
+            var cell = e.target.closest('.record-value-cell');
+            if (cell && !cell.contains(e.relatedTarget)) {
+                tip.style.display = 'none';
+            }
+        });
+    })();
+    </script>
 </body>
 </html>

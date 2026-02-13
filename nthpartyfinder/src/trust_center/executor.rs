@@ -255,24 +255,34 @@ fn extract_subprocessors_from_json(
 
     debug!("Found {} items at path '{}'", items.len(), mapping.subprocessors_path);
 
+    // Check for Conveyor-style relational model: items have canonical_asset_id
+    // and the root JSON has _embedded.canonical_assets for name/website resolution.
+    let canonical_assets = build_canonical_asset_lookup(json);
+    let use_canonical_assets = !canonical_assets.is_empty()
+        && items.first().and_then(|i| i.get("canonical_asset_id")).is_some();
+
+    if use_canonical_assets {
+        debug!("Using canonical asset resolution ({} assets available)", canonical_assets.len());
+    }
+
     let mut vendors = Vec::new();
     for item in items {
-        // Extract the company name
-        let name = match get_nested_str(item, &mapping.name_field) {
-            Some(n) => n.trim().to_string(),
-            None => continue,
+        // If using canonical asset resolution, enrich the item first
+        let (name, domain, extra_evidence) = if use_canonical_assets {
+            resolve_canonical_asset(item, &canonical_assets, mapping)
+        } else {
+            // Standard extraction: name and URL from the item directly
+            let name = get_nested_str(item, &mapping.name_field)
+                .map(|n| n.trim().to_string());
+            let domain = mapping.url_field.as_ref()
+                .and_then(|url_field| get_nested_str(item, url_field))
+                .and_then(|url_text| extract_domain_from_url_text(url_text));
+            (name, domain, None)
         };
 
-        if name.is_empty() || name.len() < 2 {
-            continue;
-        }
-
-        // Try to extract domain from the URL field
-        let domain = if let Some(ref url_field) = mapping.url_field {
-            get_nested_str(item, url_field)
-                .and_then(|url_text| extract_domain_from_url_text(url_text))
-        } else {
-            None
+        let name = match name {
+            Some(n) if n.len() >= 2 => n,
+            _ => continue,
         };
 
         // If no domain from URL, the caller's pipeline will handle org-to-domain resolution.
@@ -282,7 +292,9 @@ fn extract_subprocessors_from_json(
         });
 
         // Build evidence string from configured fields
-        let evidence = if mapping.evidence_fields.is_empty() {
+        let evidence = if let Some(extra) = extra_evidence {
+            extra
+        } else if mapping.evidence_fields.is_empty() {
             name.clone()
         } else {
             mapping.evidence_fields.iter()
@@ -300,6 +312,67 @@ fn extract_subprocessors_from_json(
 
     debug!("Extracted {} subprocessor records for {}", vendors.len(), source_domain);
     Ok(vendors)
+}
+
+/// Canonical asset info resolved from a lookup table.
+struct CanonicalAsset {
+    name: String,
+    website: Option<String>,
+}
+
+/// Build a lookup table from _embedded.canonical_assets (Conveyor-style).
+/// Maps canonical_asset_id → {name, website}.
+fn build_canonical_asset_lookup(json: &serde_json::Value) -> std::collections::HashMap<String, CanonicalAsset> {
+    let mut lookup = std::collections::HashMap::new();
+
+    let assets = json
+        .get("_embedded")
+        .and_then(|e| e.get("canonical_assets"))
+        .and_then(|a| a.as_array());
+
+    if let Some(assets) = assets {
+        for asset in assets {
+            if let (Some(id), Some(name)) = (
+                asset.get("id").and_then(|v| v.as_str()),
+                asset.get("name").and_then(|v| v.as_str()),
+            ) {
+                let website = asset.get("website").and_then(|v| v.as_str()).map(|s| s.to_string());
+                lookup.insert(id.to_string(), CanonicalAsset {
+                    name: name.to_string(),
+                    website,
+                });
+            }
+        }
+    }
+
+    lookup
+}
+
+/// Resolve a subprocessor item using canonical asset lookup (Conveyor-style).
+/// Returns (name, domain, evidence).
+fn resolve_canonical_asset(
+    item: &serde_json::Value,
+    lookup: &std::collections::HashMap<String, CanonicalAsset>,
+    mapping: &ResponseMapping,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let asset_id = item.get("canonical_asset_id").and_then(|v| v.as_str());
+
+    let asset = asset_id.and_then(|id| lookup.get(id));
+
+    let name = asset.map(|a| a.name.clone());
+    let domain = asset
+        .and_then(|a| a.website.as_deref())
+        .and_then(|url| extract_domain_from_url_text(url));
+
+    // Build evidence: name + description from the subprocessor item
+    let description = get_nested_str(item, mapping.purpose_field.as_deref().unwrap_or("description"));
+    let evidence = match (&name, description) {
+        (Some(n), Some(d)) => Some(format!("{} | {}", n, d)),
+        (Some(n), None) => Some(n.clone()),
+        _ => None,
+    };
+
+    (name, domain, evidence)
 }
 
 /// Extract a domain from URL text like "https://aws.amazon.com" or "cloudflare.com".
@@ -437,5 +510,99 @@ mod tests {
         assert_eq!(result[1].domain, "datadoghq.com");
         assert_eq!(result[2].domain, "anthropic.com");
         assert_eq!(result[0].source_type, RecordType::TrustCenterApi);
+    }
+
+    #[test]
+    fn test_extract_subprocessors_safebase_nested_fields() {
+        // SafeBase-style JSON with nested company.name and company.domain
+        let json = serde_json::json!([
+            {"company": {"name": "Algolia", "domain": "algolia.com"}, "purpose": "Search", "location": "US"},
+            {"company": {"name": "Datadog", "domain": "datadoghq.com"}, "purpose": "Monitoring", "location": "US"},
+            {"company": {"name": "Stripe", "domain": "stripe.com"}, "purpose": "Payments", "location": "US"},
+            {"company": {"name": null, "domain": null}, "purpose": "AWS is a cloud provider", "location": "US"}
+        ]);
+
+        let mapping = ResponseMapping {
+            subprocessors_path: String::new(), // Empty path = root is the array
+            name_field: "company.name".to_string(),
+            url_field: Some("company.domain".to_string()),
+            purpose_field: Some("purpose".to_string()),
+            location_field: Some("location".to_string()),
+            evidence_fields: vec!["company.name".to_string(), "purpose".to_string()],
+        };
+
+        let result = extract_subprocessors_from_json(&json, &mapping, "drata.com").unwrap();
+        // Entry with null name should be skipped
+        assert_eq!(result.len(), 3, "Should extract 3 vendors (skip null name)");
+        assert_eq!(result[0].domain, "algolia.com");
+        assert_eq!(result[1].domain, "datadoghq.com");
+        assert_eq!(result[2].domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_extract_subprocessors_conveyor_canonical_assets() {
+        // Conveyor-style JSON with _embedded.subprocessors referencing _embedded.canonical_assets
+        let json = serde_json::json!({
+            "_embedded": {
+                "subprocessors": [
+                    {"id": "s1", "canonical_asset_id": "ca1", "description": "Cloud Infrastructure", "data_locations": ["US"]},
+                    {"id": "s2", "canonical_asset_id": "ca2", "description": "CDN and Security", "data_locations": ["US"]},
+                    {"id": "s3", "canonical_asset_id": "ca3", "description": "Monitoring", "data_locations": ["US"]},
+                    {"id": "s4", "canonical_asset_id": "missing-id", "description": "Unknown", "data_locations": ["US"]}
+                ],
+                "canonical_assets": [
+                    {"id": "ca1", "name": "AWS", "website": "https://aws.amazon.com", "type": "Vendor"},
+                    {"id": "ca2", "name": "Cloudflare", "website": "https://cloudflare.com", "type": "Vendor"},
+                    {"id": "ca3", "name": "Datadog", "website": "https://datadoghq.com", "type": "Vendor"}
+                ]
+            }
+        });
+
+        let mapping = ResponseMapping {
+            subprocessors_path: "_embedded.subprocessors".to_string(),
+            name_field: "name".to_string(),
+            url_field: Some("website".to_string()),
+            purpose_field: Some("description".to_string()),
+            location_field: Some("data_locations".to_string()),
+            evidence_fields: vec!["name".to_string(), "description".to_string()],
+        };
+
+        let result = extract_subprocessors_from_json(&json, &mapping, "conveyor.com").unwrap();
+        // Should extract 3 vendors (4th has missing canonical_asset_id)
+        assert_eq!(result.len(), 3, "Should extract 3 vendors (skip unresolvable canonical_asset_id)");
+        assert_eq!(result[0].domain, "aws.amazon.com");
+        assert_eq!(result[1].domain, "cloudflare.com");
+        assert_eq!(result[2].domain, "datadoghq.com");
+
+        // Verify evidence includes resolved name + description
+        assert!(result[0].raw_record.contains("AWS"), "Evidence should contain resolved name");
+        assert!(result[0].raw_record.contains("Cloud Infrastructure"), "Evidence should contain description");
+    }
+
+    #[test]
+    fn test_build_canonical_asset_lookup() {
+        let json = serde_json::json!({
+            "_embedded": {
+                "canonical_assets": [
+                    {"id": "ca1", "name": "AWS", "website": "https://aws.amazon.com"},
+                    {"id": "ca2", "name": "Cloudflare", "website": "https://cloudflare.com"},
+                    {"id": "ca3", "name": "NoWebsite"}
+                ]
+            }
+        });
+
+        let lookup = build_canonical_asset_lookup(&json);
+        assert_eq!(lookup.len(), 3);
+        assert_eq!(lookup.get("ca1").unwrap().name, "AWS");
+        assert_eq!(lookup.get("ca1").unwrap().website, Some("https://aws.amazon.com".to_string()));
+        assert_eq!(lookup.get("ca3").unwrap().name, "NoWebsite");
+        assert_eq!(lookup.get("ca3").unwrap().website, None);
+    }
+
+    #[test]
+    fn test_build_canonical_asset_lookup_no_assets() {
+        let json = serde_json::json!({"data": [{"name": "test"}]});
+        let lookup = build_canonical_asset_lookup(&json);
+        assert!(lookup.is_empty(), "Should return empty map when no canonical_assets");
     }
 }

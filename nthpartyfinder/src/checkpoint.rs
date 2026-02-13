@@ -266,6 +266,7 @@ pub fn generate_settings_hash(
     saas_tenant_enabled: bool,
     ct_enabled: bool,
     web_org_enabled: bool,
+    web_traffic_enabled: bool,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -277,6 +278,7 @@ pub fn generate_settings_hash(
     saas_tenant_enabled.hash(&mut hasher);
     ct_enabled.hash(&mut hasher);
     web_org_enabled.hash(&mut hasher);
+    web_traffic_enabled.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -499,9 +501,9 @@ mod tests {
 
     #[test]
     fn test_settings_hash() {
-        let hash1 = generate_settings_hash(Some(3), true, true, false, false, true);
-        let hash2 = generate_settings_hash(Some(3), true, true, false, false, true);
-        let hash3 = generate_settings_hash(Some(3), true, true, true, false, true); // saas changed
+        let hash1 = generate_settings_hash(Some(3), true, true, false, false, true, false);
+        let hash2 = generate_settings_hash(Some(3), true, true, false, false, true, false);
+        let hash3 = generate_settings_hash(Some(3), true, true, true, false, true, false); // saas changed
 
         // Same settings should produce same hash
         assert_eq!(hash1, hash2);

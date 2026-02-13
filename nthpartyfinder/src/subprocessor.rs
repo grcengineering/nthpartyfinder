@@ -973,11 +973,17 @@ impl SubprocessorAnalyzer {
             "onetrust.com" => urls.push("https://www.onetrust.com/trust-center/subprocessors".to_string()),
             "sprinto.com" => urls.push("https://sprinto.com/trust/subprocessors".to_string()),
             "scrut.io" => urls.push("https://scrut.io/trust/subprocessors".to_string()),
+            "conveyor.com" => urls.push("https://trust.conveyor.com".to_string()),
             _ => {}
         }
         
-        // Add high-priority patterns discovered through research first  
+        // Add high-priority patterns discovered through research first
         urls.extend(vec![
+            // HIGHEST PRIORITY: Trust subdomain pattern — extremely common for trust center products
+            // (SafeBase, Conveyor, Vanta, Drata, Secureframe all use trust.{domain})
+            format!("https://trust.{}/subprocessors", domain),
+            format!("https://trust.{}", domain),  // Root trust page may contain subprocessors (Conveyor)
+
             // WORKING PATTERNS: Discovered through research and web searches
             format!("https://{}/legal/subprocessors", domain),         // Klaviyo: https://klaviyo.com/legal/subprocessors
             format!("https://{}/legal/service-providers", domain),      // Stripe: https://stripe.com/legal/service-providers
@@ -1023,7 +1029,7 @@ impl SubprocessorAnalyzer {
             // Trust/Security center patterns
             format!("https://{}/trust/subprocessors", domain),
             format!("https://www.{}/trust/subprocessors", domain),
-            format!("https://trust.{}/subprocessors", domain),  // New: trust subdomain pattern (e.g., trust.cursor.com)
+            // trust.{domain}/subprocessors already added as high-priority pattern above
             format!("https://{}/security/subprocessors", domain),
             format!("https://www.{}/security/subprocessors", domain),
             format!("https://{}/trust-center/subprocessors", domain),
@@ -1354,6 +1360,7 @@ impl SubprocessorAnalyzer {
         // SafeBase Trust Center patterns
         // SafeBase trust centers: https://[company].safebase.io/subprocessors
         //                        https://security.[company].com (hosted by SafeBase)
+        //                        https://trust.[company].com/product/[company]/subprocessors (custom domain)
         urls.extend(vec![
             format!("https://{}.safebase.io/subprocessors", company_name),
             format!("https://{}.safebase.io/sub-processors", company_name),
@@ -1362,6 +1369,10 @@ impl SubprocessorAnalyzer {
             format!("https://security.{}/subprocessors", base_domain), // SafeBase often powers security.* subdomains
             format!("https://security.{}/sub-processors", base_domain),
             format!("https://security.{}/vendors", base_domain),
+            // SafeBase custom-domain patterns (e.g., trust.drata.com/product/drata/subprocessors)
+            format!("https://trust.{}/product/{}/subprocessors", base_domain, company_name),
+            format!("https://trust.{}/product/{}/sub-processors", base_domain, company_name),
+            format!("https://trust.{}/product/{}/vendors", base_domain, company_name),
         ]);
 
         // OneTrust Trust Center patterns
@@ -1375,7 +1386,9 @@ impl SubprocessorAnalyzer {
         ]);
 
         // Conveyor Trust Center patterns
-        // Conveyor trust hubs: https://[company].trusthub.io/subprocessors
+        // Conveyor trust hubs: https://[company].trusthub.io (defunct, redirects to conveyor.com)
+        // Custom domains: trust.{domain} is already covered by generic URL patterns above
+        // Conveyor detection happens via probe_conveyor() when window.VENDOR_REPORT is found
         urls.extend(vec![
             format!("https://{}.trusthub.io/subprocessors", company_name),
             format!("https://{}.trusthub.io/sub-processors", company_name),
@@ -1538,9 +1551,9 @@ impl SubprocessorAnalyzer {
 
             if let Some(ref strategy) = cached_strategy {
                 // Check if strategy is not stale or unreliable
-                if !strategy.discovery_metadata.is_stale(30)
-                    && !strategy.discovery_metadata.is_unreliable(3)
-                {
+                let is_stale = strategy.discovery_metadata.is_stale(30);
+                let is_unreliable = strategy.discovery_metadata.is_unreliable(3);
+                if !is_stale && !is_unreliable {
                     debug!("Found cached trust center strategy for {}, executing", source_domain);
                     match crate::trust_center::executor::execute_strategy(
                         strategy, &self.client, Some(&content), source_domain
@@ -1549,8 +1562,12 @@ impl SubprocessorAnalyzer {
                             debug!("Trust center strategy returned {} vendors for {}", vendors.len(), source_domain);
                             return Ok(vendors);
                         }
-                        Ok(_) => debug!("Trust center strategy returned no vendors for {}", source_domain),
-                        Err(e) => debug!("Trust center strategy failed for {}: {}", source_domain, e),
+                        Ok(_) => {
+                            debug!("Trust center strategy returned no vendors for {}", source_domain);
+                        }
+                        Err(e) => {
+                            debug!("Trust center strategy failed for {}: {}", source_domain, e);
+                        }
                     }
                 }
             }
@@ -1580,15 +1597,65 @@ impl SubprocessorAnalyzer {
                                 }
                                 return Ok(vendors);
                             }
-                            Ok(_) => debug!("Auto-discovered strategy returned no vendors for {}", source_domain),
-                            Err(e) => debug!("Auto-discovered strategy execution failed: {}", e),
+                            Ok(_) => {
+                                debug!("Auto-discovered strategy returned no vendors for {}", source_domain);
+                            }
+                            Err(e) => {
+                                debug!("Auto-discovered strategy execution failed: {}", e);
+                            }
                         }
                     }
-                    Ok(None) => debug!("No trust center strategy discovered for {}", source_domain),
-                    Err(e) => debug!("Trust center auto-discovery failed for {}: {}", source_domain, e),
+                    Ok(None) => {
+                        debug!("No trust center strategy discovered for {}", source_domain);
+                    }
+                    Err(e) => {
+                        debug!("Trust center auto-discovery failed for {}: {}", source_domain, e);
+                    }
                 }
             }
         }
+
+        // SPA fallback: If the static HTML looks like a SPA (minimal text content),
+        // use a headless browser to render the page and get the full DOM content.
+        // This catches trust center pages (like Vanta's) where static HTML is just a
+        // skeleton and all content is rendered by JavaScript.
+        let content = if crate::trust_center::discovery::is_likely_spa(&content) {
+            debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
+            let url_for_browser = url.to_string();
+            match tokio::task::spawn_blocking(move || -> Result<String> {
+                let browser = crate::create_browser()?;
+                let tab = browser.new_tab()
+                    .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+                tab.navigate_to(&url_for_browser)
+                    .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
+                tab.wait_until_navigated()
+                    .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
+                // Wait for JavaScript to render content
+                std::thread::sleep(Duration::from_millis(5000));
+                let rendered = tab.get_content()
+                    .map_err(|e| anyhow::anyhow!("Failed to get rendered content: {}", e))?;
+                Ok(rendered)
+            }).await {
+                Ok(Ok(rendered)) if rendered.len() > content.len() => {
+                    debug!("Browser rendered {} chars (was {} static) for {}", rendered.len(), content.len(), source_domain);
+                    rendered
+                }
+                Ok(Ok(_rendered)) => {
+                    debug!("Browser rendering didn't produce larger content for {}, using static HTML", source_domain);
+                    content
+                }
+                Ok(Err(e)) => {
+                    debug!("Browser rendering failed for {}: {}, using static HTML", source_domain, e);
+                    content
+                }
+                Err(e) => {
+                    debug!("Browser task panicked for {}: {}, using static HTML", source_domain, e);
+                    content
+                }
+            }
+        } else {
+            content
+        };
 
         // Process HTML content
         let document = Html::parse_document(&content);
@@ -1672,7 +1739,31 @@ impl SubprocessorAnalyzer {
                 }
 
                 vendors.extend(extraction_result.subprocessors);
-                return Ok(vendors); // Always return early for domain-specific patterns
+
+                // Decide whether to return domain-specific results or fall through to generic.
+                let should_skip_generic = custom_rules.special_handling.as_ref()
+                    .map(|sh| sh.skip_generic_methods)
+                    .unwrap_or(true);
+
+                if should_skip_generic {
+                    return Ok(vendors);
+                }
+
+                // When skip_generic_methods is false, check if we found a reasonable number
+                // of vendors compared to what was previously successful. If extraction count
+                // dropped significantly, fall through to generic methods which may do better
+                // (e.g., when page structure changed and regex patterns became stale).
+                let prev_count = {
+                    let cache = self.cache.read().await;
+                    cache.get_cached_entry(source_domain).await
+                        .and_then(|e| e.extraction_metadata.as_ref().map(|m| m.successful_extractions))
+                        .unwrap_or(0) as usize
+                };
+                let found_enough = prev_count == 0 || vendors.len() >= prev_count / 2;
+                if !vendors.is_empty() && found_enough {
+                    return Ok(vendors);
+                }
+                debug!("Domain-specific extraction found {} vendors (prev: {}), falling through to generic extraction", vendors.len(), prev_count);
             }
         } else {
             debug!("🔥🔥🔥 NO DOMAIN-SPECIFIC PATTERNS - Using minimal bootstrap extraction for {}", source_domain);
@@ -3255,41 +3346,60 @@ impl SubprocessorAnalyzer {
             }
         }
 
+        // Extract plain text from the document for regex matching.
+        // SPA-rendered pages have company names in separate DOM elements (e.g. <div>Name</div><div>•</div>)
+        // which become contiguous in plain text ("Name • ...") but NOT in raw HTML.
+        let plain_text: String = document.root_element()
+            .text()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         // Extract using custom regex patterns (validated against ReDoS - H006)
+        // Run against both raw HTML and plain text to handle SPA-rendered content
         for regex_rule in &custom_rules.custom_regex_patterns {
             if let Some(regex) = validate_and_compile_regex(&regex_rule.pattern) {
                 debug!("Applying custom regex: {} - {}", regex_rule.pattern, regex_rule.description);
 
-                for capture in regex.captures_iter(html_content) {
-                    if let Some(org_match) = capture.get(regex_rule.capture_group) {
-                        let org_name = org_match.as_str().trim();
+                // Run regex against both raw HTML and plain text
+                let sources: [&str; 2] = [html_content, &plain_text];
+                for source in &sources {
+                    for capture in regex.captures_iter(source) {
+                        if let Some(org_match) = capture.get(regex_rule.capture_group) {
+                            let org_name = org_match.as_str().trim();
 
-                        if !org_name.is_empty() && org_name.len() > 2 {
-                            // Check against exclusion patterns
-                            let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(org_name));
-                            if should_exclude {
-                                debug!("Excluding '{}' due to exclusion pattern", org_name);
-                                continue;
-                            }
-
-                            if let Some(result) = self.extract_domain_from_organization_name(org_name, custom_rules) {
-                                let evidence = format!("Custom regex match: '{}' from pattern: {}", org_name, regex_rule.description);
-                                debug!("Custom regex extraction found: {} -> {} (fallback: {})", org_name, result.domain, result.is_fallback);
-
-                                // Track pending mappings that came from generic fallback
-                                if result.is_fallback {
-                                    pending_mappings.push(PendingOrgMapping {
-                                        org_name: org_name.to_string(),
-                                        inferred_domain: result.domain.clone(),
-                                        source_domain: source_domain.to_string(),
-                                    });
+                            if !org_name.is_empty() && org_name.len() > 2 {
+                                // Check against exclusion patterns
+                                let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(org_name));
+                                if should_exclude {
+                                    debug!("Excluding '{}' due to exclusion pattern", org_name);
+                                    continue;
                                 }
 
-                                vendors.push(SubprocessorDomain {
-                                    domain: result.domain,
-                                    source_type: RecordType::HttpSubprocessor,
-                                    raw_record: evidence,
-                                });
+                                if let Some(result) = self.extract_domain_from_organization_name(org_name, custom_rules) {
+                                    // Deduplicate: skip if we already found this domain
+                                    if vendors.iter().any(|v| v.domain == result.domain) {
+                                        continue;
+                                    }
+
+                                    let evidence = format!("Custom regex match: '{}' from pattern: {}", org_name, regex_rule.description);
+                                    debug!("Custom regex extraction found: {} -> {} (fallback: {})", org_name, result.domain, result.is_fallback);
+
+                                    // Track pending mappings that came from generic fallback
+                                    if result.is_fallback {
+                                        pending_mappings.push(PendingOrgMapping {
+                                            org_name: org_name.to_string(),
+                                            inferred_domain: result.domain.clone(),
+                                            source_domain: source_domain.to_string(),
+                                        });
+                                    }
+
+                                    vendors.push(SubprocessorDomain {
+                                        domain: result.domain,
+                                        source_type: RecordType::HttpSubprocessor,
+                                        raw_record: evidence,
+                                    });
+                                }
                             }
                         }
                     }

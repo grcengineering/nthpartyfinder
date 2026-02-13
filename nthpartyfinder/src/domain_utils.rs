@@ -1,5 +1,3 @@
-use regex::Regex;
-
 /// Extract the base domain from SPF subdomains and other technical subdomains
 pub fn extract_base_domain(domain: &str) -> String {
     // Remove common SPF and technical prefixes
@@ -42,31 +40,24 @@ fn extract_organizational_domain(domain: &str) -> Option<String> {
     // - mail.google.com -> google.com
     // - subdomain.company.com -> company.com
     
-    // Get the last 2 parts (assumed to be the org domain)
-    if parts.len() >= 2 {
-        let org_domain = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
-        
-        // Don't flatten if the subdomain indicates a different organization
-        // (e.g., github.io, herokuapp.com)
-        let keep_subdomain_patterns = vec![
-            r"\.github\.io$",
-            r"\.herokuapp\.com$", 
-            r"\.amazonaws\.com$",
-            r"\.cloudfront\.net$",
-            r"\.azurewebsites\.net$"
-        ];
-        
-        for pattern in keep_subdomain_patterns {
-            if let Ok(regex) = Regex::new(pattern) {
-                if regex.is_match(domain) {
-                    return Some(domain.to_string());
-                }
-            }
+    // Get the organizational/apex domain.
+    // FQDNs like s3.amazonaws.com or Nagios-842216103.us-east-1.elb.amazonaws.com
+    // normalize to amazonaws.com — the vendor is the platform provider.
+    // The full FQDN is preserved in the record value / evidence fields.
+    let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+
+    // Handle compound TLDs (e.g., .co.uk, .com.au) — need 3 parts for the apex
+    let compound_tlds = ["co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr",
+                         "com.br", "com.mx", "com.cn", "org.uk", "net.au"];
+    if compound_tlds.contains(&last_two.as_str()) {
+        if parts.len() > 3 {
+            Some(format!("{}.{}", parts[parts.len() - 3], last_two))
+        } else {
+            // e.g., "example.co.uk" — already the apex with compound TLD
+            Some(domain.to_string())
         }
-        
-        Some(org_domain)
     } else {
-        Some(domain.to_string())
+        Some(last_two)
     }
 }
 
@@ -111,6 +102,60 @@ mod tests {
         assert_eq!(extract_base_domain("google.com"), "google.com");
         assert_eq!(extract_base_domain("mail.google.com"), "google.com");
         assert_eq!(extract_base_domain("api.stripe.com"), "stripe.com");
+    }
+
+    /// Regression test: FQDNs from subdomain discovery (e.g. CNAME targets)
+    /// must normalize to the apex domain for the Vendor Domain field.
+    /// The full FQDN is preserved in Record Value / Evidence.
+    #[test]
+    fn test_fqdn_normalizes_to_apex_domain() {
+        // AWS ELB FQDN → amazonaws.com
+        assert_eq!(
+            extract_base_domain("Nagios-842216103.us-east-1.elb.amazonaws.com"),
+            "amazonaws.com"
+        );
+        // S3 bucket FQDN → amazonaws.com
+        assert_eq!(extract_base_domain("s3.amazonaws.com"), "amazonaws.com");
+        // Deep AWS FQDN
+        assert_eq!(
+            extract_base_domain("my-app-1234.us-west-2.elb.amazonaws.com"),
+            "amazonaws.com"
+        );
+        // CloudFront distribution → cloudfront.net
+        assert_eq!(
+            extract_base_domain("d25ka488dfqyj6.cloudfront.net"),
+            "cloudfront.net"
+        );
+        // Azure Web Apps → azurewebsites.net
+        assert_eq!(
+            extract_base_domain("myapp.azurewebsites.net"),
+            "azurewebsites.net"
+        );
+        // GitHub Pages → github.io
+        assert_eq!(extract_base_domain("myproject.github.io"), "github.io");
+        // Heroku → herokuapp.com
+        assert_eq!(
+            extract_base_domain("myapp.herokuapp.com"),
+            "herokuapp.com"
+        );
+        // Already apex → unchanged
+        assert_eq!(extract_base_domain("amazonaws.com"), "amazonaws.com");
+        assert_eq!(extract_base_domain("cloudfront.net"), "cloudfront.net");
+    }
+
+    /// Regression test: compound TLDs are handled correctly
+    #[test]
+    fn test_compound_tld_handling() {
+        assert_eq!(
+            extract_base_domain("mail.example.co.uk"),
+            "example.co.uk"
+        );
+        assert_eq!(
+            extract_base_domain("api.company.com.au"),
+            "company.com.au"
+        );
+        // Already at apex with compound TLD
+        assert_eq!(extract_base_domain("example.co.uk"), "example.co.uk");
     }
 
     #[test]

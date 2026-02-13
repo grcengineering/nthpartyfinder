@@ -560,3 +560,174 @@ async fn test_custom_rules_earliest_position_matching() {
         domains
     );
 }
+
+/// Test that custom regex patterns match company names across HTML element boundaries.
+/// SPA-rendered pages (like Vanta's trust center) place company names and bullet separators
+/// in separate `<div>` elements. The regex must run against extracted plain text (where element
+/// boundaries become spaces) in addition to raw HTML, so that patterns like
+/// "CompanyName • Purpose" match even when the bullet is in a different element.
+#[tokio::test]
+async fn test_custom_regex_matches_across_html_element_boundaries() {
+    use nthpartyfinder::subprocessor::{
+        CustomExtractionRules, CustomRegexPattern, SpecialHandling,
+    };
+    use std::collections::HashMap;
+
+    let analyzer = SubprocessorAnalyzer::new().await;
+
+    // Build custom rules mimicking Vanta's trust center cache
+    let mut custom_mappings = HashMap::new();
+    custom_mappings.insert("Amazon Web Services".to_string(), "amazon.com".to_string());
+    custom_mappings.insert("Cloudflare".to_string(), "cloudflare.com".to_string());
+    custom_mappings.insert("Datadog".to_string(), "datadoghq.com".to_string());
+    custom_mappings.insert("Intercom".to_string(), "intercom.com".to_string());
+    custom_mappings.insert("OpenAI".to_string(), "openai.com".to_string());
+
+    let custom_rules = CustomExtractionRules {
+        direct_selectors: vec![],
+        custom_regex_patterns: vec![
+            CustomRegexPattern {
+                // Pattern 1: business suffixes (Inc, LLC, etc.)
+                pattern: r"(?:^|\s)([A-Z][a-zA-Z\s]+(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))".to_string(),
+                capture_group: 1,
+                description: "Extract company names with business suffixes".to_string(),
+            },
+            CustomRegexPattern {
+                // Pattern 2: "CompanyName • Purpose" format (Vanta trust center)
+                pattern: r"([A-Z][a-zA-Z]+(?:\s[A-Z][a-zA-Z]+)*)\s*[••]\s*[A-Z]".to_string(),
+                capture_group: 1,
+                description: "Extract company names before bullet separator".to_string(),
+            },
+        ],
+        special_handling: Some(SpecialHandling {
+            skip_generic_methods: true,
+            custom_org_to_domain_mapping: Some(custom_mappings),
+            exclusion_patterns: vec![
+                r"^(?i:Vanta|Core Product|Infrastructure|Application)$".to_string(),
+            ],
+        }),
+    };
+
+    // Simulate SPA-rendered HTML where company names are in separate <div> elements.
+    // In raw HTML, "Amazon Web Services" and "•" are in different elements, so the regex
+    // "CompanyName • Purpose" cannot match in the raw HTML string.
+    let html_content = r#"
+    <html><body>
+        <div class="subprocessor-list">
+            <div class="row">
+                <div data-component="Typography">Amazon Web Services</div>
+                <div data-component="Typography">•</div>
+                <div data-component="Typography">Infrastructure Hosting</div>
+            </div>
+            <div class="row">
+                <div data-component="Typography">Cloudflare</div>
+                <div data-component="Typography">•</div>
+                <div data-component="Typography">Content Delivery</div>
+            </div>
+            <div class="row">
+                <div data-component="Typography">Datadog</div>
+                <div data-component="Typography">•</div>
+                <div data-component="Typography">Monitoring</div>
+            </div>
+            <div class="row">
+                <div data-component="Typography">Intercom</div>
+                <div data-component="Typography">•</div>
+                <div data-component="Typography">Customer Support</div>
+            </div>
+            <div class="row">
+                <div data-component="Typography">OpenAI, LLC</div>
+                <div data-component="Typography">•</div>
+                <div data-component="Typography">AI Services</div>
+            </div>
+        </div>
+    </body></html>
+    "#;
+
+    let document = scraper::Html::parse_document(html_content);
+    let result = analyzer.extract_with_custom_rules(
+        &document, html_content, "https://trust.vanta.com/subprocessors", &custom_rules, "vanta.com",
+    );
+
+    assert!(result.is_ok(), "Custom rules extraction should succeed");
+    let extraction = result.unwrap();
+    let domains: Vec<String> = extraction.subprocessors.iter().map(|v| v.domain.clone()).collect();
+
+    // The key assertion: company names should be found even though they're in separate DOM elements.
+    // Without the plain text extraction fix, only "OpenAI, LLC" (matching the Inc/LLC pattern in raw HTML) would be found.
+    // With the fix, the bullet pattern matches in plain text where "Amazon Web Services • Infrastructure" is contiguous.
+    assert!(
+        domains.contains(&"amazon.com".to_string()),
+        "Should extract Amazon Web Services from SPA-style HTML via plain text regex, found: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"cloudflare.com".to_string()),
+        "Should extract Cloudflare from SPA-style HTML via plain text regex, found: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"datadoghq.com".to_string()),
+        "Should extract Datadog from SPA-style HTML via plain text regex, found: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"intercom.com".to_string()),
+        "Should extract Intercom from SPA-style HTML via plain text regex, found: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"openai.com".to_string()),
+        "Should extract OpenAI from SPA-style HTML via plain text regex, found: {:?}",
+        domains
+    );
+
+    // Should find at least 5 vendors
+    assert!(
+        domains.len() >= 5,
+        "Should extract at least 5 vendors from SPA-rendered HTML, found {} : {:?}",
+        domains.len(),
+        domains
+    );
+}
+
+/// Test that is_likely_spa detects pages where <body> has no visible content — only scripts.
+/// This covers trust center SPAs like Vanta that have meta descriptions (inflating text ratio)
+/// but an empty body with only <script> tags.
+#[test]
+fn test_spa_detection_body_with_only_scripts() {
+    use nthpartyfinder::trust_center::discovery::is_likely_spa;
+
+    // Vanta-style SPA: long meta description inflates text ratio, but body is empty except scripts
+    let spa_html = r#"<!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Trust Center - Subprocessors</title>
+        <meta name="description" content="View our list of subprocessors and the services they provide. We maintain transparency about our vendor relationships and data processing activities to ensure compliance with privacy regulations.">
+    </head>
+    <body id="body">
+        <script src="/static/js/main.chunk.js"></script>
+        <script src="/static/js/vendor.chunk.js"></script>
+        <script src="/static/js/runtime-main.js"></script>
+    </body>
+    </html>"#;
+
+    assert!(is_likely_spa(spa_html), "Should detect body-only-scripts SPA pattern");
+
+    // Normal page with actual content should NOT be detected as SPA
+    let normal_html = r#"<!DOCTYPE html>
+    <html>
+    <head><title>Subprocessors</title></head>
+    <body>
+        <div class="content">
+            <h1>Our Subprocessors</h1>
+            <table>
+                <tr><td>Amazon Web Services</td><td>Hosting</td></tr>
+                <tr><td>Cloudflare</td><td>CDN</td></tr>
+            </table>
+        </div>
+    </body>
+    </html>"#;
+
+    assert!(!is_likely_spa(normal_html), "Normal HTML with content should NOT be detected as SPA");
+}

@@ -71,6 +71,31 @@ pub fn is_likely_spa(html: &str) -> bool {
         }
     }
 
+    // SPA indicator 3: Body element has no visible content elements — only scripts.
+    // Some SPAs (e.g., Vanta trust center) use <body id="body"> with only <script> children
+    // and rely entirely on JavaScript to render content. The text ratio check above may be
+    // fooled by long meta descriptions that inflate text content counts.
+    if let Some(body_start) = html_lower.find("<body") {
+        if let Some(body_tag_end) = html_lower[body_start..].find('>') {
+            let body_content_start = body_start + body_tag_end + 1;
+            let body_content = if let Some(body_end) = html_lower[body_content_start..].find("</body") {
+                &html_lower[body_content_start..body_content_start + body_end]
+            } else {
+                &html_lower[body_content_start..]
+            };
+
+            // Check if body has any visible content elements (not just script/noscript)
+            let visible_tags = ["<div", "<p", "<table", "<section", "<article", "<main",
+                                "<h1", "<h2", "<h3", "<span", "<ul", "<ol", "<form"];
+            let has_visible_content = visible_tags.iter().any(|tag| body_content.contains(tag));
+
+            if !has_visible_content && body_content.contains("<script") {
+                debug!("SPA detected: body has no visible content elements, only scripts");
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -282,21 +307,325 @@ fn analyze_intercepted_responses(
 fn discover_via_html_patterns(html: &str) -> Result<Vec<CandidateStrategy>> {
     let mut candidates = Vec::new();
 
-    // Probe 2a: __NEXT_DATA__ hydration blob (Next.js apps)
+    // Probe 2a: SafeBase trust center (detected by __SB_CONFIG__)
+    // Must run before generic __NEXT_DATA__ probe since SafeBase uses Next.js
+    // but has a specific structure that the generic probe might score poorly.
+    probe_safebase(html, &mut candidates);
+
+    // Probe 2b: Conveyor trust center (detected by window.VENDOR_REPORT)
+    // Must run before generic JS object probe since Conveyor uses a relational
+    // model (canonical_asset_id → canonical_assets) that the generic probe can't handle.
+    probe_conveyor(html, &mut candidates);
+
+    // Probe 2c: __NEXT_DATA__ hydration blob (Next.js apps)
     if let Some(candidate) = probe_next_data(html) {
         candidates.push(candidate);
     }
 
-    // Probe 2b: <script type="application/json"> tags
+    // Probe 2d: <script type="application/json"> tags
     probe_json_script_tags(html, &mut candidates);
 
-    // Probe 2c: Base64 encoded JSON blobs
+    // Probe 2e: Base64 encoded JSON blobs
     probe_base64_blobs(html, &mut candidates);
 
-    // Probe 2d: JavaScript object assignments (window.X = {...})
+    // Probe 2f: JavaScript object assignments (window.X = {...})
     probe_js_object_assignments(html, &mut candidates);
 
     Ok(candidates)
+}
+
+/// SafeBase trust center probe.
+///
+/// SafeBase (safebase.io) powers trust centers for many companies. It uses Next.js
+/// and embeds subprocessor data in the __NEXT_DATA__ hydration blob at:
+///   props.pageProps.orgInfo.sp.products.{productId}.raw.spData.items.{itemUid}.listEntries
+///
+/// Each entry has: { company: { name, domain, logo }, purpose, location, additionalDetails }
+///
+/// SafeBase also supports multi-product trust centers where multiple products
+/// (e.g., "Drata" and "SafeBase") share a single trust center domain.
+/// Product info is at: props.pageProps.orgInfo.sp.products (map of productId → product).
+fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
+    // Quick check: SafeBase pages contain __SB_CONFIG__
+    if !html.contains("__SB_CONFIG__") {
+        return;
+    }
+    debug!("SafeBase trust center detected (found __SB_CONFIG__)");
+
+    // Parse __NEXT_DATA__ to extract the SafeBase structure
+    let pattern = r#"<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>"#;
+    let regex = match fancy_regex::Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let json_str = match regex.captures(html).ok().flatten().and_then(|c| c.get(1)) {
+        Some(m) => m.as_str(),
+        None => {
+            debug!("SafeBase: __NEXT_DATA__ not found despite __SB_CONFIG__ presence");
+            return;
+        }
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(j) => j,
+        Err(e) => {
+            debug!("SafeBase: Failed to parse __NEXT_DATA__: {}", e);
+            return;
+        }
+    };
+
+    // Navigate to the products structure
+    let products = match super::navigate_json_path(&json, "props.pageProps.orgInfo.sp.products") {
+        Some(p) if p.is_object() => p,
+        _ => {
+            debug!("SafeBase: products structure not found in __NEXT_DATA__");
+            return;
+        }
+    };
+
+    let products_map = match products.as_object() {
+        Some(m) => m,
+        None => return,
+    };
+
+    debug!("SafeBase: found {} products", products_map.len());
+
+    // Iterate through all products to find subprocessor list items
+    for (product_id, product_data) in products_map {
+        let slug = product_data.get("slug").and_then(|v| v.as_str()).unwrap_or(product_id);
+        let product_name = product_data.get("name").and_then(|v| v.as_str()).unwrap_or(slug);
+        let show = product_data.get("show").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        if !show {
+            debug!("SafeBase: skipping hidden product '{}' (slug: {})", product_name, slug);
+            continue;
+        }
+
+        debug!("SafeBase: scanning product '{}' (id: {}, slug: {})", product_name, product_id, slug);
+
+        // Look for subprocessor items in raw.spData.items
+        let items = match super::navigate_json_path(product_data, "raw.spData.items") {
+            Some(i) if i.is_object() => i,
+            _ => continue,
+        };
+
+        let items_map = match items.as_object() {
+            Some(m) => m,
+            None => continue,
+        };
+
+        for (item_uid, item_data) in items_map {
+            let list_entries = match item_data.get("listEntries").and_then(|v| v.as_array()) {
+                Some(arr) if arr.len() >= 3 => arr,
+                _ => continue,
+            };
+
+            // Verify entries look like subprocessor data (have company.name or name)
+            let has_company = list_entries.iter().take(5).any(|entry| {
+                entry.get("company").and_then(|c| c.get("name")).and_then(|n| n.as_str())
+                    .map_or(false, |s| !s.is_empty())
+            });
+
+            if !has_company {
+                continue;
+            }
+
+            debug!("SafeBase: found {} subprocessor entries in product '{}', item {}",
+                   list_entries.len(), product_name, item_uid);
+
+            // Build the full data path for this subprocessor list
+            let data_path = format!(
+                "props.pageProps.orgInfo.sp.products.{}.raw.spData.items.{}.listEntries",
+                product_id, item_uid
+            );
+
+            // Score higher since we've positively identified SafeBase structure
+            let score = 0.95;
+
+            candidates.push(CandidateStrategy {
+                strategy: TrustCenterStrategy {
+                    strategy_type: StrategyType::HydrationData {
+                        script_selector: "script#__NEXT_DATA__".to_string(),
+                        data_path: data_path.clone(),
+                    },
+                    endpoint: EndpointConfig {
+                        url: String::new(), // Filled by caller
+                        slug: Some(slug.to_string()),
+                        requires_browser: false,
+                    },
+                    response_mapping: ResponseMapping {
+                        subprocessors_path: String::new(), // Not needed for HydrationData
+                        name_field: "company.name".to_string(),
+                        url_field: Some("company.domain".to_string()),
+                        purpose_field: Some("purpose".to_string()),
+                        location_field: Some("location".to_string()),
+                        evidence_fields: vec![
+                            "company.name".to_string(),
+                            "purpose".to_string(),
+                            "location".to_string(),
+                        ],
+                    },
+                    discovery_metadata: DiscoveryMetadata::new(
+                        DiscoveryMethod::HtmlPatternScan,
+                        list_entries.len() as u32,
+                        score,
+                    ),
+                },
+                score,
+                item_count: list_entries.len(),
+            });
+        }
+    }
+}
+
+/// Conveyor trust center probe.
+///
+/// Conveyor (conveyor.com) powers trust centers embedded as `window.VENDOR_REPORT = {...}`.
+/// The data uses a relational model:
+///   - `_embedded.subprocessors[]` has `canonical_asset_id`, `description`, `data_locations`
+///   - `_embedded.canonical_assets[]` has `id`, `name`, `website`
+/// Subprocessor names/domains are resolved by joining on `canonical_asset_id` → `id`.
+///
+/// Conveyor also has a public REST API that returns the same data:
+///   GET https://api.conveyor.com/public/public_vendor_reports/by_slug?slug={slug}&embed_canonical_assets=true
+/// The slug is found in `window.CANONICAL_ASSET = { slug: "company" }`.
+///
+/// This probe creates a RestApi strategy pointing to the public API.
+fn probe_conveyor(html: &str, candidates: &mut Vec<CandidateStrategy>) {
+    // Quick check: Conveyor pages contain window.VENDOR_REPORT
+    if !html.contains("window.VENDOR_REPORT") {
+        return;
+    }
+    debug!("Conveyor trust center detected (found window.VENDOR_REPORT)");
+
+    // Extract the slug from window.CANONICAL_ASSET
+    let slug = extract_conveyor_slug(html);
+
+    if slug.is_none() {
+        debug!("Conveyor: could not extract slug from CANONICAL_ASSET");
+    }
+
+    // Try to parse window.VENDOR_REPORT to count subprocessors for validation
+    let subprocessor_count = count_conveyor_subprocessors(html);
+
+    if subprocessor_count < 3 {
+        debug!("Conveyor: found {} subprocessors, below threshold of 3", subprocessor_count);
+        return;
+    }
+
+    debug!("Conveyor: found {} subprocessors, slug={:?}", subprocessor_count, slug);
+
+    let score = 0.95;
+    let api_url = match &slug {
+        Some(s) => format!(
+            "https://api.conveyor.com/public/public_vendor_reports/by_slug?slug={}&embed_canonical_assets=true",
+            s
+        ),
+        None => String::new(),
+    };
+
+    candidates.push(CandidateStrategy {
+        strategy: TrustCenterStrategy {
+            strategy_type: StrategyType::RestApi {
+                method: "GET".to_string(),
+                body_template: None,
+                headers: std::collections::HashMap::new(),
+            },
+            endpoint: EndpointConfig {
+                url: api_url,
+                slug,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "_embedded.subprocessors".to_string(),
+                name_field: "name".to_string(),
+                url_field: Some("website".to_string()),
+                purpose_field: Some("description".to_string()),
+                location_field: Some("data_locations".to_string()),
+                evidence_fields: vec![
+                    "name".to_string(),
+                    "description".to_string(),
+                ],
+            },
+            discovery_metadata: DiscoveryMetadata::new(
+                DiscoveryMethod::HtmlPatternScan,
+                subprocessor_count as u32,
+                score,
+            ),
+        },
+        score,
+        item_count: subprocessor_count,
+    });
+}
+
+/// Extract the Conveyor slug from window.CANONICAL_ASSET assignment.
+fn extract_conveyor_slug(html: &str) -> Option<String> {
+    let json = extract_js_object_assignment(html, "CANONICAL_ASSET")?;
+    json.get("slug").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+/// Count the number of subprocessors in a Conveyor VENDOR_REPORT.
+fn count_conveyor_subprocessors(html: &str) -> usize {
+    let json = extract_js_object_assignment(html, "VENDOR_REPORT");
+    match json {
+        Some(j) => {
+            j.get("_embedded")
+                .and_then(|e| e.get("subprocessors"))
+                .and_then(|s| s.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
+        }
+        None => 0,
+    }
+}
+
+/// Extract a JSON object from a `window.VAR_NAME = {...};` assignment using bracket-matching.
+/// This handles nested braces correctly unlike regex-based approaches.
+fn extract_js_object_assignment(html: &str, var_name: &str) -> Option<serde_json::Value> {
+    let marker = format!("window.{}", var_name);
+    let marker_pos = html.find(&marker)?;
+    let after_marker = &html[marker_pos + marker.len()..];
+
+    // Skip whitespace and '='
+    let trimmed = after_marker.trim_start();
+    if !trimmed.starts_with('=') {
+        return None;
+    }
+    let after_eq = trimmed[1..].trim_start();
+
+    if !after_eq.starts_with('{') {
+        return None;
+    }
+
+    // Bracket-match to find the balanced closing brace
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape_next = false;
+    let mut end_pos = None;
+
+    for (i, ch) in after_eq.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => { escape_next = true; }
+            '"' => { in_string = !in_string; }
+            '{' if !in_string => { depth += 1; }
+            '}' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    end_pos = Some(i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let json_str = &after_eq[..end_pos?];
+    serde_json::from_str(json_str).ok()
 }
 
 /// Search for Next.js __NEXT_DATA__ hydration blob.
@@ -642,5 +971,236 @@ mod tests {
         let candidate = result.unwrap();
         assert_eq!(candidate.item_count, 5);
         assert!(candidate.score >= 0.4);
+    }
+
+    #[test]
+    fn test_probe_safebase_detects_trust_center() {
+        // Minimal SafeBase trust center HTML with __SB_CONFIG__ and __NEXT_DATA__
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {"NEXT_PUBLIC_SITE":"https://app.safebase.io"};</script>
+            <div id="__next"></div>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"acme","name":"Acme Corp","show":true,"order":1,
+                    "raw":{"spData":{"items":{
+                        "abc-123":{"listEntries":[
+                            {"company":{"name":"Algolia","domain":"algolia.com"},"purpose":"Search","location":"US"},
+                            {"company":{"name":"AWS","domain":"amazonaws.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"Datadog","domain":"datadoghq.com"},"purpose":"Monitoring","location":"US"},
+                            {"company":{"name":"Stripe","domain":"stripe.com"},"purpose":"Payments","location":"US"}
+                        ],"text":{"title":"Subprocessors"}}
+                    }}}
+                }
+            }}}}}}
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+
+        assert_eq!(candidates.len(), 1, "Should find exactly one subprocessor list");
+        let candidate = &candidates[0];
+        assert_eq!(candidate.item_count, 4);
+        assert!(candidate.score >= 0.9, "SafeBase probe should have high confidence");
+
+        // Verify field mapping
+        assert_eq!(candidate.strategy.response_mapping.name_field, "company.name");
+        assert_eq!(candidate.strategy.response_mapping.url_field, Some("company.domain".to_string()));
+        assert_eq!(candidate.strategy.response_mapping.purpose_field, Some("purpose".to_string()));
+        assert_eq!(candidate.strategy.response_mapping.location_field, Some("location".to_string()));
+
+        // Verify slug extraction
+        assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
+    }
+
+    #[test]
+    fn test_probe_safebase_multi_product() {
+        // Multi-product SafeBase trust center
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"acme","name":"Acme","show":true,"order":1,
+                    "raw":{"spData":{"items":{
+                        "uid-1":{"listEntries":[
+                            {"company":{"name":"AWS","domain":"amazonaws.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"GCP","domain":"cloud.google.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"Stripe","domain":"stripe.com"},"purpose":"Pay","location":"US"}
+                        ]}
+                    }}}
+                },
+                "product1":{
+                    "id":"product1","slug":"safebase","name":"SafeBase","show":true,"order":2,
+                    "raw":{"spData":{"items":{
+                        "uid-2":{"listEntries":[
+                            {"company":{"name":"Okta","domain":"okta.com"},"purpose":"Auth","location":"US"},
+                            {"company":{"name":"Snowflake","domain":"snowflake.com"},"purpose":"Data","location":"US"},
+                            {"company":{"name":"Twilio","domain":"twilio.com"},"purpose":"Comms","location":"US"}
+                        ]}
+                    }}}
+                },
+                "hidden_product":{
+                    "id":"hidden","slug":"internal","name":"Internal","show":false,"order":3,
+                    "raw":{"spData":{"items":{
+                        "uid-3":{"listEntries":[
+                            {"company":{"name":"Secret","domain":"secret.com"},"purpose":"Internal","location":"US"},
+                            {"company":{"name":"Hidden","domain":"hidden.com"},"purpose":"Internal","location":"US"},
+                            {"company":{"name":"Private","domain":"private.com"},"purpose":"Internal","location":"US"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+
+        // Should find 2 products (not the hidden one)
+        assert_eq!(candidates.len(), 2, "Should find subprocessors from 2 visible products");
+        assert_eq!(candidates[0].item_count, 3);
+        assert_eq!(candidates[1].item_count, 3);
+    }
+
+    #[test]
+    fn test_probe_safebase_skips_non_safebase() {
+        // Regular Next.js page without __SB_CONFIG__
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"data":[
+                {"name":"AWS","url":"https://aws.amazon.com"}
+            ]}}}
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty(), "Should not detect SafeBase on non-SafeBase pages");
+    }
+
+    #[test]
+    fn test_probe_safebase_skips_entries_without_company() {
+        // SafeBase page with non-subprocessor list entries (no company.name)
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"acme","name":"Acme","show":true,"order":1,
+                    "raw":{"spData":{"items":{
+                        "trusted-by":{"listEntries":[
+                            {"name":"Customer A","logo":"a.png"},
+                            {"name":"Customer B","logo":"b.png"},
+                            {"name":"Customer C","logo":"c.png"},
+                            {"name":"Customer D","logo":"d.png"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty(), "Should not detect entries without company.name as subprocessors");
+    }
+
+    #[test]
+    fn test_probe_conveyor_detects_trust_center() {
+        let html = r#"<html><body>
+            <script>
+            window.CANONICAL_ASSET = {"id":"abc-123","slug":"acme","name":"Acme Inc."};
+            window.VENDOR_REPORT = {"_embedded":{"subprocessors":[
+                {"id":"s1","canonical_asset_id":"ca1","description":"Cloud","data_locations":["US"]},
+                {"id":"s2","canonical_asset_id":"ca2","description":"CDN","data_locations":["US"]},
+                {"id":"s3","canonical_asset_id":"ca3","description":"Monitoring","data_locations":["US"]},
+                {"id":"s4","canonical_asset_id":"ca4","description":"Auth","data_locations":["US"]}
+            ],"canonical_assets":[
+                {"id":"ca1","name":"AWS","website":"https://aws.amazon.com"},
+                {"id":"ca2","name":"Cloudflare","website":"https://cloudflare.com"},
+                {"id":"ca3","name":"Datadog","website":"https://datadoghq.com"},
+                {"id":"ca4","name":"Okta","website":"https://okta.com"}
+            ]}};
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_conveyor(html, &mut candidates);
+
+        assert_eq!(candidates.len(), 1, "Should find one Conveyor trust center");
+        let candidate = &candidates[0];
+        assert_eq!(candidate.item_count, 4);
+        assert!(candidate.score >= 0.9, "Conveyor probe should have high confidence");
+
+        // Verify slug extraction
+        assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
+
+        // Verify API URL contains slug
+        assert!(candidate.strategy.endpoint.url.contains("slug=acme"));
+
+        // Verify it's a RestApi strategy
+        match &candidate.strategy.strategy_type {
+            StrategyType::RestApi { method, .. } => assert_eq!(method, "GET"),
+            _ => panic!("Expected RestApi strategy"),
+        }
+    }
+
+    #[test]
+    fn test_probe_conveyor_skips_non_conveyor() {
+        let html = r#"<html><body>
+            <script>
+            window.APP_CONFIG = {"key": "value"};
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_conveyor(html, &mut candidates);
+        assert!(candidates.is_empty(), "Should not detect Conveyor on non-Conveyor pages");
+    }
+
+    #[test]
+    fn test_probe_conveyor_handles_missing_slug() {
+        // Conveyor page without CANONICAL_ASSET (should still detect but with empty URL)
+        let html = r#"<html><body>
+            <script>
+            window.VENDOR_REPORT = {"_embedded":{"subprocessors":[
+                {"id":"s1","canonical_asset_id":"ca1","description":"Cloud","data_locations":["US"]},
+                {"id":"s2","canonical_asset_id":"ca2","description":"CDN","data_locations":["US"]},
+                {"id":"s3","canonical_asset_id":"ca3","description":"Monitoring","data_locations":["US"]}
+            ],"canonical_assets":[
+                {"id":"ca1","name":"AWS","website":"https://aws.amazon.com"},
+                {"id":"ca2","name":"Cloudflare","website":"https://cloudflare.com"},
+                {"id":"ca3","name":"Datadog","website":"https://datadoghq.com"}
+            ]}};
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_conveyor(html, &mut candidates);
+
+        assert_eq!(candidates.len(), 1, "Should detect Conveyor even without slug");
+        assert_eq!(candidates[0].strategy.endpoint.slug, None);
+        assert!(candidates[0].strategy.endpoint.url.is_empty(), "URL should be empty without slug");
+    }
+
+    #[test]
+    fn test_probe_conveyor_skips_few_subprocessors() {
+        // Conveyor page with too few subprocessors
+        let html = r#"<html><body>
+            <script>
+            window.VENDOR_REPORT = {"_embedded":{"subprocessors":[
+                {"id":"s1","canonical_asset_id":"ca1","description":"Cloud","data_locations":["US"]}
+            ],"canonical_assets":[
+                {"id":"ca1","name":"AWS","website":"https://aws.amazon.com"}
+            ]}};
+            </script></body></html>"#;
+
+        let mut candidates = Vec::new();
+        probe_conveyor(html, &mut candidates);
+        assert!(candidates.is_empty(), "Should skip Conveyor with < 3 subprocessors");
+    }
+
+    #[test]
+    fn test_extract_conveyor_slug() {
+        let html = r#"window.CANONICAL_ASSET = {"id":"abc","slug":"conveyor","name":"Conveyor Inc."};"#;
+        assert_eq!(extract_conveyor_slug(html), Some("conveyor".to_string()));
+
+        let html_no_slug = r#"window.APP_CONFIG = {"key":"value"};"#;
+        assert_eq!(extract_conveyor_slug(html_no_slug), None);
     }
 }

@@ -260,6 +260,13 @@ pub struct DiscoveryConfig {
     /// Timeout for CT log queries in seconds
     #[serde(default = "default_ct_timeout_secs")]
     pub ct_timeout_secs: u64,
+    /// Enable Web Traffic & Components discovery
+    /// Analyzes page source HTML and runtime network traffic for external vendor domains
+    #[serde(default = "default_web_traffic_enabled")]
+    pub web_traffic_enabled: bool,
+    /// Timeout for web traffic page fetch in seconds
+    #[serde(default = "default_web_traffic_timeout_secs")]
+    pub web_traffic_timeout_secs: u64,
     /// Enable web page analysis for organization name extraction
     /// When enabled, fetches homepage to extract org name from meta tags, Schema.org, etc.
     #[serde(default = "default_web_org_enabled")]
@@ -328,6 +335,14 @@ fn default_ct_timeout_secs() -> u64 {
     30
 }
 
+fn default_web_traffic_enabled() -> bool {
+    true
+}
+
+fn default_web_traffic_timeout_secs() -> u64 {
+    15
+}
+
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
@@ -340,6 +355,8 @@ impl Default for DiscoveryConfig {
             tenant_probe_concurrency: default_tenant_probe_concurrency(),
             ct_discovery_enabled: false,
             ct_timeout_secs: default_ct_timeout_secs(),
+            web_traffic_enabled: default_web_traffic_enabled(),
+            web_traffic_timeout_secs: default_web_traffic_timeout_secs(),
             web_org_enabled: default_web_org_enabled(),
             web_org_timeout_secs: default_web_org_timeout_secs(),
             web_org_min_confidence: default_web_org_min_confidence(),

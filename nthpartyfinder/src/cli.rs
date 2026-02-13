@@ -78,6 +78,14 @@ pub struct Cli {
     #[arg(long)]
     pub disable_ct_discovery: bool,
 
+    /// Enable Web Traffic & Components discovery (analyzes page source and runtime network traffic)
+    #[arg(long)]
+    pub enable_web_traffic_discovery: bool,
+
+    /// Disable Web Traffic & Components discovery (overrides config)
+    #[arg(long)]
+    pub disable_web_traffic_discovery: bool,
+
     /// Path to subfinder binary
     #[arg(long)]
     pub subfinder_path: Option<String>,
@@ -226,6 +234,8 @@ pub struct Args {
     pub disable_saas_tenant_discovery: bool,
     pub enable_ct_discovery: bool,
     pub disable_ct_discovery: bool,
+    pub enable_web_traffic_discovery: bool,
+    pub disable_web_traffic_discovery: bool,
     pub subfinder_path: Option<String>,
     pub parallel_discovery: bool,
     pub log_file: Option<String>,
@@ -268,6 +278,8 @@ impl From<&Cli> for Args {
             disable_saas_tenant_discovery: cli.disable_saas_tenant_discovery,
             enable_ct_discovery: cli.enable_ct_discovery,
             disable_ct_discovery: cli.disable_ct_discovery,
+            enable_web_traffic_discovery: cli.enable_web_traffic_discovery,
+            disable_web_traffic_discovery: cli.disable_web_traffic_discovery,
             subfinder_path: cli.subfinder_path.clone(),
             parallel_discovery: cli.parallel_discovery,
             log_file: cli.log_file.clone(),

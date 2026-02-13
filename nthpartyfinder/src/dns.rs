@@ -762,6 +762,99 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
     if domains.is_empty() { None } else { Some(domains) }
 }
 
+/// Recursively resolve SPF include chains to discover nested mail sender domains.
+/// Many organizations use hosted SPF services (e.g., EasyDMARC, Cloudflare) that delegate
+/// their SPF records through multiple levels of `include:` directives. This function follows
+/// those chains to discover the actual mail service providers hidden behind the delegation.
+///
+/// Respects RFC 7208's 10 DNS-querying mechanism limit to avoid excessive lookups.
+pub async fn resolve_spf_includes_recursive(
+    txt_records: &[String],
+    dns_pool: &DnsServerPool,
+    source_domain: &str,
+) -> Vec<VendorDomain> {
+    let mut all_domains = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut to_resolve: Vec<String> = Vec::new();
+    let mut lookup_count: usize = 0;
+    const MAX_SPF_LOOKUPS: usize = 10;
+
+    // Find SPF records in the initial TXT records and extract include/redirect/exists targets
+    for record in txt_records {
+        let record_clean = unescape_dns_txt(record.trim_matches('"'));
+        let record_lower = record_clean.to_lowercase();
+        if !record_lower.starts_with("v=spf1") {
+            continue;
+        }
+        collect_spf_targets(&record_lower, &mut to_resolve, &mut visited);
+    }
+
+    // Iteratively resolve include targets (BFS to stay within lookup limit)
+    while let Some(target) = to_resolve.pop() {
+        if lookup_count >= MAX_SPF_LOOKUPS {
+            debug!("SPF recursive resolution hit {}-lookup limit for {}", MAX_SPF_LOOKUPS, source_domain);
+            break;
+        }
+        lookup_count += 1;
+
+        match get_txt_records_with_pool(&target, dns_pool).await {
+            Ok(nested_records) => {
+                for record in &nested_records {
+                    let record_clean = unescape_dns_txt(record.trim_matches('"'));
+                    let record_lower = record_clean.to_lowercase();
+                    if !record_lower.starts_with("v=spf1") {
+                        continue;
+                    }
+
+                    // Extract vendor domains from this nested SPF record
+                    if let Some(domains) = extract_from_spf_record(
+                        &record_clean, None, source_domain, record,
+                    ) {
+                        all_domains.extend(domains);
+                    }
+
+                    // Collect more targets to resolve
+                    collect_spf_targets(&record_lower, &mut to_resolve, &mut visited);
+                }
+            }
+            Err(e) => {
+                debug!("SPF recursive resolution failed for {}: {}", target, e);
+            }
+        }
+    }
+
+    if !all_domains.is_empty() {
+        debug!(
+            "SPF recursive resolution for {} found {} additional vendor domains across {} lookups",
+            source_domain, all_domains.len(), lookup_count
+        );
+    }
+
+    all_domains
+}
+
+/// Extract SPF include/redirect targets from a lowercased SPF record for recursive resolution.
+/// Note: `exists:` targets are NOT included here because they are macro-expanded IP-check
+/// mechanisms, not SPF delegation. Domain extraction from `exists:` is already handled by
+/// `extract_from_spf_record`.
+fn collect_spf_targets(record_lower: &str, to_resolve: &mut Vec<String>, visited: &mut HashSet<String>) {
+    let target_regexes: &[&Lazy<Regex>] = &[
+        &SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX,
+    ];
+    for re in target_regexes {
+        for cap in re.captures_iter(record_lower) {
+            if let Some(m) = cap.get(1) {
+                let raw_target = m.as_str();
+                // Strip SPF macros (e.g., %{i}._spf.mta.salesforce.com -> _spf.mta.salesforce.com)
+                let cleaned = strip_spf_macros(raw_target);
+                if is_valid_domain(&cleaned) && visited.insert(cleaned.clone()) {
+                    to_resolve.push(cleaned);
+                }
+            }
+        }
+    }
+}
+
 fn extract_from_dkim_record(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
     if !record.contains("k=rsa") && !record.contains("k=ed25519") {
         return None;

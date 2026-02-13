@@ -38,6 +38,10 @@ pub enum RecordType {
     // Trust Center API extraction
     TrustCenterApi,      // TRUST_CENTER::API
 
+    // Webpage discovery
+    WebTrafficSource,    // DISCOVERY::WEBPAGE_SOURCE (static HTML analysis)
+    WebTrafficNetwork,   // DISCOVERY::WEBPAGE_NETWORK (runtime network requests)
+
     // Unknown/Other
     Unknown,             // UNKNOWN
 }
@@ -71,6 +75,8 @@ impl RecordType {
             RecordType::SaasTenantProbe => "DISCOVERY::SAAS_TENANT".to_string(),
             RecordType::CtLogDiscovery => "DISCOVERY::CT_LOG".to_string(),
             RecordType::TrustCenterApi => "TRUST_CENTER::API".to_string(),
+            RecordType::WebTrafficSource => "DISCOVERY::WEBPAGE_SOURCE".to_string(),
+            RecordType::WebTrafficNetwork => "DISCOVERY::WEBPAGE_NETWORK".to_string(),
             RecordType::Unknown => "UNKNOWN".to_string(),
         }
     }
@@ -91,7 +97,8 @@ impl RecordType {
             RecordType::HttpWellKnown | RecordType::HttpMeta | RecordType::HttpFile | RecordType::HttpSubprocessor => "HTTP Verification",
             RecordType::CertDomain | RecordType::CertSan => "Certificate Authority",
             RecordType::ApiEndpoint | RecordType::ApiWebhook => "API Integration",
-            RecordType::SubfinderDiscovery | RecordType::SaasTenantProbe | RecordType::CtLogDiscovery => "Discovery",
+            RecordType::SubfinderDiscovery | RecordType::SaasTenantProbe | RecordType::CtLogDiscovery
+            | RecordType::WebTrafficSource | RecordType::WebTrafficNetwork => "Discovery",
             RecordType::TrustCenterApi => "Trust Center",
             RecordType::Unknown => "Other",
         }
@@ -109,6 +116,8 @@ impl RecordType {
             RecordType::DnsTxtSpf => 6,
             RecordType::DnsTxtDmarc => 5,
             RecordType::DnsTxtDkim => 5,
+            RecordType::WebTrafficNetwork => 5,  // Runtime network request is strong evidence
+            RecordType::WebTrafficSource => 4,   // Static webpage source reference
             RecordType::SubfinderDiscovery => 4,
             RecordType::CtLogDiscovery => 3,
             RecordType::DnsSubdomain | RecordType::DnsMx | RecordType::DnsA | RecordType::DnsAaaa => 2,
@@ -141,6 +150,8 @@ impl RecordType {
             RecordType::SaasTenantProbe => "SaaS tenant probe discovery",
             RecordType::CtLogDiscovery => "Certificate Transparency log discovery",
             RecordType::TrustCenterApi => "Trust center API extraction",
+            RecordType::WebTrafficSource => "External resource referenced in webpage source",
+            RecordType::WebTrafficNetwork => "Runtime network request from webpage to external domain",
             RecordType::Unknown => "Unknown or unclassified record type",
         }
     }

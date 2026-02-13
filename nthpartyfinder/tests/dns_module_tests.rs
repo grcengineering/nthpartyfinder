@@ -683,3 +683,52 @@ async fn test_dns_timeout_handling() {
     // Use a firewall to drop packets to specific DNS servers
     // Verify timeout handling works correctly
 }
+
+// ============================================================================
+// RECURSIVE SPF RESOLUTION TESTS
+// ============================================================================
+
+#[test]
+fn test_spf_hosted_service_extraction() {
+    // Simulate an EasyDMARC-style hosted SPF record where the actual mail senders
+    // are hidden behind nested include chains. The top-level SPF only has:
+    //   v=spf1 include:_spf.example_com._d.easydmarc.pro ~all
+    // Without recursive resolution, only easydmarc.pro is extracted.
+    let records = vec!["v=spf1 include:_spf.example_com._d.easydmarc.pro ~all".to_string()];
+    let results = dns::extract_vendor_domains_with_source(&records);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].domain, "easydmarc.pro");
+    assert!(matches!(results[0].source_type, RecordType::DnsTxtSpf));
+}
+
+#[test]
+fn test_spf_nested_exists_extracts_domain() {
+    // The exists: mechanism should extract the base domain for vendor identification
+    // even though recursive resolution won't follow it as an include target.
+    let records = vec![
+        "v=spf1 ip4:1.2.3.0/24 exists:%{i}._spf.mta.salesforce.com include:_spf1.example._d.easydmarc.pro ~all".to_string()
+    ];
+    let results = dns::extract_vendor_domains_with_source(&records);
+
+    let domains: Vec<&str> = results.iter().map(|d| d.domain.as_str()).collect();
+    assert!(domains.contains(&"salesforce.com"), "Should extract salesforce.com from exists: mechanism, got: {:?}", domains);
+    assert!(domains.contains(&"easydmarc.pro"), "Should extract easydmarc.pro from include: mechanism, got: {:?}", domains);
+}
+
+#[tokio::test]
+async fn test_spf_recursive_with_empty_records() {
+    // Recursive resolution on non-SPF records should return empty
+    let pool = DnsServerPool::new();
+    let records = vec!["some-non-spf-record=value".to_string()];
+    let results = dns::resolve_spf_includes_recursive(&records, &pool, "example.com").await;
+    assert!(results.is_empty(), "Non-SPF records should yield no recursive results");
+}
+
+#[tokio::test]
+async fn test_spf_recursive_with_no_includes() {
+    // SPF record with only ip4 ranges (no include/redirect) should produce no recursive results
+    let pool = DnsServerPool::new();
+    let records = vec!["v=spf1 ip4:1.2.3.0/24 ip4:5.6.7.0/24 ~all".to_string()];
+    let results = dns::resolve_spf_includes_recursive(&records, &pool, "example.com").await;
+    assert!(results.is_empty(), "SPF with only ip4 ranges should yield no recursive targets");
+}
