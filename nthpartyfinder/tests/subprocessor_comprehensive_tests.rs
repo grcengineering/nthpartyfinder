@@ -591,3 +591,250 @@ async fn test_summary_report() {
     println!("\n✓ All comprehensive tests defined and passing");
     println!("================================\n");
 }
+
+// ============================================================================
+// REGRESSION: Cache path isolation
+// ============================================================================
+
+/// Regression test: Different domains must map to different cache file paths.
+/// Previously, `get_cache_file_path` used `canonicalize()` which fails for
+/// non-existent files (returns relative path) while succeeding for the existing
+/// cache directory (returns absolute path). The `starts_with` check between
+/// relative and absolute paths always failed, routing ALL uncached domains
+/// to a shared `_invalid_domain_.json` file. This caused one domain's cached
+/// trust center strategy to be returned for every other domain.
+#[tokio::test]
+async fn test_cache_path_isolation_between_domains() {
+    let cache = SubprocessorCache::load().await;
+
+    let path_a = cache.get_cache_file_path("alpha.com");
+    let path_b = cache.get_cache_file_path("beta.com");
+    let path_c = cache.get_cache_file_path("gamma.io");
+
+    // Each domain MUST produce a unique cache path
+    assert_ne!(path_a, path_b, "Different domains must have different cache paths");
+    assert_ne!(path_a, path_c, "Different domains must have different cache paths");
+    assert_ne!(path_b, path_c, "Different domains must have different cache paths");
+
+    // No domain should resolve to _invalid_domain_.json
+    let _invalid = cache.get_cache_file_path("_invalid_domain_");
+    assert_ne!(path_a.file_name(), Some(std::ffi::OsStr::new("_invalid_domain_.json")),
+        "Valid domain must not resolve to _invalid_domain_.json");
+    assert_ne!(path_b.file_name(), Some(std::ffi::OsStr::new("_invalid_domain_.json")),
+        "Valid domain must not resolve to _invalid_domain_.json");
+
+    // Filenames should contain the sanitized domain
+    assert!(path_a.file_name().unwrap().to_str().unwrap().contains("alpha.com"),
+        "Cache path should contain domain name");
+    assert!(path_b.file_name().unwrap().to_str().unwrap().contains("beta.com"),
+        "Cache path should contain domain name");
+
+    println!("✓ Cache paths are properly isolated between domains");
+    println!("  alpha.com -> {:?}", path_a);
+    println!("  beta.com  -> {:?}", path_b);
+    println!("  gamma.io  -> {:?}", path_c);
+}
+
+/// Regression test: Path traversal attempts should be sanitized.
+#[tokio::test]
+async fn test_cache_path_traversal_prevention() {
+    let cache = SubprocessorCache::load().await;
+
+    // Domains with path traversal characters should be sanitized
+    let path_traversal = cache.get_cache_file_path("../../../etc/passwd");
+    let normal = cache.get_cache_file_path("example.com");
+
+    // Path traversal attempt should NOT escape the cache directory
+    let cache_dir = std::path::PathBuf::from("cache");
+    assert!(path_traversal.starts_with(&cache_dir),
+        "Path traversal attempt must stay within cache dir: {:?}", path_traversal);
+
+    // Must not produce the same path as a normal domain
+    assert_ne!(path_traversal, normal,
+        "Path traversal domain must not collide with normal domain");
+
+    println!("✓ Path traversal attempts are properly sanitized");
+    println!("  ../../../etc/passwd -> {:?}", path_traversal);
+}
+
+// ============================================================================
+// UTF-8 BOUNDARY REGRESSION TESTS
+// ============================================================================
+
+/// Regression test for UTF-8 char boundary panic in create_enhanced_evidence.
+/// Bug: &text[..200] panics when byte 200 falls inside a multi-byte UTF-8 character
+/// (e.g., right single quotation mark '\u{2019}' = 3 bytes).
+/// Fix: Walk backwards from byte 200 to find a valid char boundary using is_char_boundary().
+#[test]
+fn test_utf8_truncation_does_not_panic() {
+    // Simulate the exact truncation logic from create_enhanced_evidence
+    fn safe_truncate(text: &str, max_bytes: usize) -> String {
+        if text.len() > max_bytes {
+            let mut truncate_at = max_bytes;
+            while truncate_at > 0 && !text.is_char_boundary(truncate_at) {
+                truncate_at -= 1;
+            }
+            format!("{}...", &text[..truncate_at])
+        } else {
+            text.to_string()
+        }
+    }
+
+    // Case 1: Multi-byte char ('\u{2019}' = 3 bytes) at exactly position 198-200
+    // This was the real crash: Salesforce page text with right single quotation mark
+    let mut text_with_smart_quote = "A".repeat(198);
+    text_with_smart_quote.push('\u{2019}'); // right single quotation mark (3 bytes: E2 80 99)
+    text_with_smart_quote.push_str("more text after");
+    assert_eq!(text_with_smart_quote.len(), 198 + 3 + 15); // 216 bytes total
+    assert!(!text_with_smart_quote.is_char_boundary(200)); // byte 200 is inside the smart quote
+
+    let result = safe_truncate(&text_with_smart_quote, 200);
+    assert!(result.ends_with("..."));
+    assert!(result.len() <= 203); // 200 max + "..."
+    println!("✓ Smart quote at boundary: truncated safely to {} bytes", result.len());
+
+    // Case 2: All ASCII — should truncate at exactly byte 200
+    let ascii_text = "B".repeat(250);
+    let result = safe_truncate(&ascii_text, 200);
+    assert_eq!(result, format!("{}...", "B".repeat(200)));
+    println!("✓ ASCII text: truncated at exactly 200 bytes");
+
+    // Case 3: Text shorter than 200 — no truncation
+    let short_text = "Short text";
+    let result = safe_truncate(short_text, 200);
+    assert_eq!(result, "Short text");
+    println!("✓ Short text: no truncation");
+
+    // Case 4: Japanese text (3 bytes per char) — boundary must be respected
+    let japanese_text = "日本語テスト".repeat(20); // 6 chars * 3 bytes * 20 = 360 bytes
+    let result = safe_truncate(&japanese_text, 200);
+    assert!(result.ends_with("..."));
+    // Result text (excluding "...") must end on a valid char boundary
+    let content = &result[..result.len() - 3];
+    assert!(content.is_char_boundary(content.len()));
+    println!("✓ Japanese text: truncated safely at char boundary");
+
+    // Case 5: Emoji (4 bytes per char)
+    let emoji_text = "🔍".repeat(60); // 4 bytes * 60 = 240 bytes
+    let result = safe_truncate(&emoji_text, 200);
+    assert!(result.ends_with("..."));
+    let content = &result[..result.len() - 3];
+    assert!(content.is_char_boundary(content.len()));
+    println!("✓ Emoji text: truncated safely at char boundary");
+}
+
+// ============================================================================
+// NER FALSE POSITIVE FILTERING TESTS
+// ============================================================================
+
+#[test]
+fn test_ner_false_positive_language_codes_rejected() {
+    // ISO 639-1 language codes that NER misidentifies as organizations
+    // (found on internationalized Microsoft/Salesforce pages)
+    let language_codes = ["ar", "cs", "da", "de", "es", "fi", "fr", "he", "hu",
+                          "id", "it", "ja", "ko", "ms", "nl", "pl", "ru", "sv", "th", "tr"];
+    for code in &language_codes {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(code),
+            "Language code '{}' should be rejected as NER false positive", code);
+    }
+    println!("✓ All {} ISO 639-1 language codes rejected", language_codes.len());
+}
+
+#[test]
+fn test_ner_false_positive_locale_identifiers_rejected() {
+    // Locale identifiers from internationalized pages
+    let locales = ["en-us", "zh-hans", "zh-hant", "pt-br", "nb-no"];
+    for locale in &locales {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(locale),
+            "Locale '{}' should be rejected as NER false positive", locale);
+    }
+    println!("✓ All {} locale identifiers rejected", locales.len());
+}
+
+#[test]
+fn test_ner_false_positive_snake_case_field_names_rejected() {
+    // Snake_case identifiers from security questionnaire fields
+    let field_names = ["soc2_report", "penetration_testing", "encrypt_data",
+                       "enter_into_dpa", "sso_mfa", "live_status_page",
+                       "public_privacy_policy", "self_serve_security_docs",
+                       "bug_bounty_resp_disclosure", "integration_docs"];
+    for field in &field_names {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(field),
+            "Snake_case field '{}' should be rejected as NER false positive", field);
+    }
+    println!("✓ All {} snake_case field names rejected", field_names.len());
+}
+
+#[test]
+fn test_ner_false_positive_short_strings_rejected() {
+    // Very short strings that can't be real organization names
+    let short_strings = ["A", "B", "N", "ab", "xy"];
+    for s in &short_strings {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(s),
+            "Short string '{}' should be rejected as NER false positive", s);
+    }
+    println!("✓ All {} short strings rejected", short_strings.len());
+}
+
+#[test]
+fn test_ner_false_positive_real_orgs_accepted() {
+    // Real organization names that should NOT be rejected
+    let real_orgs = ["Google", "Microsoft", "Salesforce", "Amazon Web Services",
+                     "Cloudflare", "Stripe", "Ada Support", "Chronosphere",
+                     "Proofpoint", "ServiceNow", "Freshworks", "Red Sift"];
+    for org in &real_orgs {
+        assert!(!nthpartyfinder::subprocessor::is_ner_false_positive(org),
+            "Real organization '{}' should NOT be rejected", org);
+    }
+    println!("✓ All {} real organization names accepted", real_orgs.len());
+}
+
+#[tokio::test]
+async fn test_garbage_single_char_domains_rejected() {
+    // These are the exact garbage domains found in the depth-3 Klaviyo scan
+    // from Apple's subprocessor PDF text artifacts
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let garbage_domains = [
+        "b.mz", "e.zz", "n.ik", "j.os", "f.ff", "v.rr", "d.ed", "c.ib",
+        "j.ai", "j.xa", "k.ai", "k.mv", "l.cr", "p.pk", "w.gf", "g.yc",
+        "f.ed", "d.lr", "d.qd", "v.szd", "t.gcs", "t.nzx", "s.kuj",
+        "i.lsg", "y.dks", "z.hum", "a.ehsi", "xp.fh", "ic.xw", "ie.kpm",
+    ];
+    for domain in &garbage_domains {
+        assert!(!analyzer.is_valid_vendor_domain(domain),
+            "Garbage domain '{}' should be rejected by is_valid_vendor_domain", domain);
+    }
+    println!("✓ All {} garbage single/two-char domains rejected", garbage_domains.len());
+}
+
+#[tokio::test]
+async fn test_valid_short_domains_accepted() {
+    // Legitimate short domains that SHOULD pass validation
+    // Note: 2-char names like hp.com, fb.com are typically resolved through
+    // known vendor mappings, not the inference path that calls is_valid_vendor_domain.
+    // But 3-char names like aws.com, ibm.com, box.com MUST pass.
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let valid_domains = [
+        "aws.com", "ibm.com", "box.com", "duo.com", "ada.cx",
+        "google.com", "stripe.com", "zoom.us", "redis.io", "elastic.co",
+        "cloudflare.com", "datadoghq.com",
+    ];
+    for domain in &valid_domains {
+        assert!(analyzer.is_valid_vendor_domain(domain),
+            "Valid domain '{}' should be accepted by is_valid_vendor_domain", domain);
+    }
+    println!("✓ All {} valid domains accepted", valid_domains.len());
+}
+
+#[tokio::test]
+async fn test_placeholder_domains_rejected() {
+    // Placeholder text that gets converted to .com domains
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let placeholder_domains = ["n/a.com", "none.com", "na.com",
+                                "example.com", "test.com", "domain.com"];
+    for domain in &placeholder_domains {
+        assert!(!analyzer.is_valid_vendor_domain(domain),
+            "Placeholder domain '{}' should be rejected", domain);
+    }
+    println!("✓ All {} placeholder domains rejected", placeholder_domains.len());
+}

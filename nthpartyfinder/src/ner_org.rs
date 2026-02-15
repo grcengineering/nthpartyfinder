@@ -339,7 +339,7 @@ impl NerOrganizationExtractor {
                         let confidence = span.probability();
                         if confidence >= threshold {
                             let org_name = span.text().trim().to_string();
-                            if org_name.len() >= 2 {
+                            if org_name.len() >= 3 {
                                 let key = org_name.to_lowercase();
                                 let existing = all_orgs.get(&key);
                                 if existing.is_none() || existing.unwrap().confidence < confidence {

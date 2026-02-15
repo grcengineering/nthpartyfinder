@@ -513,7 +513,7 @@ impl SubprocessorCache {
     }
     
     /// Get cache file path for a specific domain
-    fn get_cache_file_path(&self, domain: &str) -> PathBuf {
+    pub fn get_cache_file_path(&self, domain: &str) -> PathBuf {
         // Sanitize domain for filesystem - prevent path traversal (M005 fix)
         let safe_domain: String = domain.chars()
             .map(|c| match c {
@@ -523,15 +523,11 @@ impl SubprocessorCache {
             .collect();
         // Ensure no path traversal via ".." sequences
         let safe_domain = safe_domain.replace("..", "_");
-        let path = self.cache_dir.join(format!("{}.json", safe_domain));
-        // Final check: ensure the resolved path is within cache_dir
-        if let (Ok(resolved), Ok(cache_dir)) = (path.canonicalize().or(Ok::<_, std::io::Error>(path.clone())), self.cache_dir.canonicalize().or(Ok::<_, std::io::Error>(self.cache_dir.clone()))) {
-            if !resolved.starts_with(&cache_dir) {
-                // Path traversal attempt detected - return a safe default
-                return self.cache_dir.join("_invalid_domain_.json");
-            }
+        // Validate that the sanitized domain doesn't produce an empty filename
+        if safe_domain.is_empty() || safe_domain == "." {
+            return self.cache_dir.join("_invalid_domain_.json");
         }
-        path
+        self.cache_dir.join(format!("{}.json", safe_domain))
     }
     
     /// Clear cache for a specific domain
@@ -865,10 +861,10 @@ impl SubprocessorAnalyzer {
                     let elapsed = request_start.elapsed();
                     debug!("Found {} subprocessors from URL: {}", subprocessors.len(), url);
                     if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("✅ HTTP request to {} completed in {:.2}s (found {} subprocessors)", 
+                        debug_logger.debug(&format!("✅ HTTP request to {} completed in {:.2}s (found {} subprocessors)",
                             url, elapsed.as_secs_f64(), subprocessors.len()));
                     }
-                    
+
                     // Cache successful URLs regardless of whether they return subprocessors
                     {
                         let cache = self.cache.read().await;
@@ -878,7 +874,7 @@ impl SubprocessorAnalyzer {
                             debug!("Successfully cached URL for {}: {} (found {} subprocessors)", domain, url, subprocessors.len());
                         }
                     }
-                    
+
                     if !subprocessors.is_empty() {
                         debug!("Found working subprocessor URL for {}: {} - stopping URL discovery", domain, url);
                         if let Some(debug_logger) = &debug_logger {
@@ -1911,6 +1907,12 @@ impl SubprocessorAnalyzer {
                                 let domain_parts: Vec<&str> = source_domain.split('.').collect();
                                 let domain_name = domain_parts.first().unwrap_or(&"");
                                 if org_lower == domain_name.to_lowercase() {
+                                    continue;
+                                }
+                                // Skip NER false positives: language codes, locale identifiers,
+                                // snake_case field names, and other non-organization patterns
+                                if is_ner_false_positive(&org.organization) {
+                                    debug!("Skipping NER false positive: '{}'", org.organization);
                                     continue;
                                 }
                                 vendors.push(SubprocessorDomain {
@@ -3124,15 +3126,11 @@ impl SubprocessorAnalyzer {
             ];
             
             if !navigation_terms.contains(&cleaned.as_str()) {
-                let potential_domains = [
-                    format!("{}.com", cleaned),
-                    format!("{}.io", cleaned),
-                    format!("{}.co", cleaned),
-                    format!("{}.org", cleaned),
-                ];
-                
-                // Return the first one (most common is .com)
-                return Some(potential_domains[0].clone());
+                let candidate = format!("{}.com", cleaned);
+                // Validate the inferred domain to prevent garbage like short-name FPs
+                if self.is_valid_vendor_domain(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
         
@@ -3852,27 +3850,39 @@ impl SubprocessorAnalyzer {
             "example.com", "example.org", "localhost", "127.0.0.1",
             "test.com", "domain.com", "yoursite.com", "website.com",
             "email.com", "mail.com", // Common placeholders
+            "n/a.com", "none.com", "na.com", // Placeholder text parsed as domains
         ];
-        
+
         // Check if domain is in invalid patterns
         if invalid_patterns.iter().any(|&pattern| domain == pattern) {
             return false;
         }
-        
+
         // Domain should have at least one dot and reasonable length
         // Also check that it has a valid TLD (at least 2 characters after the last dot)
         if !domain.contains('.') || domain.len() < 4 || domain.len() > 100 {
             return false;
         }
-        
+
         // Validate TLD exists and is reasonable
         if let Some(last_dot_pos) = domain.rfind('.') {
             let tld = &domain[last_dot_pos + 1..];
             if tld.len() < 2 || tld.len() > 10 || !tld.chars().all(|c| c.is_ascii_alphabetic()) {
                 return false;
             }
+
+            // Validate the domain label (part before TLD) is at least 3 characters
+            // This catches PDF extraction artifacts like b.mz, e.zz, n.ik, j.os, f.ff, v.rr
+            // from garbled PDF text (e.g., Apple's subprocessor PDF table formatting)
+            // Note: legitimate 2-char domains like hp.com or fb.com are handled via known
+            // vendor mappings which bypass this validation path
+            let label = &domain[..last_dot_pos];
+            let last_label = label.rsplit('.').next().unwrap_or(label);
+            if last_label.len() < 3 {
+                return false;
+            }
         }
-        
+
         true
     }
     
@@ -3882,9 +3892,13 @@ impl SubprocessorAnalyzer {
         let text = element.text().collect::<String>();
         let text = text.trim();
 
-        // Truncate to reasonable length
+        // Truncate to reasonable length (find valid char boundary to avoid panic on multi-byte UTF-8)
         let evidence_text = if text.len() > 200 {
-            format!("{}...", &text[..200])
+            let mut truncate_at = 200;
+            while truncate_at > 0 && !text.is_char_boundary(truncate_at) {
+                truncate_at -= 1;
+            }
+            format!("{}...", &text[..truncate_at])
         } else {
             text.to_string()
         };
@@ -4026,7 +4040,8 @@ impl SubprocessorAnalyzer {
         }
 
         // Also look for explicit domain mentions in the PDF content
-        let domain_regex = regex::Regex::new(r"\b([a-zA-Z]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,10}\b").ok();
+        // Require labels to be at least 3 chars to avoid PDF artifacts like b.mz, e.zz, n.ik
+        let domain_regex = regex::Regex::new(r"\b([a-zA-Z][a-zA-Z0-9\-]{2,61}\.)+[a-zA-Z]{2,10}\b").ok();
         if let Some(regex) = domain_regex {
             for capture in regex.captures_iter(pdf_content) {
                 if let Some(domain_match) = capture.get(0) {
@@ -4108,6 +4123,48 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
     debug_logger: &crate::logger::AnalysisLogger,
 ) -> Result<Vec<SubprocessorDomain>> {
     analyzer.analyze_domain_with_logging(domain, logger, Some(debug_logger)).await
+}
+
+/// Check if a NER-extracted organization name is a false positive.
+/// Returns true for patterns that are clearly not real organization names:
+/// - ISO 639 language codes (ar, cs, da, de, es, fi, fr, he, hu, id, it, ja, ko, ms, nl, pl, ru, sv, th, tr)
+/// - Locale identifiers (en-us, zh-hans, pt-br, nb-no)
+/// - Snake_case field/feature names (soc2_report, penetration_testing, encrypt_data)
+/// - Very short strings (< 3 chars)
+pub fn is_ner_false_positive(org_name: &str) -> bool {
+    let name = org_name.trim();
+    let lower = name.to_lowercase();
+
+    // Too short to be a real organization name
+    if name.len() < 3 {
+        return true;
+    }
+
+    // Snake_case identifiers are code/config field names, not organizations
+    if lower.contains('_') && lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return true;
+    }
+
+    // Locale/language identifiers (en-us, zh-hans, pt-br, nb-no)
+    if lower.len() <= 7 && lower.contains('-') && lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return true;
+    }
+
+    // ISO 639-1 language codes that NER misidentifies as organizations
+    // (commonly found on internationalized Microsoft/Salesforce pages)
+    let language_codes = [
+        "ar", "bg", "bn", "ca", "cs", "cy", "da", "de", "el", "en", "es", "et",
+        "eu", "fa", "fi", "fr", "ga", "gl", "gu", "he", "hi", "hr", "hu", "hy",
+        "id", "is", "it", "ja", "ka", "kk", "km", "kn", "ko", "lb", "lo", "lt",
+        "lv", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "no", "pa",
+        "pl", "ps", "pt", "ro", "ru", "si", "sk", "sl", "so", "sq", "sr", "sv",
+        "sw", "ta", "te", "th", "tl", "tr", "uk", "ur", "uz", "vi", "zh",
+    ];
+    if language_codes.contains(&lower.as_str()) {
+        return true;
+    }
+
+    false
 }
 
 /// Extract visible text content from HTML, stripping tags and scripts.

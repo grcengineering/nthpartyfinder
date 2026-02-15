@@ -141,6 +141,11 @@ pub struct Cli {
     #[arg(long, value_name = "CONCURRENCY")]
     pub whois_concurrency: Option<usize>,
 
+    /// Analysis timeout in seconds (default: 600). Use 0 for no timeout.
+    /// Overrides NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+
     /// Auto-resume from checkpoint if one exists (skip resume prompt)
     #[arg(long, conflicts_with = "no_resume")]
     pub resume: bool,
@@ -249,6 +254,7 @@ pub struct Args {
     pub backoff_strategy: Option<String>,
     pub max_retries: Option<u32>,
     pub whois_concurrency: Option<usize>,
+    pub timeout: Option<u64>,
     pub resume: bool,
     pub no_resume: bool,
     // Batch options
@@ -293,6 +299,7 @@ impl From<&Cli> for Args {
             backoff_strategy: cli.backoff_strategy.clone(),
             max_retries: cli.max_retries,
             whois_concurrency: cli.whois_concurrency,
+            timeout: cli.timeout,
             resume: cli.resume,
             no_resume: cli.no_resume,
             input_file: cli.input_file.clone(),

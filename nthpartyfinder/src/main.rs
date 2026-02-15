@@ -859,12 +859,19 @@ async fn main() -> Result<()> {
     logger.start_scan_progress(100).await;
 
     // R004 fix: global analysis timeout prevents indefinite hangs (e.g., vanta.com case).
-    // Default 10 minutes, configurable via NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
-    let analysis_timeout_secs: u64 = std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(600);
-    let analysis_timeout = std::time::Duration::from_secs(analysis_timeout_secs);
+    // Priority: --timeout CLI flag > NTHPARTY_ANALYSIS_TIMEOUT_SECS env var > default 600s.
+    // Use --timeout 0 to disable the timeout entirely.
+    let analysis_timeout_secs: u64 = args.timeout.unwrap_or_else(|| {
+        std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600)
+    });
+    let analysis_timeout = if analysis_timeout_secs == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(analysis_timeout_secs))
+    };
 
     let analysis_future = discover_nth_parties(
         domain,
@@ -893,27 +900,32 @@ async fn main() -> Result<()> {
         &output_dir_for_checkpoint,
     );
 
-    let new_results = match tokio::time::timeout(analysis_timeout, analysis_future).await {
-        Ok(result) => result?,
-        Err(_) => {
-            logger.warn(&format!(
-                "Analysis timed out after {} seconds. Saving checkpoint with partial results.",
-                analysis_timeout_secs
-            ));
-            // Save checkpoint before exiting so progress is preserved
-            {
-                let cp = checkpoint.lock().await;
-                if let Err(e) = cp.save(Path::new(&output_dir)) {
-                    logger.warn(&format!("Failed to save checkpoint on timeout: {}", e));
+    let new_results = if let Some(timeout_duration) = analysis_timeout {
+        match tokio::time::timeout(timeout_duration, analysis_future).await {
+            Ok(result) => result?,
+            Err(_) => {
+                logger.warn(&format!(
+                    "Analysis timed out after {} seconds. Saving checkpoint with partial results.",
+                    analysis_timeout_secs
+                ));
+                // Save checkpoint before exiting so progress is preserved
+                {
+                    let cp = checkpoint.lock().await;
+                    if let Err(e) = cp.save(Path::new(&output_dir)) {
+                        logger.warn(&format!("Failed to save checkpoint on timeout: {}", e));
+                    }
                 }
+                logger.finish_progress("Analysis timed out - partial results saved").await;
+                eprintln!();
+                eprintln!("Analysis exceeded the {} second timeout.", analysis_timeout_secs);
+                eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
+                eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
+                std::process::exit(1);
             }
-            logger.finish_progress("Analysis timed out - partial results saved").await;
-            eprintln!();
-            eprintln!("Analysis exceeded the {} second timeout.", analysis_timeout_secs);
-            eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
-            eprintln!("To increase the timeout: export NTHPARTY_ANALYSIS_TIMEOUT_SECS=1200");
-            std::process::exit(1);
         }
+    } else {
+        // No timeout — run to completion
+        analysis_future.await?
     };
 
     // Check if interrupted - save checkpoint and exit
