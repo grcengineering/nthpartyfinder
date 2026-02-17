@@ -64,8 +64,6 @@ async fn main() -> Result<()> {
     eprintln!("  Parsing arguments...");
 
     let cli = Cli::parse();
-    eprintln!("  Loading configuration...");
-
     // Handle cache subcommand first (before any other processing)
     if let Some(Commands::Cache { action }) = &cli.command {
         match action {
@@ -111,19 +109,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initialize logging system early so init progress bar can start immediately
-    eprintln!("  Starting logger...");
-    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
-    let logger = Arc::new(match &args.log_file {
-        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
-        None => AnalysisLogger::new(verbosity),
-    });
-
-    // Start initialization progress bar (6 steps: config, NER spawn, vendor registry,
-    // known vendors, org normalizer, feature detection)
-    logger.start_init_progress(6).await;
-
-    // Step 1: Load configuration
+    // Load configuration BEFORE starting the progress bar.
+    // Config loading may trigger an interactive prompt (e.g., "Create default config?")
+    // which would be hidden by the progress bar's steady-tick redraws.
+    eprintln!("  Loading configuration...");
     let _app_config = match AppConfig::load() {
         Ok(cfg) => cfg,
         Err(config::ConfigError::FileNotFound(path)) => {
@@ -150,9 +139,20 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
-    logger.complete_init_step("Configuration loaded").await;
 
-    // Step 2: Spawn NER initialization in background (takes ~0.8s)
+    // Initialize logging system — safe to start now that all interactive prompts are done
+    eprintln!("  Starting logger...");
+    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
+    let logger = Arc::new(match &args.log_file {
+        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
+        None => AnalysisLogger::new(verbosity),
+    });
+
+    // Start initialization progress bar (5 steps: NER spawn, vendor registry,
+    // known vendors, org normalizer, feature detection)
+    logger.start_init_progress(5).await;
+
+    // Step 1: Spawn NER initialization in background (takes ~0.8s)
     // This runs concurrently with vendor_registry and known_vendors init below
     #[cfg(feature = "embedded-ner")]
     let ner_bg_handle = if !args.disable_slm {
@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("NER not compiled in").await;
     }
 
-    // Step 3: Initialize vendor registry (consolidated vendor JSON files)
+    // Step 2: Initialize vendor registry (consolidated vendor JSON files)
     let vendor_registry_loaded = match vendor_registry::init() {
         Ok(()) => {
             if let Some(reg) = vendor_registry::get() {
@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Vendor registry (fallback mode)").await;
     }
 
-    // Step 4: Initialize known vendors database for reliable org lookups
+    // Step 3: Initialize known vendors database for reliable org lookups
     let known_vendors_loaded = match known_vendors::init() {
         Ok(()) => {
             if let Some(kv) = known_vendors::get() {
@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Known vendors database (not available)").await;
     }
 
-    // Step 5: Initialize organization name normalizer from config (global singleton)
+    // Step 4: Initialize organization name normalizer from config (global singleton)
     org_normalizer::init(&_app_config.organization);
     if org_normalizer::is_enabled() {
         logger.complete_init_step(&format!("Organization normalizer (threshold: {:.0}%)",
@@ -228,7 +228,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Organization normalizer (disabled)").await;
     }
 
-    // Step 6: Feature detection
+    // Step 5: Feature detection
     let web_org_will_be_enabled = args.enable_web_org
         || (!args.disable_web_org && _app_config.discovery.web_org_enabled);
     let subprocessor_will_be_enabled = args.enable_subprocessor_analysis
