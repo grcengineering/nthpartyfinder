@@ -2769,8 +2769,15 @@ impl SubprocessorAnalyzer {
                         
                         // Get the entity name from the identified column
                         if let Some(entity_cell) = cells.get(entity_name_column) {
-                            let cell_text = entity_cell.text().collect::<String>();
-                            debug!("🔍 Processing entity cell from column {}: '{}'", entity_name_column, cell_text.trim());
+                            // Join text nodes with newlines so <br>-separated content is
+                            // split into separate lines for individual processing instead
+                            // of concatenating into one long string
+                            let cell_text: String = entity_cell.text()
+                                .map(|t| t.trim())
+                                .filter(|t| !t.is_empty())
+                                .collect::<Vec<&str>>()
+                                .join("\n");
+                            debug!("🔍 Processing entity cell from column {}: '{}'", entity_name_column, cell_text.replace('\n', " | "));
                             
                             // Handle complex cells that might contain multiple lines or additional info
                             let lines: Vec<&str> = cell_text.lines().collect();
@@ -2780,8 +2787,9 @@ impl SubprocessorAnalyzer {
                             for (i, line) in lines.iter().enumerate() {
                                 let line_text = line.trim();
                                 
-                                // Skip empty lines or lines that are too short
-                                if line_text.is_empty() || line_text.len() < 3 {
+                                // Skip empty lines, lines that are too short, or lines that
+                                // are unreasonably long (likely concatenated row content)
+                                if line_text.is_empty() || line_text.len() < 3 || line_text.len() > 80 {
                                     continue;
                                 }
                                 
@@ -3028,18 +3036,28 @@ impl SubprocessorAnalyzer {
     
     /// Map organization names to their likely domain names for subprocessor extraction
     fn map_organization_to_domain(&self, org_name: &str) -> Option<String> {
-        let cleaned = org_name
-            .replace(",", "")
-            .replace(".", "")
-            .replace(" inc", "")
-            .replace(" llc", "")
-            .replace(" ltd", "")
-            .replace(" corp", "")
-            .replace(" corporation", "")
-            .replace(" company", "")
-            .replace(" co", "")
-            .trim()
-            .to_lowercase();
+        let trimmed = org_name.trim();
+
+        // If the input already looks like a domain (e.g., "facebook.com"), extract it
+        // directly instead of stripping dots and producing garbage like "facebookcom.com"
+        if let Some(domain) = self.extract_direct_domain_from_text(trimmed) {
+            if self.is_valid_vendor_domain(&domain) {
+                return Some(domain);
+            }
+        }
+
+        // Use regex for word-boundary-aware suffix removal to avoid truncating
+        // words like "Communications" when removing " co" or "Company" when removing " co"
+        let suffix_regex = regex::Regex::new(
+            r"(?i),?\s*\b(inc\.?|llc\.?|ltd\.?|l\.?p\.?|corp\.?|corporation|company|co\.?)$"
+        ).ok();
+        let cleaned_str = trimmed.replace(",", "").replace(".", "");
+        let cleaned = if let Some(ref re) = suffix_regex {
+            re.replace_all(&cleaned_str, "").trim().to_lowercase()
+        } else {
+            cleaned_str.trim().to_lowercase().into()
+        };
+        let cleaned = cleaned.to_string();
         
         // Common organization to domain mappings for tech/SaaS companies
         let mappings = [
@@ -3105,6 +3123,22 @@ impl SubprocessorAnalyzer {
         // Only try to infer domains for well-known organization names
         // Removed automatic domain inference to prevent false positives from navigation links
         if cleaned.len() > 2 && !cleaned.contains(" ") {
+            // Reject cookie/tracker identifiers: strings with underscores, leading underscores,
+            // or hash/numeric suffixes that indicate tracking cookies (e.g., __cf_bm, _gcl_au,
+            // visitor_id, lpv#######, _tq_idtv-#########)
+            if cleaned.contains('_') || cleaned.contains('#') || cleaned.starts_with('-') {
+                debug!("Skipping cookie/tracker-like identifier: {}", cleaned);
+                return None;
+            }
+
+            // Reject hyphenated tracker IDs (e.g., sa-user-id-v2, sa-u-date, sa-u-source)
+            // Real company names rarely have 3+ hyphen-separated segments
+            let hyphen_segments: Vec<&str> = cleaned.split('-').collect();
+            if hyphen_segments.len() >= 3 {
+                debug!("Skipping hyphenated tracker-like identifier: {}", cleaned);
+                return None;
+            }
+
             // Only infer domains for organization names that are likely actual companies
             // and not navigation terms like "home", "community", "enterprise", etc.
             let navigation_terms = [
@@ -3137,6 +3171,26 @@ impl SubprocessorAnalyzer {
                 "consulting", "group", "partners", "international", "global",
                 "corporation", "limited", "holdings", "ventures", "capital",
                 "enterprises", "associates", "industries", "incorporated",
+                // Plurals and additional generic terms missed by singular forms
+                "platforms", "applications", "products", "features", "tools",
+                "operations", "commerce", "corporate", "labs", "identifiers",
+                "realtime", "engineering", "science", "networks", "digital",
+                "storage", "hosting", "infrastructure", "intelligence",
+                "processing", "connectors", "middleware", "optimization",
+                "delivery", "distribution", "logistics", "manufacturing",
+                "healthcare", "financial", "insurance", "banking", "retail",
+                "automotive", "aerospace", "defense", "energy", "utilities",
+                "telecom", "telecommunications", "wireless", "broadband",
+                "provider", "providers", "vendor", "vendors", "supplier",
+                "suppliers", "customer", "customers", "client", "clients",
+                "overview", "summary", "description", "purpose", "function",
+                "category", "categories", "type", "types", "status", "location",
+                "region", "country", "state", "city", "address",
+                // Common cookie/consent management names that bypass underscore check
+                "optanonalertboxclosed", "optanonconsent", "optanonactivegrps",
+                "bscookie", "lidc", "ysc", "pardot",
+                "usermatchhistory", "analyticssynchistory",
+                "inferences", "slugid", "domainid",
                 // Country/region names that shouldn't be converted to domains
                 "japan", "ireland", "israel", "korea", "canada", "australia",
                 "germany", "france", "spain", "italy", "netherlands", "belgium",
@@ -3878,7 +3932,14 @@ impl SubprocessorAnalyzer {
             "test.com", "domain.com", "yoursite.com", "website.com",
             "email.com", "mail.com", // Common placeholders
             "n/a.com", "none.com", "na.com", // Placeholder text parsed as domains
+            "over.com", // Generic word false positive
         ];
+
+        // Reject domains that start with underscores or hyphens (cookie/tracker IDs)
+        let label = domain.split('.').next().unwrap_or("");
+        if label.starts_with('_') || label.starts_with('-') || label.contains("__") {
+            return false;
+        }
 
         // Check if domain is in invalid patterns
         if invalid_patterns.iter().any(|&pattern| domain == pattern) {
