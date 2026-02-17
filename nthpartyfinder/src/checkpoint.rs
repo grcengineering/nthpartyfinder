@@ -10,13 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::vendor::VendorRelationship;
-
 /// Checkpoint file name - hidden file to avoid cluttering output directory
 pub const CHECKPOINT_FILENAME: &str = ".nthpartyfinder-checkpoint.json";
 
 /// Current checkpoint format version - bump when making breaking changes
-pub const CHECKPOINT_VERSION: u32 = 1;
+pub const CHECKPOINT_VERSION: u32 = 2;
 
 /// Analysis checkpoint containing all state needed to resume an interrupted analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,8 +46,12 @@ pub struct Checkpoint {
     /// Discovered vendor domain -> organization name mappings
     pub discovered_vendors: HashMap<String, String>,
 
-    /// Partial results collected so far
-    pub partial_results: Vec<VendorRelationship>,
+    /// Number of results written to disk so far
+    pub results_count: usize,
+
+    /// Path to the disk-backed results file (zstd-compressed JSONL)
+    #[serde(default)]
+    pub results_file: String,
 
     /// Analysis settings hash to verify same settings on resume
     pub settings_hash: String,
@@ -93,7 +95,8 @@ impl Checkpoint {
             completed_domains: HashSet::new(),
             pending_domains: Vec::new(),
             discovered_vendors: HashMap::new(),
-            partial_results: Vec::new(),
+            results_count: 0,
+            results_file: String::new(),
             settings_hash,
             checkpoint_dir: None,
         }
@@ -195,22 +198,6 @@ impl Checkpoint {
         self.pending_domains.pop()
     }
 
-    /// Add a vendor relationship result
-    pub fn add_result(&mut self, result: VendorRelationship) {
-        // Track depth
-        if result.nth_party_layer > self.current_depth_reached {
-            self.current_depth_reached = result.nth_party_layer;
-        }
-        self.partial_results.push(result);
-    }
-
-    /// Add multiple vendor relationship results
-    pub fn add_results(&mut self, results: Vec<VendorRelationship>) {
-        for result in results {
-            self.add_result(result);
-        }
-    }
-
     /// Record a discovered vendor mapping
     pub fn record_vendor(&mut self, domain: String, organization: String) {
         self.discovered_vendors.insert(domain, organization);
@@ -223,7 +210,7 @@ impl Checkpoint {
             created_at: self.created_at,
             completed_count: self.completed_domains.len(),
             pending_count: self.pending_domains.len(),
-            results_count: self.partial_results.len(),
+            results_count: self.results_count,
             depth_reached: self.current_depth_reached,
             max_depth: self.max_depth,
         }
@@ -302,23 +289,7 @@ impl Default for ResumeMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vendor::RecordType;
     use tempfile::TempDir;
-
-    fn create_test_relationship(depth: u32) -> VendorRelationship {
-        VendorRelationship {
-            nth_party_domain: format!("vendor{}.com", depth),
-            nth_party_organization: format!("Vendor {} Inc", depth),
-            nth_party_layer: depth,
-            nth_party_customer_domain: "customer.com".to_string(),
-            nth_party_customer_organization: "Customer Inc".to_string(),
-            nth_party_record: "v=spf1 include:vendor.com".to_string(),
-            nth_party_record_type: RecordType::DnsTxtSpf,
-            root_customer_domain: "root.com".to_string(),
-            root_customer_organization: "Root Inc".to_string(),
-            evidence: "SPF record".to_string(),
-        }
-    }
 
     #[test]
     fn test_checkpoint_creation() {
@@ -336,7 +307,8 @@ mod tests {
         assert_eq!(checkpoint.current_depth_reached, 0);
         assert!(checkpoint.completed_domains.is_empty());
         assert!(checkpoint.pending_domains.is_empty());
-        assert!(checkpoint.partial_results.is_empty());
+        assert_eq!(checkpoint.results_count, 0);
+        assert!(checkpoint.results_file.is_empty());
     }
 
     #[test]
@@ -360,7 +332,8 @@ mod tests {
             customer_organization: "Example Inc".to_string(),
         });
         checkpoint.record_vendor("vendor1.com".to_string(), "Vendor One".to_string());
-        checkpoint.add_result(create_test_relationship(1));
+        checkpoint.results_count = 42;
+        checkpoint.results_file = "/tmp/test-results.jsonl.zst".to_string();
 
         // Save checkpoint
         checkpoint.save(output_dir).unwrap();
@@ -379,7 +352,8 @@ mod tests {
         assert_eq!(loaded.pending_domains.len(), 1);
         assert_eq!(loaded.pending_domains[0].domain, "vendor1.com");
         assert_eq!(loaded.discovered_vendors.get("vendor1.com"), Some(&"Vendor One".to_string()));
-        assert_eq!(loaded.partial_results.len(), 1);
+        assert_eq!(loaded.results_count, 42);
+        assert_eq!(loaded.results_file, "/tmp/test-results.jsonl.zst");
     }
 
     #[test]
@@ -489,14 +463,11 @@ mod tests {
 
         assert_eq!(checkpoint.current_depth_reached, 0);
 
-        checkpoint.add_result(create_test_relationship(1));
+        checkpoint.current_depth_reached = 1;
         assert_eq!(checkpoint.current_depth_reached, 1);
 
-        checkpoint.add_result(create_test_relationship(3));
+        checkpoint.current_depth_reached = 3;
         assert_eq!(checkpoint.current_depth_reached, 3);
-
-        checkpoint.add_result(create_test_relationship(2));
-        assert_eq!(checkpoint.current_depth_reached, 3); // Should stay at max
     }
 
     #[test]
@@ -529,8 +500,8 @@ mod tests {
             customer_domain: "example.com".to_string(),
             customer_organization: "Example Inc".to_string(),
         });
-        checkpoint.add_result(create_test_relationship(2));
-        checkpoint.add_result(create_test_relationship(2));
+        checkpoint.results_count = 2;
+        checkpoint.current_depth_reached = 2;
 
         let summary = checkpoint.summary();
 

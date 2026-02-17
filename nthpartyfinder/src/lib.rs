@@ -23,26 +23,9 @@ pub mod batch;
 pub mod org_normalizer;
 pub mod checkpoint;
 pub mod trust_center;
+pub mod result_sink;
+pub mod memory_monitor;
+pub mod browser_pool;
 
 pub use vendor::VendorRelationship;
 pub use checkpoint::{Checkpoint, ResumeMode};
-
-/// Create a headless Chrome browser instance.
-/// Automatically disables sandbox when running inside a container
-/// (detected via /.dockerenv or NTHPARTYFINDER_CONTAINER env var).
-pub fn create_browser() -> anyhow::Result<headless_chrome::Browser> {
-    let is_container = std::env::var("NTHPARTYFINDER_CONTAINER").is_ok()
-        || std::path::Path::new("/.dockerenv").exists();
-
-    if is_container {
-        let options = headless_chrome::LaunchOptions::default_builder()
-            .sandbox(false)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-        headless_chrome::Browser::new(options)
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome (container mode): {}", e))
-    } else {
-        headless_chrome::Browser::default()
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))
-    }
-}

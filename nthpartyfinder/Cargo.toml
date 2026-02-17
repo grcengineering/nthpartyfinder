@@ -29,7 +29,7 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["registry", "fmt"] }
 url = "2.5"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "stream"] }
 whois-rust = "1.6"
 dirs = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -50,6 +50,10 @@ fancy-regex = "0.13"
 rayon = "1.8"
 which = "6"
 zip = "0.6"
+# Disk-backed result storage with compression (memory efficiency)
+zstd = "0.13"
+# System memory monitoring for pressure-based throttling
+sysinfo = "0.32"
 # Embedded NER for organization extraction (replaces Ollama SLM)
 # Using load-dynamic to avoid Windows linking issues with ONNX Runtime
 gline-rs = { version = "1.0", optional = true }

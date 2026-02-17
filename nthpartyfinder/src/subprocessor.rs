@@ -20,6 +20,38 @@ use once_cell::sync::Lazy;
 /// Patterns exceeding this limit are rejected to mitigate ReDoS attacks (H006 fix).
 const MAX_REGEX_PATTERN_LENGTH: usize = 500;
 
+/// Maximum HTTP response body size (10 MB).
+/// Bodies exceeding this limit are truncated during streaming reads
+/// rather than rejected after full download, preventing memory exhaustion
+/// from adversarial or unexpectedly large responses.
+const MAX_HTTP_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Read an HTTP response body with streaming truncation.
+/// Reads the body in chunks, stopping at `max_bytes` to prevent
+/// memory exhaustion. Returns the body as a String (lossy UTF-8 conversion
+/// for truncated multi-byte boundaries).
+async fn read_response_body_capped(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+    use futures::StreamExt;
+
+    let mut body = Vec::with_capacity(max_bytes.min(256 * 1024)); // Pre-alloc up to 256KB
+    let mut stream = response.bytes_stream();
+    let mut total = 0usize;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("Stream read error: {}", e))?;
+        let remaining = max_bytes.saturating_sub(total);
+        if remaining == 0 {
+            debug!("HTTP response truncated at {} bytes (limit: {})", total, max_bytes);
+            break;
+        }
+        let take = chunk.len().min(remaining);
+        body.extend_from_slice(&chunk[..take]);
+        total += take;
+    }
+
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 /// Validate and compile a regex pattern from cache, rejecting patterns that are
 /// too long (potential ReDoS vectors). Returns None for rejected patterns.
 /// Uses fancy_regex which has built-in backtracking limits for additional safety.
@@ -1520,13 +1552,8 @@ impl SubprocessorAnalyzer {
             return Err(anyhow::anyhow!("Invalid content type: {} (expected HTML or PDF)", content_type));
         }
 
-        let content = response.text().await?;
-        
-        // Security: Limit content size to prevent memory exhaustion
-        const MAX_CONTENT_SIZE: usize = 10 * 1024 * 1024; // 10MB limit
-        if content.len() > MAX_CONTENT_SIZE {
-            return Err(anyhow::anyhow!("Content too large: {} bytes", content.len()));
-        }
+        // Stream the response body with size cap to prevent memory exhaustion
+        let content = read_response_body_capped(response, MAX_HTTP_BODY_BYTES).await?;
 
         // Handle PDF documents differently than HTML
         if is_pdf {
@@ -1619,8 +1646,8 @@ impl SubprocessorAnalyzer {
             debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
             let url_for_browser = url.to_string();
             match tokio::task::spawn_blocking(move || -> Result<String> {
-                let browser = crate::create_browser()?;
-                let tab = browser.new_tab()
+                let guard = crate::browser_pool::create_browser()?;
+                let tab = guard.browser.new_tab()
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
                 tab.navigate_to(&url_for_browser)
                     .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
@@ -2456,9 +2483,9 @@ impl SubprocessorAnalyzer {
         debug!("Starting headless browser scraping for: {}", url);
 
         // Launch headless Chrome (auto-detects container for sandbox config)
-        let browser = crate::create_browser()?;
+        let guard = crate::browser_pool::create_browser()?;
 
-        let tab = browser.new_tab().map_err(|e| {
+        let tab = guard.browser.new_tab().map_err(|e| {
             anyhow::anyhow!("Failed to create new browser tab: {}", e)
         })?;
 
@@ -4070,9 +4097,9 @@ impl SubprocessorAnalyzer {
 
     /// Helper method to get rendered content from headless browser
     async fn get_rendered_content_from_browser(&self, url: &str) -> Result<String> {
-        let browser = crate::create_browser()?;
+        let guard = crate::browser_pool::create_browser()?;
 
-        let tab = browser.new_tab().map_err(|e| {
+        let tab = guard.browser.new_tab().map_err(|e| {
             anyhow::anyhow!("Failed to create new browser tab: {}", e)
         })?;
         

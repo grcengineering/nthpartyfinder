@@ -167,9 +167,9 @@ pub async fn extract_organization_with_fallback(
 fn fetch_page_with_headless(domain: &str) -> Result<String> {
     let url = format!("https://{}", domain);
 
-    let browser = crate::create_browser()?;
+    let guard = crate::browser_pool::create_browser()?;
 
-    let tab = browser.new_tab()
+    let tab = guard.browser.new_tab()
         .map_err(|e| anyhow!("Failed to create browser tab: {}", e))?;
 
     tab.navigate_to(&url)

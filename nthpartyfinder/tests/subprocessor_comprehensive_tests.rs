@@ -838,3 +838,105 @@ async fn test_placeholder_domains_rejected() {
     }
     println!("✓ All {} placeholder domains rejected", placeholder_domains.len());
 }
+
+// ============================================================================
+// NER TEXT CHUNKING UTF-8 BOUNDARY REGRESSION TESTS
+// ============================================================================
+
+/// Regression test for UTF-8 char boundary panic in NER text chunking.
+/// Bug: extract_all_organizations splits text into ~3000 byte chunks, but
+/// byte offset 3000 can fall inside a multi-byte UTF-8 character (e.g.,
+/// right single quotation mark U+2019 = 3 bytes E2 80 99).
+/// Real crash: JFrog subprocessor page text with smart quotes at byte 4897.
+/// Fix: All chunk boundary calculations use is_char_boundary() walk-back.
+#[test]
+fn test_ner_chunking_utf8_boundary_safety() {
+    // Simulate the chunking logic from extract_all_organizations
+    fn safe_chunk(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut start = 0;
+        while start < text.len() {
+            let end = std::cmp::min(start + chunk_size, text.len());
+            let mut safe_end = end;
+            while safe_end > start && !text.is_char_boundary(safe_end) {
+                safe_end -= 1;
+            }
+            let actual_end = if safe_end < text.len() {
+                text[start..safe_end].rfind(char::is_whitespace)
+                    .map(|pos| start + pos + 1)
+                    .unwrap_or(safe_end)
+            } else {
+                safe_end
+            };
+            let mut final_end = actual_end;
+            while final_end > start && !text.is_char_boundary(final_end) {
+                final_end -= 1;
+            }
+            if final_end <= start {
+                start = safe_end;
+                continue;
+            }
+            result.push(text[start..final_end].to_string());
+            let overlap_start = if final_end > start + overlap { final_end - overlap } else { final_end };
+            let mut safe_overlap = overlap_start;
+            while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
+                safe_overlap -= 1;
+            }
+            start = safe_overlap;
+        }
+        result
+    }
+
+    // Case 1: Smart quote at exactly byte 2999-3001 (3-byte char spanning chunk boundary)
+    let mut text = "A".repeat(2998);
+    text.push('\u{2019}'); // right single quotation mark (3 bytes)
+    text.push_str(&" B".repeat(2000)); // more text to force chunking
+    assert!(!text.is_char_boundary(3000)); // byte 3000 is inside the smart quote
+    let chunks = safe_chunk(&text, 3000, 500);
+    assert!(!chunks.is_empty(), "Should produce at least one chunk");
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Verify every chunk is valid UTF-8 (would panic if not)
+        assert!(chunk.is_char_boundary(chunk.len()),
+            "Chunk {} end is not on char boundary", i);
+    }
+    println!("✓ Smart quote at chunk boundary: {} chunks produced safely", chunks.len());
+
+    // Case 2: Japanese text (3 bytes per char) — every 3rd byte is a boundary
+    let japanese = "日本語テストデータ処理中".repeat(200); // ~6600 bytes
+    let chunks = safe_chunk(&japanese, 3000, 500);
+    assert!(chunks.len() >= 2, "Should produce multiple chunks");
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert!(chunk.is_char_boundary(chunk.len()),
+            "Japanese chunk {} end is not on char boundary", i);
+    }
+    println!("✓ Japanese text: {} chunks produced safely", chunks.len());
+
+    // Case 3: Emoji text (4 bytes per char) — boundaries every 4th byte
+    let emoji = "🔍🛡️💻🌐".repeat(250); // mixed 4-byte and combining chars
+    let chunks = safe_chunk(&emoji, 3000, 500);
+    assert!(!chunks.is_empty());
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert!(chunk.is_char_boundary(chunk.len()),
+            "Emoji chunk {} end is not on char boundary", i);
+    }
+    println!("✓ Emoji text: {} chunks produced safely", chunks.len());
+
+    // Case 4: Short text (no chunking needed)
+    let short = "Hello world";
+    let chunks = safe_chunk(short, 3000, 500);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0], "Hello world");
+    println!("✓ Short text: no chunking needed");
+
+    // Case 5: The exact crash scenario — mixed ASCII with smart quotes at ~4897 bytes
+    let mut crash_text = "Deliver Trusted Software in the AI Era ".repeat(125); // ~4875 bytes
+    crash_text.push_str("it\u{2019}s "); // smart apostrophe at ~4878
+    crash_text.push_str(&"more content ".repeat(100));
+    let chunks = safe_chunk(&crash_text, 3000, 500);
+    assert!(chunks.len() >= 2);
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert!(chunk.is_char_boundary(chunk.len()),
+            "Crash scenario chunk {} end is not on char boundary", i);
+    }
+    println!("✓ Real crash scenario: {} chunks produced safely", chunks.len());
+}

@@ -215,8 +215,13 @@ impl NerOrganizationExtractor {
     /// Extract organization name from text content
     pub fn extract_organization(&self, text: &str) -> Result<Option<NerOrgResult>> {
         // Truncate text if too long to avoid performance issues
+        // Use floor_char_boundary to avoid panicking on multi-byte UTF-8 characters
         let text = if text.len() > 4000 {
-            &text[..4000]
+            let mut end = 4000;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
         } else {
             text
         };
@@ -299,6 +304,8 @@ impl NerOrganizationExtractor {
         let threshold = min_confidence.unwrap_or(self.min_confidence);
 
         // GLiNER truncates at ~4000 chars, so chunk long text
+        // All byte offsets must land on valid UTF-8 char boundaries to avoid panics
+        // on multi-byte characters (e.g., right single quotation mark U+2019 = 3 bytes)
         let chunks: Vec<&str> = if text.len() <= 4000 {
             vec![text]
         } else {
@@ -307,16 +314,37 @@ impl NerOrganizationExtractor {
             let mut start = 0;
             while start < text.len() {
                 let end = std::cmp::min(start + 3000, text.len());
-                // Try to break at a whitespace boundary
-                let actual_end = if end < text.len() {
-                    text[start..end].rfind(char::is_whitespace)
+                // Ensure 'end' falls on a char boundary
+                let mut safe_end = end;
+                while safe_end > start && !text.is_char_boundary(safe_end) {
+                    safe_end -= 1;
+                }
+                // Try to break at a whitespace boundary within the safe range
+                let actual_end = if safe_end < text.len() {
+                    text[start..safe_end].rfind(char::is_whitespace)
                         .map(|pos| start + pos + 1)
-                        .unwrap_or(end)
+                        .unwrap_or(safe_end)
                 } else {
-                    end
+                    safe_end
                 };
-                result.push(&text[start..actual_end]);
-                start = if actual_end > start + 500 { actual_end - 500 } else { actual_end }; // 500 char overlap
+                // Ensure actual_end is also on a char boundary (whitespace pos+1 could land mid-char)
+                let mut final_end = actual_end;
+                while final_end > start && !text.is_char_boundary(final_end) {
+                    final_end -= 1;
+                }
+                if final_end <= start {
+                    // Degenerate case: skip forward to next char boundary
+                    start = safe_end;
+                    continue;
+                }
+                result.push(&text[start..final_end]);
+                // 500 char overlap — ensure overlap start is on a char boundary
+                let overlap_start = if final_end > start + 500 { final_end - 500 } else { final_end };
+                let mut safe_overlap = overlap_start;
+                while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
+                    safe_overlap -= 1;
+                }
+                start = safe_overlap;
             }
             result
         };

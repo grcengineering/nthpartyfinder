@@ -162,9 +162,9 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
 
     // headless_chrome operations are blocking, run in a blocking thread
     let handle = tokio::task::spawn_blocking(move || -> Result<Vec<InterceptedResponse>> {
-        let browser = crate::create_browser()?;
+        let guard = crate::browser_pool::create_browser()?;
 
-        let tab = browser.new_tab()
+        let tab = guard.browser.new_tab()
             .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
         // Register response handler to capture JSON API responses.

@@ -70,9 +70,13 @@ pub async fn list_cached_domains() -> Result<()> {
             "Unknown".to_string()
         };
 
-        // Truncate URL if too long
+        // Truncate URL if too long (char boundary safe for non-ASCII URLs)
         let url_display = if url.len() > 40 {
-            format!("{}...", &url[..37])
+            let mut end = 37;
+            while end > 0 && !url.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &url[..end])
         } else {
             url
         };

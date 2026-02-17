@@ -31,6 +31,9 @@ mod batch;
 mod org_normalizer;
 mod checkpoint;
 mod trust_center;
+mod result_sink;
+mod memory_monitor;
+mod browser_pool;
 
 use cli::{Args, Cli, Commands, CacheCommands};
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
@@ -38,25 +41,11 @@ use vendor::{VendorRelationship, RecordType};
 use logger::{AnalysisLogger, VerbosityLevel};
 use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery, WebTrafficDiscovery};
 use checkpoint::{Checkpoint, ResumeMode, generate_settings_hash};
+use result_sink::ResultSink;
+use memory_monitor::MemoryMonitor;
 
-/// Create a headless Chrome browser instance.
-/// Automatically disables sandbox when running inside a container.
-fn create_browser() -> anyhow::Result<headless_chrome::Browser> {
-    let is_container = std::env::var("NTHPARTYFINDER_CONTAINER").is_ok()
-        || std::path::Path::new("/.dockerenv").exists();
+// Browser pool is in browser_pool.rs — shared between lib and binary crates
 
-    if is_container {
-        let options = headless_chrome::LaunchOptions::default_builder()
-            .sandbox(false)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-        headless_chrome::Browser::new(options)
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome (container mode): {}", e))
-    } else {
-        headless_chrome::Browser::default()
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))
-    }
-}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -512,20 +501,25 @@ async fn main() -> Result<()> {
     let web_org_min_confidence = _app_config.discovery.web_org_min_confidence;
 
     // Initialize state - restore from checkpoint if resuming
-    let (mut discovered_vendors, processed_domains_set, resumed_results) = {
+    let (mut discovered_vendors, processed_domains_set, resumed_results_file) = {
         let cp = checkpoint.lock().await;
         if !cp.completed_domains.is_empty() {
             // Resuming from checkpoint - restore state
-            logger.info(&format!("Restoring state: {} completed domains, {} pending, {} partial results",
-                cp.completed_domains.len(), cp.pending_domains.len(), cp.partial_results.len()));
+            let results_file = if !cp.results_file.is_empty() {
+                Some(cp.results_file.clone())
+            } else {
+                None
+            };
+            logger.info(&format!("Restoring state: {} completed domains, {} pending, {} results on disk",
+                cp.completed_domains.len(), cp.pending_domains.len(), cp.results_count));
             (
                 cp.discovered_vendors.clone(),
                 cp.completed_domains.clone(),
-                cp.partial_results.clone(),
+                results_file,
             )
         } else {
             // Fresh start
-            (HashMap::new(), HashSet::new(), Vec::new())
+            (HashMap::new(), HashSet::new(), None)
         }
     };
 
@@ -854,6 +848,54 @@ async fn main() -> Result<()> {
     let checkpoint_for_analysis = checkpoint.clone();
     let output_dir_for_checkpoint = output_dir.clone();
 
+    // Create disk-backed ResultSink for O(1) memory result storage
+    // Write to /tmp (ext4) for performance, results are read back at end for dedup/export
+    let sink_dir = std::path::PathBuf::from("/tmp");
+    // Clean up orphaned result files from previous crashed runs
+    match ResultSink::cleanup_orphans(&sink_dir) {
+        Ok(0) => {},
+        Ok(n) => logger.debug(&format!("Cleaned up {} orphaned result files", n)),
+        Err(e) => logger.debug(&format!("Orphan cleanup failed (non-critical): {}", e)),
+    }
+    let result_sink = Arc::new(Mutex::new(
+        ResultSink::new(&sink_dir)
+            .expect("Failed to create result sink — check /tmp disk space")
+    ));
+    logger.debug(&format!("Result sink created: {}", result_sink.lock().await.path().display()));
+
+    // Set up memory pressure monitoring — background task checks every 5s
+    // and updates a shared atomic that vendor futures read to self-throttle.
+    // Under Critical pressure, futures pause 1s per iteration to reduce allocation rate.
+    let memory_pressure_level = Arc::new(std::sync::atomic::AtomicU8::new(0)); // 0=Normal, 1=Warning, 2=Critical
+    {
+        let pressure = memory_pressure_level.clone();
+        let logger_mem = logger.clone();
+        tokio::spawn(async move {
+            let mut monitor = MemoryMonitor::new(10); // base_concurrency doesn't matter for level checking
+            loop {
+                let (level, _) = monitor.check();
+                let level_num = match level {
+                    memory_monitor::PressureLevel::Normal => 0u8,
+                    memory_monitor::PressureLevel::Warning => 1u8,
+                    memory_monitor::PressureLevel::Critical => 2u8,
+                };
+                let prev = pressure.swap(level_num, std::sync::atomic::Ordering::Relaxed);
+                // Log on transitions
+                if level_num != prev {
+                    let status = monitor.status_string();
+                    match level_num {
+                        2 => logger_mem.warn(&format!("Memory CRITICAL — throttling concurrency. {}", status)),
+                        1 => logger_mem.warn(&format!("Memory WARNING — reducing concurrency. {}", status)),
+                        0 if prev > 0 => logger_mem.info(&format!("Memory pressure relieved — resuming normal concurrency. {}", status)),
+                        _ => {}
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+    logger.debug("Memory pressure monitor started (5s interval)");
+
     // Transition unified progress bar to scanning phase (adds ↳ sub-progress detail line)
     // Init occupied 0-10%, discovery uses 10-30%, vendor processing uses 30-100%
     logger.start_scan_progress(100).await;
@@ -898,9 +940,11 @@ async fn main() -> Result<()> {
         web_traffic_discovery.as_ref(),
         checkpoint_for_analysis.clone(),
         &output_dir_for_checkpoint,
+        result_sink.clone(),
+        memory_pressure_level.clone(),
     );
 
-    let new_results = if let Some(timeout_duration) = analysis_timeout {
+    if let Some(timeout_duration) = analysis_timeout {
         match tokio::time::timeout(timeout_duration, analysis_future).await {
             Ok(result) => result?,
             Err(_) => {
@@ -908,9 +952,17 @@ async fn main() -> Result<()> {
                     "Analysis timed out after {} seconds. Saving checkpoint with partial results.",
                     analysis_timeout_secs
                 ));
-                // Save checkpoint before exiting so progress is preserved
+                // Flush sink and save checkpoint before exiting
                 {
-                    let cp = checkpoint.lock().await;
+                    let mut sink = result_sink.lock().await;
+                    let _ = sink.flush();
+                }
+                {
+                    let mut cp = checkpoint.lock().await;
+                    let sink = result_sink.lock().await;
+                    cp.results_count = sink.count();
+                    cp.results_file = sink.path().to_string_lossy().to_string();
+                    drop(sink);
                     if let Err(e) = cp.save(Path::new(&output_dir)) {
                         logger.warn(&format!("Failed to save checkpoint on timeout: {}", e));
                     }
@@ -935,7 +987,55 @@ async fn main() -> Result<()> {
         std::process::exit(130);
     }
 
-    // Combine resumed results with new results
+    // Drain results from disk-backed sink and combine with any resumed results
+    // The sink is consumed here — results are read back from the zstd-compressed JSONL file
+    let new_results = {
+        let sink_path;
+        // Flush and get path, then try to drain
+        {
+            let mut sink = result_sink.lock().await;
+            let _ = sink.flush();
+            sink_path = sink.path().to_path_buf();
+        }
+        // Try to take ownership for clean drain (finalizes zstd stream)
+        match Arc::try_unwrap(result_sink) {
+            Ok(mutex) => {
+                let sink = mutex.into_inner();
+                sink.drain_all()
+                    .expect("Failed to read results from disk sink")
+            }
+            Err(_arc) => {
+                // Fallback: read from path if Arc still has references
+                // (shouldn't happen after analysis completes, but be safe)
+                logger.debug("ResultSink has outstanding references, reading from file path");
+                ResultSink::read_results(&sink_path)
+                    .expect("Failed to read results from disk sink file")
+            }
+        }
+    };
+    logger.debug(&format!("Read {} results from disk sink", new_results.len()));
+
+    // Load resumed results from previous checkpoint file if resuming
+    let resumed_results = if let Some(ref results_file) = resumed_results_file {
+        let path = std::path::Path::new(results_file);
+        if path.exists() {
+            match ResultSink::read_results(path) {
+                Ok(results) => {
+                    logger.info(&format!("Loaded {} resumed results from {}", results.len(), results_file));
+                    results
+                }
+                Err(e) => {
+                    logger.warn(&format!("Failed to read resumed results from {}: {}", results_file, e));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     // Deduplicate by (vendor_domain, customer_domain, record_type) so that different
     // discovery sources (SPF, verification, SaaS tenant, etc.) for the same vendor are
     // preserved as separate rows. Each source type conveys a distinct security signal
@@ -1114,7 +1214,9 @@ async fn discover_nth_parties(
     web_traffic_discovery: Option<&WebTrafficDiscovery>,
     checkpoint: Arc<Mutex<Checkpoint>>,
     checkpoint_output_dir: &str,
-) -> Result<Vec<VendorRelationship>> {
+    result_sink: Arc<Mutex<ResultSink>>,
+    memory_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+) -> Result<()> {
     // Check for interrupt signal
     if is_interrupted() {
         // Save checkpoint before returning
@@ -1125,7 +1227,7 @@ async fn discover_nth_parties(
         } else {
             eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
         }
-        return Ok(vec![]);
+        return Ok(());
     }
 
     // Check if we've already processed this domain
@@ -1133,7 +1235,7 @@ async fn discover_nth_parties(
         let processed = processed_domains.lock().await;
         if processed.contains(domain) {
             logger.debug(&format!("Domain {} already processed, skipping", domain));
-            return Ok(vec![]);
+            return Ok(());
         }
     }
 
@@ -1143,12 +1245,12 @@ async fn discover_nth_parties(
     const ABSOLUTE_MAX_DEPTH: u32 = 10;
     if current_depth > ABSOLUTE_MAX_DEPTH {
         logger.warn(&format!("Hit absolute depth cap ({}) for domain {}", ABSOLUTE_MAX_DEPTH, domain));
-        return Ok(vec![]);
+        return Ok(());
     }
     if let Some(max) = max_depth {
         if current_depth > max {
             logger.debug(&format!("Reached max depth {} for domain {}", max, domain));
-            return Ok(vec![]);
+            return Ok(());
         }
     }
 
@@ -1160,9 +1262,7 @@ async fn discover_nth_parties(
     logger.record_domain_processed();
     logger.record_depth_reached(current_depth);
     logger.debug(&format!("Analyzing domain: {} at depth {}", domain, current_depth));
-    
-    let mut results = Vec::new();
-    
+
     // Analyze DNS TXT records using the DNS server pool
     if current_depth == 1 {
         logger.update_progress("DNS record analysis").await;
@@ -1542,8 +1642,21 @@ async fn discover_nth_parties(
                     let analysis_config_inner = analysis_config_clone.clone();
                     let checkpoint_clone = checkpoint.clone();
                     let checkpoint_output_dir_clone = checkpoint_output_dir_owned.clone();
+                    let result_sink_clone = result_sink.clone();
+                    let pressure_level = memory_pressure_level.clone();
 
                     async move {
+                        // Memory pressure throttle: pause under Critical pressure
+                        // to reduce concurrent allocation rate and prevent OOM
+                        let pressure = pressure_level.load(std::sync::atomic::Ordering::Relaxed);
+                        if pressure >= 2 {
+                            // Critical: pause 1s to let GC / drop cycles catch up
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        } else if pressure >= 1 {
+                            // Warning: brief yield to reduce peak concurrency
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+
                         // Apply rate limiting delay if configured (helps prevent server/resource overwhelming)
                         if request_delay_ms > 0 && index > 0 {
                             tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
@@ -1562,8 +1675,13 @@ async fn discover_nth_parties(
                                 _ => "discovery",
                             };
                             // Show raw record context (truncated) for richer substatus
+                            // Use char boundary check to avoid panic on multi-byte UTF-8
                             let record_hint = if vendor_domain_info.raw_record.len() > 50 {
-                                format!("{}...", &vendor_domain_info.raw_record[..50])
+                                let mut end = 50;
+                                while end > 0 && !vendor_domain_info.raw_record.is_char_boundary(end) {
+                                    end -= 1;
+                                }
+                                format!("{}...", &vendor_domain_info.raw_record[..end])
                             } else {
                                 vendor_domain_info.raw_record.clone()
                             };
@@ -1573,7 +1691,12 @@ async fn discover_nth_parties(
                         logger_clone.debug(&format!("🔍 Starting analysis for vendor {}/{}: {} (depth {}, source: {:?})",
                             index + 1, total_vendors, vendor_domain_clone, current_depth, vendor_domain_info.source_type));
 
-                        let result = process_vendor_domain(
+                        let count_before = {
+                            let sink = result_sink_clone.lock().await;
+                            sink.count()
+                        };
+
+                        process_vendor_domain(
                             vendor_domain_info.domain,
                             vendor_domain_info.source_type,
                             domain,
@@ -1597,69 +1720,74 @@ async fn discover_nth_parties(
                             &analysis_config_inner,
                             checkpoint_clone,
                             checkpoint_output_dir_clone,
+                            result_sink_clone.clone(),
+                            pressure_level.clone(),
                         ).await;
-                        
+
+                        let count_after = {
+                            let sink = result_sink_clone.lock().await;
+                            sink.count()
+                        };
+                        let new_relationships = count_after - count_before;
+
                         let elapsed = start_time.elapsed();
-                        logger_clone.debug(&format!("✅ Completed analysis for vendor {}/{}: {} in {:.2}s (found {} relationships)", 
-                            index + 1, total_vendors, vendor_domain_clone, elapsed.as_secs_f64(), result.len()));
-                        
+                        logger_clone.debug(&format!("✅ Completed analysis for vendor {}/{}: {} in {:.2}s (found {} relationships)",
+                            index + 1, total_vendors, vendor_domain_clone, elapsed.as_secs_f64(), new_relationships));
+
                         // Set progress position for root-level analysis (position-based to avoid >100%)
                         if current_depth == 1 && total_vendors > 0 {
                             let position = 30 + ((index as u64 + 1) * 70) / total_vendors as u64;
                             logger_clone.set_progress_position(position).await;
                         }
 
-                        result
+                        // Return count of new relationships found by this vendor
+                        new_relationships
                     }
                 }));
                 
                 // Configure buffer size based on analysis config concurrency settings
                 let configured_concurrency = analysis_config.get_concurrency_for_depth(current_depth as usize);
                 let buffer_size = configured_concurrency.min(args.parallel_jobs).max(2);
-                
-                // Process all vendors without timeout restrictions
-                let mut vendor_results: Vec<Vec<VendorRelationship>> = Vec::new();
+
+                // Results are written directly to disk via ResultSink — no in-memory accumulation
                 let mut vendor_stream = vendor_stream.buffer_unordered(buffer_size);
-                
-                logger.debug(&format!("Starting parallel processing for {} vendors at depth {} (no timeout limit)", vendor_count, current_depth));
-                
-                // Process all vendors to completion without timeout
+
+                logger.debug(&format!("Starting parallel processing for {} vendors at depth {} (disk-backed results)", vendor_count, current_depth));
+
+                // Process all vendors to completion — results go to disk via ResultSink
                 let mut processed_count = 0;
                 let mut total_relationships_found = 0usize;
                 let checkpoint_path = Path::new(checkpoint_output_dir);
-                while let Some(result) = vendor_stream.next().await {
+                while let Some(new_count) = vendor_stream.next().await {
                     // Check for interrupt signal
                     if is_interrupted() {
-                        // Save checkpoint immediately
+                        // Flush sink and save checkpoint
+                        {
+                            let mut sink = result_sink.lock().await;
+                            let _ = sink.flush();
+                        }
                         let mut cp = checkpoint.lock().await;
-                        // Update checkpoint with current state
                         let vendors = discovered_vendors.lock().await;
                         cp.discovered_vendors = vendors.clone();
                         drop(vendors);
                         let processed = processed_domains.lock().await;
                         cp.completed_domains = processed.clone();
                         drop(processed);
-                        // Add any results collected so far
-                        for r in &result {
-                            cp.add_result(r.clone());
-                        }
-                        for batch in &vendor_results {
-                            for r in batch {
-                                cp.add_result(r.clone());
-                            }
-                        }
-                        results.extend(result);
+                        // Store result count and file path in checkpoint
+                        let sink = result_sink.lock().await;
+                        cp.results_count = sink.count();
+                        cp.results_file = sink.path().to_string_lossy().to_string();
+                        drop(sink);
                         if let Err(e) = cp.save(checkpoint_path) {
                             eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
                         } else {
                             eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
                         }
-                        return Ok(results);
+                        return Ok(());
                     }
 
                     processed_count += 1;
-                    total_relationships_found += result.len();
-                    vendor_results.push(result);
+                    total_relationships_found += new_count;
                     // Update main progress bar with running stats
                     if current_depth == 1 {
                         logger.update_progress(&format!("Analyzing vendors ({}/{}) — {} relationships found",
@@ -1677,19 +1805,11 @@ async fn discover_nth_parties(
                             let processed = processed_domains.lock().await;
                             cp.completed_domains = processed.clone();
                             drop(processed);
-                            // Add results to checkpoint (M013 fix: use HashSet for O(1) dedup
-                            // instead of O(n) linear scan per result)
-                            let existing_keys: HashSet<(String, String)> = cp.partial_results.iter()
-                                .map(|pr| (pr.nth_party_domain.clone(), pr.nth_party_customer_domain.clone()))
-                                .collect();
-                            for batch in &vendor_results {
-                                for r in batch {
-                                    let key = (r.nth_party_domain.clone(), r.nth_party_customer_domain.clone());
-                                    if !existing_keys.contains(&key) {
-                                        cp.add_result(r.clone());
-                                    }
-                                }
-                            }
+                            // Track result count and file path (no in-memory result cloning)
+                            let sink = result_sink.lock().await;
+                            cp.results_count = sink.count();
+                            cp.results_file = sink.path().to_string_lossy().to_string();
+                            drop(sink);
                             if let Err(e) = cp.save(checkpoint_path) {
                                 logger.debug(&format!("Failed to save checkpoint: {}", e));
                             } else {
@@ -1699,21 +1819,15 @@ async fn discover_nth_parties(
                     }
                 }
 
-                logger.debug(&format!("All {} vendor domains processed successfully at depth {}", vendor_results.len(), current_depth));
+                logger.debug(&format!("All {} vendor domains processed at depth {} ({} relationships to disk)",
+                    processed_count, current_depth, total_relationships_found));
 
-                // Collect results from parallel processing
-                let mut total_relationships = 0;
-                for vendor_result in vendor_results {
-                    total_relationships += vendor_result.len();
-                    results.extend(vendor_result);
-                }
+                logger.log_parallel_processing_complete(total_relationships_found);
 
-                logger.log_parallel_processing_complete(total_relationships);
-                
                 // Finish progress bar for root-level analysis
                 if current_depth == 1 {
                     logger.finish_progress(&format!("Vendor analysis completed — {} relationships from {} vendors",
-                        total_relationships, vendor_count)).await;
+                        total_relationships_found, vendor_count)).await;
                 }
             }
         },
@@ -1727,7 +1841,7 @@ async fn discover_nth_parties(
         }
     }
     
-    Ok(results)
+    Ok(())
 }
 
 async fn process_vendor_domain(
@@ -1754,9 +1868,10 @@ async fn process_vendor_domain(
     analysis_config: &AnalysisConfig,
     checkpoint: Arc<Mutex<Checkpoint>>,
     checkpoint_output_dir: String,
-) -> Vec<VendorRelationship> {
-    let mut results = Vec::new();
-    
+    result_sink: Arc<Mutex<ResultSink>>,
+    memory_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+) {
+
     // Extract base domain for organization identification
     let base_domain = domain_utils::extract_base_domain(&vendor_domain);
     let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
@@ -1764,7 +1879,7 @@ async fn process_vendor_domain(
     // Skip self-references (same organization)
     if base_domain == customer_base_domain {
         logger.debug(&format!("Skipping self-reference: {} -> {}", customer_domain, base_domain));
-        return results;
+        return;
     }
     
     // Get organization info via WHOIS if not already cached
@@ -1852,20 +1967,26 @@ async fn process_vendor_domain(
                           customer_base_domain, customer_org,
                           base_domain, vendor_org));
     
-    results.push(relationship);
-    
+    // Write relationship directly to disk-backed sink (O(1) memory)
+    {
+        let mut sink = result_sink.lock().await;
+        if let Err(e) = sink.append_one(&relationship) {
+            logger.warn(&format!("Failed to write result to sink: {}", e));
+        }
+    }
+
     // Check for termination condition (common denominators)
     if max_depth.is_none() && is_common_denominator(&base_domain) {
         logger.debug(&format!("Reached common denominator: {}", base_domain));
-        return results;
+        return;
     }
     
     // Normalize domain for DNS lookup
     let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain);
     
-    // Recursive analysis for deeper levels
+    // Recursive analysis for deeper levels — results go directly to shared sink
     // Note: Discovery methods (subdomain/SaaS tenant) only run at depth 1, so we pass None here
-    match discover_nth_parties(
+    if let Err(e) = discover_nth_parties(
         &lookup_domain,
         max_depth,
         discovered_vendors.clone(),
@@ -1890,16 +2011,11 @@ async fn process_vendor_domain(
         None,  // web_traffic_discovery - only runs at depth 1
         checkpoint,
         &checkpoint_output_dir,
+        result_sink,
+        memory_pressure_level,
     ).await {
-        Ok(sub_results) => {
-            results.extend(sub_results);
-        },
-        Err(e) => {
-            logger.warn(&format!("Failed to analyze vendor domain {}: {}", lookup_domain, e));
-        }
+        logger.warn(&format!("Failed to analyze vendor domain {}: {}", lookup_domain, e));
     }
-
-    results
 }
 
 fn is_common_denominator(domain: &str) -> bool {
