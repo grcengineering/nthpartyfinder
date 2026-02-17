@@ -83,16 +83,57 @@ pub fn create_browser() -> anyhow::Result<BrowserGuard> {
     let is_container = std::env::var("NTHPARTYFINDER_CONTAINER").is_ok()
         || std::path::Path::new("/.dockerenv").exists();
 
-    let browser = if is_container {
-        let options = headless_chrome::LaunchOptions::default_builder()
-            .sandbox(false)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-        headless_chrome::Browser::new(options)
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome (container mode): {}", e))?
-    } else {
-        headless_chrome::Browser::default()
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+    // Try to find Chrome binary: check env var, then well-known paths
+    let chrome_path: Option<std::path::PathBuf> = std::env::var("CHROME_PATH").ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            // WSL: Windows Chrome installation
+            let wsl_path = std::path::Path::new("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe");
+            if wsl_path.exists() { Some(wsl_path.to_path_buf()) } else { None }
+        });
+
+    // Assign a unique debug port per browser instance to avoid port conflicts.
+    // Uses an atomic counter starting at 9222 (Chrome's default debug port).
+    static PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(9222);
+    let debug_port = PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Wrap around if we exceed reasonable range
+    if debug_port > 9322 {
+        PORT_COUNTER.store(9222, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    let browser = match (is_container, &chrome_path) {
+        (true, Some(path)) => {
+            let options = headless_chrome::LaunchOptions::default_builder()
+                .sandbox(false)
+                .path(Some(path.clone()))
+                .port(Some(debug_port))
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
+            headless_chrome::Browser::new(options)
+                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+        }
+        (true, None) => {
+            let options = headless_chrome::LaunchOptions::default_builder()
+                .sandbox(false)
+                .port(Some(debug_port))
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
+            headless_chrome::Browser::new(options)
+                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+        }
+        (false, Some(path)) => {
+            let options = headless_chrome::LaunchOptions::default_builder()
+                .path(Some(path.clone()))
+                .port(Some(debug_port))
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
+            headless_chrome::Browser::new(options)
+                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+        }
+        (false, None) => {
+            headless_chrome::Browser::default()
+                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+        }
     };
 
     Ok(BrowserGuard {

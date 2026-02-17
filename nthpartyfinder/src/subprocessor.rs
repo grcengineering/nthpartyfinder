@@ -1642,7 +1642,8 @@ impl SubprocessorAnalyzer {
         // use a headless browser to render the page and get the full DOM content.
         // This catches trust center pages (like Vanta's) where static HTML is just a
         // skeleton and all content is rendered by JavaScript.
-        let content = if crate::trust_center::discovery::is_likely_spa(&content) {
+        let is_spa = crate::trust_center::discovery::is_likely_spa(&content);
+        let content = if is_spa {
             debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
             let url_for_browser = url.to_string();
             match tokio::task::spawn_blocking(move || -> Result<String> {
