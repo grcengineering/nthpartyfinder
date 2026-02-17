@@ -8,7 +8,9 @@
 //! (spawn_blocking) contexts.
 
 /// Maximum concurrent headless Chrome instances.
-const MAX_BROWSER_INSTANCES: usize = 2;
+/// Increased from 2→4 to reduce browser serialization bottleneck during depth-2+ scans.
+/// At ~200-300 MB per instance, 4 instances ≈ 1.2 GB peak — acceptable given our memory fixes.
+const MAX_BROWSER_INSTANCES: usize = 4;
 
 /// Global counting semaphore for browser instances.
 static BROWSER_SEMAPHORE: once_cell::sync::Lazy<BrowserSemaphore> =

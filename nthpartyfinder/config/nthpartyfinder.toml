@@ -39,8 +39,8 @@ user_agent = "nthpartyfinder/1.0 (Security Research Tool)"
 # Default timeout for HTTP requests in seconds
 # Applies to all HTTP requests unless a more specific timeout is set
 # Higher values are more tolerant of slow servers but delay overall analysis
-# Recommended: 15-60 seconds depending on network conditions
-request_timeout_secs = 30
+# Recommended: 10-30 seconds depending on network conditions
+request_timeout_secs = 15
 
 # =============================================================================
 # [dns] - DNS Configuration
@@ -374,9 +374,9 @@ strategy = "unlimited"
 #
 # Recommendations:
 #   - Fast machine, good network: [100, 50, 25, 10]
-#   - Normal usage: [50, 20, 10, 5]
+#   - Normal usage: [50, 30, 15, 8]
 #   - Limited resources: [20, 10, 5, 3]
-concurrency_per_depth = [50, 20, 10, 5]
+concurrency_per_depth = [50, 30, 15, 8]
 
 # Delay between starting new vendor analyses (milliseconds)
 # Prevents overwhelming target servers with rapid-fire requests

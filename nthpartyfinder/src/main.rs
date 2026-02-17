@@ -1647,18 +1647,22 @@ async fn discover_nth_parties(
 
                     async move {
                         // Memory pressure throttle: pause under Critical pressure
-                        // to reduce concurrent allocation rate and prevent OOM
+                        // to reduce concurrent allocation rate and prevent OOM.
+                        // Thresholds raised (80%/92%) and pauses shortened to avoid
+                        // premature throttling that was causing scan timeouts.
                         let pressure = pressure_level.load(std::sync::atomic::Ordering::Relaxed);
                         if pressure >= 2 {
-                            // Critical: pause 1s to let GC / drop cycles catch up
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            // Critical (>92%): brief pause to let drops catch up
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         } else if pressure >= 1 {
-                            // Warning: brief yield to reduce peak concurrency
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            // Warning (80-92%): minimal yield
+                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                         }
 
-                        // Apply rate limiting delay if configured (helps prevent server/resource overwhelming)
-                        if request_delay_ms > 0 && index > 0 {
+                        // Apply rate limiting delay only at depth 1 (root vendor analysis).
+                        // Depth 2+ vendors are already throttled by concurrency limits and
+                        // the recursive semaphore — adding per-vendor delays compounds latency.
+                        if request_delay_ms > 0 && index > 0 && current_depth == 1 {
                             tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
                         }
 

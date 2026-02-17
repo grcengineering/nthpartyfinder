@@ -438,7 +438,10 @@ pub async fn get_txt_records_with_pool(domain: &str, dns_pool: &DnsServerPool) -
     get_txt_records_with_rate_limit(domain, dns_pool, None).await
 }
 
-/// Get TXT records with optional rate limiting support
+/// Get TXT records with optional rate limiting support.
+/// Uses concurrent DNS racing: fires DoH + traditional DNS in parallel,
+/// returns the first successful result. This eliminates sequential fallback
+/// latency which could cost 10-20s per domain on failures.
 pub async fn get_txt_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -450,92 +453,92 @@ pub async fn get_txt_records_with_rate_limit(
     }
 
     debug!("Querying TXT records for domain: {}", domain);
-    
-    // First, try DNS over HTTPS (primary method)
-    info!("Attempting DoH lookup for {}", domain);
-    for attempt in 0..2 {
-        let doh_server = dns_pool.next_doh_server();
-        debug!("DoH attempt {} for {}: using {}", attempt + 1, domain, doh_server.name);
-        
+
+    // Race DoH and traditional DNS concurrently — first successful result wins.
+    // This replaces the old sequential fallback (DoH×2 → DNS×2 → system) which
+    // could take 20+ seconds on failure. Now worst-case is ~3s (single timeout).
+    let doh_server = dns_pool.next_doh_server();
+    let dns_server = dns_pool.next_dns_server();
+
+    // Spawn DoH lookup
+    let doh_fut = async {
         match dns_pool.doh_txt_lookup(domain, doh_server).await {
-            Ok(records) if !records.is_empty() => {
-                info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
-                return Ok(records);
-            },
-            Ok(_) => {
-                debug!("DoH returned empty results for {} via {}", domain, doh_server.name);
-            },
-            Err(e) => {
-                debug!("DoH lookup failed for {} via {}: {}", domain, doh_server.name, e);
-            }
+            Ok(records) if !records.is_empty() => Some(records),
+            Ok(_) => None,
+            Err(_) => None,
         }
-    }
-    
-    // Fallback to traditional DNS queries
-    info!("DoH failed, falling back to traditional DNS for {}", domain);
-    for attempt in 0..2 {
-        let dns_server = dns_pool.next_dns_server();
-        debug!("DNS attempt {} for {}: using {}", attempt + 1, domain, dns_server.name);
-        
-        // Try UDP first (faster) - handle resolver creation failure gracefully (C002 fix)
+    };
+
+    // Spawn traditional DNS lookup (UDP)
+    let dns_fut = async {
         let resolver = match dns_pool.create_dns_resolver(dns_server, false) {
             Ok(r) => r,
-            Err(e) => {
-                debug!("Failed to create UDP resolver for {}: {}", dns_server.name, e);
-                continue;
-            }
+            Err(_) => return None,
         };
         match resolver.txt_lookup(domain).await {
             Ok(txt_lookup) => {
-                let records: Vec<String> = txt_lookup
-                    .iter()
-                    .map(|record| record.to_string())
-                    .collect();
+                let records: Vec<String> = txt_lookup.iter().map(|r| r.to_string()).collect();
+                if records.is_empty() { None } else { Some(records) }
+            }
+            Err(_) => None,
+        }
+    };
 
-                debug!("Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
-                return Ok(records);
-            },
-            Err(e) => {
-                debug!("UDP lookup failed for {} via {}: {}", domain, dns_server.name, e);
+    // Race both with a 3s overall timeout
+    let race_result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        async {
+            tokio::pin!(doh_fut);
+            tokio::pin!(dns_fut);
 
-                // Try TCP fallback for this server
-                let tcp_resolver = match dns_pool.create_dns_resolver(dns_server, true) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        debug!("Failed to create TCP resolver for {}: {}", dns_server.name, e);
-                        continue;
+            // Use select to return whichever finishes first with results
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut doh_fut => {
+                        if let Some(records) = result {
+                            info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                            return Some(records);
+                        }
+                        // DoH failed — wait for DNS
+                        if let Some(records) = (&mut dns_fut).await {
+                            debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                            return Some(records);
+                        }
+                        return None;
                     }
-                };
-                match tcp_resolver.txt_lookup(domain).await {
-                    Ok(txt_lookup) => {
-                        let records: Vec<String> = txt_lookup
-                            .iter()
-                            .map(|record| record.to_string())
-                            .collect();
-
-                        debug!("Found {} TXT records for {} via {} (TCP)", records.len(), domain, dns_server.name);
-                        return Ok(records);
-                    },
-                    Err(tcp_e) => {
-                        debug!("TCP lookup also failed for {} via {}: {}", domain, dns_server.name, tcp_e);
+                    result = &mut dns_fut => {
+                        if let Some(records) = result {
+                            debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                            return Some(records);
+                        }
+                        // DNS failed — wait for DoH
+                        if let Some(records) = (&mut doh_fut).await {
+                            info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                            return Some(records);
+                        }
+                        return None;
                     }
                 }
             }
         }
+    ).await;
+
+    match race_result {
+        Ok(Some(records)) => return Ok(records),
+        _ => {}
     }
-    
-    // Final fallback: try system resolver
-    debug!("All custom DNS failed for {}, trying system resolver", domain);
+
+    // Final fallback: system resolver (only if both racing attempts failed)
+    debug!("DNS race failed for {}, trying system resolver", domain);
     match try_system_dns_resolver(domain).await {
         Ok(records) => {
             debug!("Found {} TXT records for {} via system resolver", records.len(), domain);
             Ok(records)
         },
         Err(e) => {
-            // M001: Distinguish "all DNS resolution failed" from "no records found" (which
-            // returns Ok(vec![]) via a successful lookup with zero results above).
-            warn!("All DNS resolution failed for {} (DoH, UDP, TCP, system resolver all errored) — returning empty results to continue analysis. Last error: {}", domain, e);
-            Ok(vec![]) // Return empty instead of error to continue analysis
+            warn!("All DNS resolution failed for {} — returning empty results to continue analysis. Last error: {}", domain, e);
+            Ok(vec![])
         }
     }
 }
@@ -557,7 +560,8 @@ pub async fn get_cname_records_with_pool(domain: &str, dns_pool: &DnsServerPool)
     get_cname_records_with_rate_limit(domain, dns_pool, None).await
 }
 
-/// Get CNAME records with optional rate limiting support
+/// Get CNAME records with optional rate limiting support.
+/// Single-attempt DoH lookup — CNAME absence is normal, so no retries needed.
 pub async fn get_cname_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -570,23 +574,17 @@ pub async fn get_cname_records_with_rate_limit(
 
     debug!("Querying CNAME records for domain: {}", domain);
 
-    // Try DNS over HTTPS first
-    for attempt in 0..2 {
-        let doh_server = dns_pool.next_doh_server();
-        debug!("DoH CNAME attempt {} for {}: using {}", attempt + 1, domain, doh_server.name);
-
-        match dns_pool.doh_cname_lookup(domain, doh_server).await {
-            Ok(records) if !records.is_empty() => {
-                debug!("DoH successful: Found {} CNAME records for {} via {}", records.len(), domain, doh_server.name);
-                return Ok(records);
-            },
-            Ok(_) => {
-                debug!("DoH returned empty CNAME results for {} via {}", domain, doh_server.name);
-            },
-            Err(e) => {
-                debug!("DoH CNAME lookup failed for {} via {}: {}", domain, doh_server.name, e);
-            }
-        }
+    // Single DoH attempt with short timeout — CNAME absence is normal
+    let doh_server = dns_pool.next_doh_server();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        dns_pool.doh_cname_lookup(domain, doh_server)
+    ).await {
+        Ok(Ok(records)) if !records.is_empty() => {
+            debug!("DoH successful: Found {} CNAME records for {} via {}", records.len(), domain, doh_server.name);
+            return Ok(records);
+        },
+        _ => {}
     }
 
     // No CNAME found is normal for most domains

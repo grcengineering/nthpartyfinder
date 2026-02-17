@@ -11,11 +11,11 @@ use std::sync::Arc;
 /// Memory pressure levels with corresponding throttle actions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PressureLevel {
-    /// < 70% used: no throttling
+    /// < 80% used: no throttling
     Normal,
-    /// 70-85% used: reduce concurrency by half
+    /// 80-92% used: reduce concurrency by half
     Warning,
-    /// > 85% used: reduce concurrency to 1
+    /// > 92% used: reduce concurrency to 1
     Critical,
 }
 
@@ -42,8 +42,8 @@ impl MemoryMonitor {
             system,
             base_concurrency,
             effective_concurrency: effective,
-            warning_threshold: 70.0,
-            critical_threshold: 85.0,
+            warning_threshold: 80.0,
+            critical_threshold: 92.0,
         }
     }
 
