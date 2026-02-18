@@ -34,7 +34,7 @@ async fn test_domain_validation() {
         "google.com",
         "sub.domain.io",
         "test-site.org",
-        "a.b.c.d.com",
+        "cdn.assets.vendor.com",
         "valid-domain123.net",
     ];
     
