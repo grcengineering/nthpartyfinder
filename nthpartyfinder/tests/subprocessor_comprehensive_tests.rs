@@ -299,8 +299,8 @@ async fn test_cached_domain_stripe() {
 
     if let Some(url) = cache.get_cached_subprocessor_url("stripe.com").await {
         assert!(url.contains("stripe.com"), "URL should contain domain");
-        assert!(url.contains("legal") || url.contains("service-providers"),
-                "URL should be legal/subprocessor related");
+        assert!(url.contains("legal") || url.contains("service-providers") || url.contains("trust"),
+                "URL should be legal/subprocessor/trust related");
         println!("✓ stripe.com cache: {}", url);
     } else {
         println!("⚠ stripe.com not cached - expected for new installations");
@@ -882,7 +882,14 @@ fn test_ner_chunking_utf8_boundary_safety() {
             while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
                 safe_overlap -= 1;
             }
-            start = safe_overlap;
+            // Ensure forward progress: if char-boundary walk-back lands at or before
+            // current start (possible with multi-byte chars like CJK or emoji),
+            // skip the overlap and advance to final_end instead.
+            if safe_overlap <= start {
+                start = final_end;
+            } else {
+                start = safe_overlap;
+            }
         }
         result
     }

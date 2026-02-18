@@ -338,13 +338,19 @@ impl NerOrganizationExtractor {
                     continue;
                 }
                 result.push(&text[start..final_end]);
-                // 500 char overlap — ensure overlap start is on a char boundary
+                // 500 byte overlap — ensure overlap start is on a char boundary
                 let overlap_start = if final_end > start + 500 { final_end - 500 } else { final_end };
                 let mut safe_overlap = overlap_start;
                 while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
                     safe_overlap -= 1;
                 }
-                start = safe_overlap;
+                // Ensure forward progress: char-boundary walk-back on multi-byte text
+                // (CJK, emoji) can land at or before current start, causing infinite loop.
+                if safe_overlap <= start {
+                    start = final_end;
+                } else {
+                    start = safe_overlap;
+                }
             }
             result
         };
