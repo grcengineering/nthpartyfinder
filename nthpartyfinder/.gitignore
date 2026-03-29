@@ -36,3 +36,8 @@ models/*.json
 
 # Git worktrees
 .worktrees/
+
+# PAI / tooling
+MEMORY/
+.zerg/
+.gsd/

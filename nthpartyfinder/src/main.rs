@@ -34,6 +34,7 @@ mod trust_center;
 mod result_sink;
 mod memory_monitor;
 mod browser_pool;
+mod dep_check;
 
 use cli::{Args, Cli, Commands, CacheCommands};
 use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
@@ -140,6 +141,56 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Pre-flight dependency checks — validate optional runtime dependencies
+    // before starting analysis. This runs after config load so we know which
+    // features are enabled, and before NER init so we can download ORT if needed.
+    eprintln!("  Checking dependencies...");
+    #[cfg(feature = "embedded-ner")]
+    {
+        let slm_wanted = args.enable_slm || (!args.disable_slm && _app_config.discovery.ner_enabled);
+        if slm_wanted {
+            // Check if ONNX Runtime is available; if not, offer to download it
+            let ort_check = dep_check::check_onnx_runtime_availability();
+            if !ort_check {
+                match dep_check::download_onnx_runtime_interactive() {
+                    Ok(_path) => {
+                        // ORT_DYLIB_PATH is now set for this process
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️  {}", e);
+                        eprintln!("   Continuing without NER (--disable-slm implied).");
+                        // We don't exit — just disable SLM for this run
+                    }
+                }
+            }
+        }
+    }
+
+    // Check other optional dependencies and print warnings (non-blocking)
+    match dep_check::check_dependencies(
+        args.enable_slm,
+        args.disable_slm,
+        args.enable_subdomain_discovery,
+        args.enable_web_org,
+        args.enable_web_traffic_discovery,
+        _app_config.discovery.ner_enabled,
+        _app_config.discovery.subdomain_enabled,
+    ) {
+        Ok(results) => {
+            for result in &results {
+                if !result.available {
+                    if let Some(msg) = &result.message {
+                        eprintln!("⚠️  {}", msg);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ Missing required dependency:\n{}", e);
+            std::process::exit(1);
+        }
+    }
+
     // Initialize logging system — safe to start now that all interactive prompts are done
     eprintln!("  Starting logger...");
     let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
@@ -148,12 +199,12 @@ async fn main() -> Result<()> {
         None => AnalysisLogger::new(verbosity),
     });
 
-    // Start initialization progress bar (5 steps: NER spawn, vendor registry,
-    // known vendors, org normalizer, feature detection)
+    // Start initialization progress bar (5 steps: vendor registry, known vendors,
+    // org normalizer, feature detection, NER model)
     logger.start_init_progress(5).await;
 
-    // Step 1: Spawn NER initialization in background (takes ~0.8s)
-    // This runs concurrently with vendor_registry and known_vendors init below
+    // Spawn NER initialization in background (takes ~0.8s)
+    // This runs concurrently with steps 1-4 below, then awaited at step 5.
     #[cfg(feature = "embedded-ner")]
     let ner_bg_handle = if !args.disable_slm {
         Some(tokio::task::spawn_blocking(|| {
@@ -162,20 +213,8 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    #[cfg(feature = "embedded-ner")]
-    {
-        if !args.disable_slm {
-            logger.complete_init_step("NER model loading in background").await;
-        } else {
-            logger.complete_init_step("NER disabled (--disable-slm)").await;
-        }
-    }
-    #[cfg(not(feature = "embedded-ner"))]
-    {
-        logger.complete_init_step("NER not compiled in").await;
-    }
 
-    // Step 2: Initialize vendor registry (consolidated vendor JSON files)
+    // Step 1: Initialize vendor registry (consolidated vendor JSON files)
     let vendor_registry_loaded = match vendor_registry::init() {
         Ok(()) => {
             if let Some(reg) = vendor_registry::get() {
@@ -196,7 +235,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Vendor registry (fallback mode)").await;
     }
 
-    // Step 3: Initialize known vendors database for reliable org lookups
+    // Step 2: Initialize known vendors database for reliable org lookups
     let known_vendors_loaded = match known_vendors::init() {
         Ok(()) => {
             if let Some(kv) = known_vendors::get() {
@@ -219,7 +258,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Known vendors database (not available)").await;
     }
 
-    // Step 4: Initialize organization name normalizer from config (global singleton)
+    // Step 3: Initialize organization name normalizer from config (global singleton)
     org_normalizer::init(&_app_config.organization);
     if org_normalizer::is_enabled() {
         logger.complete_init_step(&format!("Organization normalizer (threshold: {:.0}%)",
@@ -228,7 +267,7 @@ async fn main() -> Result<()> {
         logger.complete_init_step("Organization normalizer (disabled)").await;
     }
 
-    // Step 5: Feature detection
+    // Step 4: Feature detection
     let web_org_will_be_enabled = args.enable_web_org
         || (!args.disable_web_org && _app_config.discovery.web_org_enabled);
     let subprocessor_will_be_enabled = args.enable_subprocessor_analysis
@@ -240,6 +279,30 @@ async fn main() -> Result<()> {
     let web_traffic_will_be_enabled = args.enable_web_traffic_discovery
         || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled);
     logger.complete_init_step("Feature detection complete").await;
+
+    // Step 5: Await NER model initialization (was spawned in background during steps 1-4)
+    #[cfg(feature = "embedded-ner")]
+    {
+        if let Some(handle) = ner_bg_handle {
+            match handle.await {
+                Ok(Ok(())) => {
+                    logger.complete_init_step("NER model loaded (GLiNER ready)").await;
+                }
+                Ok(Err(e)) => {
+                    logger.complete_init_step(&format!("NER initialization failed: {}", e)).await;
+                }
+                Err(e) => {
+                    logger.complete_init_step(&format!("NER task panicked: {}", e)).await;
+                }
+            }
+        } else {
+            logger.complete_init_step("NER disabled (--disable-slm)").await;
+        }
+    }
+    #[cfg(not(feature = "embedded-ner"))]
+    {
+        logger.complete_init_step("NER not compiled in").await;
+    }
 
     // Finish init progress bar
     logger.finish_init().await;
@@ -536,24 +599,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-
-    // Await background NER initialization (overlaps with WHOIS above)
-    #[cfg(feature = "embedded-ner")]
-    {
-        if let Some(handle) = ner_bg_handle {
-            match handle.await {
-                Ok(Ok(())) => {
-                    logger.info("NER model loaded (GLiNER ready)");
-                }
-                Ok(Err(e)) => {
-                    logger.warn(&format!("NER initialization failed: {}", e));
-                }
-                Err(e) => {
-                    logger.warn(&format!("NER task panicked: {}", e));
-                }
-            }
-        }
-    }
 
     // Collect WHOIS result (already running in background)
     if let Some(handle) = whois_handle {
@@ -1095,10 +1140,14 @@ async fn main() -> Result<()> {
     logger.log_export_success(&final_output_path);
 
     // Prompt user to confirm any pending org-to-domain mappings discovered via generic fallback
-    if let Some(analyzer) = &subprocessor_analyzer {
-        let pending = analyzer.get_pending_mappings().await;
-        if !pending.is_empty() {
-            confirm_pending_mappings(&pending, analyzer, &logger).await?;
+    // Skip when stdin is not a terminal (non-interactive mode)
+    let is_interactive_post = std::io::stdin().is_terminal();
+    if is_interactive_post {
+        if let Some(analyzer) = &subprocessor_analyzer {
+            let pending = analyzer.get_pending_mappings().await;
+            if !pending.is_empty() {
+                confirm_pending_mappings(&pending, analyzer, &logger).await?;
+            }
         }
     }
 
@@ -1127,7 +1176,7 @@ async fn main() -> Result<()> {
         }
         drop(vendors);
 
-        if !all_unverified.is_empty() {
+        if !all_unverified.is_empty() && is_interactive_post {
             confirm_unverified_organizations(&all_unverified, &discovered_vendors, &logger).await?;
         }
     }
@@ -1271,17 +1320,48 @@ async fn discover_nth_parties(
     }
     logger.log_dns_lookup_start(domain);
 
-    match dns::get_txt_records_with_pool(domain, &dns_pool).await {
-        Ok(txt_records) => {
-            if !txt_records.is_empty() {
-                logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
-                logger.debug(&format!("Raw TXT records for {}: {:?}", domain, txt_records));
-                if current_depth == 1 {
-                    logger.show_sub_progress(&format!("Found {} TXT records for {}", txt_records.len(), domain)).await;
+    // Fetch TXT records with retry for root domain — a domain with 0 TXT records
+    // at depth 1 almost certainly indicates a transient DNS failure, not reality.
+    let txt_records = match dns::get_txt_records_with_pool(domain, &dns_pool).await {
+        Ok(records) if !records.is_empty() => records,
+        first_result => {
+            if current_depth == 1 {
+                // Root domain with 0 TXT records is suspicious — retry once with a
+                // fresh server rotation to recover from a single-server transient failure.
+                logger.debug(&format!("Root domain {} returned 0 TXT records on first attempt, retrying...", domain));
+                match dns::get_txt_records_with_pool(domain, &dns_pool).await {
+                    Ok(retry_records) if !retry_records.is_empty() => {
+                        logger.info(&format!("DNS retry succeeded: found {} TXT records for {} on second attempt", retry_records.len(), domain));
+                        retry_records
+                    }
+                    _ => {
+                        logger.warn(&format!(
+                            "DNS returned 0 TXT records for root domain {} after 2 attempts. \
+                             This is unusual — most domains have SPF/DMARC/verification records. \
+                             Possible causes: transient DNS failure, network issues, or DNS blocking.",
+                            domain
+                        ));
+                        first_result.unwrap_or_default()
+                    }
                 }
             } else {
-                logger.log_dns_lookup_success(domain, "DoH/DNS", 0);
+                first_result.unwrap_or_default()
             }
+        }
+    };
+
+    {
+        // Scope for TXT record processing and vendor discovery
+        let txt_records = txt_records; // bind into this block
+        if !txt_records.is_empty() {
+            logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
+            logger.debug(&format!("Raw TXT records for {}: {:?}", domain, txt_records));
+            if current_depth == 1 {
+                logger.show_sub_progress(&format!("Found {} TXT records for {}", txt_records.len(), domain)).await;
+            }
+        } else {
+            logger.log_dns_lookup_success(domain, "DoH/DNS", 0);
+        }
 
             let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(&txt_records, Some(verification_logger), domain);
 
@@ -1584,9 +1664,12 @@ async fn discover_nth_parties(
                     logger.update_progress(&format!("Analyzing {} vendor domains (WHOIS + org lookup)", vendor_count)).await;
                     logger.show_sub_progress(&format!("Processing vendor 0/{} — resolving organizations", vendor_count)).await;
                 } else {
+                    logger.warn("No vendor domains found for root domain after all discovery methods. \
+                                 This likely indicates a DNS resolution failure or network issue. \
+                                 Try re-running the scan.");
                     logger.update_progress("No vendor domains found to analyze").await;
                     logger.set_progress_position(100).await;
-                    logger.finish_progress("Analysis completed").await;
+                    logger.finish_progress("Analysis completed — 0 vendors found (possible DNS failure)").await;
                 }
             }
             
@@ -1834,17 +1917,8 @@ async fn discover_nth_parties(
                         total_relationships_found, vendor_count)).await;
                 }
             }
-        },
-        Err(e) => {
-            logger.log_dns_lookup_failed(domain, &e.to_string());
-            
-            // Finish progress bar even if DNS lookup failed (for root-level analysis)
-            if current_depth == 1 {
-                logger.finish_progress("Analysis completed with DNS errors").await;
-            }
         }
-    }
-    
+
     Ok(())
 }
 

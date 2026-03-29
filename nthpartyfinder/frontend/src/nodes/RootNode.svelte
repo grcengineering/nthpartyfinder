@@ -12,77 +12,83 @@
 </script>
 
 <div class="root-node" class:expanded={data.expanded}>
-  <div class="node-icon">🏢</div>
-  <div class="node-content">
-    <div class="node-domain">{data.domain}</div>
-    {#if data.organization && data.organization !== data.domain}
-      <div class="node-org">{data.organization}</div>
-    {/if}
+  <!-- Handle at center of circle (56px circle, so top: 28px) -->
+  <Handle type="source" position={Position.Bottom} id="source" style="position: absolute; left: 50%; top: 28px; transform: translate(-50%, -50%);" />
+
+  <div class="node-circle">
+    <span class="node-icon">🏢</span>
     {#if data.hasChildren}
-      <div class="node-children">
-        {data.expanded ? '▲' : '▼'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
-      </div>
+      <div class="badge">{data.childCount}</div>
     {/if}
   </div>
-  <!-- Bottom handle for vertical (top-down) layout -->
-  <Handle type="source" position={Position.Bottom} />
+  <div class="node-label">{data.domain}</div>
+  {#if data.hasChildren}
+    <div class="node-hint">{data.expanded ? 'Click to collapse' : 'Click to expand'}</div>
+  {/if}
 </div>
 
 <style>
   .root-node {
-    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-    color: white;
-    padding: 16px 20px;
-    border-radius: 12px;
-    min-width: 180px;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     cursor: pointer;
-    transition: transform 0.2s, box-shadow 0.2s;
+    width: 120px;
+  }
+
+  .node-circle {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
     display: flex;
     align-items: center;
-    gap: 12px;
-    overflow: hidden;
-    box-sizing: border-box;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+    transition: transform 0.2s, box-shadow 0.2s;
+    position: relative;
   }
 
-  .root-node:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
+  .root-node:hover .node-circle {
+    transform: scale(1.08);
+    box-shadow: 0 4px 16px rgba(99, 102, 241, 0.45);
   }
 
-  .root-node.expanded {
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+  .root-node.expanded .node-circle {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25), 0 2px 8px rgba(99, 102, 241, 0.35);
   }
 
-  .node-icon {
-    font-size: 24px;
+  .node-icon { font-size: 24px; line-height: 1; }
+
+  .badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    background: #ef4444;
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 5px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
   }
 
-  .node-content {
-    flex: 1;
-    overflow: hidden;
-  }
-
-  .node-domain {
+  .node-label {
+    font-size: 12px;
     font-weight: 600;
-    font-size: 14px;
-    margin-bottom: 2px;
+    color: #1e293b;
+    text-align: center;
+    max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .node-org {
-    font-size: 11px;
-    opacity: 0.9;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .node-children {
-    font-size: 11px;
-    opacity: 0.8;
-    margin-top: 4px;
-  }
+  .node-hint { font-size: 9px; color: #94a3b8; }
 </style>

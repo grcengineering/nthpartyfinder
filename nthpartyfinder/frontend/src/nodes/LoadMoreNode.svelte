@@ -9,52 +9,50 @@
 </script>
 
 <div class="load-more-node">
-  <!-- Top handle for vertical layout -->
-  <Handle type="target" position={Position.Top} />
+  <!-- Handle at center of circle (40px circle, so top: 20px) -->
+  <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 20px; transform: translate(-50%, -50%);" />
 
-  <div class="node-content">
-    <div class="node-icon">+</div>
-    <div class="node-label">{data.label}</div>
-    <div class="node-hint">Click to load</div>
+  <div class="node-circle">
+    <span class="plus-icon">+</span>
   </div>
+  <div class="node-label">{data.label}</div>
+  <div class="node-hint">Click to load</div>
 </div>
 
 <style>
   .load-more-node {
-    background: white;
-    border: 2px dashed #9ca3af;
-    color: #6b7280;
-    padding: 10px 14px;
-    border-radius: 8px;
-    min-width: 100px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
     cursor: pointer;
+    width: 100px;
+  }
+
+  .node-circle {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px dashed #9ca3af;
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     transition: all 0.2s;
   }
 
-  .load-more-node:hover {
+  .load-more-node:hover .node-circle {
     border-color: #6366f1;
-    color: #6366f1;
     background: #f5f3ff;
+    transform: scale(1.08);
   }
 
-  .node-content {
-    text-align: center;
+  .plus-icon {
+    font-size: 20px; font-weight: 300; color: #9ca3af; line-height: 1;
   }
 
-  .node-icon {
-    font-size: 18px;
-    font-weight: bold;
-    margin-bottom: 2px;
-  }
+  .load-more-node:hover .plus-icon { color: #6366f1; }
 
-  .node-label {
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .node-hint {
-    font-size: 9px;
-    opacity: 0.7;
-    margin-top: 2px;
-  }
+  .node-label { font-size: 11px; font-weight: 500; color: #6b7280; text-align: center; }
+  .node-hint { font-size: 9px; color: #9ca3af; }
 </style>

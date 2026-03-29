@@ -972,7 +972,7 @@ Add the following sections to `README.md`:
 Pull the pre-built image with embedded NER:
 
 ```bash
-docker pull ghcr.io/your-org/nthpartyfinder:latest
+docker pull ghcr.io/grcengineering/nthpartyfinder:latest
 ```
 
 Or build locally:
@@ -989,7 +989,7 @@ docker run -v $(pwd)/output:/output nthpartyfinder -d example.com -r 2 -f json -
 
 ### Option 2: Pre-built Binary
 
-Download from [Releases](https://github.com/your-org/nthpartyfinder/releases).
+Download from [Releases](https://github.com/grcengineering/nthpartyfinder/releases).
 
 - **Full version** (`nthpartyfinder-full`): Includes embedded NER (~150MB)
 - **Slim version** (`nthpartyfinder`): No NER, smaller size (~15MB)
@@ -998,7 +998,7 @@ Download from [Releases](https://github.com/your-org/nthpartyfinder/releases).
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/nthpartyfinder.git
+git clone https://github.com/grcengineering/nthpartyfinder.git
 cd nthpartyfinder
 
 # Build without embedded NER (faster, smaller)

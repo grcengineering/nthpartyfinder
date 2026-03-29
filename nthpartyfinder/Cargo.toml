@@ -5,7 +5,7 @@ edition = "2021"
 description = "A cross-platform CLI tool for identifying Nth party vendor relationships through DNS analysis"
 authors = ["Security Community"]
 license = "MIT"
-repository = "https://github.com/your-org/nthpartyfinder"
+repository = "https://github.com/grcengineering/nthpartyfinder"
 keywords = ["security", "dns", "vendor-risk", "grc", "third-party"]
 categories = ["command-line-utilities", "network-programming"]
 
@@ -76,6 +76,11 @@ predicates = "3.0"
 [[bin]]
 name = "nthpartyfinder"
 path = "src/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/nthpartyfinder-{ target }{ archive-suffix }"
+bin-dir = "nthpartyfinder{ binary-ext }"
+pkg-fmt = "tgz"
 
 [[example]]
 name = "progress_test"

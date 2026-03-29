@@ -96,7 +96,7 @@ fn get_local_overrides_path() -> PathBuf {
 }
 
 /// GitHub raw URL for remote updates
-pub const GITHUB_RAW_URL: &str = "https://raw.githubusercontent.com/your-org/nthpartyfinder/main/config/known_vendors.json";
+pub const GITHUB_RAW_URL: &str = "https://raw.githubusercontent.com/grcengineering/nthpartyfinder/main/config/known_vendors.json";
 
 /// Known vendors database structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

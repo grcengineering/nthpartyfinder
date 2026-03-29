@@ -80,7 +80,7 @@ pub async fn fetch_page_content(domain: &str) -> Result<String> {
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/your-org/nthpartyfinder)")
+        .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/grcengineering/nthpartyfinder)")
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 

@@ -19,6 +19,7 @@ export interface AggregatedVendor {
   domain: string;
   organization: string;
   layer: number;
+  layers: number[];    // All layers this vendor appears at
   discoveryCount: number;
   sources: DiscoverySource[];
   children: string[];  // Child vendor domains
@@ -32,6 +33,8 @@ export interface XYFlowNode {
     organization: string;
     domain: string;
     layer: number;
+    layers?: number[];
+    activeLayers?: number[];
     childCount: number;
     hasChildren: boolean;
     expanded: boolean;
@@ -50,6 +53,8 @@ export interface XYFlowEdge {
   label?: string;
   type?: string;
   hidden?: boolean;
+  sourceHandle?: string;
+  targetHandle?: string;
   data?: {
     recordType: string;
     layer: number;
@@ -68,6 +73,7 @@ export function aggregateVendors(relationships: Relationship[]): Map<string, Agg
         domain,
         organization: rel.nth_party_organization || domain,
         layer: rel.nth_party_layer,
+        layers: [rel.nth_party_layer],
         discoveryCount: 0,
         sources: [],
         children: []
@@ -75,6 +81,12 @@ export function aggregateVendors(relationships: Relationship[]): Map<string, Agg
     }
 
     const vendor = vendors.get(domain)!;
+
+    // Track all layers this vendor appears at
+    if (!vendor.layers.includes(rel.nth_party_layer)) {
+      vendor.layers.push(rel.nth_party_layer);
+      vendor.layers.sort((a, b) => a - b);
+    }
 
     // Use minimum layer (earliest discovery point)
     vendor.layer = Math.min(vendor.layer, rel.nth_party_layer);
@@ -127,24 +139,36 @@ export function buildRelationshipMap(relationships: Relationship[]): Map<string,
 }
 
 // Layout constants - VERTICAL top-to-bottom
-const LAYER_SPACING = 180;  // Vertical distance between layers (rows)
-const NODE_SPACING = 280;   // Horizontal distance between sibling nodes (columns)
+const NODE_WIDTH = 120;     // Compact circular node footprint width
+const NODE_HEIGHT = 90;     // Compact circular node footprint height (circle + labels)
+const H_GAP = 40;           // Horizontal gap between nodes
+const V_GAP = 30;           // Vertical gap between rows within a layer
+const LAYER_GAP = 80;       // Extra gap between layers
+const MAX_COLS = 10;        // Max nodes per row before wrapping (smaller nodes = more per row)
+const NODE_SPACING = NODE_WIDTH + H_GAP; // Total horizontal step
 
-// Calculate vertical positions (top-to-bottom layout)
+// Layer band info exported for rendering backgrounds
+export interface LayerBand {
+  layer: number;
+  label: string;
+  y: number;      // Top of band
+  height: number; // Band height
+  width: number;  // Band width
+}
+
+// Calculate vertical positions with multi-row grid and parent-proximity ordering
 function calculateVerticalPositions(
   vendors: Map<string, AggregatedVendor>,
   childrenMap: Map<string, Set<string>>,
   rootDomain: string
-): Map<string, { x: number; y: number }> {
+): { positions: Map<string, { x: number; y: number }>; layerBands: LayerBand[] } {
   const positions = new Map<string, { x: number; y: number }>();
+  const layerBands: LayerBand[] = [];
 
   // Group vendors by layer
   const layerNodes = new Map<number, string[]>();
-
-  // Add root at layer 0
   layerNodes.set(0, [rootDomain]);
 
-  // Group other vendors by layer
   for (const [domain, vendor] of vendors) {
     if (domain === rootDomain) continue;
     if (!layerNodes.has(vendor.layer)) {
@@ -153,26 +177,123 @@ function calculateVerticalPositions(
     layerNodes.get(vendor.layer)!.push(domain);
   }
 
-  // Calculate positions for each layer (top-to-bottom)
-  for (const [layer, domains] of layerNodes) {
-    const totalWidth = (domains.length - 1) * NODE_SPACING;
-    const startX = -totalWidth / 2;
+  // Sort layers
+  const sortedLayers = Array.from(layerNodes.keys()).sort((a, b) => a - b);
 
-    domains.forEach((domain, index) => {
-      positions.set(domain, {
-        x: startX + index * NODE_SPACING,
-        y: layer * LAYER_SPACING
-      });
-    });
+  // Build reverse map: child -> parent domain for ordering
+  const parentOf = new Map<string, string>();
+  for (const [parent, children] of childrenMap) {
+    for (const child of children) {
+      parentOf.set(child, parent);
+    }
   }
 
-  return positions;
+  let currentY = 0;
+
+  for (const layer of sortedLayers) {
+    let domains = layerNodes.get(layer)!;
+
+    // Order nodes by parent x-position to minimize edge crossings
+    if (layer > 0) {
+      domains = orderByParentProximity(domains, parentOf, positions);
+    }
+
+    // Calculate grid dimensions
+    const cols = Math.min(domains.length, MAX_COLS);
+    const rows = Math.ceil(domains.length / cols);
+    const totalWidth = (cols - 1) * NODE_SPACING;
+    const startX = -totalWidth / 2;
+
+    const bandPadding = 20;
+    const bandTop = currentY - bandPadding;
+
+    // Position each node in grid
+    domains.forEach((domain, index) => {
+      const col = index % cols;
+      const row = Math.floor(index / cols);
+      // For incomplete last row, center it
+      const nodesInRow = row < rows - 1 ? cols : domains.length - row * cols;
+      const rowWidth = (nodesInRow - 1) * NODE_SPACING;
+      const rowStartX = -rowWidth / 2;
+      const colInRow = index - row * cols;
+
+      positions.set(domain, {
+        x: rowStartX + colInRow * NODE_SPACING,
+        y: currentY + row * (NODE_HEIGHT + V_GAP)
+      });
+    });
+
+    const bandHeight = rows * NODE_HEIGHT + (rows - 1) * V_GAP + bandPadding * 2;
+    const bandWidth = Math.max((Math.min(domains.length, MAX_COLS) - 1) * NODE_SPACING + NODE_WIDTH + bandPadding * 2, 400);
+
+    const layerLabels: Record<number, string> = {
+      0: 'Target Organization',
+      1: 'Layer 1 — Direct Vendors',
+      2: 'Layer 2 — Sub-processors',
+      3: 'Layer 3 — Nth Parties',
+      4: 'Layer 4 — Deep Dependencies'
+    };
+
+    layerBands.push({
+      layer,
+      label: layerLabels[layer] || `Layer ${layer}`,
+      y: bandTop,
+      height: bandHeight,
+      width: bandWidth
+    });
+
+    // Advance Y for next layer
+    currentY += rows * (NODE_HEIGHT + V_GAP) + LAYER_GAP;
+  }
+
+  return { positions, layerBands };
+}
+
+// Order domains so children of the same parent are adjacent, sorted by parent x-position
+function orderByParentProximity(
+  domains: string[],
+  parentOf: Map<string, string>,
+  positions: Map<string, { x: number; y: number }>
+): string[] {
+  // Group by parent
+  const groups = new Map<string, string[]>();
+  const orphans: string[] = [];
+
+  for (const domain of domains) {
+    const parent = parentOf.get(domain);
+    if (parent && positions.has(parent)) {
+      if (!groups.has(parent)) groups.set(parent, []);
+      groups.get(parent)!.push(domain);
+    } else {
+      orphans.push(domain);
+    }
+  }
+
+  // Sort groups by parent x-position (left to right)
+  const sortedParents = Array.from(groups.keys()).sort((a, b) => {
+    const ax = positions.get(a)?.x || 0;
+    const bx = positions.get(b)?.x || 0;
+    return ax - bx;
+  });
+
+  // Flatten: ordered groups, then orphans at the end
+  const result: string[] = [];
+  for (const parent of sortedParents) {
+    // Sort children within group alphabetically for consistency
+    const children = groups.get(parent)!;
+    children.sort((a, b) => a.localeCompare(b));
+    result.push(...children);
+  }
+  orphans.sort((a, b) => a.localeCompare(b));
+  result.push(...orphans);
+
+  return result;
 }
 
 export function transformToXyflow(
   relationships: Relationship[],
   rootDomain: string
-): { nodes: XYFlowNode[]; edges: XYFlowEdge[]; vendors: Map<string, AggregatedVendor> } {
+): { nodes: XYFlowNode[]; edges: XYFlowEdge[]; vendors: Map<string, AggregatedVendor>; layerBands: LayerBand[] } {
   const nodes: XYFlowNode[] = [];
   const edges: XYFlowEdge[] = [];
   const addedEdges = new Set<string>();
@@ -189,7 +310,7 @@ export function transformToXyflow(
   }
 
   // Calculate positions
-  const positions = calculateVerticalPositions(vendors, childrenMap, rootDomain);
+  const { positions, layerBands } = calculateVerticalPositions(vendors, childrenMap, rootDomain);
 
   // Add root node
   const rootChildren = childrenMap.get(rootDomain) || new Set();
@@ -203,7 +324,7 @@ export function transformToXyflow(
       layer: 0,
       childCount: rootChildren.size,
       hasChildren: rootChildren.size > 0,
-      expanded: true,
+      expanded: false,
       discoveryCount: 1,
       sources: []
     },
@@ -211,12 +332,12 @@ export function transformToXyflow(
     hidden: false
   });
 
-  // Add vendor nodes
+  // Add vendor nodes — all start hidden, revealed by expand/pagination
   for (const [domain, vendor] of vendors) {
     if (domain === rootDomain) continue;
 
     const children = childrenMap.get(domain) || new Set();
-    const position = positions.get(domain) || { x: 0, y: vendor.layer * LAYER_SPACING };
+    const position = positions.get(domain) || { x: 0, y: 0 };
 
     nodes.push({
       id: domain,
@@ -233,11 +354,11 @@ export function transformToXyflow(
         sources: vendor.sources
       },
       position,
-      hidden: vendor.layer > 1  // Only show layer 1 initially
+      hidden: true
     });
   }
 
-  // Add edges (deduplicated - one edge per parent-child pair)
+  // Add edges — all start hidden, revealed by expand/pagination
   for (const rel of relationships) {
     const edgeKey = `${rel.nth_party_customer_domain}->${rel.nth_party_domain}`;
     if (addedEdges.has(edgeKey)) continue;
@@ -250,8 +371,8 @@ export function transformToXyflow(
       id: `e-${edgeKey}`,
       source: rel.nth_party_customer_domain,
       target: rel.nth_party_domain,
-      type: 'smoothstep',
-      hidden: layer > 1,
+      type: 'bezier',
+      hidden: true,
       data: {
         recordType: rel.nth_party_record_type,
         layer: layer
@@ -259,7 +380,7 @@ export function transformToXyflow(
     });
   }
 
-  return { nodes, edges, vendors };
+  return { nodes, edges, vendors, layerBands };
 }
 
 export function formatRecordType(recordType: string): string {

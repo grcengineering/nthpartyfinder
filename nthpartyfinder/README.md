@@ -1,6 +1,6 @@
 # Nth Party Finder (nthpartyfinder)
 
-[![Build Status](https://github.com/your-org/nthpartyfinder/workflows/Build%20and%20Test/badge.svg)](https://github.com/your-org/nthpartyfinder/actions)
+[![Build Status](https://github.com/grcengineering/nthpartyfinder/workflows/Build%20and%20Test/badge.svg)](https://github.com/grcengineering/nthpartyfinder/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A high-performance, cross-platform command line tool for identifying Nth party vendor relationships through DNS analysis. Built in Rust for security, performance, and memory safety.
@@ -32,7 +32,7 @@ Security GRC teams responsible for third-party cyber risk management struggle to
 Pull the pre-built image with embedded NER:
 
 ```bash
-docker pull ghcr.io/your-org/nthpartyfinder:latest
+docker pull ghcr.io/grcengineering/nthpartyfinder:latest
 ```
 
 Or build locally:
@@ -49,7 +49,7 @@ docker run -v $(pwd)/output:/output nthpartyfinder -d example.com -r 2 -f json -
 
 ### Option 2: Pre-built Binaries
 
-Download from [Releases](https://github.com/your-org/nthpartyfinder/releases):
+Download from [Releases](https://github.com/grcengineering/nthpartyfinder/releases):
 
 - **Full version** (`nthpartyfinder-full`): Includes embedded NER (~150MB)
 - **Slim version** (`nthpartyfinder`): No NER, smaller size (~15MB)
@@ -65,7 +65,7 @@ Platform-specific binaries:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/nthpartyfinder.git
+git clone https://github.com/grcengineering/nthpartyfinder.git
 cd nthpartyfinder
 
 # Download model files (required for default build)
@@ -318,7 +318,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/nthpartyfinder.git
+git clone https://github.com/grcengineering/nthpartyfinder.git
 cd nthpartyfinder
 
 # Run tests
@@ -350,6 +350,6 @@ This tool is designed for legitimate security and GRC purposes only. Please use 
 
 ## Support
 
-- 📖 Documentation: [Wiki](https://github.com/your-org/nthpartyfinder/wiki)
-- 🐛 Bug Reports: [Issues](https://github.com/your-org/nthpartyfinder/issues)
-- 💬 Discussions: [GitHub Discussions](https://github.com/your-org/nthpartyfinder/discussions)
+- 📖 Documentation: [Wiki](https://github.com/grcengineering/nthpartyfinder/wiki)
+- 🐛 Bug Reports: [Issues](https://github.com/grcengineering/nthpartyfinder/issues)
+- 💬 Discussions: [GitHub Discussions](https://github.com/grcengineering/nthpartyfinder/discussions)

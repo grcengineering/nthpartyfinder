@@ -7,6 +7,8 @@
     organization: string;
     domain: string;
     layer: number;
+    layers?: number[];
+    activeLayers?: number[];  // Layers with currently visible edges — drives ring display
     childCount: number;
     hasChildren: boolean;
     expanded: boolean;
@@ -14,153 +16,182 @@
     sources: DiscoverySource[];
   };
 
-  // Color based on layer depth - same icon as root, different gradient colors
-  const layerColors: Record<number, { bg: string; shadow: string }> = {
-    1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', shadow: 'rgba(59, 130, 246, 0.3)' },
-    2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', shadow: 'rgba(16, 185, 129, 0.3)' },
-    3: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', shadow: 'rgba(245, 158, 11, 0.3)' },
-    4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', shadow: 'rgba(239, 68, 68, 0.3)' }
+  const layerColors: Record<number, { bg: string; shadow: string; ring: string; solid: string }> = {
+    1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', shadow: 'rgba(59, 130, 246, 0.35)', ring: 'rgba(59, 130, 246, 0.25)', solid: '#3b82f6' },
+    2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', shadow: 'rgba(16, 185, 129, 0.35)', ring: 'rgba(16, 185, 129, 0.25)', solid: '#10b981' },
+    3: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', shadow: 'rgba(245, 158, 11, 0.35)', ring: 'rgba(245, 158, 11, 0.25)', solid: '#f59e0b' },
+    4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', shadow: 'rgba(239, 68, 68, 0.35)', ring: 'rgba(239, 68, 68, 0.25)', solid: '#ef4444' }
   };
 
   $: colors = layerColors[data.layer] || layerColors[4];
 
+  // Build concentric ring shadows from ACTIVE layers only (not all possible layers).
+  // activeLayers is set by VendorGraph when edges become visible/hidden.
+  // Only show rings for layers BEYOND the primary layer (additional relationships).
+  $: multiLayerShadow = buildMultiLayerShadow(data.activeLayers || [data.layer]);
+
+  function buildMultiLayerShadow(activeLayers: number[]): string {
+    // Only the primary layer = no extra rings
+    const uniqueLayers = [...new Set(activeLayers)].sort((a, b) => a - b);
+    if (uniqueLayers.length <= 1) return '';
+
+    // Skip the primary layer — only show rings for ADDITIONAL layers
+    const extraLayers = uniqueLayers.filter(l => l !== data.layer);
+    if (extraLayers.length === 0) return '';
+
+    const shadows: string[] = [];
+    for (let i = 0; i < extraLayers.length; i++) {
+      const layer = extraLayers[i];
+      const color = (layerColors[layer] || layerColors[4]).solid;
+      const offset = (i + 1) * 4;
+      shadows.push(`0 0 0 ${offset}px ${color}`);
+    }
+    return shadows.join(', ');
+  }
+
+  let hovered = false;
+
+  function handleExpandClick(event: MouseEvent) {
+    event.stopPropagation();
+    window.dispatchEvent(new CustomEvent('node-action', {
+      detail: { action: 'expand', domain: data.domain }
+    }));
+  }
+
   function handleInfoClick(event: MouseEvent) {
     event.stopPropagation();
-    event.preventDefault();
-    // Use global event bus to bypass xyflow's data pipeline (callbacks on node.data get lost)
     window.dispatchEvent(new CustomEvent('show-vendor-info', {
       detail: { domain: data.domain, sources: data.sources }
     }));
   }
 </script>
 
+<!-- svelte-ignore a11y-no-static-element-interactions -->
 <div
   class="vendor-node"
   class:expanded={data.expanded}
-  style="background: {colors.bg}; --shadow-color: {colors.shadow};"
+  class:hovered
+  on:mouseenter={() => hovered = true}
+  on:mouseleave={() => hovered = false}
 >
-  <!-- Top handle for incoming edges (vertical layout) -->
-  <Handle type="target" position={Position.Top} />
+  <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 24px; transform: translate(-50%, -50%);" />
 
-  <div class="node-icon">🏢</div>
-  <div class="node-content">
-    <div class="node-domain">{data.domain}</div>
-    {#if data.organization && data.organization !== data.domain}
-      <div class="node-org">{data.organization}</div>
-    {/if}
-
-    <!-- Discovery count badge -->
-    {#if data.discoveryCount > 1}
-      <div class="discovery-badge">×{data.discoveryCount} sources</div>
-    {/if}
-
-    <!-- Child count indicator -->
-    {#if data.hasChildren}
-      <div class="node-children">
-        {data.expanded ? '▲' : '▼'} {data.childCount} vendor{data.childCount !== 1 ? 's' : ''}
-      </div>
-    {/if}
+  <div class="node-circle" style="background: {colors.bg}; --shadow-color: {colors.shadow}; --ring-color: {colors.ring};{multiLayerShadow ? ` box-shadow: ${multiLayerShadow};` : ''}">
+    <span class="node-icon">🏢</span>
   </div>
 
-  <!-- Info button -->
-  <button class="info-btn nodrag nopan" on:click={handleInfoClick} title="View discovery details">
-    ℹ
-  </button>
-
-  <!-- Bottom handle for outgoing edges (vertical layout) -->
   {#if data.hasChildren}
-    <Handle type="source" position={Position.Bottom} />
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <div
+      class="action-badge expand-badge nodrag nopan"
+      class:visible={hovered}
+      on:click={handleExpandClick}
+      title={data.expanded ? 'Collapse vendors' : `Expand ${data.childCount} vendors`}
+    >
+      <span class="badge-count">{data.childCount}</span>
+      <span class="badge-icon">{data.expanded ? '▲' : '▼'}</span>
+    </div>
+  {/if}
+  {#if data.discoveryCount > 0}
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <div
+      class="action-badge info-badge nodrag nopan"
+      class:visible={hovered}
+      on:click={handleInfoClick}
+      title="View {data.discoveryCount} discovery sources"
+    >
+      <span class="badge-count">×{data.discoveryCount}</span>
+      <span class="badge-icon">ℹ</span>
+    </div>
+  {/if}
+
+  <div class="node-label">{data.domain}</div>
+  {#if data.organization && data.organization !== data.domain}
+    <div class="node-org">{data.organization}</div>
+  {/if}
+
+  {#if data.hasChildren}
+    <Handle type="source" position={Position.Bottom} id="source" style="position: absolute; left: 50%; top: 24px; transform: translate(-50%, -50%);" />
   {/if}
 </div>
 
 <style>
-  /* Styling identical to RootNode except for background color (set via style attribute) */
   .vendor-node {
-    color: white;
-    padding: 16px 20px;
-    border-radius: 12px;
-    min-width: 180px;
-    box-shadow: 0 4px 12px var(--shadow-color, rgba(99, 102, 241, 0.3));
-    cursor: pointer;
-    transition: transform 0.2s, box-shadow 0.2s;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 12px;
-    /* Ensure content stays within bounds */
-    overflow: hidden;
-    box-sizing: border-box;
+    gap: 4px;
+    cursor: default;
+    width: 120px;
+    position: relative;
   }
 
-  .vendor-node:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 16px var(--shadow-color, rgba(99, 102, 241, 0.4));
-  }
-
-  .vendor-node.expanded {
-    box-shadow: 0 4px 12px var(--shadow-color, rgba(99, 102, 241, 0.4));
-  }
-
-  .node-icon {
-    font-size: 24px;
-  }
-
-  .node-content {
-    flex: 1;
-    overflow: hidden;
-  }
-
-  .node-domain {
-    font-weight: 600;
-    font-size: 14px;
-    margin-bottom: 2px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .node-org {
-    font-size: 11px;
-    opacity: 0.9;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .discovery-badge {
-    display: inline-block;
-    background: rgba(255, 255, 255, 0.2);
-    padding: 2px 6px;
-    border-radius: 10px;
-    font-size: 10px;
-    margin-top: 4px;
-  }
-
-  .node-children {
-    font-size: 11px;
-    opacity: 0.8;
-    margin-top: 4px;
-  }
-
-  .info-btn {
-    width: 24px;
-    height: 24px;
+  .node-circle {
+    width: 48px;
+    height: 48px;
     border-radius: 50%;
-    border: none;
-    background: rgba(255, 255, 255, 0.25);
-    color: white;
-    font-size: 14px;
-    font-weight: bold;
-    cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.2s;
-    padding: 0;
-    line-height: 1;
-    flex-shrink: 0;
+    box-shadow: 0 2px 8px var(--shadow-color, rgba(59, 130, 246, 0.35));
+    /* Smooth transition for ring grow/shrink animation */
+    transition: box-shadow 0.4s ease, transform 0.2s;
+    position: relative;
   }
 
-  .info-btn:hover {
-    background: rgba(255, 255, 255, 0.4);
+  .vendor-node:hover .node-circle {
+    transform: scale(1.08);
+  }
+
+  .vendor-node.expanded .node-circle {
+    box-shadow: 0 0 0 3px var(--ring-color, rgba(59, 130, 246, 0.25)), 0 2px 8px var(--shadow-color);
+  }
+
+  .node-icon { font-size: 20px; line-height: 1; }
+
+  .action-badge {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 24px;
+    border-radius: 12px;
+    padding: 0 8px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    z-index: 10;
+  }
+
+  .action-badge.visible {
+    opacity: 1;
+    transform: scale(1);
+    pointer-events: all;
+  }
+
+  .expand-badge { top: -14px; right: -10px; background: #ef4444; color: white; }
+  .expand-badge:hover { background: #dc2626; transform: scale(1.1) !important; }
+  .info-badge { top: -14px; left: -10px; background: #6366f1; color: white; }
+  .info-badge:hover { background: #4f46e5; transform: scale(1.1) !important; }
+
+  .badge-count { font-size: 10px; }
+  .badge-icon { font-size: 9px; }
+
+  .node-label {
+    font-size: 11px; font-weight: 600; color: #1e293b;
+    text-align: center; max-width: 120px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .node-org {
+    font-size: 10px; color: #64748b;
+    text-align: center; max-width: 120px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 </style>

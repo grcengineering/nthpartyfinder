@@ -26,6 +26,7 @@ pub mod trust_center;
 pub mod result_sink;
 pub mod memory_monitor;
 pub mod browser_pool;
+pub mod dep_check;
 
 pub use vendor::VendorRelationship;
 pub use checkpoint::{Checkpoint, ResumeMode};

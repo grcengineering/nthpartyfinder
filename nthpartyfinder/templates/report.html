@@ -8,6 +8,14 @@
     <!-- SAFETY(C003): vendor_graph_css is a compile-time constant from include_str!("../static/vendor-graph.css"), not user data -->
     <style>{{ vendor_graph_css|safe }}</style>
     <style>
+        @font-face {
+            font-family: 'Neonlux';
+            src: url('https://st.1001fonts.net/download/font/neonlux.demo.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
+
         :root {
             --primary-color: #2563eb;
             --secondary-color: #1e40af;
@@ -55,9 +63,58 @@
         }
 
         .header h1 {
+            font-family: 'Neonlux', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             font-size: 2.5rem;
             margin-bottom: 0.5rem;
             font-weight: 700;
+            background: linear-gradient(90deg, #f97316, #ef4444, #a855f6, #3b82f6, #06b6d4, #3b82f6, #a855f6, #ef4444, #f97316);
+            background-size: 300% 100%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: lavaFlow 6s ease infinite, neonFlicker 4s ease-in-out infinite;
+            text-shadow: none;
+            filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.7));
+            position: relative;
+        }
+
+        /* Neon glow layer behind the text using a pseudo-element */
+        .header h1::after {
+            content: attr(data-text);
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, #f97316, #ef4444, #a855f6, #3b82f6, #06b6d4, #3b82f6, #a855f6, #ef4444, #f97316);
+            background-size: 300% 100%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: lavaFlow 6s ease infinite;
+            filter: blur(8px);
+            opacity: 0.5;
+            z-index: -1;
+        }
+
+        @keyframes lavaFlow {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        @keyframes neonFlicker {
+            0%, 100% { opacity: 1; }
+            5% { opacity: 0.85; }
+            6% { opacity: 1; }
+            41% { opacity: 1; }
+            42% { opacity: 0.8; }
+            43% { opacity: 0.9; }
+            44% { opacity: 1; }
+            76% { opacity: 1; }
+            77% { opacity: 0.7; }
+            78% { opacity: 0.85; }
+            79% { opacity: 1; }
         }
 
         .header .subtitle {
@@ -985,7 +1042,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔍 Nth Party Analysis Report</h1>
+            <h1 data-text="🔍 Nth Party Analysis Report">🔍 Nth Party Analysis Report</h1>
             <div class="subtitle">Vendor Relationship Discovery & Risk Assessment</div>
             <div class="domain-info">
                 <strong>{{ summary.root_domain }}</strong> ({{ summary.root_organization }})
@@ -1039,20 +1096,24 @@
                 </div>
                 <div class="legend">
                     <div class="legend-item">
-                        <div class="legend-color" style="background: #10b981;"></div>
+                        <div class="legend-color" style="background: linear-gradient(135deg, #6366f1, #8b5cf6);"></div>
                         Root Domain
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: #3b82f6;"></div>
+                        <div class="legend-color" style="background: linear-gradient(135deg, #3b82f6, #2563eb);"></div>
                         3rd Party Vendor
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: #f59e0b;"></div>
+                        <div class="legend-color" style="background: linear-gradient(135deg, #10b981, #059669);"></div>
                         4th Party Vendor
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: #ef4444;"></div>
-                        5th+ Party Vendor
+                        <div class="legend-color" style="background: linear-gradient(135deg, #f59e0b, #d97706);"></div>
+                        5th Party Vendor
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-color" style="background: linear-gradient(135deg, #ef4444, #dc2626);"></div>
+                        6th+ Party Vendor
                     </div>
                 </div>
             </div>

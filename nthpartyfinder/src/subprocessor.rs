@@ -750,6 +750,202 @@ impl SubprocessorAnalyzer {
         cache.add_confirmed_mappings(source_domain, confirmed_mappings).await
     }
 
+    /// Try to fetch subprocessors from a Vanta trust center via GraphQL API.
+    /// Vanta trust centers serve SPAs that load data from app.vanta.com/graphql.
+    /// This method extracts the slugId from the HTML and calls the API directly,
+    /// bypassing the need for a headless browser.
+    pub async fn try_vanta_graphql(&self, domain: &str) -> Option<Vec<SubprocessorDomain>> {
+        // Fetch the trust center HTML to extract the slugId
+        let html_url = format!("https://{}/subprocessors", domain);
+        debug!("Vanta: fetching HTML from {}", html_url);
+        let html_resp = match self.client.get(&html_url)
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Language", "en-US,en;q=0.5")
+            .header("Upgrade-Insecure-Requests", "1")
+            .send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                debug!("Vanta: failed to fetch HTML from {}: {}", html_url, e);
+                return None;
+            }
+        };
+        if !html_resp.status().is_success() {
+            return None;
+        }
+        let html_body = html_resp.text().await.ok()?;
+        if !html_body.contains("assets.vanta.com") {
+            return None;
+        }
+        self.try_vanta_graphql_from_html(&html_body).await
+    }
+
+    /// Try to fetch subprocessors from Vanta GraphQL API using already-fetched HTML.
+    /// This avoids re-fetching the HTML page (which may be blocked by Cloudflare).
+    pub async fn try_vanta_graphql_from_html(&self, html: &str) -> Option<Vec<SubprocessorDomain>> {
+        // Extract slugId from <head data-slugid="...">
+        let slug_id = {
+            let doc = Html::parse_document(html);
+            let head_sel = Selector::parse("head").ok()?;
+            let head = doc.select(&head_sel).next()?;
+            head.value().attr("data-slugid").map(|s| s.to_string())
+        }?;
+
+        debug!("Vanta: extracted slugId={}", slug_id);
+
+        // Extract the signature manifest URL
+        let manifest_url = self.extract_vanta_manifest_url(html)?;
+        debug!("Vanta: fetching manifest from {}", manifest_url);
+
+        let manifest_resp = match self.client.get(&manifest_url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                debug!("Vanta: manifest fetch error: {}", e);
+                return None;
+            }
+        };
+        if !manifest_resp.status().is_success() {
+            debug!("Vanta: manifest fetch failed with status {}", manifest_resp.status());
+            return None;
+        }
+        let manifest_body = manifest_resp.text().await.ok()?;
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_body).ok()?;
+
+        let signed_at = manifest.get("signedAt")?.as_str()?;
+        let operations = manifest.get("operations")?.as_object()?;
+
+        let (op_name, signature) = if let Some(sig) = operations.get("fetchTrustReportSubprocessorsForScrapers") {
+            ("fetchTrustReportSubprocessorsForScrapers", sig.as_str()?)
+        } else if let Some(sig) = operations.get("fetchDataForTrustReport") {
+            ("fetchDataForTrustReport", sig.as_str()?)
+        } else {
+            debug!("Vanta: no suitable GraphQL operation in manifest");
+            return None;
+        };
+
+        let query = format!(
+            "query {}($slugId: String!) {{ trust {{ trustReportBySlugId(slugId: $slugId) {{ subprocessors {{ name url service location purpose }} }} }} }}",
+            op_name
+        );
+
+        let gql_body = serde_json::json!({
+            "operationName": op_name,
+            "variables": { "slugId": slug_id },
+            "query": query,
+            "extensions": {
+                "signedQuery": {
+                    "signedAt": signed_at,
+                    "signature": signature
+                }
+            }
+        });
+
+        let gql_resp = self.client
+            .post("https://app.vanta.com/graphql")
+            .json(&gql_body)
+            .send()
+            .await
+            .ok()?;
+
+        if !gql_resp.status().is_success() {
+            debug!("Vanta: GraphQL request failed with status {}", gql_resp.status());
+            return None;
+        }
+
+        let gql_data: serde_json::Value = gql_resp.json().await.ok()?;
+        self.parse_vanta_graphql_response(&gql_data)
+    }
+
+    /// Parse the Vanta GraphQL response into SubprocessorDomain results
+    fn parse_vanta_graphql_response(&self, gql_data: &serde_json::Value) -> Option<Vec<SubprocessorDomain>> {
+        let subprocessors = gql_data
+            .get("data")?
+            .get("trust")?
+            .get("trustReportBySlugId")?
+            .get("subprocessors")?
+            .as_array()?;
+
+        let results: Vec<SubprocessorDomain> = subprocessors
+            .iter()
+            .filter_map(|sp| {
+                let name = sp.get("name")?.as_str()?.trim().to_string();
+                let url = sp.get("url").and_then(|u| u.as_str()).unwrap_or("").trim().to_string();
+                let purpose = sp.get("purpose").and_then(|p| p.as_str()).unwrap_or("").to_string();
+
+                let domain = if !url.is_empty() {
+                    let cleaned = url
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_start_matches("www.")
+                        .trim_end_matches('/')
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    if cleaned.contains('.') && !cleaned.is_empty() {
+                        cleaned
+                    } else {
+                        format!("_org:{}", name)
+                    }
+                } else {
+                    format!("_org:{}", name)
+                };
+
+                let raw_record = if purpose.is_empty() {
+                    format!("Vanta subprocessor: {}", name)
+                } else {
+                    format!("Vanta subprocessor: {} ({})", name, purpose)
+                };
+
+                Some(SubprocessorDomain {
+                    domain,
+                    source_type: RecordType::HttpSubprocessor,
+                    raw_record,
+                })
+            })
+            .collect();
+
+        if results.is_empty() {
+            None
+        } else {
+            debug!("Vanta GraphQL parsed {} subprocessors", results.len());
+            Some(results)
+        }
+    }
+
+    /// Extract the signature manifest URL from Vanta trust center HTML
+    fn extract_vanta_manifest_url(&self, html: &str) -> Option<String> {
+        let doc = Html::parse_document(html);
+
+        // Method 1: Check data-signature-manifest-url on <html> element
+        let html_sel = Selector::parse("html").ok()?;
+        if let Some(html_el) = doc.select(&html_sel).next() {
+            if let Some(url) = html_el.value().attr("data-signature-manifest-url") {
+                if url.contains("signature-manifest") {
+                    return Some(url.to_string());
+                }
+            }
+        }
+
+        // Method 2: Look for <link rel="preload" href="...signature-manifest...">
+        if let Ok(link_sel) = Selector::parse("link[rel='preload'][as='fetch']") {
+            for link in doc.select(&link_sel) {
+                if let Some(href) = link.value().attr("href") {
+                    if href.contains("signature-manifest") && href.ends_with(".json") {
+                        return Some(href.to_string());
+                    }
+                }
+            }
+        }
+
+        // Method 3: Search raw HTML for the manifest URL pattern
+        let re = Regex::new(r#"https://assets\.vanta\.com/static/signature-manifest\.[a-f0-9]+\.json"#).ok()?;
+        if let Ok(Some(m)) = re.find(html) {
+            return Some(m.as_str().to_string());
+        }
+
+        None
+    }
+
     /// Analyze a domain for subprocessor pages and extract vendor relationships
     pub async fn analyze_domain(&self, domain: &str, logger: Option<&dyn LogFailure>) -> Result<Vec<SubprocessorDomain>> {
         self.analyze_domain_with_logging(domain, logger, None).await
@@ -825,7 +1021,7 @@ impl SubprocessorAnalyzer {
                     } else {
                         debug!("Cached URL {} returned no subprocessors for {} (this is valid and cached)", url, domain);
                     }
-                    return Ok(subprocessors);
+                    return Ok(filter_subprocessor_results(subprocessors));
                 }
                 Err(e) => {
                     debug!("Cached URL {} failed for {}: {}, will try other URLs", url, domain, e);
@@ -847,6 +1043,8 @@ impl SubprocessorAnalyzer {
         }
 
         // URL discovery phase - try a limited number of most promising URLs
+        // Note: Vanta trust center detection happens inside scrape_subprocessor_page
+        // when it detects "assets.vanta.com" in the HTML response
         let subprocessor_urls = self.generate_subprocessor_urls(domain);
         
         // Limit URL testing to prevent performance degradation
@@ -897,13 +1095,15 @@ impl SubprocessorAnalyzer {
                             url, elapsed.as_secs_f64(), subprocessors.len()));
                     }
 
-                    // Cache successful URLs regardless of whether they return subprocessors
-                    {
-                        let cache = self.cache.read().await;
-                        if let Err(e) = cache.cache_working_url(domain, &url).await {
-                            debug!("Failed to cache working URL for {}: {}", domain, e);
-                        } else {
-                            debug!("Successfully cached URL for {}: {} (found {} subprocessors)", domain, url, subprocessors.len());
+                    if !subprocessors.is_empty() {
+                        // Only cache URLs that actually found subprocessors
+                        {
+                            let cache = self.cache.read().await;
+                            if let Err(e) = cache.cache_working_url(domain, &url).await {
+                                debug!("Failed to cache working URL for {}: {}", domain, e);
+                            } else {
+                                debug!("Successfully cached URL for {}: {} (found {} subprocessors)", domain, url, subprocessors.len());
+                            }
                         }
                     }
 
@@ -912,7 +1112,7 @@ impl SubprocessorAnalyzer {
                         if let Some(debug_logger) = &debug_logger {
                             debug_logger.debug(&format!("🎯 SUCCESS: Found {} subprocessors, stopping URL discovery", subprocessors.len()));
                         }
-                        return Ok(subprocessors);
+                        return Ok(filter_subprocessor_results(subprocessors));
                     } else {
                         // HTTP succeeded but no subprocessors found - continue trying other URLs
                         debug!("HTTP request to {} succeeded but found 0 subprocessors - continuing to test other URLs", url);
@@ -974,10 +1174,18 @@ impl SubprocessorAnalyzer {
     /// Generate common subprocessor page URLs based on research findings
     pub fn generate_subprocessor_urls(&self, domain: &str) -> Vec<String> {
         let base_domain = domain.trim_start_matches("www.");
-        
+
         // Known working URLs from Perplexity analysis - test these first
         let mut urls = vec![];
-        
+
+        // Trust subdomain detection: if domain IS a trust center (e.g., trust.vanta.com),
+        // prioritize its own subprocessor page before any other patterns.
+        let is_trust_subdomain = base_domain.starts_with("trust.");
+        if is_trust_subdomain {
+            urls.push(format!("https://{}/subprocessors", base_domain));
+            urls.push(format!("https://{}/sub-processors", base_domain));
+        }
+
         // High-priority patterns based on successful discoveries
         match base_domain {
             "apple.com" => urls.push("https://www.apple.com/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf".to_string()),
@@ -993,7 +1201,7 @@ impl SubprocessorAnalyzer {
             "sage.com" => urls.push("https://www.sage.com/en-gb/trust-security/privacy/customer-due-diligence/".to_string()),
             "heroku.com" => urls.push("https://compliance.salesforce.com/en/services/heroku".to_string()),
             // Trust Center product companies - their own subprocessor pages
-            "vanta.com" => urls.push("https://trust.vanta.com/subprocessors".to_string()),
+            "vanta.com" | "trust.vanta.com" => urls.push("https://trust.vanta.com/subprocessors".to_string()),
             "drata.com" => urls.push("https://drata.com/trust/subprocessors".to_string()),
             "secureframe.com" => urls.push("https://secureframe.com/trust/subprocessors".to_string()),
             "thoropass.com" => urls.push("https://thoropass.com/trust/subprocessors".to_string()),
@@ -1004,13 +1212,15 @@ impl SubprocessorAnalyzer {
             "conveyor.com" => urls.push("https://trust.conveyor.com".to_string()),
             _ => {}
         }
-        
+
         // Add high-priority patterns discovered through research first
+        // Skip trust.{domain} patterns when domain already IS a trust subdomain
+        // to avoid nonsense URLs like https://trust.trust.vanta.com/subprocessors
+        if !is_trust_subdomain {
+            urls.push(format!("https://trust.{}/subprocessors", domain));
+            urls.push(format!("https://trust.{}", domain));
+        }
         urls.extend(vec![
-            // HIGHEST PRIORITY: Trust subdomain pattern — extremely common for trust center products
-            // (SafeBase, Conveyor, Vanta, Drata, Secureframe all use trust.{domain})
-            format!("https://trust.{}/subprocessors", domain),
-            format!("https://trust.{}", domain),  // Root trust page may contain subprocessors (Conveyor)
 
             // WORKING PATTERNS: Discovered through research and web searches
             format!("https://{}/legal/subprocessors", domain),         // Klaviyo: https://klaviyo.com/legal/subprocessors
@@ -1173,12 +1383,7 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/trustcenter/subprocessors", domain),
 
             // F001: Trust subdomain patterns (popular pattern)
-            format!("https://trust.{}/sub-processors", base_domain),
-            format!("https://trust.{}/vendors", base_domain),
-            format!("https://trust.{}/third-party", base_domain),
-            format!("https://trust.{}/data-processors", base_domain),
-            format!("https://trust.{}/security/subprocessors", base_domain),
-            format!("https://trust.{}/compliance/subprocessors", base_domain),
+            // Note: these are skipped when domain already starts with trust. (see is_trust_subdomain guard below)
 
             // F001: Compliance page variations
             format!("https://{}/compliance/sub-processors", domain),
@@ -1320,6 +1525,18 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/gdpr/subprocessors/", domain),
         ]);
 
+        // Trust subdomain patterns — only when domain is NOT already a trust subdomain
+        if !is_trust_subdomain {
+            urls.extend(vec![
+                format!("https://trust.{}/sub-processors", base_domain),
+                format!("https://trust.{}/vendors", base_domain),
+                format!("https://trust.{}/third-party", base_domain),
+                format!("https://trust.{}/data-processors", base_domain),
+                format!("https://trust.{}/security/subprocessors", base_domain),
+                format!("https://trust.{}/compliance/subprocessors", base_domain),
+            ]);
+        }
+
         // ========================================================================
         // TRUST CENTER PRODUCTS (Vanta, Drata, SecureFrame, Thoropass, SafeBase, etc.)
         // These products provide hosted trust centers for companies to publish their
@@ -1397,11 +1614,16 @@ impl SubprocessorAnalyzer {
             format!("https://security.{}/subprocessors", base_domain), // SafeBase often powers security.* subdomains
             format!("https://security.{}/sub-processors", base_domain),
             format!("https://security.{}/vendors", base_domain),
-            // SafeBase custom-domain patterns (e.g., trust.drata.com/product/drata/subprocessors)
-            format!("https://trust.{}/product/{}/subprocessors", base_domain, company_name),
-            format!("https://trust.{}/product/{}/sub-processors", base_domain, company_name),
-            format!("https://trust.{}/product/{}/vendors", base_domain, company_name),
         ]);
+        // SafeBase custom-domain patterns (e.g., trust.drata.com/product/drata/subprocessors)
+        // Skip when domain already is a trust subdomain to avoid trust.trust.{domain}
+        if !is_trust_subdomain {
+            urls.extend(vec![
+                format!("https://trust.{}/product/{}/subprocessors", base_domain, company_name),
+                format!("https://trust.{}/product/{}/sub-processors", base_domain, company_name),
+                format!("https://trust.{}/product/{}/vendors", base_domain, company_name),
+            ]);
+        }
 
         // OneTrust Trust Center patterns
         // OneTrust provides various trust center solutions
@@ -1559,6 +1781,17 @@ impl SubprocessorAnalyzer {
         if is_pdf {
             debug!("Processing PDF document from URL: {}", url);
             return self.extract_from_pdf_content(&content, url, source_domain).await;
+        }
+
+        // ================================================================
+        // Vanta Trust Center: Detect and fetch via GraphQL API
+        // ================================================================
+        if content.contains("assets.vanta.com") {
+            debug!("Vanta trust center detected in HTML for {}, trying GraphQL API", source_domain);
+            if let Some(results) = self.try_vanta_graphql_from_html(&content).await {
+                debug!("Vanta GraphQL returned {} subprocessors for {}", results.len(), source_domain);
+                return Ok(results);
+            }
         }
 
         // ================================================================
@@ -3222,11 +3455,17 @@ impl SubprocessorAnalyzer {
     /// Validate if a string is a reasonable domain name
     fn is_valid_domain(&self, domain: &str) -> bool {
         // Basic validation: must contain a dot and valid characters
-        domain.contains('.') && 
-        domain.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-') &&
-        !domain.starts_with('.') &&
-        !domain.ends_with('.') &&
-        domain.len() >= 4 // minimum like "a.co"
+        if !domain.contains('.') ||
+           !domain.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-') ||
+           domain.starts_with('.') ||
+           domain.ends_with('.') ||
+           domain.len() < 4 {
+            return false;
+        }
+
+        // Validate TLD: must be a known valid TLD (2-3 chars for country codes, or known gTLDs)
+        let tld = domain.rsplit('.').next().unwrap_or("");
+        is_valid_tld(tld)
     }
 
     /// Extract vendor domains from paragraph-based content (for text-based tables and lists)
@@ -3390,6 +3629,12 @@ impl SubprocessorAnalyzer {
                     }
 
                     if !text.is_empty() && text.len() > 2 {
+                        // Reject org names that are too long or contain garbage
+                        if !is_valid_org_name(&text) {
+                            debug!("Rejecting invalid org name from selector (quality check): '{}'", &text[..text.len().min(80)]);
+                            continue;
+                        }
+
                         // Check against exclusion patterns
                         let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(&text));
                         if should_exclude {
@@ -3449,6 +3694,12 @@ impl SubprocessorAnalyzer {
                             let org_name = org_match.as_str().trim();
 
                             if !org_name.is_empty() && org_name.len() > 2 {
+                                // Reject org names that are too long or contain garbage
+                                if !is_valid_org_name(org_name) {
+                                    debug!("Rejecting invalid org name (quality check): '{}'", &org_name[..org_name.len().min(80)]);
+                                    continue;
+                                }
+
                                 // Check against exclusion patterns
                                 let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(org_name));
                                 if should_exclude {
@@ -3747,9 +3998,11 @@ impl SubprocessorAnalyzer {
         }
 
         // Add pattern for extracting company names with various formats
+        // Use [a-zA-Z ]{2,50} instead of [a-zA-Z\s]+ to prevent matching across
+        // table rows/paragraphs (the + with \s gobbles entire document sections)
         if successful_extractions.len() > 5 {
             custom_regex_patterns.push(CustomRegexPattern {
-                pattern: r"(?:^|\s)([A-Z][a-zA-Z\s]+(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))".to_string(),
+                pattern: r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))".to_string(),
                 capture_group: 1,
                 description: "Extract properly capitalized company names with business suffixes".to_string(),
             });
@@ -4214,7 +4467,151 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
     analyzer.analyze_domain_with_logging(domain, logger, Some(debug_logger)).await
 }
 
+/// Post-process subprocessor extraction results to remove false positives.
+/// Applied as a final filter before returning results from analyze_domain_with_full_options.
+pub fn filter_subprocessor_results(vendors: Vec<SubprocessorDomain>) -> Vec<SubprocessorDomain> {
+    let before_count = vendors.len();
+    let filtered: Vec<SubprocessorDomain> = vendors.into_iter().filter(|v| {
+        let domain = &v.domain;
+
+        // Filter _org: entries through NER false positive detection
+        if let Some(org_name) = domain.strip_prefix("_org:") {
+            if is_ner_false_positive(org_name) {
+                debug!("Filtering false positive org: {}", org_name);
+                return false;
+            }
+            return true;
+        }
+
+        // Validate domain TLD
+        if let Some(tld) = domain.rsplit('.').next() {
+            if !is_valid_tld(tld) {
+                debug!("Filtering domain with invalid TLD: {}", domain);
+                return false;
+            }
+        }
+
+        true
+    }).collect();
+
+    if filtered.len() < before_count {
+        debug!("Filtered {} false positive results ({} → {})", before_count - filtered.len(), before_count, filtered.len());
+    }
+    filtered
+}
+
+/// Check if a TLD (top-level domain) is valid.
+/// Rejects obviously invalid TLDs from false-positive domain extraction
+/// (e.g., span.truncated, civ.xm, l-p.yfc, next-public-bknq7n.mui).
+pub fn is_valid_tld(tld: &str) -> bool {
+    let tld_lower = tld.to_lowercase();
+
+    // 2-letter TLDs: must be a known ISO 3166-1 alpha-2 country code
+    if tld_lower.len() == 2 {
+        const COUNTRY_CODES: &[&str] = &[
+            "ac", "ad", "ae", "af", "ag", "ai", "al", "am", "ao", "aq", "ar", "as", "at", "au",
+            "aw", "ax", "az", "ba", "bb", "bd", "be", "bf", "bg", "bh", "bi", "bj", "bm", "bn",
+            "bo", "br", "bs", "bt", "bw", "by", "bz", "ca", "cc", "cd", "cf", "cg", "ch", "ci",
+            "ck", "cl", "cm", "cn", "co", "cr", "cu", "cv", "cw", "cx", "cy", "cz", "de", "dj",
+            "dk", "dm", "do", "dz", "ec", "ee", "eg", "er", "es", "et", "eu", "fi", "fj", "fk",
+            "fm", "fo", "fr", "ga", "gb", "gd", "ge", "gf", "gg", "gh", "gi", "gl", "gm", "gn",
+            "gp", "gq", "gr", "gs", "gt", "gu", "gw", "gy", "hk", "hm", "hn", "hr", "ht", "hu",
+            "id", "ie", "il", "im", "in", "io", "iq", "ir", "is", "it", "je", "jm", "jo", "jp",
+            "ke", "kg", "kh", "ki", "km", "kn", "kp", "kr", "kw", "ky", "kz", "la", "lb", "lc",
+            "li", "lk", "lr", "ls", "lt", "lu", "lv", "ly", "ma", "mc", "md", "me", "mg", "mh",
+            "mk", "ml", "mm", "mn", "mo", "mp", "mq", "mr", "ms", "mt", "mu", "mv", "mw", "mx",
+            "my", "mz", "na", "nc", "ne", "nf", "ng", "ni", "nl", "no", "np", "nr", "nu", "nz",
+            "om", "pa", "pe", "pf", "pg", "ph", "pk", "pl", "pm", "pn", "pr", "ps", "pt", "pw",
+            "py", "qa", "re", "ro", "rs", "ru", "rw", "sa", "sb", "sc", "sd", "se", "sg", "sh",
+            "si", "sj", "sk", "sl", "sm", "sn", "so", "sr", "ss", "st", "sv", "sx", "sy", "sz",
+            "tc", "td", "tf", "tg", "th", "tj", "tk", "tl", "tm", "tn", "to", "tr", "tt", "tv",
+            "tw", "tz", "ua", "ug", "uk", "us", "uy", "uz", "va", "vc", "ve", "vg", "vi", "vn",
+            "vu", "wf", "ws", "ye", "yt", "za", "zm", "zw",
+        ];
+        return COUNTRY_CODES.contains(&tld_lower.as_str());
+    }
+
+    // 3+ letter TLDs: check against known gTLDs and common new gTLDs
+    const KNOWN_GTLDS: &[&str] = &[
+        // Original gTLDs
+        "com", "org", "net", "edu", "gov", "mil", "int",
+        // Common new gTLDs
+        "app", "dev", "xyz", "online", "site", "tech", "store", "cloud", "info", "biz",
+        "pro", "name", "museum", "coop", "aero", "cat", "jobs", "mobi", "tel", "travel",
+        "asia", "post",
+        // Tech/startup popular
+        "io", "co", "ai", "gg", "tv", "fm", "ly", "to", "me", "cc", "ws",
+        // Business
+        "inc", "llc", "ltd", "gmbh", "sarl",
+        // Industry-specific
+        "health", "medical", "law", "legal", "finance", "bank", "insurance",
+        "security", "email", "software", "systems", "solutions", "services", "digital",
+        "media", "agency", "studio", "design", "consulting", "marketing", "global",
+        "world", "space", "one", "live", "life", "work", "team", "group", "network",
+        "community", "social", "blog", "news", "today", "exchange", "money", "capital",
+        "fund", "investments", "partners", "ventures", "holdings",
+        // Country-specific gTLDs
+        "com.au", "co.uk", "co.in", "com.br", "co.jp", "co.kr", "com.cn",
+    ];
+    KNOWN_GTLDS.contains(&tld_lower.as_str())
+}
+
 /// Check if a NER-extracted organization name is a false positive.
+/// Validates whether an extracted string is a plausible organization name.
+/// Rejects garbage from greedy regex/table extraction: concatenated table rows,
+/// strings with embedded country names, table header phrases, etc.
+pub fn is_valid_org_name(org_name: &str) -> bool {
+    let name = org_name.trim();
+
+    // Too short
+    if name.len() < 3 {
+        return false;
+    }
+
+    // Too long — real org names are rarely > 80 chars
+    // e.g. "Amazon Web Services, Inc." = 25 chars
+    if name.len() > 80 {
+        return false;
+    }
+
+    let lower = name.to_lowercase();
+
+    // Contains embedded country/location names that indicate concatenated table rows
+    // Real org names don't contain "United States" or "Netherlands" mid-string
+    let location_markers = [
+        "united states", "united kingdom", "european union",
+        "location of processing", "corporate location", "description of processing",
+        "name of subprocessor", "location of sub",
+    ];
+    for marker in &location_markers {
+        if lower.contains(marker) {
+            return false;
+        }
+    }
+
+    // Contains table header/structure phrases
+    let table_headers = [
+        "third party subprocessors", "name of sub", "processing location",
+        "corporate location", "service description", "data processed",
+        "purpose of processing", "categories of data", "subsidiaries name",
+    ];
+    for header in &table_headers {
+        if lower.contains(header) {
+            return false;
+        }
+    }
+
+    // Too many words — real org names rarely exceed 6-7 words
+    // "Amazon Web Services, Inc." = 4 words
+    // "AI Inference and AI Services United States..." = 10+ words → garbage
+    let word_count = name.split_whitespace().count();
+    if word_count > 8 {
+        return false;
+    }
+
+    true
+}
+
 /// Returns true for patterns that are clearly not real organization names:
 /// - ISO 639 language codes (ar, cs, da, de, es, fi, fr, he, hu, id, it, ja, ko, ms, nl, pl, ru, sv, th, tr)
 /// - Locale identifiers (en-us, zh-hans, pt-br, nb-no)

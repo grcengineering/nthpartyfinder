@@ -1,4 +1,4 @@
-use nthpartyfinder::subprocessor::{SubprocessorAnalyzer, extract_vendor_domains_from_subprocessors};
+use nthpartyfinder::subprocessor::{SubprocessorAnalyzer, extract_vendor_domains_from_subprocessors, is_valid_tld, is_valid_org_name};
 
 #[tokio::test]
 async fn test_subprocessor_url_generation() {
@@ -343,4 +343,178 @@ async fn test_url_generation_count_increased() {
     // Previous was ~70, new should be ~100+
     assert!(urls.len() >= 80,
             "Should generate at least 80 URLs for comprehensive coverage, got {}", urls.len());
+}
+
+#[tokio::test]
+async fn test_trust_subdomain_url_generation() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+
+    // When domain IS a trust subdomain, should NOT generate trust.trust.{domain} URLs
+    let urls = analyzer.generate_subprocessor_urls("trust.vanta.com");
+    let has_double_trust = urls.iter().any(|u| u.contains("trust.trust."));
+    assert!(!has_double_trust,
+            "Should NOT generate double-trust URLs, but found: {:?}",
+            urls.iter().filter(|u| u.contains("trust.trust.")).collect::<Vec<_>>());
+
+    // Should have the correct URL as one of the first entries
+    assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"),
+            "Should include https://trust.vanta.com/subprocessors in URL list");
+
+    // First URL should be the trust center's own subprocessor page
+    assert!(urls[0] == "https://trust.vanta.com/subprocessors",
+            "First URL should be the trust subdomain's subprocessor page, got: {}", urls[0]);
+}
+
+#[tokio::test]
+async fn test_vanta_com_still_generates_correct_urls() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let urls = analyzer.generate_subprocessor_urls("vanta.com");
+
+    // vanta.com should still get the hardcoded trust.vanta.com URL
+    assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"),
+            "vanta.com should include trust.vanta.com/subprocessors");
+
+    // Should also include trust.vanta.com pattern from generic trust subdomain patterns
+    assert!(urls.iter().any(|u| u.starts_with("https://trust.vanta.com")),
+            "vanta.com should include trust.vanta.com patterns");
+}
+
+#[test]
+fn test_is_valid_tld_rejects_fake_tlds() {
+    // These are false positive TLDs from extraction garbage
+    assert!(!is_valid_tld("truncated"), "Should reject 'truncated' TLD");
+    assert!(!is_valid_tld("xm"), "Should reject 'xm' TLD");
+    assert!(!is_valid_tld("yfc"), "Should reject 'yfc' TLD");
+    assert!(!is_valid_tld("mui"), "Should reject 'mui' TLD");
+}
+
+#[test]
+fn test_is_valid_tld_accepts_real_tlds() {
+    // Common valid TLDs
+    assert!(is_valid_tld("com"), "Should accept 'com'");
+    assert!(is_valid_tld("org"), "Should accept 'org'");
+    assert!(is_valid_tld("net"), "Should accept 'net'");
+    assert!(is_valid_tld("io"), "Should accept 'io'");
+    assert!(is_valid_tld("co"), "Should accept 'co'");
+    assert!(is_valid_tld("ai"), "Should accept 'ai'");
+    assert!(is_valid_tld("dev"), "Should accept 'dev'");
+    assert!(is_valid_tld("app"), "Should accept 'app'");
+
+    // Country code TLDs
+    assert!(is_valid_tld("uk"), "Should accept 'uk'");
+    assert!(is_valid_tld("de"), "Should accept 'de'");
+    assert!(is_valid_tld("jp"), "Should accept 'jp'");
+    assert!(is_valid_tld("us"), "Should accept 'us'");
+
+    // Less common but valid
+    assert!(is_valid_tld("email"), "Should accept 'email'");
+    assert!(is_valid_tld("cloud"), "Should accept 'cloud'");
+}
+#[tokio::test]
+#[ignore] // Requires network access to Vanta API; run with: cargo test -- --ignored
+async fn test_vanta_graphql_from_html() {
+    // Minimal Vanta trust center HTML with required data attributes
+    let vanta_html = r#"<!doctype html>
+<html data-signature-manifest-url="https://assets.vanta.com/static/signature-manifest.a48acf2deafa086b8892d65f28bd1a9c0ecb5223.json">
+<head data-slugid="jr8w9ljcrpzfh88hb34qo"></head>
+<body><script src="https://assets.vanta.com/static/index.fcb463e0.js"></script></body>
+</html>"#;
+
+    let analyzer = SubprocessorAnalyzer::new().await;
+    let results = analyzer.try_vanta_graphql_from_html(vanta_html).await;
+    assert!(results.is_some(), "Vanta GraphQL strategy should return results for Vanta trust center HTML");
+    let results = results.unwrap();
+    assert!(results.len() > 10, "Should find at least 10 Vanta subprocessors, found {}", results.len());
+
+    // Verify no false positives like _org:encrypt_data
+    for r in &results {
+        if r.domain.starts_with("_org:") {
+            let org_name = r.domain.strip_prefix("_org:").unwrap();
+            assert!(!org_name.contains("encrypt"), "Should not have false positive org: {}", r.domain);
+            assert!(!org_name.contains("penetration"), "Should not have false positive org: {}", r.domain);
+        } else {
+            // Domain results should not have fake TLDs
+            if let Some(tld) = r.domain.rsplit('.').next() {
+                assert!(is_valid_tld(tld), "Invalid TLD in domain {}", r.domain);
+            }
+        }
+    }
+
+    // Verify we get well-known Vanta subprocessors
+    let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+    assert!(domains.iter().any(|d| d.contains("amazon")), "Should find AWS: {:?}", domains);
+}
+
+#[test]
+fn test_org_name_validation() {
+    // Valid org names
+    assert!(is_valid_org_name("GitHub, Inc."));
+    assert!(is_valid_org_name("Amazon Web Services, Inc."));
+    assert!(is_valid_org_name("Cloudflare"));
+    assert!(is_valid_org_name("Elasticsearch, Inc."));
+    assert!(is_valid_org_name("New Relic"));
+    assert!(is_valid_org_name("Anthropic PBC"));
+
+    // Invalid: too long (concatenated table rows)
+    assert!(!is_valid_org_name(
+        "AI Inference and AI Services United States United States Anthropic PBC AI Inference and AI Services United States United States Cloudflare Content delivery service United States United States Elasticsearch, Inc."
+    ));
+
+    // Invalid: contains location/country markers
+    assert!(!is_valid_org_name("Factor Authentication United States United States xAI"));
+    assert!(!is_valid_org_name("Some Company United Kingdom Processing"));
+
+    // Invalid: contains table header phrases
+    assert!(!is_valid_org_name("Third Party Subprocessors Name of Subprocessor Description of Processing"));
+    assert!(!is_valid_org_name("Location of Processing Corporate Location GitHub"));
+
+    // Invalid: too many words
+    assert!(!is_valid_org_name("This Is Way Too Many Words For A Real Organization Name To Have In Practice"));
+
+    // Invalid: too short
+    assert!(!is_valid_org_name("AB"));
+    assert!(!is_valid_org_name(""));
+
+    // Edge cases: valid short names
+    assert!(is_valid_org_name("IBM"));
+    assert!(is_valid_org_name("xAI"));
+    assert!(is_valid_org_name("Duo Security"));
+
+    // "America, Inc." is structurally valid as an org name (13 chars, 2 words).
+    // The regex fix prevents it from being extracted in the first place — the old
+    // greedy regex matched "...America, Inc." from mid-table-row, but the fixed
+    // regex with [a-zA-Z ]{2,50} won't cross row boundaries.
+    assert!(is_valid_org_name("America, Inc."), "Structurally valid org name format");
+}
+
+#[test]
+fn test_org_regex_prevents_table_row_gobbling() {
+    // The fixed regex should NOT match across table row boundaries
+    let fixed_regex = regex::Regex::new(
+        r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))"
+    ).unwrap();
+
+    // Simulated plain text from github.com subprocessor page (table rows joined by spaces)
+    let table_text = "AI Inference and AI Services United States United States Anthropic PBC AI Inference and AI Services United States United States Cloudflare Content delivery service United States United States Elasticsearch, Inc.";
+
+    let matches: Vec<&str> = fixed_regex.captures_iter(table_text)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim()))
+        .collect();
+
+    // Should NOT produce a 200+ char match spanning the whole text
+    for m in &matches {
+        assert!(m.len() <= 60, "Regex match too long ({}): '{}'", m.len(), m);
+    }
+
+    // Should extract individual company names, not concatenated rows
+    let good_text = "GitHub, Inc. provides hosting services. Amazon Web Services, Inc. provides cloud.";
+    let good_matches: Vec<&str> = fixed_regex.captures_iter(good_text)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim()))
+        .collect();
+
+    // Should find reasonable individual matches
+    for m in &good_matches {
+        assert!(m.len() <= 60, "Good match too long: '{}'", m);
+        assert!(m.len() >= 3, "Good match too short: '{}'", m);
+    }
 }
