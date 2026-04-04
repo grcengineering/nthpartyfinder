@@ -3,7 +3,17 @@ use dirs;
 
 #[derive(Parser, Debug)]
 #[command(name = "nthpartyfinder")]
-#[command(about = "A tool for identifying Nth party vendor relationships through DNS analysis")]
+#[command(about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods")]
+#[command(long_about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods.\n\n\
+Discovery methods:\n  \
+DNS (always on)      SPF/DMARC/DKIM/MX/NS/CNAME/verification TXT records\n  \
+Subprocessor         Scrapes vendor/subprocessor pages linked from trust centers\n  \
+Web Traffic          Analyzes page source and runtime network requests for 3rd-party SDKs\n  \
+SaaS Tenant          Probes for SaaS tenant subdomains (e.g., company.slack.com)\n  \
+Subfinder            Subdomain enumeration via CNAME discovery\n  \
+CT Logs              Certificate Transparency log analysis\n\n\
+Non-DNS methods are controlled by config or --enable/--disable flags.\n\
+Use --dns-only to disable all non-DNS discovery methods.")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -154,6 +164,16 @@ pub struct Cli {
     #[arg(long, conflicts_with = "resume")]
     pub no_resume: bool,
 
+    /// Include common infrastructure providers (AWS, Google, Cloudflare, etc.) in results.
+    /// By default, these are filtered from output to reduce noise.
+    #[arg(long)]
+    pub include_infra: bool,
+
+    /// DNS-only mode: disable all non-DNS discovery methods (subprocessor, web traffic,
+    /// SaaS tenant, subfinder, CT logs). Equivalent to passing all --disable-* flags.
+    #[arg(long)]
+    pub dns_only: bool,
+
     // ============ Batch Analysis Options ============
 
     /// Path to CSV or JSON file containing multiple domains to analyze
@@ -257,6 +277,8 @@ pub struct Args {
     pub timeout: Option<u64>,
     pub resume: bool,
     pub no_resume: bool,
+    pub include_infra: bool,
+    pub dns_only: bool,
     // Batch options
     pub input_file: Option<String>,
     pub batch_output_dir: Option<String>,
@@ -302,6 +324,8 @@ impl From<&Cli> for Args {
             timeout: cli.timeout,
             resume: cli.resume,
             no_resume: cli.no_resume,
+            include_infra: cli.include_infra,
+            dns_only: cli.dns_only,
             input_file: cli.input_file.clone(),
             batch_output_dir: cli.batch_output_dir.clone(),
             batch_parallel: cli.batch_parallel,

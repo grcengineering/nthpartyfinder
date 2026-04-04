@@ -268,16 +268,22 @@ async fn main() -> Result<()> {
     }
 
     // Step 4: Feature detection
-    let web_org_will_be_enabled = args.enable_web_org
-        || (!args.disable_web_org && _app_config.discovery.web_org_enabled);
-    let subprocessor_will_be_enabled = args.enable_subprocessor_analysis
-        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled);
-    let subdomain_will_be_enabled = args.enable_subdomain_discovery
-        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled);
-    let saas_tenant_will_be_enabled = args.enable_saas_tenant_discovery
-        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled);
-    let web_traffic_will_be_enabled = args.enable_web_traffic_discovery
-        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled);
+    // --dns-only disables all non-DNS discovery methods
+    let web_org_will_be_enabled = !args.dns_only && (args.enable_web_org
+        || (!args.disable_web_org && _app_config.discovery.web_org_enabled));
+    let subprocessor_will_be_enabled = !args.dns_only && (args.enable_subprocessor_analysis
+        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled));
+    let subdomain_will_be_enabled = !args.dns_only && (args.enable_subdomain_discovery
+        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled));
+    let saas_tenant_will_be_enabled = !args.dns_only && (args.enable_saas_tenant_discovery
+        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled));
+    let web_traffic_will_be_enabled = !args.dns_only && (args.enable_web_traffic_discovery
+        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled));
+    let ct_will_be_enabled = !args.dns_only && (args.enable_ct_discovery
+        || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled));
+    if args.dns_only {
+        logger.info("DNS-only mode: all non-DNS discovery methods disabled");
+    }
     logger.complete_init_step("Feature detection complete").await;
 
     // Step 5: Await NER model initialization (was spawned in background during steps 1-4)
@@ -429,7 +435,7 @@ async fn main() -> Result<()> {
         subprocessor_will_be_enabled,
         subdomain_will_be_enabled,
         saas_tenant_will_be_enabled,
-        args.enable_ct_discovery || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled),
+        ct_will_be_enabled,
         web_org_will_be_enabled,
         web_traffic_will_be_enabled,
     );
@@ -653,8 +659,7 @@ async fn main() -> Result<()> {
     };
 
     // Initialize discovery modules if enabled
-    let subdomain_discovery = if args.enable_subdomain_discovery
-        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled) {
+    let subdomain_discovery = if subdomain_will_be_enabled {
         let path = args.subfinder_path.clone()
             .unwrap_or_else(|| _app_config.discovery.subfinder_path.clone());
         let mut discovery = SubfinderDiscovery::new(
@@ -839,8 +844,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let saas_tenant_discovery = if args.enable_saas_tenant_discovery
-        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled) {
+    let saas_tenant_discovery = if saas_tenant_will_be_enabled {
         let mut discovery = SaasTenantDiscovery::new(
             std::time::Duration::from_secs(_app_config.discovery.tenant_probe_timeout_secs),
             _app_config.discovery.tenant_probe_concurrency,
@@ -861,8 +865,7 @@ async fn main() -> Result<()> {
     };
 
     // Set up CT log discovery
-    let ct_discovery = if args.enable_ct_discovery
-        || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled) {
+    let ct_discovery = if ct_will_be_enabled {
         Some(CtLogDiscovery::new(
             std::time::Duration::from_secs(_app_config.discovery.ct_timeout_secs),
         ))
@@ -871,8 +874,7 @@ async fn main() -> Result<()> {
     };
 
     // Set up Webpage Source & Network Request discovery
-    let web_traffic_discovery = if args.enable_web_traffic_discovery
-        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled) {
+    let web_traffic_discovery = if web_traffic_will_be_enabled {
         Some(WebTrafficDiscovery::new(
             _app_config.discovery.web_traffic_timeout_secs,
         ))
@@ -1090,6 +1092,7 @@ async fn main() -> Result<()> {
     let results: Vec<VendorRelationship> = {
         let mut all_results = resumed_results;
         all_results.extend(new_results);
+        let raw_count = all_results.len();
         let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
         let mut deduped: Vec<VendorRelationship> = Vec::new();
         for r in all_results {
@@ -1109,7 +1112,28 @@ async fn main() -> Result<()> {
                 deduped.push(r);
             }
         }
+        if deduped.len() < raw_count {
+            logger.info(&format!("{} raw relationships deduplicated to {} unique",
+                raw_count, deduped.len()));
+        }
         deduped
+    };
+
+    // BUG-008: Filter common infra providers from results unless --include-infra is set.
+    // Previously this was only gated by max_depth.is_none(), meaning explicit --depth
+    // would bypass filtering entirely, producing 100+ noise entries.
+    let results: Vec<VendorRelationship> = if args.include_infra {
+        results
+    } else {
+        let before = results.len();
+        let filtered: Vec<VendorRelationship> = results.into_iter()
+            .filter(|r| !is_common_denominator(&r.nth_party_domain))
+            .collect();
+        if filtered.len() < before {
+            logger.info(&format!("Filtered {} common infra provider entries (use --include-infra to include)",
+                before - filtered.len()));
+        }
+        filtered
     };
 
     let unique_vendors = results.iter()
@@ -1906,14 +1930,14 @@ async fn discover_nth_parties(
                     }
                 }
 
-                logger.debug(&format!("All {} vendor domains processed at depth {} ({} relationships to disk)",
+                logger.debug(&format!("All {} vendor domains processed at depth {} ({} raw relationships to disk, pending dedup)",
                     processed_count, current_depth, total_relationships_found));
 
                 logger.log_parallel_processing_complete(total_relationships_found);
 
                 // Finish progress bar for root-level analysis
                 if current_depth == 1 {
-                    logger.finish_progress(&format!("Vendor analysis completed — {} relationships from {} vendors",
+                    logger.finish_progress(&format!("Vendor analysis completed — {} raw relationships from {} vendors (deduplicating...)",
                         total_relationships_found, vendor_count)).await;
                 }
             }
@@ -2682,11 +2706,21 @@ async fn run_batch_analysis(
 
         let all_relationships = all_results.lock().await;
 
+        // BUG-008: Filter infra providers in batch combined export too
+        let export_relationships: Vec<VendorRelationship> = if args.include_infra {
+            all_relationships.clone()
+        } else {
+            all_relationships.iter()
+                .filter(|r| !is_common_denominator(&r.nth_party_domain))
+                .cloned()
+                .collect()
+        };
+
         match args.output_format.as_str() {
-            "json" => export::export_json(&all_relationships, &combined_path.to_string_lossy())?,
-            "markdown" => export::export_markdown(&all_relationships, &combined_path.to_string_lossy())?,
-            "html" => export::export_html(&all_relationships, &combined_path.to_string_lossy())?,
-            "csv" | _ => export::export_csv(&all_relationships, &combined_path.to_string_lossy())?,
+            "json" => export::export_json(&export_relationships, &combined_path.to_string_lossy())?,
+            "markdown" => export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?,
+            "html" => export::export_html(&export_relationships, &combined_path.to_string_lossy())?,
+            "csv" | _ => export::export_csv(&export_relationships, &combined_path.to_string_lossy())?,
         }
 
         println!("Combined report: {}", combined_path.display());
