@@ -239,6 +239,13 @@ fn extract_external_domains_from_html(html: &str, target_base_domain: &str) -> V
                             continue;
                         }
 
+                        // Social media domains are only vendor signals when their
+                        // SDK/script is loaded, not from simple hyperlinks or embeds
+                        if is_social_media_domain(&base_domain) && !is_active_resource_load(element_type) {
+                            debug!("Web traffic: skipping social media link {} (element: {})", base_domain, element_type);
+                            continue;
+                        }
+
                         results.push(WebTrafficResult {
                             vendor_domain: base_domain,
                             source: WebTrafficSource::PageSource,
@@ -262,6 +269,31 @@ fn is_infrastructure_noise(domain: &str) -> bool {
         // W3C/standards bodies
         | "w3.org" | "schema.org" | "ogp.me"
     )
+}
+
+/// Check if a domain is a social media platform. Social media domains should only be
+/// treated as vendor relationships when their SDK/scripts are actively loaded (e.g.,
+/// `<script src="https://connect.facebook.net/sdk.js">`), NOT when they appear as
+/// simple hyperlinks (e.g., `<a href="https://facebook.com/company">`).
+fn is_social_media_domain(domain: &str) -> bool {
+    matches!(domain,
+        "facebook.com" | "facebook.net"
+        | "linkedin.com"
+        | "twitter.com" | "x.com"
+        | "youtube.com"
+        | "instagram.com"
+        | "tiktok.com"
+        | "pinterest.com"
+        | "reddit.com"
+        | "threads.net"
+        | "mastodon.social"
+    )
+}
+
+/// Whether the given HTML element type represents an active resource load (script/SDK)
+/// vs. a passive reference (hyperlink, meta tag).
+fn is_active_resource_load(element_type: &str) -> bool {
+    matches!(element_type, "script src" | "img src")
 }
 
 /// Truncate a URL for evidence display (char boundary safe for non-ASCII URLs).
@@ -303,8 +335,10 @@ mod tests {
         assert!(domains.contains(&"segment.io"), "Should find segment.io");
         // googleapis.com is filtered as infrastructure noise
         assert!(!domains.contains(&"googleapis.com"), "Should filter googleapis.com");
-        assert!(domains.contains(&"facebook.com"), "Should find facebook.com");
-        assert!(domains.contains(&"youtube.com"), "Should find youtube.com");
+        // facebook.com from <img> (tracking pixel) IS a vendor signal
+        assert!(domains.contains(&"facebook.com"), "Should find facebook.com tracking pixel");
+        // youtube.com from <iframe> (embed) is NOT a vendor signal — social media filter
+        assert!(!domains.contains(&"youtube.com"), "Should filter youtube.com iframe embed");
     }
 
     #[test]
@@ -355,6 +389,44 @@ mod tests {
         let results = extract_external_domains_from_html(html, "example.com");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].vendor_domain, "segment.io");
+    }
+
+    #[test]
+    fn test_social_media_links_filtered() {
+        // Simple hyperlinks to social media profiles should NOT be vendor relationships
+        let html = r#"
+            <a href="https://www.facebook.com/ourcompany">Follow us on Facebook</a>
+            <a href="https://twitter.com/ourcompany">Follow us on Twitter</a>
+            <a href="https://www.linkedin.com/company/ourcompany">LinkedIn</a>
+            <a href="https://www.youtube.com/c/ourcompany">YouTube</a>
+            <a href="https://www.instagram.com/ourcompany">Instagram</a>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        // Social media profile links should be filtered
+        assert!(!domains.contains(&"facebook.com"), "Should filter facebook.com profile link");
+        assert!(!domains.contains(&"twitter.com"), "Should filter twitter.com profile link");
+        assert!(!domains.contains(&"linkedin.com"), "Should filter linkedin.com profile link");
+        assert!(!domains.contains(&"youtube.com"), "Should filter youtube.com profile link");
+        assert!(!domains.contains(&"instagram.com"), "Should filter instagram.com profile link");
+        // Real vendor SDKs should still be found
+        assert!(domains.contains(&"segment.io"), "Should find segment.io SDK");
+    }
+
+    #[test]
+    fn test_social_media_sdk_not_filtered() {
+        // Social media SDKs loaded via <script> ARE vendor relationships
+        let html = r#"
+            <script src="https://connect.facebook.net/en_US/fbevents.js"></script>
+            <img src="https://pixel.facebook.com/tr?id=123456">
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        // Facebook SDK via script = vendor signal
+        assert!(domains.contains(&"facebook.net"), "Should find facebook.net SDK script");
+        // Facebook tracking pixel via img = vendor signal
+        assert!(domains.contains(&"facebook.com"), "Should find facebook.com tracking pixel");
     }
 
     #[test]
