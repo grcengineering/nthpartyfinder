@@ -427,6 +427,24 @@ fn is_placeholder_organization(org: &str) -> bool {
         "private",
         "redacted",
         "withheld",
+        // TLD registry operators (not the actual domain owners)
+        "verisign global registry",
+        "verisign",
+        "vrsn",
+        "pir.org",
+        "public interest registry",
+        "afilias",
+        "donuts",
+        "identity digital",
+        "centralnic",
+        "nic.br",
+        "denic",
+        "nominet",
+        "afnic",
+        "sidn",
+        "registry operator",
+        "global registry services",
+        "icann",
         // Domain registrars/brand protection services (not the actual domain owners)
         "markmonitor",
         "csc corporate domains",
@@ -714,6 +732,12 @@ mod tests {
         assert!(is_placeholder_organization("GoDaddy.com, LLC"));
         assert!(is_placeholder_organization("Cloudflare, Inc."));
 
+        // TLD registry operators (BUG-006)
+        assert!(is_placeholder_organization("Verisign Global Registry Services"));
+        assert!(is_placeholder_organization("VeriSign, Inc."));
+        assert!(is_placeholder_organization("Public Interest Registry"));
+        assert!(is_placeholder_organization("ICANN"));
+
         // Address-like values (start with numbers)
         assert!(is_placeholder_organization("5335 Gate Parkway"));
         assert!(is_placeholder_organization("123 Main Street"));
@@ -761,6 +785,20 @@ mod tests {
         let whois_data = "Domain Name: example.com\nOrganization: REDACTED FOR PRIVACY\nRegistrar: GoDaddy.com, LLC";
         // GoDaddy is in the placeholder list, so should return None
         assert!(extract_organization_from_whois(whois_data).is_none());
+
+        // Registry operator as organization (BUG-006) — should be rejected
+        let whois_data = "Domain Name: smtp.com\nOrganization: Verisign Global Registry Services\nRegistrar: Network Solutions, LLC";
+        // Verisign is a registry operator, not the domain owner; registrar is also a placeholder
+        assert!(extract_organization_from_whois(whois_data).is_none(),
+            "Registry operator should be rejected as placeholder");
+
+        // Registry operator with valid registrar
+        let whois_data = "Domain Name: smtp.com\nOrganization: VeriSign, Inc.\nRegistrar: Acme Corp";
+        // VeriSign is rejected, but Acme Corp is a valid registrar org name
+        assert_eq!(
+            extract_organization_from_whois(whois_data),
+            Some("Acme Corp".to_string())
+        );
     }
 
     #[tokio::test]
