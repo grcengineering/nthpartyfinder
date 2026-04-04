@@ -2159,7 +2159,7 @@ impl SubprocessorAnalyzer {
                 // Extract text content from HTML for NER processing
                 let text_content = extract_text_from_html(&content);
                 if text_content.len() >= 100 {
-                    match crate::ner_org::extract_all_organizations(&text_content, Some(0.7)) {
+                    match crate::ner_org::extract_all_organizations(&text_content, Some(0.85)) {
                         Ok(ner_results) if !ner_results.is_empty() => {
                             debug!("NER fallback found {} organizations for {}", ner_results.len(), source_domain);
                             for org in &ner_results {
@@ -4180,6 +4180,16 @@ impl SubprocessorAnalyzer {
 
     /// Validate if a domain is likely a legitimate vendor domain
     pub fn is_valid_vendor_domain(&self, domain: &str) -> bool {
+        // RFC 1035: domains must not contain whitespace or non-ASCII characters
+        if domain.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
+            return false;
+        }
+
+        // RFC 1035: valid domain chars are alphanumeric, hyphens, and dots only
+        if !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+            return false;
+        }
+
         // Filter out common false positives and invalid domains
         let invalid_patterns = [
             "example.com", "example.org", "localhost", "127.0.0.1",
@@ -4206,6 +4216,12 @@ impl SubprocessorAnalyzer {
             return false;
         }
 
+        // Domain must have at least 2 labels (reject bare TLDs like "com")
+        let labels: Vec<&str> = domain.split('.').collect();
+        if labels.len() < 2 {
+            return false;
+        }
+
         // Validate TLD exists and is reasonable
         if let Some(last_dot_pos) = domain.rfind('.') {
             let tld = &domain[last_dot_pos + 1..];
@@ -4223,6 +4239,19 @@ impl SubprocessorAnalyzer {
             if last_label.len() < 3 {
                 return false;
             }
+        }
+
+        // Reject common English words that PDF/HTML extraction mistakes for domains
+        // These are words that, when combined with a TLD, form syntactically valid but
+        // semantically bogus domains (e.g., "conditions.com", "prevention.com")
+        let domain_label = domain.split('.').next().unwrap_or("").to_lowercase();
+        if is_common_english_word(&domain_label) {
+            return false;
+        }
+
+        // Reject garbled text from PDF extraction (all-consonant or improbable sequences)
+        if is_garbled_text(&domain_label) {
+            return false;
         }
 
         true
@@ -4471,27 +4500,63 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
 /// Applied as a final filter before returning results from analyze_domain_with_full_options.
 pub fn filter_subprocessor_results(vendors: Vec<SubprocessorDomain>) -> Vec<SubprocessorDomain> {
     let before_count = vendors.len();
-    let filtered: Vec<SubprocessorDomain> = vendors.into_iter().filter(|v| {
+    let filtered: Vec<SubprocessorDomain> = vendors.into_iter().filter_map(|mut v| {
         let domain = &v.domain;
 
-        // Filter _org: entries through NER false positive detection
+        // BUG-001/002: Transform _org: sentinel entries — strip prefix so it doesn't
+        // leak into JSON output. The org name becomes the domain field (used for org
+        // lookup downstream), with the _org: prefix removed.
         if let Some(org_name) = domain.strip_prefix("_org:") {
             if is_ner_false_positive(org_name) {
                 debug!("Filtering false positive org: {}", org_name);
-                return false;
+                return None;
             }
-            return true;
+            // Strip the _org: prefix; downstream code will use this for org resolution
+            // but it won't appear as a raw domain in output
+            let clean_org = org_name.to_string();
+            if !is_valid_org_name(&clean_org) {
+                debug!("Filtering invalid org name: {}", clean_org);
+                return None;
+            }
+            v.domain = clean_org;
+            return Some(v);
+        }
+
+        // Reject domains with whitespace (BUG-009: "il mj.com")
+        if domain.chars().any(|c| c.is_whitespace()) {
+            debug!("Filtering domain with whitespace: {}", domain);
+            return None;
         }
 
         // Validate domain TLD
         if let Some(tld) = domain.rsplit('.').next() {
             if !is_valid_tld(tld) {
                 debug!("Filtering domain with invalid TLD: {}", domain);
-                return false;
+                return None;
             }
         }
 
-        true
+        // Reject common English words mistaken for domains (BUG-005)
+        if let Some(label) = domain.split('.').next() {
+            let label_lower = label.to_lowercase();
+            if is_common_english_word(&label_lower) {
+                debug!("Filtering common word domain: {}", domain);
+                return None;
+            }
+            if is_garbled_text(&label_lower) {
+                debug!("Filtering garbled text domain: {}", domain);
+                return None;
+            }
+        }
+
+        // Reject bare TLDs (BUG-004: "com" extracted from SPF)
+        let label_count = domain.split('.').count();
+        if label_count < 2 {
+            debug!("Filtering bare TLD: {}", domain);
+            return None;
+        }
+
+        Some(v)
     }).collect();
 
     if filtered.len() < before_count {
@@ -4636,6 +4701,57 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
         return true;
     }
 
+    // Standards, certifications, and regulatory frameworks that NER identifies
+    // as organizations but are not vendors (BUG-003/010)
+    let standards_and_frameworks = [
+        "iso", "iec", "iso/iec", "iso/iec 27001", "iso/iec 27017", "iso/iec 27018",
+        "iso 27001", "iso 27017", "iso 27018", "iso 27701", "iso 9001", "iso 22301",
+        "soc", "soc 1", "soc 2", "soc 3", "soc2", "soc1", "soc3",
+        "pci-dss", "pci dss", "pci",
+        "gdpr", "ccpa", "cpra", "hipaa", "hitech", "ferpa", "coppa", "glba",
+        "nist", "nist 800-53", "nist csf", "nist sp 800-171",
+        "fedramp", "fisma", "itar", "cmmc",
+        "csa", "csa star", "star",
+        "aicpa", "ssae 18", "ssae 16", "ssae",
+        "cis", "cis benchmarks",
+        "owasp", "owasp top 10",
+        "cobit", "itil",
+        "eu", "european union",
+    ];
+    if standards_and_frameworks.contains(&lower.as_str()) {
+        return true;
+    }
+    // Standards with version numbers: "ISO 27001:2022", "SOC 2 Type II", etc.
+    if lower.starts_with("iso ") || lower.starts_with("iso/") || lower.starts_with("soc ")
+        || lower.starts_with("nist ") || lower.starts_with("pci") {
+        return true;
+    }
+
+    // Non-vendor organizations: charities, government bodies, standards bodies,
+    // religious organizations, and similar entities that NER correctly identifies
+    // as organizations but are not software/service vendors (BUG-003/010)
+    let non_vendor_orgs = [
+        "the salvation army", "salvation army",
+        "red cross", "american red cross", "international red cross",
+        "united nations", "world health organization", "who",
+        "federal trade commission", "ftc",
+        "securities and exchange commission", "sec",
+        "department of defense", "dod",
+        "department of homeland security", "dhs",
+        "national security agency", "nsa",
+        "government accountability office", "gao",
+        "european commission",
+        "international organization for standardization",
+        "international electrotechnical commission",
+        "national institute of standards and technology",
+        "internet engineering task force", "ietf",
+        "world wide web consortium", "w3c",
+        "ieee",
+    ];
+    if non_vendor_orgs.contains(&lower.as_str()) {
+        return true;
+    }
+
     // ISO 639-1 language codes that NER misidentifies as organizations
     // (commonly found on internationalized Microsoft/Salesforce pages)
     let language_codes = [
@@ -4648,6 +4764,84 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
     ];
     if language_codes.contains(&lower.as_str()) {
         return true;
+    }
+
+    false
+}
+
+/// Check if a domain label is a common English word that PDF/HTML extraction
+/// mistakes for a vendor domain. These words are syntactically valid domain labels
+/// but semantically bogus when extracted from page content or PDF text.
+pub fn is_common_english_word(label: &str) -> bool {
+    const COMMON_WORDS: &[&str] = &[
+        // Words found in vanta.com false positives (BUG-005)
+        "conditions", "prevention", "logging", "support", "services",
+        "compliance", "security", "privacy", "access", "control",
+        "monitoring", "management", "protection", "detection", "response",
+        "integration", "infrastructure", "configuration", "authentication",
+        "authorization", "encryption", "verification", "notification",
+        "application", "processing", "performance", "availability",
+        "documentation", "implementation", "certification", "remediation",
+        // Common web page / legal boilerplate words
+        "contact", "about", "terms", "policy", "cookies", "disclaimer",
+        "copyright", "agreement", "overview", "features", "pricing",
+        "resources", "updates", "settings", "account", "download",
+        "information", "solutions", "products", "partners", "customers",
+        "careers", "enterprise", "platform", "dashboard",
+        // Common technical/UI words from page scraping
+        "button", "submit", "cancel", "delete", "search", "filter",
+        "loading", "error", "success", "warning", "undefined",
+        "header", "footer", "sidebar", "content", "container",
+        "section", "article", "navigation", "checkbox", "dropdown",
+    ];
+    COMMON_WORDS.contains(&label)
+}
+
+/// Detect garbled text from PDF extraction — sequences that are unlikely to be
+/// real domain labels. Catches all-consonant gibberish (e.g., "ksbpw") and
+/// strings with improbable character distributions.
+pub fn is_garbled_text(label: &str) -> bool {
+    if label.len() < 3 {
+        return false; // Too short to judge meaningfully
+    }
+
+    let chars: Vec<char> = label.chars().collect();
+    let vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
+
+    // Count vowels and consonants (ignoring digits/hyphens)
+    let alpha_chars: Vec<char> = chars.iter().filter(|c| c.is_ascii_alphabetic()).cloned().collect();
+    if alpha_chars.is_empty() {
+        return true; // No alphabetic characters at all
+    }
+
+    let vowel_count = alpha_chars.iter().filter(|c| vowels.contains(&c.to_ascii_lowercase())).count();
+    let consonant_count = alpha_chars.len() - vowel_count;
+
+    // All-consonant sequences of 4+ chars are almost certainly garbled
+    // (e.g., "ksbpw", "brtfd", "mnpqx")
+    if vowel_count == 0 && consonant_count >= 4 {
+        return true;
+    }
+
+    // Very low vowel ratio for longer strings (< 15% vowels in 6+ alpha chars)
+    if alpha_chars.len() >= 6 {
+        let vowel_ratio = vowel_count as f64 / alpha_chars.len() as f64;
+        if vowel_ratio < 0.15 {
+            return true;
+        }
+    }
+
+    // Check for 4+ consecutive consonants (unusual in English/domain names)
+    let mut consecutive_consonants = 0u32;
+    for c in &alpha_chars {
+        if vowels.contains(&c.to_ascii_lowercase()) {
+            consecutive_consonants = 0;
+        } else {
+            consecutive_consonants += 1;
+            if consecutive_consonants >= 5 {
+                return true;
+            }
+        }
     }
 
     false

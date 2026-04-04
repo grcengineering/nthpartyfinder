@@ -789,6 +789,41 @@ fn test_ner_false_positive_real_orgs_accepted() {
     println!("✓ All {} real organization names accepted", real_orgs.len());
 }
 
+#[test]
+fn test_ner_false_positive_standards_and_certifications_rejected() {
+    // BUG-003/010: Standards and certifications should be rejected as NER false positives
+    let standards = [
+        "ISO", "IEC", "ISO/IEC 27001", "ISO 27001", "SOC 2", "SOC2",
+        "PCI-DSS", "PCI DSS", "GDPR", "HIPAA", "NIST", "NIST 800-53",
+        "FedRAMP", "CCPA", "FERPA", "OWASP", "AICPA", "SSAE 18",
+        "CSA STAR", "CIS", "COBIT", "ITIL", "CMMC", "FISMA",
+    ];
+    for s in &standards {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(s),
+            "Standard/certification '{}' should be rejected as NER false positive", s);
+    }
+    println!("✓ All {} standards/certifications rejected", standards.len());
+}
+
+#[test]
+fn test_ner_false_positive_non_vendor_orgs_rejected() {
+    // BUG-003/010: Non-vendor organizations (charities, government, standards bodies)
+    let non_vendors = [
+        "The Salvation Army", "Salvation Army", "Red Cross",
+        "United Nations", "World Health Organization",
+        "Federal Trade Commission", "FTC",
+        "Department of Defense", "DoD",
+        "European Commission", "IEEE", "IETF", "W3C",
+        "International Organization for Standardization",
+        "National Institute of Standards and Technology",
+    ];
+    for org in &non_vendors {
+        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(org),
+            "Non-vendor org '{}' should be rejected as NER false positive", org);
+    }
+    println!("✓ All {} non-vendor organizations rejected", non_vendors.len());
+}
+
 #[tokio::test]
 async fn test_garbage_single_char_domains_rejected() {
     // These are the exact garbage domains found in the depth-3 Klaviyo scan

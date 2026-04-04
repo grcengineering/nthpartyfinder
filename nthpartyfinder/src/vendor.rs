@@ -184,6 +184,17 @@ impl VendorRelationship {
         root_customer_organization: String,
         evidence: String,
     ) -> Self {
+        // BUG-001/002: Strip any leaked _org: sentinel prefix from output fields.
+        // This is a safety net — the primary fix is in filter_subprocessor_results().
+        let nth_party_domain = nth_party_domain
+            .strip_prefix("_org:")
+            .map(|s| s.to_string())
+            .unwrap_or(nth_party_domain);
+        let nth_party_organization = nth_party_organization
+            .strip_prefix("_org:")
+            .map(|s| s.to_string())
+            .unwrap_or(nth_party_organization);
+
         VendorRelationship {
             nth_party_domain,
             nth_party_organization,

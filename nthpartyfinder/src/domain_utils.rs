@@ -2,13 +2,13 @@
 pub fn extract_base_domain(domain: &str) -> String {
     // Remove common SPF and technical prefixes
     let spf_prefixes = vec![
-        "_spf.", "spf.", "_dmarc.", "dmarc.", "_domainkey.", 
+        "_spf.", "spf.", "_dmarc.", "dmarc.", "_domainkey.",
         "selector1._domainkey.", "selector2._domainkey.",
         "_smtp.", "smtp.", "mail.", "email."
     ];
-    
+
     let mut cleaned_domain = domain.to_lowercase();
-    
+
     // Remove SPF-specific prefixes
     for prefix in spf_prefixes {
         if cleaned_domain.starts_with(prefix) {
@@ -16,13 +16,34 @@ pub fn extract_base_domain(domain: &str) -> String {
             break;
         }
     }
-    
+
     // Remove subdomain prefixes that are clearly technical (but keep meaningful subdomains)
-    if let Some(base) = extract_organizational_domain(&cleaned_domain) {
+    let result = if let Some(base) = extract_organizational_domain(&cleaned_domain) {
         base
     } else {
-        cleaned_domain
+        cleaned_domain.clone()
+    };
+
+    // BUG-004 safety: never return a bare TLD or single-label domain.
+    // A valid extracted domain must have at least 2 labels (e.g., "example.com").
+    // If over-stripping reduced the domain to a bare TLD, fall back to the best available.
+    let label_count = result.split('.').count();
+    if label_count < 2 {
+        // If cleaned_domain also has < 2 labels, fall back to original input
+        if cleaned_domain.split('.').count() >= 2 {
+            return cleaned_domain;
+        }
+        return domain.to_lowercase();
     }
+
+    // Reject results that are only a public suffix (e.g., "co.uk", "com.au")
+    let compound_tlds = ["co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr",
+                         "com.br", "com.mx", "com.cn", "org.uk", "net.au"];
+    if compound_tlds.contains(&result.as_str()) {
+        return cleaned_domain;
+    }
+
+    result
 }
 
 /// Extract the organizational domain (e.g. mailgun.org from eu.mailgun.org)
@@ -156,6 +177,22 @@ mod tests {
         );
         // Already at apex with compound TLD
         assert_eq!(extract_base_domain("example.co.uk"), "example.co.uk");
+    }
+
+    /// BUG-004 regression: SPF include domains must never be over-stripped to a bare TLD.
+    /// e.g., include:theaccessgroupSPF.smtp.com must not extract just "com".
+    #[test]
+    fn test_never_returns_bare_tld() {
+        // smtp. prefix stripped → theaccessgroupspf.com (valid 2-label domain)
+        let result = extract_base_domain("theaccessgroupSPF.smtp.com");
+        assert!(result.contains('.'), "Must not return bare TLD");
+        let label_count = result.split('.').count();
+        assert!(label_count >= 2, "Must have at least 2 labels, got: {}", result);
+
+        // Edge case: "smtp.com" — stripping smtp. prefix leaves bare "com",
+        // but safety check falls back to the original "smtp.com"
+        let result2 = extract_base_domain("smtp.com");
+        assert_eq!(result2, "smtp.com", "Must fall back to original when over-stripped");
     }
 
     #[test]
