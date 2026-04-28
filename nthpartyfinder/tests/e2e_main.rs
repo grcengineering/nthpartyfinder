@@ -4,4 +4,5 @@ mod e2e {
     pub mod cli_basics;
     pub mod helpers;
     pub mod output_formats;
+    pub mod regression_bugs;
 }

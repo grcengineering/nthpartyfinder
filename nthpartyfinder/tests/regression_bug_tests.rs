@@ -3,12 +3,14 @@
 //! These tests ensure that the specific bug classes found during scan analysis
 //! are caught at the unit level and never regress.
 
+use nthpartyfinder::discovery::web_traffic::extract_external_domains_from_html;
 use nthpartyfinder::domain_utils::extract_base_domain;
 use nthpartyfinder::subprocessor::{
     filter_subprocessor_results, is_common_english_word, is_garbled_text, is_ner_false_positive,
     is_valid_org_name, is_valid_tld, SubprocessorDomain,
 };
 use nthpartyfinder::vendor::RecordType;
+use nthpartyfinder::whois::is_placeholder_organization;
 
 // ============================================================================
 // Helper to build SubprocessorDomain entries for filter testing
@@ -603,4 +605,78 @@ fn test_google_service_domains_are_valid_but_filtered_by_pipeline() {
     let filtered = filter_subprocessor_results(entries);
     // These ARE valid domains — the infra filter is a separate pipeline stage
     assert_eq!(filtered.len(), 3);
+}
+
+// ============================================================================
+// BUG-006: TLD registry operators rejected from WHOIS org resolution
+// Fix commit: 595eba3
+// ============================================================================
+
+#[test]
+fn bug_006_tld_registry_operators_rejected_as_placeholder_orgs() {
+    let registry_orgs = [
+        "Verisign Global Registry Services",
+        "VeriSign, Inc.",
+        "ICANN",
+        "Public Interest Registry",
+        "Afilias",
+        "CentralNic",
+        "Donuts",
+        "Identity Digital",
+    ];
+    for org in registry_orgs {
+        assert!(
+            is_placeholder_organization(org),
+            "BUG-006 regression: '{org}' should be rejected as registry placeholder"
+        );
+    }
+    assert!(
+        !is_placeholder_organization("Acme Corporation"),
+        "Real org names must still pass"
+    );
+}
+
+// ============================================================================
+// BUG-011: Social media links excluded from vendor relationships
+// Fix commit: 086218f
+// ============================================================================
+
+#[test]
+fn bug_011_social_media_profile_links_not_vendor_relationships() {
+    let html = r#"
+        <a href="https://www.facebook.com/ourcompany">Follow us</a>
+        <a href="https://twitter.com/ourcompany">Twitter</a>
+        <a href="https://www.linkedin.com/company/ourcompany">LinkedIn</a>
+        <a href="https://www.youtube.com/c/ourcompany">YouTube</a>
+        <a href="https://www.instagram.com/ourcompany">Instagram</a>
+        <script src="https://cdn.segment.io/analytics.js"></script>
+    "#;
+    let results = extract_external_domains_from_html(html, "example.com");
+    let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+
+    for social in ["facebook.com", "twitter.com", "linkedin.com", "youtube.com", "instagram.com"] {
+        assert!(
+            !domains.contains(&social),
+            "BUG-011 regression: {social} profile link should be filtered"
+        );
+    }
+    assert!(
+        domains.contains(&"segment.io"),
+        "Real vendor SDKs must still be detected"
+    );
+}
+
+#[test]
+fn bug_011_social_media_active_loads_still_detected() {
+    let html = r#"
+        <script src="https://connect.facebook.net/en_US/sdk.js"></script>
+        <img src="https://www.facebook.com/tr?id=123" />
+    "#;
+    let results = extract_external_domains_from_html(html, "example.com");
+    let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+
+    assert!(
+        domains.contains(&"facebook.net") || domains.contains(&"facebook.com"),
+        "BUG-011: active script/pixel loads from social media should still be vendor signals"
+    );
 }

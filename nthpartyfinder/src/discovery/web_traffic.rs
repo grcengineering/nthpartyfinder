@@ -235,7 +235,7 @@ impl WebTrafficDiscovery {
 }
 
 /// Extract external domains from HTML content by parsing resource-loading elements.
-fn extract_external_domains_from_html(
+pub fn extract_external_domains_from_html(
     html: &str,
     target_base_domain: &str,
 ) -> Vec<WebTrafficResult> {

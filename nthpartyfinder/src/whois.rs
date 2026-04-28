@@ -490,7 +490,7 @@ fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
     None
 }
 
-fn is_placeholder_organization(org: &str) -> bool {
+pub fn is_placeholder_organization(org: &str) -> bool {
     let placeholders = vec![
         // Privacy protection services
         "whois privacy protection service",
