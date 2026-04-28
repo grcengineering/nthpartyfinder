@@ -1,7 +1,4 @@
-use nthpartyfinder::subprocessor::{
-    is_valid_org_name, is_valid_tld,
-    SubprocessorAnalyzer,
-};
+use nthpartyfinder::subprocessor::{is_valid_org_name, is_valid_tld, SubprocessorAnalyzer};
 
 #[tokio::test]
 async fn test_subprocessor_url_generation() {

@@ -3,7 +3,9 @@ use crate::domain_utils;
 use crate::rate_limit::RateLimitContext;
 use crate::vendor::RecordType;
 use anyhow::Result;
-use hickory_resolver::config::{LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{
+    LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts,
+};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use hickory_resolver::proto::xfer::Protocol;
 use hickory_resolver::TokioResolver;
@@ -391,7 +393,11 @@ impl DnsServerPool {
         opts.validate = false;
         opts.num_concurrent_reqs = 4; // Increased concurrency
 
-        Ok(TokioResolver::builder_with_config(config, TokioConnectionProvider::default()).with_options(opts).build())
+        Ok(
+            TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
+                .with_options(opts)
+                .build(),
+        )
     }
 
     /// Fast bulk DNS lookup optimized for subdomain scanning.
@@ -427,9 +433,9 @@ impl DnsServerPool {
                 std::time::Duration::from_millis(2000),
                 resolver.txt_lookup(domain),
             )
-            .await {
-                let records: Vec<String> =
-                    txt_lookup.iter().map(|r| r.to_string()).collect();
+            .await
+            {
+                let records: Vec<String> = txt_lookup.iter().map(|r| r.to_string()).collect();
                 return Ok(records);
             }
         }
@@ -457,17 +463,16 @@ impl DnsServerPool {
                 std::time::Duration::from_millis(2000),
                 resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
             )
-            .await {
+            .await
+            {
                 use hickory_resolver::proto::rr::RData;
                 let records: Vec<String> = lookup
                     .record_iter()
-                    .filter_map(|r| {
-                        match r.data() {
-                            RData::CNAME(ref cname) => {
-                                Some(cname.to_string().trim_end_matches('.').to_string())
-                            }
-                            _ => None,
+                    .filter_map(|r| match r.data() {
+                        RData::CNAME(ref cname) => {
+                            Some(cname.to_string().trim_end_matches('.').to_string())
                         }
+                        _ => None,
                     })
                     .collect();
                 return Ok(records);
@@ -577,7 +582,9 @@ pub async fn get_txt_records_with_rate_limit(
         }
     ).await;
 
-    if let Ok(Some(records)) = race_result { return Ok(records) }
+    if let Ok(Some(records)) = race_result {
+        return Ok(records);
+    }
 
     // Final fallback: system resolver (only if both racing attempts failed)
     debug!("DNS race failed for {}, trying system resolver", domain);
@@ -683,8 +690,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
         let mut record_matched = false;
 
         // Extract vendor domains based on record patterns
-        if let Some(domains) =
-            extract_from_spf_record(&record_clean, logger, source_domain, record)
+        if let Some(domains) = extract_from_spf_record(&record_clean, logger, source_domain, record)
         {
             record_matched = true;
             for domain_info in domains {

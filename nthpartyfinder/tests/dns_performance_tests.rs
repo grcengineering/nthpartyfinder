@@ -142,9 +142,11 @@ fn measure_spf_macro_stripping_overhead() {
     // Measure strip_spf_macros regex compilation overhead
     println!("\n=== SPF Macro Stripping Performance ===\n");
 
-    let macro_domains = ["v=spf1 include:%{ir}.%{v}._spf.example.com ~all",
+    let macro_domains = [
+        "v=spf1 include:%{ir}.%{v}._spf.example.com ~all",
         "v=spf1 exists:%{i}.%{d2}.spf.has.pphosted.com ~all",
-        "v=spf1 include:%{ir}.%{v}.%{d}.spf.example.org ~all"];
+        "v=spf1 include:%{ir}.%{v}.%{d}.spf.example.org ~all",
+    ];
 
     let records: Vec<String> = macro_domains.iter().map(|s| s.to_string()).collect();
 

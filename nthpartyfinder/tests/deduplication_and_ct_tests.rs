@@ -182,7 +182,6 @@ fn test_within_same_spf_record_still_deduplicated() {
 #[test]
 fn test_ct_log_discovery_infrastructure_filtering() {
     // Test that infrastructure domains are correctly filtered
-    
 
     // These should be filtered as infrastructure
     assert!(is_infrastructure("cloudflare.com"));

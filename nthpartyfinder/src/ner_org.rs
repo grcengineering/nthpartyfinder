@@ -270,15 +270,15 @@ impl NerOrganizationExtractor {
                     if confidence >= self.min_confidence
                         && (best_match.is_none()
                             || confidence > best_match.as_ref().unwrap().confidence)
-                        {
-                            let org_name = span.text().trim().to_string();
-                            if !org_name.is_empty() {
-                                best_match = Some(NerOrgResult {
-                                    organization: org_name,
-                                    confidence,
-                                });
-                            }
+                    {
+                        let org_name = span.text().trim().to_string();
+                        if !org_name.is_empty() {
+                            best_match = Some(NerOrgResult {
+                                organization: org_name,
+                                confidence,
+                            });
                         }
+                    }
                 }
             }
         }

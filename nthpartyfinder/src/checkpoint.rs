@@ -191,9 +191,9 @@ impl Checkpoint {
                 .pending_domains
                 .iter()
                 .any(|p| p.domain == pending.domain)
-            {
-                self.pending_domains.push(pending);
-            }
+        {
+            self.pending_domains.push(pending);
+        }
     }
 
     /// Get the next pending domain to process (if any)
@@ -275,8 +275,7 @@ pub fn generate_settings_hash(
 }
 
 /// Resume mode options
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ResumeMode {
     /// Prompt user if checkpoint exists
     #[default]
@@ -286,7 +285,6 @@ pub enum ResumeMode {
     /// Start fresh, ignore any existing checkpoint
     Fresh,
 }
-
 
 #[cfg(test)]
 mod tests {

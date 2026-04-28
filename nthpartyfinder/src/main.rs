@@ -3200,9 +3200,7 @@ async fn run_batch_analysis(
                 export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?
             }
             "html" => export::export_html(&export_relationships, &combined_path.to_string_lossy())?,
-            _ => {
-                export::export_csv(&export_relationships, &combined_path.to_string_lossy())?
-            }
+            _ => export::export_csv(&export_relationships, &combined_path.to_string_lossy())?,
         }
 
         println!("Combined report: {}", combined_path.display());

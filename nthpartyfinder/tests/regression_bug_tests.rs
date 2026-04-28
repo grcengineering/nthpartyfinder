@@ -420,7 +420,7 @@ fn test_social_media_domains_in_web_traffic() {
 
 #[test]
 fn test_whois_rejects_amazon_registrar() {
-    
+
     // Amazon Registrar is a domain registrar, not the actual domain owner
     // This is tested via is_placeholder_organization in whois module's own tests
     // We verify the module-level behavior via extract_organization_from_whois
@@ -654,7 +654,13 @@ fn bug_011_social_media_profile_links_not_vendor_relationships() {
     let results = extract_external_domains_from_html(html, "example.com");
     let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
 
-    for social in ["facebook.com", "twitter.com", "linkedin.com", "youtube.com", "instagram.com"] {
+    for social in [
+        "facebook.com",
+        "twitter.com",
+        "linkedin.com",
+        "youtube.com",
+        "instagram.com",
+    ] {
         assert!(
             !domains.contains(&social),
             "BUG-011 regression: {social} profile link should be filtered"

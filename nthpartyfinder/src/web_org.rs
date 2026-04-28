@@ -454,23 +454,27 @@ fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
 
             // Check if right side looks like a company name (preferred for | and -)
             if (sep == " | " || sep == " - " || sep == " – " || sep == " — ")
-                && is_valid_org_name(right) && !looks_like_page_name(right) {
-                    return Some(WebOrgResult {
-                        organization: clean_org_name(right),
-                        confidence: 0.65,
-                        source: WebOrgSource::TitleTag,
-                    });
-                }
+                && is_valid_org_name(right)
+                && !looks_like_page_name(right)
+            {
+                return Some(WebOrgResult {
+                    organization: clean_org_name(right),
+                    confidence: 0.65,
+                    source: WebOrgSource::TitleTag,
+                });
+            }
 
             // Check if left side looks like a company name (for ": " pattern)
             if (sep == ": " || sep == " :: ")
-                && is_valid_org_name(left) && !looks_like_page_name(left) {
-                    return Some(WebOrgResult {
-                        organization: clean_org_name(left),
-                        confidence: 0.65,
-                        source: WebOrgSource::TitleTag,
-                    });
-                }
+                && is_valid_org_name(left)
+                && !looks_like_page_name(left)
+            {
+                return Some(WebOrgResult {
+                    organization: clean_org_name(left),
+                    confidence: 0.65,
+                    source: WebOrgSource::TitleTag,
+                });
+            }
         }
     }
 
