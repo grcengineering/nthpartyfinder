@@ -38,8 +38,7 @@ fn measure_regex_overhead_detailed() {
     );
 
     // Test 3: Complex records (multiple patterns)
-    let complex_records: Vec<String> =
-        vec![
+    let complex_records: Vec<String> = vec![
             "v=spf1 include:_spf.google.com include:mailgun.org redirect=_spf.sendgrid.net ~all"
                 .to_string();
             100
