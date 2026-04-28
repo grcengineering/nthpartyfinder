@@ -1,49 +1,52 @@
 // Allow dead code for functions that are part of the API surface but not used in all code paths
 #![allow(dead_code)]
 
-use clap::Parser;
 use anyhow::Result;
+use clap::Parser;
 use ctrlc;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::io::{self, IsTerminal};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+mod batch;
+mod browser_pool;
+mod cache_commands;
+mod checkpoint;
 mod cli;
 mod config;
+mod dep_check;
 mod discovery;
 mod dns;
-mod whois;
-mod export;
-mod vendor;
 mod domain_utils;
-mod verification_logger;
-mod subprocessor;
-mod logger;
-mod vendor_registry;
+mod export;
 mod known_vendors;
-mod web_org;
-mod ner_org;
-mod cache_commands;
-mod rate_limit;
-mod batch;
-mod org_normalizer;
-mod checkpoint;
-mod trust_center;
-mod result_sink;
+mod logger;
 mod memory_monitor;
-mod browser_pool;
-mod dep_check;
+mod ner_org;
+mod org_normalizer;
+mod rate_limit;
+mod result_sink;
+mod subprocessor;
+mod trust_center;
+mod vendor;
+mod vendor_registry;
+mod verification_logger;
+mod web_org;
+mod whois;
 
-use cli::{Args, Cli, Commands, CacheCommands};
-use config::{AppConfig, AnalysisConfig, AnalysisStrategy};
-use vendor::{VendorRelationship, RecordType};
+use checkpoint::{generate_settings_hash, Checkpoint, ResumeMode};
+use cli::{Args, CacheCommands, Cli, Commands};
+use config::{AnalysisConfig, AnalysisStrategy, AppConfig};
+use discovery::{
+    CtLogDiscovery, InstallOption, SaasTenantDiscovery, SubfinderDiscovery, TenantStatus,
+    WebTrafficDiscovery,
+};
 use logger::{AnalysisLogger, VerbosityLevel};
-use discovery::{SubfinderDiscovery, SaasTenantDiscovery, TenantStatus, InstallOption, CtLogDiscovery, WebTrafficDiscovery};
-use checkpoint::{Checkpoint, ResumeMode, generate_settings_hash};
-use result_sink::ResultSink;
 use memory_monitor::MemoryMonitor;
+use result_sink::ResultSink;
+use vendor::{RecordType, VendorRelationship};
 
 // Browser pool is in browser_pool.rs — shared between lib and binary crates
 
@@ -80,7 +83,9 @@ async fn main() -> Result<()> {
                 } else if let Some(d) = domain {
                     return cache_commands::clear_domain_cache(d).await;
                 } else {
-                    eprintln!("Error: Either specify a domain or use --all to clear all cache entries.");
+                    eprintln!(
+                        "Error: Either specify a domain or use --all to clear all cache entries."
+                    );
                     eprintln!("Usage: nthpartyfinder cache clear <domain>");
                     eprintln!("       nthpartyfinder cache clear --all");
                     std::process::exit(1);
@@ -99,7 +104,10 @@ async fn main() -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
             Ok(path) => {
-                println!("✅ Created default configuration file at: {}", path.display());
+                println!(
+                    "✅ Created default configuration file at: {}",
+                    path.display()
+                );
                 println!("   Edit this file to customize settings, then run nthpartyfinder again.");
                 std::process::exit(0);
             }
@@ -120,8 +128,13 @@ async fn main() -> Result<()> {
             // Config not found - prompt to create if interactive
             match AppConfig::prompt_create_config() {
                 Ok(Some(created_path)) => {
-                    println!("✅ Created default configuration file at: {}", created_path.display());
-                    println!("   Edit this file to customize settings, then run nthpartyfinder again.");
+                    println!(
+                        "✅ Created default configuration file at: {}",
+                        created_path.display()
+                    );
+                    println!(
+                        "   Edit this file to customize settings, then run nthpartyfinder again."
+                    );
                     std::process::exit(0);
                 }
                 Ok(None) => {
@@ -147,7 +160,8 @@ async fn main() -> Result<()> {
     eprintln!("  Checking dependencies...");
     #[cfg(feature = "embedded-ner")]
     {
-        let slm_wanted = args.enable_slm || (!args.disable_slm && _app_config.discovery.ner_enabled);
+        let slm_wanted =
+            args.enable_slm || (!args.disable_slm && _app_config.discovery.ner_enabled);
         if slm_wanted {
             // Check if ONNX Runtime is available; if not, offer to download it
             let ort_check = dep_check::check_onnx_runtime_availability();
@@ -227,12 +241,20 @@ async fn main() -> Result<()> {
     };
     if vendor_registry_loaded {
         if let Some(reg) = vendor_registry::get() {
-            logger.complete_init_step(&format!("Vendor registry ({} vendors, {} domains)", reg.vendor_count(), reg.domain_count())).await;
+            logger
+                .complete_init_step(&format!(
+                    "Vendor registry ({} vendors, {} domains)",
+                    reg.vendor_count(),
+                    reg.domain_count()
+                ))
+                .await;
         } else {
             logger.complete_init_step("Vendor registry loaded").await;
         }
     } else {
-        logger.complete_init_step("Vendor registry (fallback mode)").await;
+        logger
+            .complete_init_step("Vendor registry (fallback mode)")
+            .await;
     }
 
     // Step 2: Initialize known vendors database for reliable org lookups
@@ -250,41 +272,64 @@ async fn main() -> Result<()> {
     if known_vendors_loaded {
         if let Some(kv) = known_vendors::get() {
             let stats = kv.stats();
-            logger.complete_init_step(&format!("Known vendors database ({} vendors)", stats.base_count)).await;
+            logger
+                .complete_init_step(&format!(
+                    "Known vendors database ({} vendors)",
+                    stats.base_count
+                ))
+                .await;
         } else {
-            logger.complete_init_step("Known vendors database loaded").await;
+            logger
+                .complete_init_step("Known vendors database loaded")
+                .await;
         }
     } else {
-        logger.complete_init_step("Known vendors database (not available)").await;
+        logger
+            .complete_init_step("Known vendors database (not available)")
+            .await;
     }
 
     // Step 3: Initialize organization name normalizer from config (global singleton)
     org_normalizer::init(&_app_config.organization);
     if org_normalizer::is_enabled() {
-        logger.complete_init_step(&format!("Organization normalizer (threshold: {:.0}%)",
-            _app_config.organization.similarity_threshold * 100.0)).await;
+        logger
+            .complete_init_step(&format!(
+                "Organization normalizer (threshold: {:.0}%)",
+                _app_config.organization.similarity_threshold * 100.0
+            ))
+            .await;
     } else {
-        logger.complete_init_step("Organization normalizer (disabled)").await;
+        logger
+            .complete_init_step("Organization normalizer (disabled)")
+            .await;
     }
 
     // Step 4: Feature detection
     // --dns-only disables all non-DNS discovery methods
-    let web_org_will_be_enabled = !args.dns_only && (args.enable_web_org
-        || (!args.disable_web_org && _app_config.discovery.web_org_enabled));
-    let subprocessor_will_be_enabled = !args.dns_only && (args.enable_subprocessor_analysis
-        || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled));
-    let subdomain_will_be_enabled = !args.dns_only && (args.enable_subdomain_discovery
-        || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled));
-    let saas_tenant_will_be_enabled = !args.dns_only && (args.enable_saas_tenant_discovery
-        || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled));
-    let web_traffic_will_be_enabled = !args.dns_only && (args.enable_web_traffic_discovery
-        || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled));
-    let ct_will_be_enabled = !args.dns_only && (args.enable_ct_discovery
-        || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled));
+    let web_org_will_be_enabled = !args.dns_only
+        && (args.enable_web_org
+            || (!args.disable_web_org && _app_config.discovery.web_org_enabled));
+    let subprocessor_will_be_enabled = !args.dns_only
+        && (args.enable_subprocessor_analysis
+            || (!args.disable_subprocessor_analysis && _app_config.discovery.subprocessor_enabled));
+    let subdomain_will_be_enabled = !args.dns_only
+        && (args.enable_subdomain_discovery
+            || (!args.disable_subdomain_discovery && _app_config.discovery.subdomain_enabled));
+    let saas_tenant_will_be_enabled = !args.dns_only
+        && (args.enable_saas_tenant_discovery
+            || (!args.disable_saas_tenant_discovery && _app_config.discovery.saas_tenant_enabled));
+    let web_traffic_will_be_enabled = !args.dns_only
+        && (args.enable_web_traffic_discovery
+            || (!args.disable_web_traffic_discovery && _app_config.discovery.web_traffic_enabled));
+    let ct_will_be_enabled = !args.dns_only
+        && (args.enable_ct_discovery
+            || (!args.disable_ct_discovery && _app_config.discovery.ct_discovery_enabled));
     if args.dns_only {
         logger.info("DNS-only mode: all non-DNS discovery methods disabled");
     }
-    logger.complete_init_step("Feature detection complete").await;
+    logger
+        .complete_init_step("Feature detection complete")
+        .await;
 
     // Step 5: Await NER model initialization (was spawned in background during steps 1-4)
     #[cfg(feature = "embedded-ner")]
@@ -292,17 +337,25 @@ async fn main() -> Result<()> {
         if let Some(handle) = ner_bg_handle {
             match handle.await {
                 Ok(Ok(())) => {
-                    logger.complete_init_step("NER model loaded (GLiNER ready)").await;
+                    logger
+                        .complete_init_step("NER model loaded (GLiNER ready)")
+                        .await;
                 }
                 Ok(Err(e)) => {
-                    logger.complete_init_step(&format!("NER initialization failed: {}", e)).await;
+                    logger
+                        .complete_init_step(&format!("NER initialization failed: {}", e))
+                        .await;
                 }
                 Err(e) => {
-                    logger.complete_init_step(&format!("NER task panicked: {}", e)).await;
+                    logger
+                        .complete_init_step(&format!("NER task panicked: {}", e))
+                        .await;
                 }
             }
         } else {
-            logger.complete_init_step("NER disabled (--disable-slm)").await;
+            logger
+                .complete_init_step("NER disabled (--disable-slm)")
+                .await;
         }
     }
     #[cfg(not(feature = "embedded-ner"))]
@@ -316,7 +369,11 @@ async fn main() -> Result<()> {
     // Print feature status summary above the unified progress bar
     if vendor_registry_loaded {
         if let Some(reg) = vendor_registry::get() {
-            logger.info(&format!("Vendor registry: {} vendors, {} domains", reg.vendor_count(), reg.domain_count()));
+            logger.info(&format!(
+                "Vendor registry: {} vendors, {} domains",
+                reg.vendor_count(),
+                reg.domain_count()
+            ));
         }
     }
     if web_org_will_be_enabled {
@@ -362,8 +419,11 @@ async fn main() -> Result<()> {
     }
 
     // Get domain (required at this point since --init was not used and not batch mode)
-    let domain = args.domain.as_ref().expect("Domain is required when not using --init or --input-file");
-    
+    let domain = args
+        .domain
+        .as_ref()
+        .expect("Domain is required when not using --init or --input-file");
+
     // Get domain-specific output directory
     let output_dir = match args.get_domain_output_dir() {
         Ok(dir) => dir,
@@ -375,10 +435,13 @@ async fn main() -> Result<()> {
 
     // Create the directory structure if it doesn't exist
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
-        logger.error(&format!("Failed to create output directory '{}': {}", output_dir, e));
+        logger.error(&format!(
+            "Failed to create output directory '{}': {}",
+            output_dir, e
+        ));
         std::process::exit(1);
     }
-    
+
     let output_filename = if args.output.contains('.') {
         args.output.clone()
     } else if args.output == "nth_parties" {
@@ -408,7 +471,10 @@ async fn main() -> Result<()> {
 
             let mut user_input = String::new();
             if let Err(e) = io::stdin().read_line(&mut user_input) {
-                eprintln!("Warning: Failed to read stdin: {}, using default output path", e);
+                eprintln!(
+                    "Warning: Failed to read stdin: {}, using default output path",
+                    e
+                );
             }
             let user_input = user_input.trim();
 
@@ -472,12 +538,16 @@ async fn main() -> Result<()> {
                                 logger.info("Auto-resuming from compatible checkpoint (non-interactive mode)");
                                 checkpoint = Some(existing_checkpoint);
                             } else {
-                                logger.info("Incompatible checkpoint deleted (non-interactive mode)");
+                                logger
+                                    .info("Incompatible checkpoint deleted (non-interactive mode)");
                                 let _ = Checkpoint::delete(output_dir_path);
                             }
                         } else {
                             // Suspend progress bars for interactive checkpoint prompt
-                            let created_at = existing_checkpoint.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+                            let created_at = existing_checkpoint
+                                .created_at
+                                .format("%Y-%m-%d %H:%M:%S UTC")
+                                .to_string();
                             let resume_result = logger.suspend_for_io(|| {
                                 println!();
                                 println!("╔════════════════════════════════════════════════════════════════╗");
@@ -525,15 +595,22 @@ async fn main() -> Result<()> {
 
                             match resume_result {
                                 Some(true) => checkpoint = Some(existing_checkpoint),
-                                Some(false) => { let _ = Checkpoint::delete(output_dir_path); }
-                                None => { let _ = Checkpoint::delete(output_dir_path); }
+                                Some(false) => {
+                                    let _ = Checkpoint::delete(output_dir_path);
+                                }
+                                None => {
+                                    let _ = Checkpoint::delete(output_dir_path);
+                                }
                             }
                         }
                     }
                 }
             }
             Err(e) => {
-                logger.warn(&format!("Failed to load existing checkpoint: {}. Starting fresh.", e));
+                logger.warn(&format!(
+                    "Failed to load existing checkpoint: {}. Starting fresh.",
+                    e
+                ));
                 let _ = Checkpoint::delete(output_dir_path);
             }
         }
@@ -553,14 +630,20 @@ async fn main() -> Result<()> {
     let verification_logger = verification_logger::VerificationFailureLogger::new(
         &output_dir,
         domain,
-        args.log_verification_failures
+        args.log_verification_failures,
     );
-    
+
     if args.log_verification_failures {
         if let Err(e) = verification_logger.initialize() {
-            logger.warn(&format!("Failed to initialize verification failure logger: {}", e));
+            logger.warn(&format!(
+                "Failed to initialize verification failure logger: {}",
+                e
+            ));
         } else {
-            logger.debug(&format!("Verification failure logging enabled: {}", verification_logger.get_file_path()));
+            logger.debug(&format!(
+                "Verification failure logging enabled: {}",
+                verification_logger.get_file_path()
+            ));
         }
     }
 
@@ -579,8 +662,12 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            logger.info(&format!("Restoring state: {} completed domains, {} pending, {} results on disk",
-                cp.completed_domains.len(), cp.pending_domains.len(), cp.results_count));
+            logger.info(&format!(
+                "Restoring state: {} completed domains, {} pending, {} results on disk",
+                cp.completed_domains.len(),
+                cp.pending_domains.len(),
+                cp.results_count
+            ));
             (
                 cp.discovered_vendors.clone(),
                 cp.completed_domains.clone(),
@@ -600,7 +687,12 @@ async fn main() -> Result<()> {
     let whois_handle = if !discovered_vendors.contains_key(domain) {
         let whois_domain = domain.clone();
         Some(tokio::spawn(async move {
-            whois::get_organization_with_status_and_config(&whois_domain, web_org_enabled, web_org_min_confidence).await
+            whois::get_organization_with_status_and_config(
+                &whois_domain,
+                web_org_enabled,
+                web_org_min_confidence,
+            )
+            .await
         }))
     } else {
         None
@@ -636,20 +728,21 @@ async fn main() -> Result<()> {
     }
 
     let root_customer_domain = domain.clone();
-    let root_customer_org = discovered_vendors.get(domain)
-        .unwrap_or(domain)
-        .clone();
+    let root_customer_org = discovered_vendors.get(domain).unwrap_or(domain).clone();
 
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
     let processed_domains = Arc::new(Mutex::new(processed_domains_set));
     let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
-    
+
     // Create shared DNS server pool from configuration
     let dns_pool = Arc::new(dns::DnsServerPool::from_config(&_app_config));
-    logger.debug(&format!("Initialized DNS server pool with {} DoH servers and {} DNS servers",
-        _app_config.dns.doh_servers.len(), _app_config.dns.dns_servers.len()));
-    
+    logger.debug(&format!(
+        "Initialized DNS server pool with {} DoH servers and {} DNS servers",
+        _app_config.dns.doh_servers.len(),
+        _app_config.dns.dns_servers.len()
+    ));
+
     // Create shared SubprocessorAnalyzer with persistent cache
     let subprocessor_enabled = subprocessor_will_be_enabled;
     let subprocessor_analyzer = if subprocessor_enabled {
@@ -660,7 +753,9 @@ async fn main() -> Result<()> {
 
     // Initialize discovery modules if enabled
     let subdomain_discovery = if subdomain_will_be_enabled {
-        let path = args.subfinder_path.clone()
+        let path = args
+            .subfinder_path
+            .clone()
             .unwrap_or_else(|| _app_config.discovery.subfinder_path.clone());
         let mut discovery = SubfinderDiscovery::new(
             PathBuf::from(path.clone()),
@@ -695,9 +790,13 @@ async fn main() -> Result<()> {
 
                 let mut input = String::new();
                 if io::stdin().read_line(&mut input).is_ok() {
-                    input.trim().parse::<usize>()
-                        .ok()
-                        .and_then(|n| if n >= 1 && n <= options.len() { Some(options[n - 1]) } else { None })
+                    input.trim().parse::<usize>().ok().and_then(|n| {
+                        if n >= 1 && n <= options.len() {
+                            Some(options[n - 1])
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     None
                 }
@@ -709,10 +808,15 @@ async fn main() -> Result<()> {
                     eprintln!("Downloading subfinder...");
                     match SubfinderDiscovery::download_and_install().await {
                         Ok(install_path) => {
-                            logger.info(&format!("Subfinder installed to: {}", install_path.display()));
+                            logger.info(&format!(
+                                "Subfinder installed to: {}",
+                                install_path.display()
+                            ));
                             discovery = SubfinderDiscovery::new(
                                 install_path,
-                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                                std::time::Duration::from_secs(
+                                    _app_config.discovery.subfinder_timeout_secs,
+                                ),
                             );
                             if discovery.is_available() {
                                 Some(discovery)
@@ -729,16 +833,16 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Some(InstallOption::Skip) => {
-                    None
-                }
+                Some(InstallOption::Skip) => None,
                 Some(InstallOption::ManualDownload) => {
                     let url = SubfinderDiscovery::get_download_url();
                     eprintln!();
                     eprintln!("Opening download page: {}", url);
                     // Try to open the URL in the default browser
                     #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", url])
+                        .spawn();
                     #[cfg(target_os = "macos")]
                     let _ = std::process::Command::new("open").arg(url).spawn();
                     #[cfg(target_os = "linux")]
@@ -754,13 +858,19 @@ async fn main() -> Result<()> {
                         Ok(true) => {
                             logger.info("Subfinder installed successfully!");
                             // Re-check availability after installation
-                            let subfinder_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+                            let subfinder_name = if cfg!(windows) {
+                                "subfinder.exe"
+                            } else {
+                                "subfinder"
+                            };
                             let go_bin = dirs::home_dir()
                                 .map(|h| h.join("go").join("bin").join(subfinder_name))
                                 .unwrap_or_else(|| PathBuf::from(subfinder_name));
                             discovery = SubfinderDiscovery::new(
                                 go_bin,
-                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                                std::time::Duration::from_secs(
+                                    _app_config.discovery.subfinder_timeout_secs,
+                                ),
                             );
                             if discovery.is_available() {
                                 Some(discovery)
@@ -787,11 +897,15 @@ async fn main() -> Result<()> {
                             eprintln!();
                             eprintln!("Docker image pulled successfully!");
                             eprintln!();
-                            eprintln!("Note: Docker-based subfinder requires running via docker command.");
+                            eprintln!(
+                                "Note: Docker-based subfinder requires running via docker command."
+                            );
                             eprintln!("nthpartyfinder cannot use Docker-based subfinder directly.");
                             eprintln!();
                             eprintln!("To use subfinder with Docker, run manually:");
-                            eprintln!("  docker run -it projectdiscovery/subfinder:latest -d <domain>");
+                            eprintln!(
+                                "  docker run -it projectdiscovery/subfinder:latest -d <domain>"
+                            );
                             eprintln!();
                             eprintln!("For native integration, install subfinder via Go or download the binary.");
                             None
@@ -814,7 +928,9 @@ async fn main() -> Result<()> {
                             logger.info("Subfinder installed successfully via Homebrew!");
                             discovery = SubfinderDiscovery::new(
                                 PathBuf::from("subfinder"),
-                                std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
+                                std::time::Duration::from_secs(
+                                    _app_config.discovery.subfinder_timeout_secs,
+                                ),
                             );
                             if discovery.is_available() {
                                 Some(discovery)
@@ -828,7 +944,8 @@ async fn main() -> Result<()> {
                             None
                         }
                         Err(e) => {
-                            logger.warn(&format!("Failed to install subfinder via Homebrew: {}", e));
+                            logger
+                                .warn(&format!("Failed to install subfinder via Homebrew: {}", e));
                             None
                         }
                     }
@@ -866,9 +983,9 @@ async fn main() -> Result<()> {
 
     // Set up CT log discovery
     let ct_discovery = if ct_will_be_enabled {
-        Some(CtLogDiscovery::new(
-            std::time::Duration::from_secs(_app_config.discovery.ct_timeout_secs),
-        ))
+        Some(CtLogDiscovery::new(std::time::Duration::from_secs(
+            _app_config.discovery.ct_timeout_secs,
+        )))
     } else {
         None
     };
@@ -884,12 +1001,19 @@ async fn main() -> Result<()> {
 
     // Configure concurrency based on analysis config
     // For recursive processing, use depth-1 concurrency as initial limit (CLI --parallel-jobs can override)
-    let recursive_limit = _app_config.analysis.get_concurrency_for_depth(1).min(args.parallel_jobs);
+    let recursive_limit = _app_config
+        .analysis
+        .get_concurrency_for_depth(1)
+        .min(args.parallel_jobs);
     let recursive_semaphore = Arc::new(Semaphore::new(recursive_limit));
-    logger.debug(&format!("Configured concurrency: {} main jobs, {} initial recursive jobs (strategy: {:?})",
-                          args.parallel_jobs, recursive_limit, _app_config.analysis.strategy));
-    logger.debug(&format!("Concurrency per depth: {:?}, request delay: {}ms",
-                          _app_config.analysis.concurrency_per_depth, _app_config.analysis.request_delay_ms));
+    logger.debug(&format!(
+        "Configured concurrency: {} main jobs, {} initial recursive jobs (strategy: {:?})",
+        args.parallel_jobs, recursive_limit, _app_config.analysis.strategy
+    ));
+    logger.debug(&format!(
+        "Concurrency per depth: {:?}, request delay: {}ms",
+        _app_config.analysis.concurrency_per_depth, _app_config.analysis.request_delay_ms
+    ));
 
     // Clone checkpoint for use in analysis (will be saved periodically and on interrupt)
     let checkpoint_for_analysis = checkpoint.clone();
@@ -900,15 +1024,17 @@ async fn main() -> Result<()> {
     let sink_dir = std::path::PathBuf::from("/tmp");
     // Clean up orphaned result files from previous crashed runs
     match ResultSink::cleanup_orphans(&sink_dir) {
-        Ok(0) => {},
+        Ok(0) => {}
         Ok(n) => logger.debug(&format!("Cleaned up {} orphaned result files", n)),
         Err(e) => logger.debug(&format!("Orphan cleanup failed (non-critical): {}", e)),
     }
     let result_sink = Arc::new(Mutex::new(
-        ResultSink::new(&sink_dir)
-            .expect("Failed to create result sink — check /tmp disk space")
+        ResultSink::new(&sink_dir).expect("Failed to create result sink — check /tmp disk space"),
     ));
-    logger.debug(&format!("Result sink created: {}", result_sink.lock().await.path().display()));
+    logger.debug(&format!(
+        "Result sink created: {}",
+        result_sink.lock().await.path().display()
+    ));
 
     // Set up memory pressure monitoring — background task checks every 5s
     // and updates a shared atomic that vendor futures read to self-throttle.
@@ -931,9 +1057,18 @@ async fn main() -> Result<()> {
                 if level_num != prev {
                     let status = monitor.status_string();
                     match level_num {
-                        2 => logger_mem.warn(&format!("Memory CRITICAL — throttling concurrency. {}", status)),
-                        1 => logger_mem.warn(&format!("Memory WARNING — reducing concurrency. {}", status)),
-                        0 if prev > 0 => logger_mem.info(&format!("Memory pressure relieved — resuming normal concurrency. {}", status)),
+                        2 => logger_mem.warn(&format!(
+                            "Memory CRITICAL — throttling concurrency. {}",
+                            status
+                        )),
+                        1 => logger_mem.warn(&format!(
+                            "Memory WARNING — reducing concurrency. {}",
+                            status
+                        )),
+                        0 if prev > 0 => logger_mem.info(&format!(
+                            "Memory pressure relieved — resuming normal concurrency. {}",
+                            status
+                        )),
                         _ => {}
                     }
                 }
@@ -1014,9 +1149,14 @@ async fn main() -> Result<()> {
                         logger.warn(&format!("Failed to save checkpoint on timeout: {}", e));
                     }
                 }
-                logger.finish_progress("Analysis timed out - partial results saved").await;
+                logger
+                    .finish_progress("Analysis timed out - partial results saved")
+                    .await;
                 eprintln!();
-                eprintln!("Analysis exceeded the {} second timeout.", analysis_timeout_secs);
+                eprintln!(
+                    "Analysis exceeded the {} second timeout.",
+                    analysis_timeout_secs
+                );
                 eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
                 eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
                 std::process::exit(1);
@@ -1060,7 +1200,10 @@ async fn main() -> Result<()> {
             }
         }
     };
-    logger.debug(&format!("Read {} results from disk sink", new_results.len()));
+    logger.debug(&format!(
+        "Read {} results from disk sink",
+        new_results.len()
+    ));
 
     // Load resumed results from previous checkpoint file if resuming
     let resumed_results = if let Some(ref results_file) = resumed_results_file {
@@ -1068,11 +1211,18 @@ async fn main() -> Result<()> {
         if path.exists() {
             match ResultSink::read_results(path) {
                 Ok(results) => {
-                    logger.info(&format!("Loaded {} resumed results from {}", results.len(), results_file));
+                    logger.info(&format!(
+                        "Loaded {} resumed results from {}",
+                        results.len(),
+                        results_file
+                    ));
                     results
                 }
                 Err(e) => {
-                    logger.warn(&format!("Failed to read resumed results from {}: {}", results_file, e));
+                    logger.warn(&format!(
+                        "Failed to read resumed results from {}: {}",
+                        results_file, e
+                    ));
                     Vec::new()
                 }
             }
@@ -1113,8 +1263,11 @@ async fn main() -> Result<()> {
             }
         }
         if deduped.len() < raw_count {
-            logger.info(&format!("{} raw relationships deduplicated to {} unique",
-                raw_count, deduped.len()));
+            logger.info(&format!(
+                "{} raw relationships deduplicated to {} unique",
+                raw_count,
+                deduped.len()
+            ));
         }
         deduped
     };
@@ -1126,17 +1279,21 @@ async fn main() -> Result<()> {
         results
     } else {
         let before = results.len();
-        let filtered: Vec<VendorRelationship> = results.into_iter()
+        let filtered: Vec<VendorRelationship> = results
+            .into_iter()
             .filter(|r| !is_common_denominator(&r.nth_party_domain))
             .collect();
         if filtered.len() < before {
-            logger.info(&format!("Filtered {} common infra provider entries (use --include-infra to include)",
-                before - filtered.len()));
+            logger.info(&format!(
+                "Filtered {} common infra provider entries (use --include-infra to include)",
+                before - filtered.len()
+            ));
         }
         filtered
     };
 
-    let unique_vendors = results.iter()
+    let unique_vendors = results
+        .iter()
         .map(|r| &r.nth_party_organization)
         .collect::<HashSet<_>>()
         .len();
@@ -1146,13 +1303,16 @@ async fn main() -> Result<()> {
 
     // Delete checkpoint on successful completion
     if let Err(e) = Checkpoint::delete(output_dir_path) {
-        logger.debug(&format!("Failed to delete checkpoint (non-critical): {}", e));
+        logger.debug(&format!(
+            "Failed to delete checkpoint (non-critical): {}",
+            e
+        ));
     } else {
         logger.debug("Checkpoint deleted after successful completion.");
     }
-    
+
     logger.log_export_start(&args.output_format);
-    
+
     // Export results
     match args.output_format.as_str() {
         "json" => export::export_json(&results, &final_output_path)?,
@@ -1160,7 +1320,7 @@ async fn main() -> Result<()> {
         "html" => export::export_html(&results, &final_output_path)?,
         "csv" | _ => export::export_csv(&results, &final_output_path)?,
     }
-    
+
     logger.log_export_success(&final_output_path);
 
     // Prompt user to confirm any pending org-to-domain mappings discovered via generic fallback
@@ -1208,7 +1368,10 @@ async fn main() -> Result<()> {
     // Close verification logger if it was enabled
     if args.log_verification_failures {
         verification_logger.close();
-        logger.debug(&format!("Verification failure log closed: {}", verification_logger.get_file_path()));
+        logger.debug(&format!(
+            "Verification failure log closed: {}",
+            verification_logger.get_file_path()
+        ));
     }
 
     // Print final comprehensive summary
@@ -1238,25 +1401,44 @@ async fn subprocessor_analysis_with_logging(
     logger: Arc<AnalysisLogger>,
     analyzer: &subprocessor::SubprocessorAnalyzer,
 ) -> Result<Vec<subprocessor::SubprocessorDomain>> {
-    logger.debug(&format!("🌐 Starting subprocessor analysis for domain: {}", domain));
+    logger.debug(&format!(
+        "🌐 Starting subprocessor analysis for domain: {}",
+        domain
+    ));
     let start_time = std::time::Instant::now();
-    
+
     // Use the cached analyzer which handles URL caching, organization caching, and early termination
-    match analyzer.analyze_domain_with_logging(domain, Some(verification_logger), Some(&logger)).await {
+    match analyzer
+        .analyze_domain_with_logging(domain, Some(verification_logger), Some(&logger))
+        .await
+    {
         Ok(subprocessors) => {
             let elapsed = start_time.elapsed();
             if !subprocessors.is_empty() {
-                logger.debug(&format!("✅ Subprocessor analysis for {} found {} unique vendors in {:.2}s: {:?}", 
-                    domain, subprocessors.len(), elapsed.as_secs_f64(),
-                    subprocessors.iter().map(|s| &s.domain).collect::<Vec<_>>()));
+                logger.debug(&format!(
+                    "✅ Subprocessor analysis for {} found {} unique vendors in {:.2}s: {:?}",
+                    domain,
+                    subprocessors.len(),
+                    elapsed.as_secs_f64(),
+                    subprocessors.iter().map(|s| &s.domain).collect::<Vec<_>>()
+                ));
             } else {
-                logger.debug(&format!("✅ Subprocessor analysis for {} completed in {:.2}s (no vendors found)", domain, elapsed.as_secs_f64()));
+                logger.debug(&format!(
+                    "✅ Subprocessor analysis for {} completed in {:.2}s (no vendors found)",
+                    domain,
+                    elapsed.as_secs_f64()
+                ));
             }
             Ok(subprocessors)
         }
         Err(e) => {
             let elapsed = start_time.elapsed();
-            logger.debug(&format!("❌ Subprocessor analysis failed for {} in {:.2}s: {}", domain, elapsed.as_secs_f64(), e));
+            logger.debug(&format!(
+                "❌ Subprocessor analysis failed for {} in {:.2}s: {}",
+                domain,
+                elapsed.as_secs_f64(),
+                e
+            ));
             Ok(Vec::new()) // Return empty vec instead of failing the entire analysis
         }
     }
@@ -1298,7 +1480,12 @@ async fn discover_nth_parties(
         if let Err(e) = cp.save(checkpoint_path) {
             eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
         } else {
-            eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
+            eprintln!(
+                "Checkpoint saved to: {}",
+                checkpoint_path
+                    .join(checkpoint::CHECKPOINT_FILENAME)
+                    .display()
+            );
         }
         return Ok(());
     }
@@ -1317,7 +1504,10 @@ async fn discover_nth_parties(
     // Defensive cap at 10 levels to prevent unbounded recursion
     const ABSOLUTE_MAX_DEPTH: u32 = 10;
     if current_depth > ABSOLUTE_MAX_DEPTH {
-        logger.warn(&format!("Hit absolute depth cap ({}) for domain {}", ABSOLUTE_MAX_DEPTH, domain));
+        logger.warn(&format!(
+            "Hit absolute depth cap ({}) for domain {}",
+            ABSOLUTE_MAX_DEPTH, domain
+        ));
         return Ok(());
     }
     if let Some(max) = max_depth {
@@ -1334,12 +1524,20 @@ async fn discover_nth_parties(
 
     logger.record_domain_processed();
     logger.record_depth_reached(current_depth);
-    logger.debug(&format!("Analyzing domain: {} at depth {}", domain, current_depth));
+    logger.debug(&format!(
+        "Analyzing domain: {} at depth {}",
+        domain, current_depth
+    ));
 
     // Analyze DNS TXT records using the DNS server pool
     if current_depth == 1 {
         logger.update_progress("DNS record analysis").await;
-        logger.show_sub_progress(&format!("Querying TXT/SPF/DMARC/DKIM records for {} via DNS-over-HTTPS", domain)).await;
+        logger
+            .show_sub_progress(&format!(
+                "Querying TXT/SPF/DMARC/DKIM records for {} via DNS-over-HTTPS",
+                domain
+            ))
+            .await;
         logger.set_progress_position(12).await; // 10% -> 12%
     }
     logger.log_dns_lookup_start(domain);
@@ -1352,10 +1550,17 @@ async fn discover_nth_parties(
             if current_depth == 1 {
                 // Root domain with 0 TXT records is suspicious — retry once with a
                 // fresh server rotation to recover from a single-server transient failure.
-                logger.debug(&format!("Root domain {} returned 0 TXT records on first attempt, retrying...", domain));
+                logger.debug(&format!(
+                    "Root domain {} returned 0 TXT records on first attempt, retrying...",
+                    domain
+                ));
                 match dns::get_txt_records_with_pool(domain, &dns_pool).await {
                     Ok(retry_records) if !retry_records.is_empty() => {
-                        logger.info(&format!("DNS retry succeeded: found {} TXT records for {} on second attempt", retry_records.len(), domain));
+                        logger.info(&format!(
+                            "DNS retry succeeded: found {} TXT records for {} on second attempt",
+                            retry_records.len(),
+                            domain
+                        ));
                         retry_records
                     }
                     _ => {
@@ -1379,110 +1584,176 @@ async fn discover_nth_parties(
         let txt_records = txt_records; // bind into this block
         if !txt_records.is_empty() {
             logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
-            logger.debug(&format!("Raw TXT records for {}: {:?}", domain, txt_records));
+            logger.debug(&format!(
+                "Raw TXT records for {}: {:?}",
+                domain, txt_records
+            ));
             if current_depth == 1 {
-                logger.show_sub_progress(&format!("Found {} TXT records for {}", txt_records.len(), domain)).await;
+                logger
+                    .show_sub_progress(&format!(
+                        "Found {} TXT records for {}",
+                        txt_records.len(),
+                        domain
+                    ))
+                    .await;
             }
         } else {
             logger.log_dns_lookup_success(domain, "DoH/DNS", 0);
         }
 
-            let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(&txt_records, Some(verification_logger), domain);
+        let vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
+            &txt_records,
+            Some(verification_logger),
+            domain,
+        );
 
-            // Recursive SPF resolution: follow include chains to discover nested mail senders
-            // (e.g., EasyDMARC-hosted SPF → Salesforce, Google, SendGrid)
-            let spf_recursive_domains = dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
-            if !spf_recursive_domains.is_empty() {
-                logger.debug(&format!("SPF recursive resolution found {} additional domains for {}", spf_recursive_domains.len(), domain));
-            }
+        // Recursive SPF resolution: follow include chains to discover nested mail senders
+        // (e.g., EasyDMARC-hosted SPF → Salesforce, Google, SendGrid)
+        let spf_recursive_domains =
+            dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
+        if !spf_recursive_domains.is_empty() {
+            logger.debug(&format!(
+                "SPF recursive resolution found {} additional domains for {}",
+                spf_recursive_domains.len(),
+                domain
+            ));
+        }
 
-            // Also include base domain if we're analyzing a subdomain
-            let current_base_domain = domain_utils::extract_base_domain(domain);
-            let mut all_vendor_domains = vendor_domains_with_source;
-            // Merge recursive SPF domains (dedup happens later in the pipeline)
-            all_vendor_domains.extend(spf_recursive_domains);
-            if current_base_domain != domain {
-                all_vendor_domains.push(dns::VendorDomain {
-                    domain: current_base_domain.clone(),
-                    source_type: RecordType::DnsSubdomain,
-                    raw_record: format!("Subdomain analysis: {} -> {}", domain, current_base_domain),
-                });
-                logger.debug(&format!("Added base domain {} for subdomain analysis of {}", current_base_domain, domain));
-            }
-            
-            // Subprocessor web page analysis (if enabled)
-            if subprocessor_enabled && subprocessor_analyzer.is_some() {
-                if current_depth == 1 {
-                    let dns_vendor_count = all_vendor_domains.len();
-                    logger.update_progress("Subprocessor page analysis").await;
-                    logger.show_sub_progress(&format!("Scraping subprocessor pages for {} ({} DNS vendors found so far)", domain, dns_vendor_count)).await;
-                    logger.set_progress_position(16).await; // 12% -> 16%
-                }
-                logger.debug(&format!("Starting subprocessor web page analysis for {}", domain));
-                
-                match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), subprocessor_analyzer.unwrap()).await {
-                    Ok(subprocessor_domains) => {
-                        if !subprocessor_domains.is_empty() {
-                            logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
-                            if current_depth == 1 {
-                                logger.show_sub_progress(&format!("Found {} subprocessors for {}", subprocessor_domains.len(), domain)).await;
-                            }
-                            logger.debug(&format!("Subprocessor domains discovered: {:?}",
-                                subprocessor_domains.iter().map(|d| &d.domain).collect::<Vec<_>>()));
+        // Also include base domain if we're analyzing a subdomain
+        let current_base_domain = domain_utils::extract_base_domain(domain);
+        let mut all_vendor_domains = vendor_domains_with_source;
+        // Merge recursive SPF domains (dedup happens later in the pipeline)
+        all_vendor_domains.extend(spf_recursive_domains);
+        if current_base_domain != domain {
+            all_vendor_domains.push(dns::VendorDomain {
+                domain: current_base_domain.clone(),
+                source_type: RecordType::DnsSubdomain,
+                raw_record: format!("Subdomain analysis: {} -> {}", domain, current_base_domain),
+            });
+            logger.debug(&format!(
+                "Added base domain {} for subdomain analysis of {}",
+                current_base_domain, domain
+            ));
+        }
 
-                            let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains.into_iter()
-                                .map(|sub_domain| {
-                                    logger.debug(&format!("Converting subprocessor domain: {} ({})",
-                                        sub_domain.domain, sub_domain.source_type));
-                                    dns::VendorDomain {
-                                        domain: sub_domain.domain,
-                                        source_type: sub_domain.source_type,
-                                        raw_record: sub_domain.raw_record,
-                                    }
-                                })
-                                .collect();
-                            all_vendor_domains.extend(converted_domains);
-                        } else {
-                            logger.log_subprocessor_analysis(domain, 0);
-                            if current_depth == 1 {
-                                logger.show_sub_progress(&format!("No subprocessors found on {} pages", domain)).await;
-                            }
-                            logger.debug(&format!("Subprocessor analysis completed: No vendor domains found in any subprocessor pages"));
-                        }
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("Subprocessor analysis failed for {}: {}", domain, e));
-                        logger.debug(&format!("Subprocessor analysis error details: {:?}", e));
-                    }
-                }
-            }
-
-            // Run discovery methods at depth 1 only (for the root domain)
+        // Subprocessor web page analysis (if enabled)
+        if subprocessor_enabled && subprocessor_analyzer.is_some() {
             if current_depth == 1 {
-                // Subdomain discovery via subfinder
-                if let Some(subfinder) = subdomain_discovery {
-                    logger.update_progress("Subdomain discovery").await;
-                    logger.show_sub_progress(&format!("Running subfinder for {}", domain)).await;
-                    logger.info("Running subdomain discovery via subfinder...");
-                    match subfinder.discover(domain).await {
-                        Ok(subdomains) => {
-                            if !subdomains.is_empty() {
-                                logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
+                let dns_vendor_count = all_vendor_domains.len();
+                logger.update_progress("Subprocessor page analysis").await;
+                logger
+                    .show_sub_progress(&format!(
+                        "Scraping subprocessor pages for {} ({} DNS vendors found so far)",
+                        domain, dns_vendor_count
+                    ))
+                    .await;
+                logger.set_progress_position(16).await; // 12% -> 16%
+            }
+            logger.debug(&format!(
+                "Starting subprocessor web page analysis for {}",
+                domain
+            ));
 
-                                // Analyze TXT and CNAME records for each subdomain with high concurrency
-                                // Uses fast combined TXT+CNAME lookup with buffer_unordered for throughput
-                                use futures::{stream, StreamExt};
+            match subprocessor_analysis_with_logging(
+                domain,
+                verification_logger,
+                logger.clone(),
+                subprocessor_analyzer.unwrap(),
+            )
+            .await
+            {
+                Ok(subprocessor_domains) => {
+                    if !subprocessor_domains.is_empty() {
+                        logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
+                        if current_depth == 1 {
+                            logger
+                                .show_sub_progress(&format!(
+                                    "Found {} subprocessors for {}",
+                                    subprocessor_domains.len(),
+                                    domain
+                                ))
+                                .await;
+                        }
+                        logger.debug(&format!(
+                            "Subprocessor domains discovered: {:?}",
+                            subprocessor_domains
+                                .iter()
+                                .map(|d| &d.domain)
+                                .collect::<Vec<_>>()
+                        ));
 
-                                let subdomain_concurrency = 50; // Increased for better throughput
-                                let mut subdomain_txt_vendors_found = 0;
-                                let mut subdomain_cname_vendors_found = 0;
-                                let domain_base = domain_utils::extract_base_domain(domain);
+                        let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains
+                            .into_iter()
+                            .map(|sub_domain| {
+                                logger.debug(&format!(
+                                    "Converting subprocessor domain: {} ({})",
+                                    sub_domain.domain, sub_domain.source_type
+                                ));
+                                dns::VendorDomain {
+                                    domain: sub_domain.domain,
+                                    source_type: sub_domain.source_type,
+                                    raw_record: sub_domain.raw_record,
+                                }
+                            })
+                            .collect();
+                        all_vendor_domains.extend(converted_domains);
+                    } else {
+                        logger.log_subprocessor_analysis(domain, 0);
+                        if current_depth == 1 {
+                            logger
+                                .show_sub_progress(&format!(
+                                    "No subprocessors found on {} pages",
+                                    domain
+                                ))
+                                .await;
+                        }
+                        logger.debug(&format!("Subprocessor analysis completed: No vendor domains found in any subprocessor pages"));
+                    }
+                }
+                Err(e) => {
+                    logger.warn(&format!(
+                        "Subprocessor analysis failed for {}: {}",
+                        domain, e
+                    ));
+                    logger.debug(&format!("Subprocessor analysis error details: {:?}", e));
+                }
+            }
+        }
 
-                                let total_subdomains = subdomains.len();
-                                logger.show_sub_progress(&format!("Running subfinder for {} (0/{} subdomains)", domain, total_subdomains)).await;
-                                let domain_for_closure = domain.to_string();
+        // Run discovery methods at depth 1 only (for the root domain)
+        if current_depth == 1 {
+            // Subdomain discovery via subfinder
+            if let Some(subfinder) = subdomain_discovery {
+                logger.update_progress("Subdomain discovery").await;
+                logger
+                    .show_sub_progress(&format!("Running subfinder for {}", domain))
+                    .await;
+                logger.info("Running subdomain discovery via subfinder...");
+                match subfinder.discover(domain).await {
+                    Ok(subdomains) => {
+                        if !subdomains.is_empty() {
+                            logger
+                                .info(&format!("Subfinder found {} subdomains", subdomains.len()));
 
-                                let subdomain_results: Vec<_> = stream::iter(subdomains.iter().enumerate().map(|(i, sub)| {
+                            // Analyze TXT and CNAME records for each subdomain with high concurrency
+                            // Uses fast combined TXT+CNAME lookup with buffer_unordered for throughput
+                            use futures::{stream, StreamExt};
+
+                            let subdomain_concurrency = 50; // Increased for better throughput
+                            let mut subdomain_txt_vendors_found = 0;
+                            let mut subdomain_cname_vendors_found = 0;
+                            let domain_base = domain_utils::extract_base_domain(domain);
+
+                            let total_subdomains = subdomains.len();
+                            logger
+                                .show_sub_progress(&format!(
+                                    "Running subfinder for {} (0/{} subdomains)",
+                                    domain, total_subdomains
+                                ))
+                                .await;
+                            let domain_for_closure = domain.to_string();
+
+                            let subdomain_results: Vec<_> = stream::iter(subdomains.iter().enumerate().map(|(i, sub)| {
                                     let subdomain = sub.subdomain.clone();
                                     let source = sub.source.clone();
                                     let dns_pool = dns_pool.clone();
@@ -1533,207 +1804,273 @@ async fn discover_nth_parties(
                                 .collect()
                                 .await;
 
-                                for (subdomain, source, txt_vendors, cname_vendors) in subdomain_results {
-                                    for vd in txt_vendors {
-                                        let vd_base = domain_utils::extract_base_domain(&vd.domain);
-                                        if vd_base != domain_base {
-                                            subdomain_txt_vendors_found += 1;
-                                            all_vendor_domains.push(dns::VendorDomain {
-                                                domain: vd.domain,
-                                                source_type: vd.source_type,
-                                                raw_record: format!("Via subdomain {} (subfinder:{}): {}", subdomain, source, vd.raw_record),
-                                            });
-                                        }
-                                    }
-                                    for (cname_target, cname_base) in cname_vendors {
-                                        subdomain_cname_vendors_found += 1;
+                            for (subdomain, source, txt_vendors, cname_vendors) in subdomain_results
+                            {
+                                for vd in txt_vendors {
+                                    let vd_base = domain_utils::extract_base_domain(&vd.domain);
+                                    if vd_base != domain_base {
+                                        subdomain_txt_vendors_found += 1;
                                         all_vendor_domains.push(dns::VendorDomain {
-                                            domain: cname_base,
-                                            source_type: RecordType::SubfinderDiscovery,
-                                            raw_record: format!("Subdomain {} CNAMEs to {} (subfinder:{})", subdomain, cname_target, source),
+                                            domain: vd.domain,
+                                            source_type: vd.source_type,
+                                            raw_record: format!(
+                                                "Via subdomain {} (subfinder:{}): {}",
+                                                subdomain, source, vd.raw_record
+                                            ),
                                         });
                                     }
                                 }
+                                for (cname_target, cname_base) in cname_vendors {
+                                    subdomain_cname_vendors_found += 1;
+                                    all_vendor_domains.push(dns::VendorDomain {
+                                        domain: cname_base,
+                                        source_type: RecordType::SubfinderDiscovery,
+                                        raw_record: format!(
+                                            "Subdomain {} CNAMEs to {} (subfinder:{})",
+                                            subdomain, cname_target, source
+                                        ),
+                                    });
+                                }
+                            }
 
-                                if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0 {
-                                    logger.info(&format!("Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
+                            if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0
+                            {
+                                logger.info(&format!("Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
                                         subdomain_txt_vendors_found, subdomain_cname_vendors_found));
-                                }
-                            } else {
-                                logger.debug("Subfinder found no subdomains");
                             }
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("Subdomain discovery failed: {}", e));
-                        }
-                    }
-                    logger.clear_sub_progress().await;
-                    logger.set_progress_position(22).await; // -> 22%
-                }
-
-                // SaaS tenant discovery
-                if let Some(tenant_disc) = saas_tenant_discovery {
-                    logger.update_progress("SaaS tenant discovery").await;
-                    logger.show_sub_progress(&format!("Probing SaaS platforms for {}", domain)).await;
-                    logger.info("Running SaaS tenant discovery...");
-                    match tenant_disc.probe_with_logger(domain, Some(&logger)).await {
-                        Ok(tenants) => {
-                            let confirmed_tenants: Vec<_> = tenants.iter()
-                                .filter(|t| matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely))
-                                .collect();
-                            if !confirmed_tenants.is_empty() {
-                                logger.info(&format!("Found {} likely/confirmed SaaS tenants", confirmed_tenants.len()));
-                                for tenant in confirmed_tenants {
-                                    all_vendor_domains.push(dns::VendorDomain {
-                                        domain: tenant.vendor_domain.clone(),
-                                        source_type: RecordType::SaasTenantProbe,
-                                        raw_record: format!("Tenant URL: {} ({:?}) | {}", tenant.tenant_url, tenant.status, tenant.evidence),
-                                    });
-                                }
-                            } else {
-                                logger.debug("No SaaS tenants discovered");
-                            }
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("SaaS tenant discovery failed: {}", e));
+                        } else {
+                            logger.debug("Subfinder found no subdomains");
                         }
                     }
-                    logger.clear_sub_progress().await;
-                    logger.set_progress_position(26).await; // -> 26%
-                }
-
-                // Certificate Transparency log discovery
-                if let Some(ct_disc) = ct_discovery {
-                    logger.update_progress("Certificate Transparency discovery").await;
-                    logger.show_sub_progress(&format!("Querying crt.sh for {} certificates", domain)).await;
-                    logger.info("Running Certificate Transparency log discovery...");
-                    match ct_disc.discover(domain).await {
-                        Ok(ct_results) => {
-                            if !ct_results.is_empty() {
-                                logger.info(&format!("Found {} vendors from CT logs", ct_results.len()));
-                                for result in ct_results {
-                                    all_vendor_domains.push(dns::VendorDomain {
-                                        domain: result.domain,
-                                        source_type: RecordType::CtLogDiscovery,
-                                        raw_record: result.certificate_info,
-                                    });
-                                }
-                            } else {
-                                logger.debug("No vendors discovered from CT logs");
-                            }
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("CT log discovery failed: {}", e));
-                        }
+                    Err(e) => {
+                        logger.warn(&format!("Subdomain discovery failed: {}", e));
                     }
-                    logger.clear_sub_progress().await;
-                    logger.set_progress_position(28).await; // -> 28%
                 }
-
-                // Webpage source & network request discovery
-                if let Some(web_traffic_disc) = web_traffic_discovery {
-                    logger.update_progress("Webpage source & network request discovery").await;
-                    logger.show_sub_progress(&format!("Analyzing webpage source and network requests for {}", domain)).await;
-                    logger.info("Running webpage source & network request discovery...");
-                    let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
-                    if !web_traffic_results.is_empty() {
-                        logger.info(&format!("Found {} vendors from webpage analysis", web_traffic_results.len()));
-                        for result in web_traffic_results {
-                            let record_type = match result.source {
-                                discovery::web_traffic::WebTrafficSource::PageSource => RecordType::WebTrafficSource,
-                                discovery::web_traffic::WebTrafficSource::NetworkTraffic => RecordType::WebTrafficNetwork,
-                            };
-                            all_vendor_domains.push(dns::VendorDomain {
-                                domain: result.vendor_domain,
-                                source_type: record_type,
-                                raw_record: result.evidence,
-                            });
-                        }
-                    } else {
-                        logger.debug("No vendors discovered from webpage analysis");
-                    }
-                    logger.clear_sub_progress().await;
-                    logger.set_progress_position(30).await; // -> 30%
-                }
+                logger.clear_sub_progress().await;
+                logger.set_progress_position(22).await; // -> 22%
             }
 
-            // Deduplicate vendor domains: only remove entries with identical
-            // (base_domain, source_type, evidence). Vendors found by different discovery
-            // sources are ALWAYS kept as separate records to preserve attribution.
-            // Same source with different evidence is also kept (different records).
-            {
-                let pre_dedup_count = all_vendor_domains.len();
-                let mut seen: HashSet<(String, String, String)> = HashSet::new();
-                let mut deduped: Vec<dns::VendorDomain> = Vec::new();
-                for vd in all_vendor_domains {
-                    let base = domain_utils::extract_base_domain(&vd.domain);
-                    let source_key = format!("{:?}", vd.source_type);
-                    let key = (base, source_key, vd.raw_record.clone());
-                    if seen.insert(key) {
-                        deduped.push(vd);
+            // SaaS tenant discovery
+            if let Some(tenant_disc) = saas_tenant_discovery {
+                logger.update_progress("SaaS tenant discovery").await;
+                logger
+                    .show_sub_progress(&format!("Probing SaaS platforms for {}", domain))
+                    .await;
+                logger.info("Running SaaS tenant discovery...");
+                match tenant_disc.probe_with_logger(domain, Some(&logger)).await {
+                    Ok(tenants) => {
+                        let confirmed_tenants: Vec<_> = tenants
+                            .iter()
+                            .filter(|t| {
+                                matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely)
+                            })
+                            .collect();
+                        if !confirmed_tenants.is_empty() {
+                            logger.info(&format!(
+                                "Found {} likely/confirmed SaaS tenants",
+                                confirmed_tenants.len()
+                            ));
+                            for tenant in confirmed_tenants {
+                                all_vendor_domains.push(dns::VendorDomain {
+                                    domain: tenant.vendor_domain.clone(),
+                                    source_type: RecordType::SaasTenantProbe,
+                                    raw_record: format!(
+                                        "Tenant URL: {} ({:?}) | {}",
+                                        tenant.tenant_url, tenant.status, tenant.evidence
+                                    ),
+                                });
+                            }
+                        } else {
+                            logger.debug("No SaaS tenants discovered");
+                        }
+                    }
+                    Err(e) => {
+                        logger.warn(&format!("SaaS tenant discovery failed: {}", e));
                     }
                 }
-                all_vendor_domains = deduped;
-                if all_vendor_domains.len() < pre_dedup_count {
-                    logger.debug(&format!("Deduplicated vendor domains: {} -> {} (removed {} exact duplicates)",
-                        pre_dedup_count, all_vendor_domains.len(), pre_dedup_count - all_vendor_domains.len()));
-                }
+                logger.clear_sub_progress().await;
+                logger.set_progress_position(26).await; // -> 26%
             }
 
-            // Progress tracking for the 30-100% range (70 percentage points across all vendors).
-            // Uses position-based tracking instead of increments to avoid exceeding 100%.
-            if current_depth == 1 {
-                let vendor_count = all_vendor_domains.len() as u64;
-                if vendor_count > 0 {
-                    logger.update_progress(&format!("Analyzing {} vendor domains (WHOIS + org lookup)", vendor_count)).await;
-                    logger.show_sub_progress(&format!("Processing vendor 0/{} — resolving organizations", vendor_count)).await;
+            // Certificate Transparency log discovery
+            if let Some(ct_disc) = ct_discovery {
+                logger
+                    .update_progress("Certificate Transparency discovery")
+                    .await;
+                logger
+                    .show_sub_progress(&format!("Querying crt.sh for {} certificates", domain))
+                    .await;
+                logger.info("Running Certificate Transparency log discovery...");
+                match ct_disc.discover(domain).await {
+                    Ok(ct_results) => {
+                        if !ct_results.is_empty() {
+                            logger
+                                .info(&format!("Found {} vendors from CT logs", ct_results.len()));
+                            for result in ct_results {
+                                all_vendor_domains.push(dns::VendorDomain {
+                                    domain: result.domain,
+                                    source_type: RecordType::CtLogDiscovery,
+                                    raw_record: result.certificate_info,
+                                });
+                            }
+                        } else {
+                            logger.debug("No vendors discovered from CT logs");
+                        }
+                    }
+                    Err(e) => {
+                        logger.warn(&format!("CT log discovery failed: {}", e));
+                    }
+                }
+                logger.clear_sub_progress().await;
+                logger.set_progress_position(28).await; // -> 28%
+            }
+
+            // Webpage source & network request discovery
+            if let Some(web_traffic_disc) = web_traffic_discovery {
+                logger
+                    .update_progress("Webpage source & network request discovery")
+                    .await;
+                logger
+                    .show_sub_progress(&format!(
+                        "Analyzing webpage source and network requests for {}",
+                        domain
+                    ))
+                    .await;
+                logger.info("Running webpage source & network request discovery...");
+                let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
+                if !web_traffic_results.is_empty() {
+                    logger.info(&format!(
+                        "Found {} vendors from webpage analysis",
+                        web_traffic_results.len()
+                    ));
+                    for result in web_traffic_results {
+                        let record_type = match result.source {
+                            discovery::web_traffic::WebTrafficSource::PageSource => {
+                                RecordType::WebTrafficSource
+                            }
+                            discovery::web_traffic::WebTrafficSource::NetworkTraffic => {
+                                RecordType::WebTrafficNetwork
+                            }
+                        };
+                        all_vendor_domains.push(dns::VendorDomain {
+                            domain: result.vendor_domain,
+                            source_type: record_type,
+                            raw_record: result.evidence,
+                        });
+                    }
                 } else {
-                    logger.warn("No vendor domains found for root domain after all discovery methods. \
-                                 This likely indicates a DNS resolution failure or network issue. \
-                                 Try re-running the scan.");
-                    logger.update_progress("No vendor domains found to analyze").await;
-                    logger.set_progress_position(100).await;
-                    logger.finish_progress("Analysis completed — 0 vendors found (possible DNS failure)").await;
+                    logger.debug("No vendors discovered from webpage analysis");
+                }
+                logger.clear_sub_progress().await;
+                logger.set_progress_position(30).await; // -> 30%
+            }
+        }
+
+        // Deduplicate vendor domains: only remove entries with identical
+        // (base_domain, source_type, evidence). Vendors found by different discovery
+        // sources are ALWAYS kept as separate records to preserve attribution.
+        // Same source with different evidence is also kept (different records).
+        {
+            let pre_dedup_count = all_vendor_domains.len();
+            let mut seen: HashSet<(String, String, String)> = HashSet::new();
+            let mut deduped: Vec<dns::VendorDomain> = Vec::new();
+            for vd in all_vendor_domains {
+                let base = domain_utils::extract_base_domain(&vd.domain);
+                let source_key = format!("{:?}", vd.source_type);
+                let key = (base, source_key, vd.raw_record.clone());
+                if seen.insert(key) {
+                    deduped.push(vd);
                 }
             }
-            
-            // Resource management based on configured strategy
-            match analysis_config.strategy {
-                AnalysisStrategy::Unlimited => {
-                    // No vendor limiting - process all vendors (resource control via concurrency/rate limiting)
-                    logger.debug(&format!("Strategy 'unlimited': processing all {} vendors at depth {}",
-                                         all_vendor_domains.len(), current_depth));
-                }
-                AnalysisStrategy::Limits => {
-                    // Apply per-depth vendor limits from configuration
-                    if let Some(max_vendors) = analysis_config.get_vendor_limit_for_depth(current_depth as usize) {
-                        if all_vendor_domains.len() > max_vendors {
-                            logger.info(&format!("Strategy 'limits': limiting vendor processing at depth {} from {} to {} vendors",
+            all_vendor_domains = deduped;
+            if all_vendor_domains.len() < pre_dedup_count {
+                logger.debug(&format!(
+                    "Deduplicated vendor domains: {} -> {} (removed {} exact duplicates)",
+                    pre_dedup_count,
+                    all_vendor_domains.len(),
+                    pre_dedup_count - all_vendor_domains.len()
+                ));
+            }
+        }
+
+        // Progress tracking for the 30-100% range (70 percentage points across all vendors).
+        // Uses position-based tracking instead of increments to avoid exceeding 100%.
+        if current_depth == 1 {
+            let vendor_count = all_vendor_domains.len() as u64;
+            if vendor_count > 0 {
+                logger
+                    .update_progress(&format!(
+                        "Analyzing {} vendor domains (WHOIS + org lookup)",
+                        vendor_count
+                    ))
+                    .await;
+                logger
+                    .show_sub_progress(&format!(
+                        "Processing vendor 0/{} — resolving organizations",
+                        vendor_count
+                    ))
+                    .await;
+            } else {
+                logger.warn(
+                    "No vendor domains found for root domain after all discovery methods. \
+                                 This likely indicates a DNS resolution failure or network issue. \
+                                 Try re-running the scan.",
+                );
+                logger
+                    .update_progress("No vendor domains found to analyze")
+                    .await;
+                logger.set_progress_position(100).await;
+                logger
+                    .finish_progress("Analysis completed — 0 vendors found (possible DNS failure)")
+                    .await;
+            }
+        }
+
+        // Resource management based on configured strategy
+        match analysis_config.strategy {
+            AnalysisStrategy::Unlimited => {
+                // No vendor limiting - process all vendors (resource control via concurrency/rate limiting)
+                logger.debug(&format!(
+                    "Strategy 'unlimited': processing all {} vendors at depth {}",
+                    all_vendor_domains.len(),
+                    current_depth
+                ));
+            }
+            AnalysisStrategy::Limits => {
+                // Apply per-depth vendor limits from configuration
+                if let Some(max_vendors) =
+                    analysis_config.get_vendor_limit_for_depth(current_depth as usize)
+                {
+                    if all_vendor_domains.len() > max_vendors {
+                        logger.info(&format!("Strategy 'limits': limiting vendor processing at depth {} from {} to {} vendors",
                                                current_depth, all_vendor_domains.len(), max_vendors));
-                            all_vendor_domains.truncate(max_vendors);
-                        }
+                        all_vendor_domains.truncate(max_vendors);
                     }
                 }
-                AnalysisStrategy::Budget => {
-                    // Budget strategy uses a global counter (tracked elsewhere)
-                    // Here we just log that we're using budget mode
-                    logger.debug(&format!("Strategy 'budget': processing vendors at depth {} (budget tracking enabled)", current_depth));
-                }
             }
-            
-            let vendor_count = all_vendor_domains.len();
-            logger.log_vendor_discovery(domain, vendor_count);
-            
-            if vendor_count > 0 {
-                logger.log_parallel_processing_start(vendor_count, current_depth);
-                
-                // Process vendor domains with controlled concurrency using stream
-                use futures::{stream, StreamExt};
-                
-                let request_delay_ms = analysis_config.request_delay_ms;
-                let analysis_config_clone = analysis_config.clone();
-                let checkpoint_output_dir_owned = checkpoint_output_dir.to_string();
-                let vendor_stream = stream::iter(all_vendor_domains.into_iter().enumerate().map(|(index, vendor_domain_info)| {
+            AnalysisStrategy::Budget => {
+                // Budget strategy uses a global counter (tracked elsewhere)
+                // Here we just log that we're using budget mode
+                logger.debug(&format!(
+                    "Strategy 'budget': processing vendors at depth {} (budget tracking enabled)",
+                    current_depth
+                ));
+            }
+        }
+
+        let vendor_count = all_vendor_domains.len();
+        logger.log_vendor_discovery(domain, vendor_count);
+
+        if vendor_count > 0 {
+            logger.log_parallel_processing_start(vendor_count, current_depth);
+
+            // Process vendor domains with controlled concurrency using stream
+            use futures::{stream, StreamExt};
+
+            let request_delay_ms = analysis_config.request_delay_ms;
+            let analysis_config_clone = analysis_config.clone();
+            let checkpoint_output_dir_owned = checkpoint_output_dir.to_string();
+            let vendor_stream = stream::iter(all_vendor_domains.into_iter().enumerate().map(|(index, vendor_domain_info)| {
                     let discovered_vendors = discovered_vendors.clone();
                     let processed_domains = processed_domains.clone();
                     let semaphore = semaphore.clone();
@@ -1855,28 +2192,75 @@ async fn discover_nth_parties(
                         new_relationships
                     }
                 }));
-                
-                // Configure buffer size based on analysis config concurrency settings
-                let configured_concurrency = analysis_config.get_concurrency_for_depth(current_depth as usize);
-                let buffer_size = configured_concurrency.min(args.parallel_jobs).max(2);
 
-                // Results are written directly to disk via ResultSink — no in-memory accumulation
-                let mut vendor_stream = vendor_stream.buffer_unordered(buffer_size);
+            // Configure buffer size based on analysis config concurrency settings
+            let configured_concurrency =
+                analysis_config.get_concurrency_for_depth(current_depth as usize);
+            let buffer_size = configured_concurrency.min(args.parallel_jobs).max(2);
 
-                logger.debug(&format!("Starting parallel processing for {} vendors at depth {} (disk-backed results)", vendor_count, current_depth));
+            // Results are written directly to disk via ResultSink — no in-memory accumulation
+            let mut vendor_stream = vendor_stream.buffer_unordered(buffer_size);
 
-                // Process all vendors to completion — results go to disk via ResultSink
-                let mut processed_count = 0;
-                let mut total_relationships_found = 0usize;
-                let checkpoint_path = Path::new(checkpoint_output_dir);
-                while let Some(new_count) = vendor_stream.next().await {
-                    // Check for interrupt signal
-                    if is_interrupted() {
-                        // Flush sink and save checkpoint
-                        {
-                            let mut sink = result_sink.lock().await;
-                            let _ = sink.flush();
-                        }
+            logger.debug(&format!(
+                "Starting parallel processing for {} vendors at depth {} (disk-backed results)",
+                vendor_count, current_depth
+            ));
+
+            // Process all vendors to completion — results go to disk via ResultSink
+            let mut processed_count = 0;
+            let mut total_relationships_found = 0usize;
+            let checkpoint_path = Path::new(checkpoint_output_dir);
+            while let Some(new_count) = vendor_stream.next().await {
+                // Check for interrupt signal
+                if is_interrupted() {
+                    // Flush sink and save checkpoint
+                    {
+                        let mut sink = result_sink.lock().await;
+                        let _ = sink.flush();
+                    }
+                    let mut cp = checkpoint.lock().await;
+                    let vendors = discovered_vendors.lock().await;
+                    cp.discovered_vendors = vendors.clone();
+                    drop(vendors);
+                    let processed = processed_domains.lock().await;
+                    cp.completed_domains = processed.clone();
+                    drop(processed);
+                    // Store result count and file path in checkpoint
+                    let sink = result_sink.lock().await;
+                    cp.results_count = sink.count();
+                    cp.results_file = sink.path().to_string_lossy().to_string();
+                    drop(sink);
+                    if let Err(e) = cp.save(checkpoint_path) {
+                        eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
+                    } else {
+                        eprintln!(
+                            "Checkpoint saved to: {}",
+                            checkpoint_path
+                                .join(checkpoint::CHECKPOINT_FILENAME)
+                                .display()
+                        );
+                    }
+                    return Ok(());
+                }
+
+                processed_count += 1;
+                total_relationships_found += new_count;
+                // Update main progress bar with running stats
+                if current_depth == 1 {
+                    logger
+                        .update_progress(&format!(
+                            "Analyzing vendors ({}/{}) — {} relationships found",
+                            processed_count, vendor_count, total_relationships_found
+                        ))
+                        .await;
+                }
+                if processed_count % 5 == 0 || processed_count == vendor_count {
+                    logger.debug(&format!(
+                        "📊 Progress: {}/{} vendors processed, {} relationships found",
+                        processed_count, vendor_count, total_relationships_found
+                    ));
+                    // Save checkpoint periodically (every 5 domains at depth 1)
+                    if current_depth == 1 {
                         let mut cp = checkpoint.lock().await;
                         let vendors = discovered_vendors.lock().await;
                         cp.discovered_vendors = vendors.clone();
@@ -1884,64 +2268,35 @@ async fn discover_nth_parties(
                         let processed = processed_domains.lock().await;
                         cp.completed_domains = processed.clone();
                         drop(processed);
-                        // Store result count and file path in checkpoint
+                        // Track result count and file path (no in-memory result cloning)
                         let sink = result_sink.lock().await;
                         cp.results_count = sink.count();
                         cp.results_file = sink.path().to_string_lossy().to_string();
                         drop(sink);
                         if let Err(e) = cp.save(checkpoint_path) {
-                            eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
+                            logger.debug(&format!("Failed to save checkpoint: {}", e));
                         } else {
-                            eprintln!("Checkpoint saved to: {}", checkpoint_path.join(checkpoint::CHECKPOINT_FILENAME).display());
-                        }
-                        return Ok(());
-                    }
-
-                    processed_count += 1;
-                    total_relationships_found += new_count;
-                    // Update main progress bar with running stats
-                    if current_depth == 1 {
-                        logger.update_progress(&format!("Analyzing vendors ({}/{}) — {} relationships found",
-                            processed_count, vendor_count, total_relationships_found)).await;
-                    }
-                    if processed_count % 5 == 0 || processed_count == vendor_count {
-                        logger.debug(&format!("📊 Progress: {}/{} vendors processed, {} relationships found",
-                            processed_count, vendor_count, total_relationships_found));
-                        // Save checkpoint periodically (every 5 domains at depth 1)
-                        if current_depth == 1 {
-                            let mut cp = checkpoint.lock().await;
-                            let vendors = discovered_vendors.lock().await;
-                            cp.discovered_vendors = vendors.clone();
-                            drop(vendors);
-                            let processed = processed_domains.lock().await;
-                            cp.completed_domains = processed.clone();
-                            drop(processed);
-                            // Track result count and file path (no in-memory result cloning)
-                            let sink = result_sink.lock().await;
-                            cp.results_count = sink.count();
-                            cp.results_file = sink.path().to_string_lossy().to_string();
-                            drop(sink);
-                            if let Err(e) = cp.save(checkpoint_path) {
-                                logger.debug(&format!("Failed to save checkpoint: {}", e));
-                            } else {
-                                logger.debug(&format!("Checkpoint saved: {} domains completed", cp.completed_domains.len()));
-                            }
+                            logger.debug(&format!(
+                                "Checkpoint saved: {} domains completed",
+                                cp.completed_domains.len()
+                            ));
                         }
                     }
-                }
-
-                logger.debug(&format!("All {} vendor domains processed at depth {} ({} raw relationships to disk, pending dedup)",
-                    processed_count, current_depth, total_relationships_found));
-
-                logger.log_parallel_processing_complete(total_relationships_found);
-
-                // Finish progress bar for root-level analysis
-                if current_depth == 1 {
-                    logger.finish_progress(&format!("Vendor analysis completed — {} raw relationships from {} vendors (deduplicating...)",
-                        total_relationships_found, vendor_count)).await;
                 }
             }
+
+            logger.debug(&format!("All {} vendor domains processed at depth {} ({} raw relationships to disk, pending dedup)",
+                    processed_count, current_depth, total_relationships_found));
+
+            logger.log_parallel_processing_complete(total_relationships_found);
+
+            // Finish progress bar for root-level analysis
+            if current_depth == 1 {
+                logger.finish_progress(&format!("Vendor analysis completed — {} raw relationships from {} vendors (deduplicating...)",
+                        total_relationships_found, vendor_count)).await;
+            }
         }
+    }
 
     Ok(())
 }
@@ -1973,31 +2328,45 @@ async fn process_vendor_domain(
     result_sink: Arc<Mutex<ResultSink>>,
     memory_pressure_level: Arc<std::sync::atomic::AtomicU8>,
 ) {
-
     // Extract base domain for organization identification
     let base_domain = domain_utils::extract_base_domain(&vendor_domain);
     let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
-    
+
     // Skip self-references (same organization)
     if base_domain == customer_base_domain {
-        logger.debug(&format!("Skipping self-reference: {} -> {}", customer_domain, base_domain));
+        logger.debug(&format!(
+            "Skipping self-reference: {} -> {}",
+            customer_domain, base_domain
+        ));
         return;
     }
-    
+
     // Get organization info via WHOIS if not already cached
     {
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&base_domain) {
             drop(vendors);
-            match whois::get_organization_with_status_and_config(&base_domain, web_org_enabled, web_org_min_confidence).await {
+            match whois::get_organization_with_status_and_config(
+                &base_domain,
+                web_org_enabled,
+                web_org_min_confidence,
+            )
+            .await
+            {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
                     // Apply organization name normalization (uses global normalizer)
-                    vendors.insert(base_domain.clone(), org_normalizer::normalize(&org_result.name));
+                    vendors.insert(
+                        base_domain.clone(),
+                        org_normalizer::normalize(&org_result.name),
+                    );
                     logger.log_whois_lookup(&base_domain, org_result.is_verified);
-                },
+                }
                 Err(e) => {
-                    logger.debug(&format!("Failed to get organization for {}: {}", base_domain, e));
+                    logger.debug(&format!(
+                        "Failed to get organization for {}: {}",
+                        base_domain, e
+                    ));
                     let mut vendors = discovered_vendors.lock().await;
                     vendors.insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
                     logger.log_whois_lookup(&base_domain, false);
@@ -2011,46 +2380,62 @@ async fn process_vendor_domain(
         let vendors = discovered_vendors.lock().await;
         if !vendors.contains_key(&customer_base_domain) {
             drop(vendors);
-            match whois::get_organization_with_status_and_config(&customer_base_domain, web_org_enabled, web_org_min_confidence).await {
+            match whois::get_organization_with_status_and_config(
+                &customer_base_domain,
+                web_org_enabled,
+                web_org_min_confidence,
+            )
+            .await
+            {
                 Ok(org_result) => {
                     let mut vendors = discovered_vendors.lock().await;
                     // Apply organization name normalization (uses global normalizer)
-                    vendors.insert(customer_base_domain.clone(), org_normalizer::normalize(&org_result.name));
+                    vendors.insert(
+                        customer_base_domain.clone(),
+                        org_normalizer::normalize(&org_result.name),
+                    );
                     logger.log_whois_lookup(&customer_base_domain, org_result.is_verified);
-                },
+                }
                 Err(e) => {
-                    logger.debug(&format!("Failed to get organization for customer {}: {}", customer_base_domain, e));
+                    logger.debug(&format!(
+                        "Failed to get organization for customer {}: {}",
+                        customer_base_domain, e
+                    ));
                     let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(customer_base_domain.clone(), org_normalizer::normalize(&customer_base_domain));
+                    vendors.insert(
+                        customer_base_domain.clone(),
+                        org_normalizer::normalize(&customer_base_domain),
+                    );
                     logger.log_whois_lookup(&customer_base_domain, false);
                 }
             }
         }
     }
-    
+
     // Create vendor relationship record using proper organization names
     let (customer_org, vendor_org) = {
         let vendors = discovered_vendors.lock().await;
-        let customer_org = vendors.get(&customer_base_domain)
+        let customer_org = vendors
+            .get(&customer_base_domain)
             .unwrap_or(&customer_base_domain.to_string())
             .clone();
-        let vendor_org = vendors.get(&base_domain)
-            .unwrap_or(&base_domain)
-            .clone();
+        let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
         (customer_org, vendor_org)
     };
-    
+
     // Determine record value based on source
     // For DNS TXT records, use the raw record so users can see the actual TXT content
     // For subdomains, show the base domain with context
     // For other types, use the vendor domain
     let record_value = match source_type {
         RecordType::DnsSubdomain => format!("{} (base of {})", base_domain, customer_domain),
-        RecordType::DnsTxtVerification | RecordType::DnsTxtSpf |
-        RecordType::DnsTxtDmarc | RecordType::DnsTxtDkim => raw_record.clone(),
+        RecordType::DnsTxtVerification
+        | RecordType::DnsTxtSpf
+        | RecordType::DnsTxtDmarc
+        | RecordType::DnsTxtDkim => raw_record.clone(),
         _ => vendor_domain.clone(),
     };
-    
+
     let relationship = VendorRelationship::new(
         base_domain.clone(),
         vendor_org.clone(),
@@ -2063,12 +2448,16 @@ async fn process_vendor_domain(
         root_customer_organization.clone(),
         raw_record.clone(),
     );
-    
-    logger.debug(&format!("Established {} relationship: {} ({}) -> {} ({})", 
-                          relationship.layer_description(),
-                          customer_base_domain, customer_org,
-                          base_domain, vendor_org));
-    
+
+    logger.debug(&format!(
+        "Established {} relationship: {} ({}) -> {} ({})",
+        relationship.layer_description(),
+        customer_base_domain,
+        customer_org,
+        base_domain,
+        vendor_org
+    ));
+
     // Write relationship directly to disk-backed sink (O(1) memory)
     {
         let mut sink = result_sink.lock().await;
@@ -2082,10 +2471,10 @@ async fn process_vendor_domain(
         logger.debug(&format!("Reached common denominator: {}", base_domain));
         return;
     }
-    
+
     // Normalize domain for DNS lookup
     let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain);
-    
+
     // Recursive analysis for deeper levels — results go directly to shared sink
     // Note: Discovery methods (subdomain/SaaS tenant) only run at depth 1, so we pass None here
     if let Err(e) = discover_nth_parties(
@@ -2107,16 +2496,21 @@ async fn process_vendor_domain(
         web_org_enabled,
         web_org_min_confidence,
         analysis_config,
-        None,  // subdomain_discovery - only runs at depth 1
-        None,  // saas_tenant_discovery - only runs at depth 1
-        None,  // ct_discovery - only runs at depth 1
-        None,  // web_traffic_discovery - only runs at depth 1
+        None, // subdomain_discovery - only runs at depth 1
+        None, // saas_tenant_discovery - only runs at depth 1
+        None, // ct_discovery - only runs at depth 1
+        None, // web_traffic_discovery - only runs at depth 1
         checkpoint,
         &checkpoint_output_dir,
         result_sink,
         memory_pressure_level,
-    ).await {
-        logger.warn(&format!("Failed to analyze vendor domain {}: {}", lookup_domain, e));
+    )
+    .await
+    {
+        logger.warn(&format!(
+            "Failed to analyze vendor domain {}: {}",
+            lookup_domain, e
+        ));
     }
 }
 
@@ -2126,7 +2520,14 @@ fn is_common_denominator(domain: &str) -> bool {
         "amazonaws.com",
         "microsoft.com",
         "google.com",
+        "googletagmanager.com",
+        "googlehosted.com",
+        "googlesyndication.com",
+        "googleadservices.com",
+        "googleusercontent.com",
+        "googleapis.com",
         "cloudflare.com",
+        "cloudflare-dns.com",
         "fastly.com",
         "akamai.com",
         "azure.com",
@@ -2135,10 +2536,10 @@ fn is_common_denominator(domain: &str) -> bool {
         "googlemail.com",
         "gmail.com",
     ];
-    
-    common_denominators.iter().any(|&cd| {
-        domain == cd || domain.ends_with(&format!(".{}", cd))
-    })
+
+    common_denominators
+        .iter()
+        .any(|&cd| domain == cd || domain.ends_with(&format!(".{}", cd)))
 }
 
 /// Prompt the user to confirm pending org-to-domain mappings discovered via generic fallback
@@ -2154,7 +2555,10 @@ async fn confirm_pending_mappings(
     // Group pending mappings by source domain
     let mut grouped: HashMap<&str, Vec<&subprocessor::PendingOrgMapping>> = HashMap::new();
     for mapping in pending {
-        grouped.entry(&mapping.source_domain).or_default().push(mapping);
+        grouped
+            .entry(&mapping.source_domain)
+            .or_default()
+            .push(mapping);
     }
 
     // Deduplicate mappings per source domain (same org_name -> same domain)
@@ -2182,7 +2586,12 @@ async fn confirm_pending_mappings(
     println!();
 
     for (source_domain, mappings) in &unique_mappings {
-        println!("📋 Source: {} ({} mapping{})", source_domain, mappings.len(), if mappings.len() == 1 { "" } else { "s" });
+        println!(
+            "📋 Source: {} ({} mapping{})",
+            source_domain,
+            mappings.len(),
+            if mappings.len() == 1 { "" } else { "s" }
+        );
         println!("─────────────────────────────────────────────────────────────────");
 
         for (idx, (org_name, domain)) in mappings.iter().enumerate() {
@@ -2213,10 +2622,21 @@ async fn confirm_pending_mappings(
                     .map(|(org, dom)| (org.to_string(), dom.to_string()))
                     .collect();
 
-                if let Err(e) = analyzer.save_confirmed_mappings(source_domain, &confirmed).await {
-                    logger.warn(&format!("Failed to save mappings for {}: {}", source_domain, e));
+                if let Err(e) = analyzer
+                    .save_confirmed_mappings(source_domain, &confirmed)
+                    .await
+                {
+                    logger.warn(&format!(
+                        "Failed to save mappings for {}: {}",
+                        source_domain, e
+                    ));
                 } else {
-                    println!("✅ Saved {} mapping{} for {}", confirmed.len(), if confirmed.len() == 1 { "" } else { "s" }, source_domain);
+                    println!(
+                        "✅ Saved {} mapping{} for {}",
+                        confirmed.len(),
+                        if confirmed.len() == 1 { "" } else { "s" },
+                        source_domain
+                    );
                 }
             }
         }
@@ -2265,11 +2685,22 @@ async fn confirm_pending_mappings(
                 }
 
                 if !confirmed.is_empty() {
-                    if let Err(e) = analyzer.save_confirmed_mappings(source_domain, &confirmed).await {
-                        logger.warn(&format!("Failed to save mappings for {}: {}", source_domain, e));
+                    if let Err(e) = analyzer
+                        .save_confirmed_mappings(source_domain, &confirmed)
+                        .await
+                    {
+                        logger.warn(&format!(
+                            "Failed to save mappings for {}: {}",
+                            source_domain, e
+                        ));
                     } else {
                         println!();
-                        println!("✅ Saved {} mapping{} for {}", confirmed.len(), if confirmed.len() == 1 { "" } else { "s" }, source_domain);
+                        println!(
+                            "✅ Saved {} mapping{} for {}",
+                            confirmed.len(),
+                            if confirmed.len() == 1 { "" } else { "s" },
+                            source_domain
+                        );
                     }
                 }
             }
@@ -2334,7 +2765,9 @@ fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
         format!("{} ltd", base),
     ];
 
-    common_inferred_patterns.iter().any(|pattern| org_lower == *pattern)
+    common_inferred_patterns
+        .iter()
+        .any(|pattern| org_lower == *pattern)
 }
 
 /// Prompt the user to confirm organizations that were inferred from domain names
@@ -2353,7 +2786,9 @@ async fn confirm_unverified_organizations(
     // Deduplicate by domain
     let mut unique: HashMap<String, String> = HashMap::new();
     for mapping in unverified {
-        unique.entry(mapping.domain.clone()).or_insert(mapping.inferred_org.clone());
+        unique
+            .entry(mapping.domain.clone())
+            .or_insert(mapping.inferred_org.clone());
     }
 
     if unique.is_empty() {
@@ -2405,9 +2840,15 @@ async fn confirm_unverified_organizations(
                     }
                 }
             }
-            println!("✅ Accepted all {} inferred organization names", unique.len());
+            println!(
+                "✅ Accepted all {} inferred organization names",
+                unique.len()
+            );
             if saved_count > 0 {
-                println!("   💾 Saved {} names to local database for future runs", saved_count);
+                println!(
+                    "   💾 Saved {} names to local database for future runs",
+                    saved_count
+                );
             }
         }
         "R" => {
@@ -2443,14 +2884,23 @@ async fn confirm_unverified_organizations(
                             // Save to local overrides for future runs
                             if let Some(kv) = known_vendors::get() {
                                 if let Err(e) = kv.add_override(domain, custom_org) {
-                                    logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+                                    logger.warn(&format!(
+                                        "Failed to save override for {}: {}",
+                                        domain, e
+                                    ));
                                 } else {
                                     saved_count += 1;
                                 }
                             }
 
-                            logger.info(&format!("Updated organization for {}: {} -> {}", domain, inferred_org, custom_org));
-                            println!("    ✅ Updated: {} → \"{}\" (saved for future runs)", domain, custom_org);
+                            logger.info(&format!(
+                                "Updated organization for {}: {} -> {}",
+                                domain, inferred_org, custom_org
+                            ));
+                            println!(
+                                "    ✅ Updated: {} → \"{}\" (saved for future runs)",
+                                domain, custom_org
+                            );
                             updated_count += 1;
                         } else {
                             println!("    ⏭️  Kept inferred name (empty input)");
@@ -2460,12 +2910,18 @@ async fn confirm_unverified_organizations(
                         // Accept inferred name and save for future runs
                         if let Some(kv) = known_vendors::get() {
                             if let Err(e) = kv.add_override(domain, inferred_org) {
-                                logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+                                logger.warn(&format!(
+                                    "Failed to save override for {}: {}",
+                                    domain, e
+                                ));
                             } else {
                                 saved_count += 1;
                             }
                         }
-                        println!("    ✅ Accepted: \"{}\" (saved for future runs)", inferred_org);
+                        println!(
+                            "    ✅ Accepted: \"{}\" (saved for future runs)",
+                            inferred_org
+                        );
                     }
                     _ => {
                         println!("    ⏭️  Skipped (not saved)");
@@ -2476,11 +2932,18 @@ async fn confirm_unverified_organizations(
             if updated_count > 0 || saved_count > 0 {
                 println!();
                 if updated_count > 0 {
-                    println!("✅ Updated {} organization name{}", updated_count, if updated_count == 1 { "" } else { "s" });
+                    println!(
+                        "✅ Updated {} organization name{}",
+                        updated_count,
+                        if updated_count == 1 { "" } else { "s" }
+                    );
                 }
                 if saved_count > 0 {
-                    println!("💾 Saved {} name{} to local database for future runs",
-                             saved_count, if saved_count == 1 { "" } else { "s" });
+                    println!(
+                        "💾 Saved {} name{} to local database for future runs",
+                        saved_count,
+                        if saved_count == 1 { "" } else { "s" }
+                    );
                 }
                 if updated_count > 0 {
                     println!("   Note: Re-run analysis to regenerate reports with corrected names");
@@ -2507,12 +2970,14 @@ async fn run_batch_analysis(
     logger: Arc<AnalysisLogger>,
 ) -> Result<()> {
     use batch::{
-        parse_domain_file, DomainAnalysisResult,
-        new_batch_summary, finalize_batch_summary, export_batch_summary,
+        export_batch_summary, finalize_batch_summary, new_batch_summary, parse_domain_file,
+        DomainAnalysisResult,
     };
     use futures::{stream, StreamExt};
 
-    let input_file = args.input_file.as_ref()
+    let input_file = args
+        .input_file
+        .as_ref()
         .expect("input_file required in batch mode");
     let input_path = Path::new(input_file);
 
@@ -2606,10 +3071,16 @@ async fn run_batch_analysis(
             let _permit = batch_sem.acquire().await.unwrap();
             let domain_start = std::time::Instant::now();
 
-            println!("[{}/{}] Starting analysis: {} {}",
-                index + 1, total_domains,
+            println!(
+                "[{}/{}] Starting analysis: {} {}",
+                index + 1,
+                total_domains,
                 entry.domain,
-                entry.label.as_ref().map(|l| format!("({})", l)).unwrap_or_default()
+                entry
+                    .label
+                    .as_ref()
+                    .map(|l| format!("({})", l))
+                    .unwrap_or_default()
             );
 
             // Run single domain analysis
@@ -2622,7 +3093,8 @@ async fn run_batch_analysis(
                 args_depth,
                 args_parallel_jobs,
                 logger.clone(),
-            ).await;
+            )
+            .await;
 
             let duration = domain_start.elapsed().as_secs_f64();
 
@@ -2636,8 +3108,10 @@ async fn run_batch_analysis(
                         all.extend(relationships);
                     }
 
-                    println!("[{}/{}] Completed: {} - {} relationships in {:.1}s",
-                        index + 1, total_domains,
+                    println!(
+                        "[{}/{}] Completed: {} - {} relationships in {:.1}s",
+                        index + 1,
+                        total_domains,
                         entry.domain,
                         count,
                         duration
@@ -2654,8 +3128,10 @@ async fn run_batch_analysis(
                     }
                 }
                 Err(e) => {
-                    println!("[{}/{}] Failed: {} - {} ({:.1}s)",
-                        index + 1, total_domains,
+                    println!(
+                        "[{}/{}] Failed: {} - {} ({:.1}s)",
+                        index + 1,
+                        total_domains,
                         entry.domain,
                         e,
                         duration
@@ -2696,7 +3172,10 @@ async fn run_batch_analysis(
     println!("   Successful:          {}", summary.successful);
     println!("   Failed:              {}", summary.failed);
     println!("   Total relationships: {}", summary.total_relationships);
-    println!("   Total duration:      {:.1}s", summary.total_duration_secs);
+    println!(
+        "   Total duration:      {:.1}s",
+        summary.total_duration_secs
+    );
     println!();
 
     // Export combined report if requested
@@ -2710,7 +3189,8 @@ async fn run_batch_analysis(
         let export_relationships: Vec<VendorRelationship> = if args.include_infra {
             all_relationships.clone()
         } else {
-            all_relationships.iter()
+            all_relationships
+                .iter()
                 .filter(|r| !is_common_denominator(&r.nth_party_domain))
                 .cloned()
                 .collect()
@@ -2718,9 +3198,13 @@ async fn run_batch_analysis(
 
         match args.output_format.as_str() {
             "json" => export::export_json(&export_relationships, &combined_path.to_string_lossy())?,
-            "markdown" => export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?,
+            "markdown" => {
+                export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?
+            }
             "html" => export::export_html(&export_relationships, &combined_path.to_string_lossy())?,
-            "csv" | _ => export::export_csv(&export_relationships, &combined_path.to_string_lossy())?,
+            "csv" | _ => {
+                export::export_csv(&export_relationships, &combined_path.to_string_lossy())?
+            }
         }
 
         println!("Combined report: {}", combined_path.display());
@@ -2732,12 +3216,20 @@ async fn run_batch_analysis(
     println!("Batch summary:   {}", summary_path.display());
 
     // List any failed domains
-    let failed: Vec<_> = summary.domain_results.iter().filter(|r| !r.success).collect();
+    let failed: Vec<_> = summary
+        .domain_results
+        .iter()
+        .filter(|r| !r.success)
+        .collect();
     if !failed.is_empty() {
         println!();
         println!("Failed domains:");
         for result in failed {
-            println!("   - {}: {}", result.domain, result.error.as_deref().unwrap_or("Unknown error"));
+            println!(
+                "   - {}: {}",
+                result.domain,
+                result.error.as_deref().unwrap_or("Unknown error")
+            );
         }
     }
 
@@ -2757,7 +3249,10 @@ async fn analyze_single_domain_for_batch(
     _logger: Arc<AnalysisLogger>,
 ) -> Result<(Vec<VendorRelationship>, Option<String>)> {
     // Create a minimal logger for this domain (suppress most output in batch mode)
-    let logger = Arc::new(AnalysisLogger::new_with_color_setting(VerbosityLevel::Silent, false));
+    let logger = Arc::new(AnalysisLogger::new_with_color_setting(
+        VerbosityLevel::Silent,
+        false,
+    ));
 
     // Initialize shared state for this domain analysis
     let discovered_vendors = Arc::new(Mutex::new(HashMap::new()));
@@ -2768,19 +3263,23 @@ async fn analyze_single_domain_for_batch(
 
     // Get root organization
     let root_customer_domain = entry.domain.clone();
-    let root_customer_org = match whois::get_organization_with_status_and_config(&entry.domain, false, 0.5).await {
-        Ok(org_result) => {
-            discovered_vendors.lock().await.insert(entry.domain.clone(), org_result.name.clone());
-            org_result.name
-        }
-        Err(_) => entry.domain.clone()
-    };
+    let root_customer_org =
+        match whois::get_organization_with_status_and_config(&entry.domain, false, 0.5).await {
+            Ok(org_result) => {
+                discovered_vendors
+                    .lock()
+                    .await
+                    .insert(entry.domain.clone(), org_result.name.clone());
+                org_result.name
+            }
+            Err(_) => entry.domain.clone(),
+        };
 
     // Create verification logger (disabled for batch mode)
     let verification_logger = verification_logger::VerificationFailureLogger::new(
         &output_dir.to_string_lossy(),
         &entry.domain,
-        false
+        false,
     );
 
     // Run the analysis using the minimal function
@@ -2799,7 +3298,8 @@ async fn analyze_single_domain_for_batch(
         parallel_jobs,
         logger.clone(),
         &app_config.analysis,
-    ).await?;
+    )
+    .await?;
 
     // Export individual report if not in combined mode
     let output_file = if !skip_individual_export && !results.is_empty() {
@@ -2868,11 +3368,14 @@ async fn discover_nth_parties_minimal(
     match dns::get_txt_records_with_pool(domain, &dns_pool).await {
         Ok(txt_records) => {
             let mut vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
-                &txt_records, Some(verification_logger), domain
+                &txt_records,
+                Some(verification_logger),
+                domain,
             );
 
             // Recursive SPF resolution for deeper-depth domains too
-            let spf_recursive = dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
+            let spf_recursive =
+                dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
             vendor_domains_with_source.extend(spf_recursive);
 
             // Process vendor domains
@@ -2890,15 +3393,23 @@ async fn discover_nth_parties_minimal(
                     let vendors = discovered_vendors.lock().await;
                     vendors.contains_key(&base_domain)
                 } {
-                    match whois::get_organization_with_status_and_config(&base_domain, false, 0.5).await {
+                    match whois::get_organization_with_status_and_config(&base_domain, false, 0.5)
+                        .await
+                    {
                         Ok(org_result) => {
                             let mut vendors = discovered_vendors.lock().await;
                             // Apply organization name normalization (uses global normalizer)
-                            vendors.insert(base_domain.clone(), org_normalizer::normalize(&org_result.name));
+                            vendors.insert(
+                                base_domain.clone(),
+                                org_normalizer::normalize(&org_result.name),
+                            );
                         }
                         Err(_) => {
                             let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
+                            vendors.insert(
+                                base_domain.clone(),
+                                org_normalizer::normalize(&base_domain),
+                            );
                         }
                     }
                 }
@@ -2906,8 +3417,10 @@ async fn discover_nth_parties_minimal(
                 // Create relationship
                 let (customer_org, vendor_org) = {
                     let vendors = discovered_vendors.lock().await;
-                    let customer_org = vendors.get(&customer_base_domain)
-                        .unwrap_or(&customer_base_domain.to_string()).clone();
+                    let customer_org = vendors
+                        .get(&customer_base_domain)
+                        .unwrap_or(&customer_base_domain.to_string())
+                        .clone();
                     let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
                     (customer_org, vendor_org)
                 };
@@ -2934,7 +3447,8 @@ async fn discover_nth_parties_minimal(
 
                 // Recursive analysis if not a common denominator
                 if !is_common_denominator(&base_domain) {
-                    let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
+                    let lookup_domain =
+                        domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
 
                     if let Ok(sub_results) = Box::pin(discover_nth_parties_minimal(
                         &lookup_domain,
@@ -2951,7 +3465,9 @@ async fn discover_nth_parties_minimal(
                         parallel_jobs,
                         logger.clone(),
                         analysis_config,
-                    )).await {
+                    ))
+                    .await
+                    {
                         results.extend(sub_results);
                     }
                 }
@@ -2963,4 +3479,39 @@ async fn discover_nth_parties_minimal(
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_common_denominator_new_google_domains() {
+        assert!(is_common_denominator("googletagmanager.com"));
+        assert!(is_common_denominator("googlehosted.com"));
+        assert!(is_common_denominator("googlesyndication.com"));
+        assert!(is_common_denominator("googleadservices.com"));
+        assert!(is_common_denominator("googleusercontent.com"));
+        assert!(is_common_denominator("googleapis.com"));
+    }
+
+    #[test]
+    fn test_is_common_denominator_cloudflare_dns() {
+        assert!(is_common_denominator("cloudflare-dns.com"));
+        assert!(is_common_denominator("sub.cloudflare-dns.com"));
+    }
+
+    #[test]
+    fn test_is_common_denominator_subdomains() {
+        assert!(is_common_denominator("tag.googletagmanager.com"));
+        assert!(is_common_denominator("storage.googleapis.com"));
+        assert!(is_common_denominator("cdn.cloudflare-dns.com"));
+    }
+
+    #[test]
+    fn test_is_common_denominator_non_matches() {
+        assert!(!is_common_denominator("stripe.com"));
+        assert!(!is_common_denominator("pendo.io"));
+        assert!(!is_common_denominator("notgoogletagmanager.com"));
+    }
 }

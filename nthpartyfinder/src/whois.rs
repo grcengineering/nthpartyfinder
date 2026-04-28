@@ -1,17 +1,17 @@
-use regex::Regex;
-use anyhow::{Result, anyhow};
-use tracing::debug;
-use std::time::Duration;
-use std::process::Command;
-use std::collections::HashMap;
-use std::sync::Arc;
-use whois_rust::{WhoIs, WhoIsLookupOptions};
-use tokio::sync::Semaphore;
-use futures::stream::{self, StreamExt};
 use crate::known_vendors;
-use crate::web_org;
 use crate::ner_org;
 use crate::rate_limit::RateLimitContext;
+use crate::web_org;
+use anyhow::{anyhow, Result};
+use futures::stream::{self, StreamExt};
+use regex::Regex;
+use std::collections::HashMap;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Semaphore;
+use tracing::debug;
+use whois_rust::{WhoIs, WhoIsLookupOptions};
 
 /// Result of an organization lookup with verification status
 #[derive(Debug, Clone)]
@@ -59,8 +59,10 @@ pub async fn get_organization_with_rate_limit(
 
     // Priority 1: Check known vendors database (fastest and most reliable - no rate limit needed)
     if let Some(kv_result) = known_vendors::lookup(domain) {
-        debug!("Found {} in known vendors database: {} (source: {})",
-               domain, kv_result.organization, kv_result.source);
+        debug!(
+            "Found {} in known vendors database: {} (source: {})",
+            domain, kv_result.organization, kv_result.source
+        );
         return Ok(OrganizationResult::verified(
             kv_result.organization,
             &kv_result.source.to_string(),
@@ -69,10 +71,14 @@ pub async fn get_organization_with_rate_limit(
 
     // Priority 2: Web page analysis (uses HTTP rate limiter separately, not WHOIS)
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_with_fallback(domain, false).await {
+        if let Ok(Some(web_result)) =
+            web_org::extract_organization_with_fallback(domain, false).await
+        {
             if web_result.confidence >= min_confidence {
-                debug!("Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                       domain, web_result.organization, web_result.source, web_result.confidence);
+                debug!(
+                    "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
+                    domain, web_result.organization, web_result.source, web_result.confidence
+                );
                 return Ok(OrganizationResult::verified(
                     web_result.organization,
                     &format!("web_{}", web_result.source),
@@ -92,19 +98,31 @@ pub async fn get_organization_with_rate_limit(
     // Priority 3: Native Rust WHOIS lookup using whois-rust library
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via whois-rust for {}: {}", domain, organization);
+            debug!(
+                "Found organization via whois-rust for {}: {}",
+                domain, organization
+            );
             return Ok(OrganizationResult::verified(organization, "whois"));
         }
-        debug!("whois-rust returned placeholder organization for {}, trying fallbacks", domain);
+        debug!(
+            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            domain
+        );
     }
 
     // Priority 4: System whois command (if available) - also uses the same rate limit token
     if let Ok(result) = try_system_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via system whois for {}: {}", domain, organization);
+            debug!(
+                "Found organization via system whois for {}: {}",
+                domain, organization
+            );
             return Ok(OrganizationResult::verified(organization, "system_whois"));
         }
-        debug!("System whois returned placeholder organization for {}, trying NER fallback", domain);
+        debug!(
+            "System whois returned placeholder organization for {}, trying NER fallback",
+            domain
+        );
     }
 
     // Priority 5: NER-based extraction (if embedded-ner feature enabled)
@@ -114,19 +132,29 @@ pub async fn get_organization_with_rate_limit(
         let content_ref = page_content.as_deref();
 
         if let Ok(Some(ner_result)) = ner_org::extract_organization(domain, content_ref) {
-            debug!("Found organization via NER for {}: {} (confidence: {:.2})",
-                   domain, ner_result.organization, ner_result.confidence);
+            debug!(
+                "Found organization via NER for {}: {} (confidence: {:.2})",
+                domain, ner_result.organization, ner_result.confidence
+            );
             return Ok(OrganizationResult::verified(
                 ner_result.organization,
                 "ner_gliner",
             ));
         }
-        debug!("NER could not determine organization for {}, using domain fallback", domain);
+        debug!(
+            "NER could not determine organization for {}, using domain fallback",
+            domain
+        );
     }
 
     // Final fallback to domain-based organization name (marked as unverified)
-    debug!("All lookup methods failed or returned placeholders for {}, using domain-based fallback", domain);
-    Ok(OrganizationResult::inferred(extract_organization_from_domain(domain)))
+    debug!(
+        "All lookup methods failed or returned placeholders for {}, using domain-based fallback",
+        domain
+    );
+    Ok(OrganizationResult::inferred(
+        extract_organization_from_domain(domain),
+    ))
 }
 
 /// Get organization with verification status, with configurable web org lookup
@@ -139,8 +167,10 @@ pub async fn get_organization_with_status_and_config(
 
     // Priority 1: Check known vendors database (fastest and most reliable)
     if let Some(kv_result) = known_vendors::lookup(domain) {
-        debug!("Found {} in known vendors database: {} (source: {})",
-               domain, kv_result.organization, kv_result.source);
+        debug!(
+            "Found {} in known vendors database: {} (source: {})",
+            domain, kv_result.organization, kv_result.source
+        );
         return Ok(OrganizationResult::verified(
             kv_result.organization,
             &kv_result.source.to_string(),
@@ -150,10 +180,14 @@ pub async fn get_organization_with_status_and_config(
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
     // Uses HTTP first, falls back to headless browser for SPA sites
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_with_fallback(domain, false).await {
+        if let Ok(Some(web_result)) =
+            web_org::extract_organization_with_fallback(domain, false).await
+        {
             if web_result.confidence >= min_confidence {
-                debug!("Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                       domain, web_result.organization, web_result.source, web_result.confidence);
+                debug!(
+                    "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
+                    domain, web_result.organization, web_result.source, web_result.confidence
+                );
                 return Ok(OrganizationResult::verified(
                     web_result.organization,
                     &format!("web_{}", web_result.source),
@@ -168,19 +202,31 @@ pub async fn get_organization_with_status_and_config(
     // Priority 3: Native Rust WHOIS lookup using whois-rust library
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via whois-rust for {}: {}", domain, organization);
+            debug!(
+                "Found organization via whois-rust for {}: {}",
+                domain, organization
+            );
             return Ok(OrganizationResult::verified(organization, "whois"));
         }
-        debug!("whois-rust returned placeholder organization for {}, trying fallbacks", domain);
+        debug!(
+            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            domain
+        );
     }
 
     // Priority 4: System whois command (if available)
     if let Ok(result) = try_system_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via system whois for {}: {}", domain, organization);
+            debug!(
+                "Found organization via system whois for {}: {}",
+                domain, organization
+            );
             return Ok(OrganizationResult::verified(organization, "system_whois"));
         }
-        debug!("System whois returned placeholder organization for {}, trying NER fallback", domain);
+        debug!(
+            "System whois returned placeholder organization for {}, trying NER fallback",
+            domain
+        );
     }
 
     // Priority 5: NER-based extraction (if embedded-ner feature enabled)
@@ -191,19 +237,29 @@ pub async fn get_organization_with_status_and_config(
         let content_ref = page_content.as_deref();
 
         if let Ok(Some(ner_result)) = ner_org::extract_organization(domain, content_ref) {
-            debug!("Found organization via NER for {}: {} (confidence: {:.2})",
-                   domain, ner_result.organization, ner_result.confidence);
+            debug!(
+                "Found organization via NER for {}: {} (confidence: {:.2})",
+                domain, ner_result.organization, ner_result.confidence
+            );
             return Ok(OrganizationResult::verified(
                 ner_result.organization,
                 "ner_gliner",
             ));
         }
-        debug!("NER could not determine organization for {}, using domain fallback", domain);
+        debug!(
+            "NER could not determine organization for {}, using domain fallback",
+            domain
+        );
     }
 
     // Final fallback to domain-based organization name (marked as unverified)
-    debug!("All lookup methods failed or returned placeholders for {}, using domain-based fallback", domain);
-    Ok(OrganizationResult::inferred(extract_organization_from_domain(domain)))
+    debug!(
+        "All lookup methods failed or returned placeholders for {}, using domain-based fallback",
+        domain
+    );
+    Ok(OrganizationResult::inferred(
+        extract_organization_from_domain(domain),
+    ))
 }
 
 pub async fn get_organization(domain: &str) -> Result<String> {
@@ -220,17 +276,24 @@ pub async fn get_organization_with_config(
 
     // Priority 1: Check known vendors database (fastest and most reliable)
     if let Some(kv_result) = known_vendors::lookup(domain) {
-        debug!("Found {} in known vendors database: {}", domain, kv_result.organization);
+        debug!(
+            "Found {} in known vendors database: {}",
+            domain, kv_result.organization
+        );
         return Ok(kv_result.organization);
     }
 
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
     // Uses HTTP first, falls back to headless browser for SPA sites
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_with_fallback(domain, false).await {
+        if let Ok(Some(web_result)) =
+            web_org::extract_organization_with_fallback(domain, false).await
+        {
             if web_result.confidence >= min_confidence {
-                debug!("Found {} via web page analysis: {} (confidence: {:.2})",
-                       domain, web_result.organization, web_result.confidence);
+                debug!(
+                    "Found {} via web page analysis: {} (confidence: {:.2})",
+                    domain, web_result.organization, web_result.confidence
+                );
                 return Ok(web_result.organization);
             }
         }
@@ -239,65 +302,82 @@ pub async fn get_organization_with_config(
     // Priority 3: Native Rust WHOIS lookup using whois-rust library
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via whois-rust for {}: {}", domain, organization);
+            debug!(
+                "Found organization via whois-rust for {}: {}",
+                domain, organization
+            );
             return Ok(organization);
         }
-        debug!("whois-rust returned placeholder organization for {}, trying fallbacks", domain);
+        debug!(
+            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            domain
+        );
     }
 
     // Priority 4: System whois command (if available)
     if let Ok(result) = try_system_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
-            debug!("Found organization via system whois for {}: {}", domain, organization);
+            debug!(
+                "Found organization via system whois for {}: {}",
+                domain, organization
+            );
             return Ok(organization);
         }
-        debug!("System whois returned placeholder organization for {}, using domain fallback", domain);
+        debug!(
+            "System whois returned placeholder organization for {}, using domain fallback",
+            domain
+        );
     }
 
     // Final fallback to domain-based organization name
-    debug!("All lookup methods failed or returned placeholders for {}, using domain-based fallback", domain);
+    debug!(
+        "All lookup methods failed or returned placeholders for {}, using domain-based fallback",
+        domain
+    );
     Ok(extract_organization_from_domain(domain))
 }
 
 async fn try_native_whois(domain: &str) -> Result<String> {
     debug!("Trying whois-rust library lookup for domain: {}", domain);
-    
+
     // Use default whois-rust configuration with built-in servers
     let whois = WhoIs::from_path("whois-servers.json")
         .or_else(|_| {
             // Fallback to using a basic server configuration string
-            WhoIs::from_string(r#"{
+            WhoIs::from_string(
+                r#"{
                 "com": "whois.verisign-grs.com",
                 "net": "whois.verisign-grs.com",
                 "org": "whois.pir.org",
                 "": "whois.iana.org"
-            }"#)
+            }"#,
+            )
         })
         .map_err(|e| anyhow!("Failed to create WHOIS client: {}", e))?;
-    
+
     // Configure lookup options
     let lookup_options = WhoIsLookupOptions::from_string(domain)
         .map_err(|e| anyhow!("Invalid domain for WHOIS lookup: {}", e))?;
-    
+
     // Perform WHOIS lookup with timeout using spawn_blocking for async compatibility
     match tokio::time::timeout(
         Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || {
-            whois.lookup(lookup_options)
-        })
-    ).await {
+        tokio::task::spawn_blocking(move || whois.lookup(lookup_options)),
+    )
+    .await
+    {
         Ok(Ok(Ok(whois_result))) => {
             debug!("whois-rust lookup successful for {}", domain);
             Ok(whois_result)
-        },
+        }
         Ok(Ok(Err(e))) => {
             debug!("whois-rust lookup failed for {}: {}", domain, e);
             Err(anyhow!("whois-rust lookup failed: {}", e))
-        },
+        }
         Ok(Err(_)) => {
             debug!("whois-rust lookup task panicked for {}", domain);
             Err(anyhow!("whois-rust lookup task panicked"))
-        },
+        }
         Err(_) => {
             debug!("whois-rust lookup timed out for {}", domain);
             Err(anyhow!("whois-rust lookup timed out"))
@@ -307,13 +387,13 @@ async fn try_native_whois(domain: &str) -> Result<String> {
 
 async fn try_system_whois(domain: &str) -> Result<String> {
     let domain_owned = domain.to_string();
-    
+
     match tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::task::spawn_blocking(move || {
-            execute_whois_command(&domain_owned)
-        })
-    ).await {
+        tokio::task::spawn_blocking(move || execute_whois_command(&domain_owned)),
+    )
+    .await
+    {
         Ok(Ok(Ok(result))) => Ok(result),
         Ok(Ok(Err(e))) => Err(anyhow!("System whois failed: {}", e)),
         Ok(Err(_)) => Err(anyhow!("System whois task panicked")),
@@ -328,20 +408,18 @@ fn execute_whois_command(domain: &str) -> Result<String> {
     } else {
         vec!["whois", "/usr/bin/whois", "/usr/local/bin/whois"]
     };
-    
+
     for cmd in whois_commands {
-        match Command::new(cmd)
-            .arg(domain)
-            .output() {
+        match Command::new(cmd).arg(domain).output() {
             Ok(output) => {
                 if output.status.success() {
                     return Ok(String::from_utf8_lossy(&output.stdout).to_string());
                 }
-            },
+            }
             Err(_) => continue,
         }
     }
-    
+
     Err(anyhow!("No working whois command found"))
 }
 
@@ -395,7 +473,7 @@ fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
         r"(?i)Sponsoring Registrar:\s*(.+)",
         r"(?i)Registrar Name:\s*(.+)",
     ];
-    
+
     for pattern in registrar_patterns {
         if let Ok(regex) = Regex::new(pattern) {
             if let Some(cap) = regex.captures(whois_data) {
@@ -408,7 +486,7 @@ fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
@@ -445,6 +523,36 @@ fn is_placeholder_organization(org: &str) -> bool {
         "registry operator",
         "global registry services",
         "icann",
+        // ccTLD registry authorities (government/national registries, not domain owners)
+        "nic.ro",
+        "rotld",
+        "registro.br",
+        "cnnic",
+        "jprs",
+        "krnic",
+        "twnic",
+        "mynic",
+        "thnic",
+        "vnnic",
+        "sgnic",
+        "hkirc",
+        "auda",
+        ".au domain administration",
+        "nz domain name commission",
+        "cira",
+        "nic.at",
+        "nic.ch",
+        "switch",
+        "dns belgium",
+        "dns.pt",
+        "nic.cz",
+        "nic.pl",
+        "domaininfo.com",
+        "registro.it",
+        "nic.ir",
+        "registry.in",
+        "nixi",
+        "national internet exchange of india",
         // Domain registrars/brand protection services (not the actual domain owners)
         "markmonitor",
         "csc corporate domains",
@@ -464,6 +572,9 @@ fn is_placeholder_organization(org: &str) -> bool {
         "gandi",
         "identity protection service",
         "identity protect",
+        // Amazon registrar (operates as domain registrar, not the actual domain owner)
+        "amazon registrar",
+        "amazon registrar, inc.",
         // Additional registrars
         "porkbun",
         "cloudflare",
@@ -502,12 +613,20 @@ fn is_placeholder_organization(org: &str) -> bool {
     let org_lower = org.to_lowercase();
 
     // Check if org contains any placeholder
-    if placeholders.iter().any(|&placeholder| org_lower.contains(placeholder)) {
+    if placeholders
+        .iter()
+        .any(|&placeholder| org_lower.contains(placeholder))
+    {
         return true;
     }
 
     // Check if org looks like an address (starts with numbers or contains common address patterns)
-    if org_lower.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+    if org_lower
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
         // Likely an address like "5335 Gate Parkway..."
         return true;
     }
@@ -544,7 +663,14 @@ pub async fn batch_get_organizations(
     min_confidence: f32,
     concurrency: usize,
 ) -> HashMap<String, OrganizationResult> {
-    batch_get_organizations_with_rate_limit(domains, web_org_enabled, min_confidence, concurrency, None).await
+    batch_get_organizations_with_rate_limit(
+        domains,
+        web_org_enabled,
+        min_confidence,
+        concurrency,
+        None,
+    )
+    .await
 }
 
 /// Batch lookup organizations with optional rate limiting
@@ -571,7 +697,10 @@ pub async fn batch_get_organizations_with_rate_limit(
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let total_domains = domains.len();
 
-    debug!("Starting parallel WHOIS lookups for {} domains (concurrency: {})", total_domains, concurrency);
+    debug!(
+        "Starting parallel WHOIS lookups for {} domains (concurrency: {})",
+        total_domains, concurrency
+    );
 
     // Clone the rate limit context for use in async closures
     let rate_limit_ctx_opt = rate_limit_ctx.cloned();
@@ -586,15 +715,30 @@ pub async fn batch_get_organizations_with_rate_limit(
 
                 debug!("WHOIS lookup {}/{}: {}", index + 1, total_domains, domain);
 
-                match get_organization_with_rate_limit(&domain, web_org_enabled, min_confidence, rate_limit_ctx_opt.as_ref()).await {
+                match get_organization_with_rate_limit(
+                    &domain,
+                    web_org_enabled,
+                    min_confidence,
+                    rate_limit_ctx_opt.as_ref(),
+                )
+                .await
+                {
                     Ok(result) => {
-                        debug!("WHOIS lookup complete for {}: {} (verified: {})",
-                               domain, result.name, result.is_verified);
+                        debug!(
+                            "WHOIS lookup complete for {}: {} (verified: {})",
+                            domain, result.name, result.is_verified
+                        );
                         (domain, result)
                     }
                     Err(e) => {
-                        debug!("WHOIS lookup failed for {}: {}, using domain fallback", domain, e);
-                        (domain.clone(), OrganizationResult::inferred(extract_organization_from_domain(&domain)))
+                        debug!(
+                            "WHOIS lookup failed for {}: {}, using domain fallback",
+                            domain, e
+                        );
+                        (
+                            domain.clone(),
+                            OrganizationResult::inferred(extract_organization_from_domain(&domain)),
+                        )
                     }
                 }
             }
@@ -604,7 +748,10 @@ pub async fn batch_get_organizations_with_rate_limit(
         .await;
 
     let result_map: HashMap<String, OrganizationResult> = results.into_iter().collect();
-    debug!("Completed parallel WHOIS lookups: {} results", result_map.len());
+    debug!(
+        "Completed parallel WHOIS lookups: {} results",
+        result_map.len()
+    );
 
     result_map
 }
@@ -647,7 +794,10 @@ where
     }
 
     let total = uncached_domains.len();
-    debug!("Pre-warming WHOIS cache for {} uncached domains (concurrency: {})", total, concurrency);
+    debug!(
+        "Pre-warming WHOIS cache for {} uncached domains (concurrency: {})",
+        total, concurrency
+    );
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let progress_counter = Arc::new(tokio::sync::Mutex::new(0usize));
@@ -672,7 +822,13 @@ where
                     cb(current, total, &domain);
                 }
 
-                match get_organization_with_status_and_config(&domain, web_org_enabled, min_confidence).await {
+                match get_organization_with_status_and_config(
+                    &domain,
+                    web_org_enabled,
+                    min_confidence,
+                )
+                .await
+                {
                     Ok(result) => (domain, result.name),
                     Err(_) => (domain.clone(), extract_organization_from_domain(&domain)),
                 }
@@ -711,12 +867,24 @@ mod tests {
     #[test]
     fn test_extract_organization_from_domain() {
         // Basic domain extraction
-        assert_eq!(extract_organization_from_domain("example.com"), "Example Inc.");
-        assert_eq!(extract_organization_from_domain("test-company.org"), "Test-company Inc.");
+        assert_eq!(
+            extract_organization_from_domain("example.com"),
+            "Example Inc."
+        );
+        assert_eq!(
+            extract_organization_from_domain("test-company.org"),
+            "Test-company Inc."
+        );
 
         // Subdomains should use the second-to-last part
-        assert_eq!(extract_organization_from_domain("www.example.com"), "Example Inc.");
-        assert_eq!(extract_organization_from_domain("api.sub.example.com"), "Example Inc.");
+        assert_eq!(
+            extract_organization_from_domain("www.example.com"),
+            "Example Inc."
+        );
+        assert_eq!(
+            extract_organization_from_domain("api.sub.example.com"),
+            "Example Inc."
+        );
     }
 
     #[test]
@@ -733,7 +901,9 @@ mod tests {
         assert!(is_placeholder_organization("Cloudflare, Inc."));
 
         // TLD registry operators (BUG-006)
-        assert!(is_placeholder_organization("Verisign Global Registry Services"));
+        assert!(is_placeholder_organization(
+            "Verisign Global Registry Services"
+        ));
         assert!(is_placeholder_organization("VeriSign, Inc."));
         assert!(is_placeholder_organization("Public Interest Registry"));
         assert!(is_placeholder_organization("ICANN"));
@@ -742,10 +912,25 @@ mod tests {
         assert!(is_placeholder_organization("5335 Gate Parkway"));
         assert!(is_placeholder_organization("123 Main Street"));
 
+        // Amazon Registrar (registrar, not domain owner)
+        assert!(is_placeholder_organization("Amazon Registrar, Inc."));
+        assert!(is_placeholder_organization("Amazon Registrar"));
+
+        // ccTLD registry authorities (government/national registries)
+        assert!(is_placeholder_organization("RoTLD"));
+        assert!(is_placeholder_organization("CNNIC"));
+        assert!(is_placeholder_organization("JPRS"));
+        assert!(is_placeholder_organization("CIRA"));
+        assert!(is_placeholder_organization("DNS Belgium"));
+        assert!(is_placeholder_organization(
+            "National Internet Exchange of India"
+        ));
+
         // Valid organization names
         assert!(!is_placeholder_organization("Microsoft Corporation"));
         assert!(!is_placeholder_organization("Google LLC"));
         assert!(!is_placeholder_organization("Anthropic PBC"));
+        assert!(!is_placeholder_organization("Amazon.com, Inc.")); // Amazon the company, NOT registrar
     }
 
     #[test]
@@ -754,20 +939,25 @@ mod tests {
         assert_eq!(clean_organization_name("Test\nCorp"), "Test Corp");
         assert_eq!(clean_organization_name("Test\r\nCorp"), "Test Corp");
         assert_eq!(clean_organization_name("Test\t\tCorp"), "Test Corp");
-        assert_eq!(clean_organization_name("  Multiple   Spaces  "), "Multiple Spaces");
+        assert_eq!(
+            clean_organization_name("  Multiple   Spaces  "),
+            "Multiple Spaces"
+        );
     }
 
     #[test]
     fn test_extract_organization_from_whois() {
         // Valid organization field
-        let whois_data = "Domain Name: example.com\nOrganization: Test Corporation\nRegistrar: GoDaddy";
+        let whois_data =
+            "Domain Name: example.com\nOrganization: Test Corporation\nRegistrar: GoDaddy";
         assert_eq!(
             extract_organization_from_whois(whois_data),
             Some("Test Corporation".to_string())
         );
 
         // Registrant Organization field
-        let whois_data = "Domain Name: example.com\nRegistrant Organization: Acme Inc\nRegistrar: NameCheap";
+        let whois_data =
+            "Domain Name: example.com\nRegistrant Organization: Acme Inc\nRegistrar: NameCheap";
         assert_eq!(
             extract_organization_from_whois(whois_data),
             Some("Acme Inc".to_string())
@@ -789,15 +979,40 @@ mod tests {
         // Registry operator as organization (BUG-006) — should be rejected
         let whois_data = "Domain Name: smtp.com\nOrganization: Verisign Global Registry Services\nRegistrar: Network Solutions, LLC";
         // Verisign is a registry operator, not the domain owner; registrar is also a placeholder
-        assert!(extract_organization_from_whois(whois_data).is_none(),
-            "Registry operator should be rejected as placeholder");
+        assert!(
+            extract_organization_from_whois(whois_data).is_none(),
+            "Registry operator should be rejected as placeholder"
+        );
 
         // Registry operator with valid registrar
-        let whois_data = "Domain Name: smtp.com\nOrganization: VeriSign, Inc.\nRegistrar: Acme Corp";
+        let whois_data =
+            "Domain Name: smtp.com\nOrganization: VeriSign, Inc.\nRegistrar: Acme Corp";
         // VeriSign is rejected, but Acme Corp is a valid registrar org name
         assert_eq!(
             extract_organization_from_whois(whois_data),
             Some("Acme Corp".to_string())
+        );
+
+        // Amazon Registrar as registrar — should be rejected (not the domain owner)
+        let whois_data = "Domain Name: example.com\nOrganization: REDACTED FOR PRIVACY\nRegistrar: Amazon Registrar, Inc.";
+        assert!(
+            extract_organization_from_whois(whois_data).is_none(),
+            "Amazon Registrar should be rejected as a registrar placeholder"
+        );
+
+        // ccTLD WHOIS returning country registry authority — registrant is rejected,
+        // but registrar may still return a non-placeholder value
+        let whois_data = "Domain Name: example.ro\nRegistrant: RoTLD";
+        assert!(
+            extract_organization_from_whois(whois_data).is_none(),
+            "RoTLD (Romania ccTLD registry) should be rejected as placeholder"
+        );
+
+        // When both registrant AND registrar are ccTLD-related, should return None
+        let whois_data = "Domain Name: example.ro\nRegistrant: RoTLD\nRegistrar: NIC.RO";
+        assert!(
+            extract_organization_from_whois(whois_data).is_none(),
+            "Both RoTLD and NIC.RO should be rejected as ccTLD registry placeholders"
         );
     }
 
@@ -825,16 +1040,17 @@ mod tests {
 
         // Each domain should have a result
         for domain in &domains {
-            assert!(results.contains_key(domain), "Missing result for {}", domain);
+            assert!(
+                results.contains_key(domain),
+                "Missing result for {}",
+                domain
+            );
         }
     }
 
     #[tokio::test]
     async fn test_prewarm_organization_cache_skips_cached() {
-        let domains = vec![
-            "cached.com".to_string(),
-            "new.com".to_string(),
-        ];
+        let domains = vec!["cached.com".to_string(), "new.com".to_string()];
 
         let mut existing_cache = HashMap::new();
         existing_cache.insert("cached.com".to_string(), "Cached Corp".to_string());
@@ -846,19 +1062,23 @@ mod tests {
             0.6,
             5,
             None,
-        ).await;
+        )
+        .await;
 
         // Only the uncached domain should be in results
-        assert!(!new_results.contains_key("cached.com"), "Cached domain should be skipped");
-        assert!(new_results.contains_key("new.com"), "New domain should be resolved");
+        assert!(
+            !new_results.contains_key("cached.com"),
+            "Cached domain should be skipped"
+        );
+        assert!(
+            new_results.contains_key("new.com"),
+            "New domain should be resolved"
+        );
     }
 
     #[tokio::test]
     async fn test_prewarm_organization_cache_all_cached() {
-        let domains = vec![
-            "cached1.com".to_string(),
-            "cached2.com".to_string(),
-        ];
+        let domains = vec!["cached1.com".to_string(), "cached2.com".to_string()];
 
         let mut existing_cache = HashMap::new();
         existing_cache.insert("cached1.com".to_string(), "Corp 1".to_string());
@@ -871,20 +1091,21 @@ mod tests {
             0.6,
             5,
             None,
-        ).await;
+        )
+        .await;
 
         // No new results since all were cached
-        assert!(new_results.is_empty(), "Should return empty when all domains cached");
+        assert!(
+            new_results.is_empty(),
+            "Should return empty when all domains cached"
+        );
     }
 
     #[tokio::test]
     async fn test_prewarm_with_progress_callback() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let domains = vec![
-            "test1.com".to_string(),
-            "test2.com".to_string(),
-        ];
+        let domains = vec!["test1.com".to_string(), "test2.com".to_string()];
 
         let existing_cache = HashMap::new();
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -894,17 +1115,16 @@ mod tests {
             call_count_clone.fetch_add(1, Ordering::SeqCst);
         };
 
-        let _results = prewarm_organization_cache(
-            domains,
-            &existing_cache,
-            false,
-            0.6,
-            5,
-            Some(callback),
-        ).await;
+        let _results =
+            prewarm_organization_cache(domains, &existing_cache, false, 0.6, 5, Some(callback))
+                .await;
 
         // Callback should be called for each domain
-        assert_eq!(call_count.load(Ordering::SeqCst), 2, "Progress callback should be called for each domain");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            2,
+            "Progress callback should be called for each domain"
+        );
     }
 
     #[tokio::test]
@@ -924,7 +1144,10 @@ mod tests {
         let result = get_organization_with_rate_limit("google.com", false, 0.6, Some(&ctx)).await;
         assert!(result.is_ok(), "Should successfully look up organization");
         let org = result.unwrap();
-        assert!(org.is_verified || !org.is_verified, "Result should be valid (verified or inferred)");
+        assert!(
+            org.is_verified || !org.is_verified,
+            "Result should be valid (verified or inferred)"
+        );
     }
 
     #[tokio::test]
@@ -940,23 +1163,20 @@ mod tests {
         };
         let ctx = RateLimitContext::from_config(&config);
 
-        let domains = vec![
-            "google.com".to_string(),
-            "microsoft.com".to_string(),
-        ];
+        let domains = vec!["google.com".to_string(), "microsoft.com".to_string()];
 
-        let results = batch_get_organizations_with_rate_limit(
-            domains.clone(),
-            false,
-            0.6,
-            2,
-            Some(&ctx),
-        ).await;
+        let results =
+            batch_get_organizations_with_rate_limit(domains.clone(), false, 0.6, 2, Some(&ctx))
+                .await;
 
         // All domains should have results
         assert_eq!(results.len(), 2);
         for domain in &domains {
-            assert!(results.contains_key(domain), "Missing result for {}", domain);
+            assert!(
+                results.contains_key(domain),
+                "Missing result for {}",
+                domain
+            );
         }
     }
 }

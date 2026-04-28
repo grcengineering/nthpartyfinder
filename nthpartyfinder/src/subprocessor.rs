@@ -1,20 +1,20 @@
+use crate::dns::LogFailure;
+use crate::rate_limit::RateLimitContext;
+use crate::vendor::RecordType;
 use anyhow::Result;
 use reqwest;
 use scraper::{Html, Selector};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use serde::{Deserialize, Serialize};
-use crate::dns::LogFailure;
-use crate::vendor::RecordType;
-use crate::rate_limit::RateLimitContext;
 
 use fancy_regex::Regex;
 // rayon available if needed for parallel processing
-use std::collections::BTreeMap;
 use once_cell::sync::Lazy;
+use std::collections::BTreeMap;
 
 /// Maximum allowed length for regex patterns loaded from cache files.
 /// Patterns exceeding this limit are rejected to mitigate ReDoS attacks (H006 fix).
@@ -30,7 +30,10 @@ const MAX_HTTP_BODY_BYTES: usize = 10 * 1024 * 1024;
 /// Reads the body in chunks, stopping at `max_bytes` to prevent
 /// memory exhaustion. Returns the body as a String (lossy UTF-8 conversion
 /// for truncated multi-byte boundaries).
-async fn read_response_body_capped(response: reqwest::Response, max_bytes: usize) -> Result<String> {
+async fn read_response_body_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String> {
     use futures::StreamExt;
 
     let mut body = Vec::with_capacity(max_bytes.min(256 * 1024)); // Pre-alloc up to 256KB
@@ -41,7 +44,10 @@ async fn read_response_body_capped(response: reqwest::Response, max_bytes: usize
         let chunk = chunk.map_err(|e| anyhow::anyhow!("Stream read error: {}", e))?;
         let remaining = max_bytes.saturating_sub(total);
         if remaining == 0 {
-            debug!("HTTP response truncated at {} bytes (limit: {})", total, max_bytes);
+            debug!(
+                "HTTP response truncated at {} bytes (limit: {})",
+                total, max_bytes
+            );
             break;
         }
         let take = chunk.len().min(remaining);
@@ -78,45 +84,26 @@ fn validate_and_compile_regex(pattern: &str) -> Option<regex::Regex> {
 // Safety (L006): All .unwrap() calls below are safe because the selector strings are
 // compile-time constants containing valid CSS selectors. Selector::parse() only fails
 // on malformed CSS selector syntax, which cannot occur with these hardcoded values.
-static DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("div").unwrap()
-});
+static DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("div").unwrap());
 
-static ALL_ELEMENTS_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("*").unwrap()
-});
+static ALL_ELEMENTS_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("*").unwrap());
 
-static PARAGRAPH_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("p").unwrap()
-});
+static PARAGRAPH_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("p").unwrap());
 
-static HEADER_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("thead tr, tr:first-child").unwrap()
-});
+static HEADER_ROW_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("thead tr, tr:first-child").unwrap());
 
-static HEADER_CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("th, td").unwrap()
-});
+static HEADER_CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("th, td").unwrap());
 
-static DATA_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("tbody tr, tr").unwrap()
-});
+static DATA_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("tbody tr, tr").unwrap());
 
-static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("td, th").unwrap()
-});
+static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("td, th").unwrap());
 
-static TH_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("th").unwrap()
-});
+static TH_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("th").unwrap());
 
-static PARAGRAPH_DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("p, div").unwrap()
-});
+static PARAGRAPH_DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("p, div").unwrap());
 
-static TR_SELECTOR: Lazy<Selector> = Lazy::new(|| {
-    Selector::parse("tr").unwrap()
-});
+static TR_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("tr").unwrap());
 
 /// Represents a discovered subprocessor from web page analysis
 #[derive(Debug, Clone)]
@@ -322,7 +309,7 @@ pub struct AdaptivePatterns {
 }
 
 /// A DOM selector with context and confidence
-#[derive(Debug, Clone, Serialize, Deserialize)]  
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomSelector {
     pub selector: String,
     pub selector_type: SelectorType,
@@ -333,7 +320,7 @@ pub struct DomSelector {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SelectorType {
     Table,
-    List, 
+    List,
     Container,
     DirectText,
 }
@@ -350,14 +337,14 @@ pub struct DetectedOrganization {
 #[derive(Debug, Clone)]
 pub struct DomContext {
     pub parent_tags: Vec<String>,
-    pub sibling_count: usize, 
+    pub sibling_count: usize,
     pub css_classes: Vec<String>,
     pub text_content: String,
     pub xpath_like: String,
 }
 
 /// Modular cache manager that stores working subprocessor URLs
-/// 
+///
 /// This cache only stores URLs that were successfully found to contain subprocessor data.
 /// The actual content is scraped fresh every time to detect changes.
 /// Each vendor domain gets its own JSON file in the cache/ directory.
@@ -392,52 +379,58 @@ pub struct SubprocessorCache {
 }
 
 impl SubprocessorCache {
-    const CACHE_VERSION: u32 = 2;  // Updated for extraction patterns support
+    const CACHE_VERSION: u32 = 2; // Updated for extraction patterns support
     const CACHE_DIR: &'static str = "cache";
-    
+
     pub fn new() -> Self {
         Self {
             cache_dir: PathBuf::from(Self::CACHE_DIR),
             cache_version: Self::CACHE_VERSION,
         }
     }
-    
+
     /// Load cache (just initialize the cache directory)
     pub async fn load() -> Self {
         let cache = Self::new();
-        
+
         // Create cache directory if it doesn't exist
         if let Err(e) = tokio::fs::create_dir_all(&cache.cache_dir).await {
             debug!("Failed to create cache directory: {}", e);
         } else {
-            debug!("Initialized modular cache system in directory: {:?}", cache.cache_dir);
+            debug!(
+                "Initialized modular cache system in directory: {:?}",
+                cache.cache_dir
+            );
         }
-        
+
         cache
     }
-    
+
     /// Check if a vendor domain has a cached working subprocessor URL
     pub async fn get_cached_subprocessor_url(&self, domain: &str) -> Option<String> {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         if let Ok(content) = tokio::fs::read_to_string(&cache_file).await {
             if let Ok(entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
                 if entry.cache_version == Self::CACHE_VERSION {
-                    debug!("Cache hit for domain {}: working URL {}", domain, entry.working_subprocessor_url);
+                    debug!(
+                        "Cache hit for domain {}: working URL {}",
+                        domain, entry.working_subprocessor_url
+                    );
                     return Some(entry.working_subprocessor_url);
                 } else {
                     debug!("Cache version mismatch for {}, ignoring cached URL", domain);
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Get cached extraction patterns for a domain, or default patterns if not cached
     pub async fn get_extraction_patterns(&self, domain: &str) -> ExtractionPatterns {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         if let Ok(content) = tokio::fs::read_to_string(&cache_file).await {
             if let Ok(entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
                 if entry.cache_version == Self::CACHE_VERSION {
@@ -448,8 +441,11 @@ impl SubprocessorCache {
                 }
             }
         }
-        
-        debug!("No domain-specific extraction patterns found for domain {}, returning empty patterns", domain);
+
+        debug!(
+            "No domain-specific extraction patterns found for domain {}, returning empty patterns",
+            domain
+        );
         // Return empty patterns instead of generic defaults - forces initial extraction with minimal patterns
         ExtractionPatterns {
             entity_column_selectors: vec!["th:contains('Entity Name')".to_string()], // Minimal bootstrap selector
@@ -462,11 +458,11 @@ impl SubprocessorCache {
             is_domain_specific: false,
         }
     }
-    
+
     /// Get cached entry with all metadata for a domain
     pub async fn get_cached_entry(&self, domain: &str) -> Option<SubprocessorUrlCacheEntry> {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         if let Ok(content) = tokio::fs::read_to_string(&cache_file).await {
             if let Ok(entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
                 if entry.cache_version == Self::CACHE_VERSION {
@@ -474,26 +470,27 @@ impl SubprocessorCache {
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Cache a working subprocessor URL for a domain
     pub async fn cache_working_url(&self, domain: &str, subprocessor_url: &str) -> Result<()> {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         // Load existing entry to preserve extraction patterns and metadata
-        let mut entry = self.get_cached_entry(domain).await.unwrap_or_else(|| {
-            SubprocessorUrlCacheEntry {
-                domain: domain.to_string(),
-                working_subprocessor_url: String::new(),
-                last_successful_access: 0,
-                cache_version: Self::CACHE_VERSION,
-                extraction_patterns: Some(ExtractionPatterns::default()),
-                extraction_metadata: None,
-                trust_center_strategy: None,
-            }
-        });
+        let mut entry =
+            self.get_cached_entry(domain)
+                .await
+                .unwrap_or_else(|| SubprocessorUrlCacheEntry {
+                    domain: domain.to_string(),
+                    working_subprocessor_url: String::new(),
+                    last_successful_access: 0,
+                    cache_version: Self::CACHE_VERSION,
+                    extraction_patterns: Some(ExtractionPatterns::default()),
+                    extraction_metadata: None,
+                    trust_center_strategy: None,
+                });
 
         // Update URL and timestamp while preserving patterns and metadata
         entry.working_subprocessor_url = subprocessor_url.to_string();
@@ -502,33 +499,39 @@ impl SubprocessorCache {
             .unwrap_or_default()
             .as_secs();
         entry.cache_version = Self::CACHE_VERSION;
-        
+
         let content = serde_json::to_string_pretty(&entry)?;
         tokio::fs::write(&cache_file, content).await?;
-        
+
         debug!("Cached working subprocessor URL for domain {} while preserving extraction patterns: {}", domain, subprocessor_url);
         Ok(())
     }
-    
+
     /// Update extraction patterns and metadata for a cached domain
-    pub async fn update_extraction_info(&self, domain: &str, patterns: ExtractionPatterns, metadata: ExtractionMetadata) -> Result<()> {
+    pub async fn update_extraction_info(
+        &self,
+        domain: &str,
+        patterns: ExtractionPatterns,
+        metadata: ExtractionMetadata,
+    ) -> Result<()> {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         // Load existing entry or create new one
-        let mut entry = self.get_cached_entry(domain).await.unwrap_or_else(|| {
-            SubprocessorUrlCacheEntry {
-                domain: domain.to_string(),
-                working_subprocessor_url: String::new(),
-                last_successful_access: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                cache_version: Self::CACHE_VERSION,
-                extraction_patterns: None,
-                extraction_metadata: None,
-                trust_center_strategy: None,
-            }
-        });
+        let mut entry =
+            self.get_cached_entry(domain)
+                .await
+                .unwrap_or_else(|| SubprocessorUrlCacheEntry {
+                    domain: domain.to_string(),
+                    working_subprocessor_url: String::new(),
+                    last_successful_access: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    cache_version: Self::CACHE_VERSION,
+                    extraction_patterns: None,
+                    extraction_metadata: None,
+                    trust_center_strategy: None,
+                });
 
         entry.extraction_patterns = Some(patterns);
         entry.extraction_metadata = Some(metadata);
@@ -536,18 +539,22 @@ impl SubprocessorCache {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         let content = serde_json::to_string_pretty(&entry)?;
         tokio::fs::write(&cache_file, content).await?;
-        
-        debug!("Updated extraction patterns and metadata for domain {}", domain);
+
+        debug!(
+            "Updated extraction patterns and metadata for domain {}",
+            domain
+        );
         Ok(())
     }
-    
+
     /// Get cache file path for a specific domain
     pub fn get_cache_file_path(&self, domain: &str) -> PathBuf {
         // Sanitize domain for filesystem - prevent path traversal (M005 fix)
-        let safe_domain: String = domain.chars()
+        let safe_domain: String = domain
+            .chars()
             .map(|c| match c {
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
                 _ => '_',
@@ -561,11 +568,11 @@ impl SubprocessorCache {
         }
         self.cache_dir.join(format!("{}.json", safe_domain))
     }
-    
+
     /// Clear cache for a specific domain
     pub async fn clear_domain_cache(&self, domain: &str) -> Result<bool> {
         let cache_file = self.get_cache_file_path(domain);
-        
+
         if cache_file.exists() {
             tokio::fs::remove_file(&cache_file).await?;
             debug!("Cleared cache for domain: {}", domain);
@@ -575,11 +582,11 @@ impl SubprocessorCache {
             Ok(false)
         }
     }
-    
+
     /// Clear all cached data
     pub async fn clear_all_cache(&self) -> Result<usize> {
         let mut count = 0;
-        
+
         if let Ok(mut entries) = tokio::fs::read_dir(&self.cache_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
@@ -591,14 +598,18 @@ impl SubprocessorCache {
                 }
             }
         }
-        
+
         debug!("Cleared {} cache files", count);
         Ok(count)
     }
 
     /// Add confirmed org-to-domain mappings to a domain's cache
     /// This saves user-confirmed mappings so they're used in future extractions
-    pub async fn add_confirmed_mappings(&self, domain: &str, mappings: &[(String, String)]) -> Result<()> {
+    pub async fn add_confirmed_mappings(
+        &self,
+        domain: &str,
+        mappings: &[(String, String)],
+    ) -> Result<()> {
         if mappings.is_empty() {
             return Ok(());
         }
@@ -607,14 +618,16 @@ impl SubprocessorCache {
 
         // Load existing entry or create new one
         let mut entry = if let Ok(content) = tokio::fs::read_to_string(&cache_file).await {
-            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content).unwrap_or_else(|_| SubprocessorUrlCacheEntry {
-                domain: domain.to_string(),
-                working_subprocessor_url: String::new(),
-                last_successful_access: 0,
-                cache_version: Self::CACHE_VERSION,
-                extraction_patterns: None,
-                extraction_metadata: None,
-                trust_center_strategy: None,
+            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content).unwrap_or_else(|_| {
+                SubprocessorUrlCacheEntry {
+                    domain: domain.to_string(),
+                    working_subprocessor_url: String::new(),
+                    last_successful_access: 0,
+                    cache_version: Self::CACHE_VERSION,
+                    extraction_patterns: None,
+                    extraction_metadata: None,
+                    trust_center_strategy: None,
+                }
             })
         } else {
             SubprocessorUrlCacheEntry {
@@ -629,30 +642,40 @@ impl SubprocessorCache {
         };
 
         // Ensure extraction_patterns and custom_extraction_rules exist
-        let patterns = entry.extraction_patterns.get_or_insert_with(|| ExtractionPatterns {
-            entity_column_selectors: Vec::new(),
-            entity_header_patterns: Vec::new(),
-            table_selectors: Vec::new(),
-            list_selectors: Vec::new(),
-            context_patterns: Vec::new(),
-            domain_extraction_patterns: Vec::new(),
-            custom_extraction_rules: None,
-            is_domain_specific: true,
-        });
+        let patterns = entry
+            .extraction_patterns
+            .get_or_insert_with(|| ExtractionPatterns {
+                entity_column_selectors: Vec::new(),
+                entity_header_patterns: Vec::new(),
+                table_selectors: Vec::new(),
+                list_selectors: Vec::new(),
+                context_patterns: Vec::new(),
+                domain_extraction_patterns: Vec::new(),
+                custom_extraction_rules: None,
+                is_domain_specific: true,
+            });
 
-        let custom_rules = patterns.custom_extraction_rules.get_or_insert_with(|| CustomExtractionRules {
-            direct_selectors: Vec::new(),
-            custom_regex_patterns: Vec::new(),
-            special_handling: None,
-        });
+        let custom_rules =
+            patterns
+                .custom_extraction_rules
+                .get_or_insert_with(|| CustomExtractionRules {
+                    direct_selectors: Vec::new(),
+                    custom_regex_patterns: Vec::new(),
+                    special_handling: None,
+                });
 
-        let special_handling = custom_rules.special_handling.get_or_insert_with(|| SpecialHandling {
-            skip_generic_methods: true,
-            custom_org_to_domain_mapping: Some(std::collections::HashMap::new()),
-            exclusion_patterns: Vec::new(),
-        });
+        let special_handling =
+            custom_rules
+                .special_handling
+                .get_or_insert_with(|| SpecialHandling {
+                    skip_generic_methods: true,
+                    custom_org_to_domain_mapping: Some(std::collections::HashMap::new()),
+                    exclusion_patterns: Vec::new(),
+                });
 
-        let org_mapping = special_handling.custom_org_to_domain_mapping.get_or_insert_with(std::collections::HashMap::new);
+        let org_mapping = special_handling
+            .custom_org_to_domain_mapping
+            .get_or_insert_with(std::collections::HashMap::new);
 
         // Add confirmed mappings with multiple variations of the org name
         for (org_name, domain_name) in mappings {
@@ -662,13 +685,19 @@ impl SubprocessorCache {
             // Add variations to improve matching
             // Remove trailing comma variation
             if org_lower.ends_with(',') {
-                org_mapping.insert(org_lower.trim_end_matches(',').to_string(), domain_name.clone());
+                org_mapping.insert(
+                    org_lower.trim_end_matches(',').to_string(),
+                    domain_name.clone(),
+                );
             } else {
                 org_mapping.insert(format!("{},", org_lower), domain_name.clone());
             }
 
             // Remove business suffixes for base name
-            let suffixes = [", inc.", ", llc", ", corp.", ", ltd.", " inc.", " llc", " corp.", " ltd.", ", inc", ", pbc"];
+            let suffixes = [
+                ", inc.", ", llc", ", corp.", ", ltd.", " inc.", " llc", " corp.", " ltd.",
+                ", inc", ", pbc",
+            ];
             for suffix in &suffixes {
                 if let Some(base) = org_lower.strip_suffix(suffix) {
                     org_mapping.insert(base.trim().to_string(), domain_name.clone());
@@ -682,7 +711,11 @@ impl SubprocessorCache {
         let content = serde_json::to_string_pretty(&entry)?;
         tokio::fs::write(&cache_file, content).await?;
 
-        debug!("Added {} confirmed mappings to cache for domain {}", mappings.len(), domain);
+        debug!(
+            "Added {} confirmed mappings to cache for domain {}",
+            mappings.len(),
+            domain
+        );
         Ok(())
     }
 }
@@ -745,9 +778,15 @@ impl SubprocessorAnalyzer {
     }
 
     /// Add confirmed mappings to the cache for a specific domain
-    pub async fn save_confirmed_mappings(&self, source_domain: &str, confirmed_mappings: &[(String, String)]) -> Result<()> {
+    pub async fn save_confirmed_mappings(
+        &self,
+        source_domain: &str,
+        confirmed_mappings: &[(String, String)],
+    ) -> Result<()> {
         let cache = self.cache.write().await;
-        cache.add_confirmed_mappings(source_domain, confirmed_mappings).await
+        cache
+            .add_confirmed_mappings(source_domain, confirmed_mappings)
+            .await
     }
 
     /// Try to fetch subprocessors from a Vanta trust center via GraphQL API.
@@ -758,11 +797,18 @@ impl SubprocessorAnalyzer {
         // Fetch the trust center HTML to extract the slugId
         let html_url = format!("https://{}/subprocessors", domain);
         debug!("Vanta: fetching HTML from {}", html_url);
-        let html_resp = match self.client.get(&html_url)
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        let html_resp = match self
+            .client
+            .get(&html_url)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
             .header("Accept-Language", "en-US,en;q=0.5")
             .header("Upgrade-Insecure-Requests", "1")
-            .send().await {
+            .send()
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => {
                 debug!("Vanta: failed to fetch HTML from {}: {}", html_url, e);
@@ -804,7 +850,10 @@ impl SubprocessorAnalyzer {
             }
         };
         if !manifest_resp.status().is_success() {
-            debug!("Vanta: manifest fetch failed with status {}", manifest_resp.status());
+            debug!(
+                "Vanta: manifest fetch failed with status {}",
+                manifest_resp.status()
+            );
             return None;
         }
         let manifest_body = manifest_resp.text().await.ok()?;
@@ -813,14 +862,15 @@ impl SubprocessorAnalyzer {
         let signed_at = manifest.get("signedAt")?.as_str()?;
         let operations = manifest.get("operations")?.as_object()?;
 
-        let (op_name, signature) = if let Some(sig) = operations.get("fetchTrustReportSubprocessorsForScrapers") {
-            ("fetchTrustReportSubprocessorsForScrapers", sig.as_str()?)
-        } else if let Some(sig) = operations.get("fetchDataForTrustReport") {
-            ("fetchDataForTrustReport", sig.as_str()?)
-        } else {
-            debug!("Vanta: no suitable GraphQL operation in manifest");
-            return None;
-        };
+        let (op_name, signature) =
+            if let Some(sig) = operations.get("fetchTrustReportSubprocessorsForScrapers") {
+                ("fetchTrustReportSubprocessorsForScrapers", sig.as_str()?)
+            } else if let Some(sig) = operations.get("fetchDataForTrustReport") {
+                ("fetchDataForTrustReport", sig.as_str()?)
+            } else {
+                debug!("Vanta: no suitable GraphQL operation in manifest");
+                return None;
+            };
 
         let query = format!(
             "query {}($slugId: String!) {{ trust {{ trustReportBySlugId(slugId: $slugId) {{ subprocessors {{ name url service location purpose }} }} }} }}",
@@ -839,7 +889,8 @@ impl SubprocessorAnalyzer {
             }
         });
 
-        let gql_resp = self.client
+        let gql_resp = self
+            .client
             .post("https://app.vanta.com/graphql")
             .json(&gql_body)
             .send()
@@ -847,7 +898,10 @@ impl SubprocessorAnalyzer {
             .ok()?;
 
         if !gql_resp.status().is_success() {
-            debug!("Vanta: GraphQL request failed with status {}", gql_resp.status());
+            debug!(
+                "Vanta: GraphQL request failed with status {}",
+                gql_resp.status()
+            );
             return None;
         }
 
@@ -856,7 +910,10 @@ impl SubprocessorAnalyzer {
     }
 
     /// Parse the Vanta GraphQL response into SubprocessorDomain results
-    fn parse_vanta_graphql_response(&self, gql_data: &serde_json::Value) -> Option<Vec<SubprocessorDomain>> {
+    fn parse_vanta_graphql_response(
+        &self,
+        gql_data: &serde_json::Value,
+    ) -> Option<Vec<SubprocessorDomain>> {
         let subprocessors = gql_data
             .get("data")?
             .get("trust")?
@@ -868,8 +925,17 @@ impl SubprocessorAnalyzer {
             .iter()
             .filter_map(|sp| {
                 let name = sp.get("name")?.as_str()?.trim().to_string();
-                let url = sp.get("url").and_then(|u| u.as_str()).unwrap_or("").trim().to_string();
-                let purpose = sp.get("purpose").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let url = sp
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let purpose = sp
+                    .get("purpose")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 let domain = if !url.is_empty() {
                     let cleaned = url
@@ -938,7 +1004,9 @@ impl SubprocessorAnalyzer {
         }
 
         // Method 3: Search raw HTML for the manifest URL pattern
-        let re = Regex::new(r#"https://assets\.vanta\.com/static/signature-manifest\.[a-f0-9]+\.json"#).ok()?;
+        let re =
+            Regex::new(r#"https://assets\.vanta\.com/static/signature-manifest\.[a-f0-9]+\.json"#)
+                .ok()?;
         if let Ok(Some(m)) = re.find(html) {
             return Some(m.as_str().to_string());
         }
@@ -947,7 +1015,11 @@ impl SubprocessorAnalyzer {
     }
 
     /// Analyze a domain for subprocessor pages and extract vendor relationships
-    pub async fn analyze_domain(&self, domain: &str, logger: Option<&dyn LogFailure>) -> Result<Vec<SubprocessorDomain>> {
+    pub async fn analyze_domain(
+        &self,
+        domain: &str,
+        logger: Option<&dyn LogFailure>,
+    ) -> Result<Vec<SubprocessorDomain>> {
         self.analyze_domain_with_logging(domain, logger, None).await
     }
 
@@ -958,12 +1030,19 @@ impl SubprocessorAnalyzer {
         logger: Option<&dyn LogFailure>,
         rate_limit_ctx: Option<&RateLimitContext>,
     ) -> Result<Vec<SubprocessorDomain>> {
-        self.analyze_domain_with_full_options(domain, logger, None, rate_limit_ctx).await
+        self.analyze_domain_with_full_options(domain, logger, None, rate_limit_ctx)
+            .await
     }
 
     /// Analyze a domain with additional debug logging for cache operations
-    pub async fn analyze_domain_with_logging(&self, domain: &str, logger: Option<&dyn LogFailure>, debug_logger: Option<&crate::logger::AnalysisLogger>) -> Result<Vec<SubprocessorDomain>> {
-        self.analyze_domain_with_full_options(domain, logger, debug_logger, None).await
+    pub async fn analyze_domain_with_logging(
+        &self,
+        domain: &str,
+        logger: Option<&dyn LogFailure>,
+        debug_logger: Option<&crate::logger::AnalysisLogger>,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        self.analyze_domain_with_full_options(domain, logger, debug_logger, None)
+            .await
     }
 
     /// Analyze a domain with all options including rate limiting
@@ -975,9 +1054,12 @@ impl SubprocessorAnalyzer {
         rate_limit_ctx: Option<&RateLimitContext>,
     ) -> Result<Vec<SubprocessorDomain>> {
         if let Some(debug_logger) = &debug_logger {
-            debug_logger.debug(&format!("🔍 Starting detailed subprocessor analysis for {}", domain));
+            debug_logger.debug(&format!(
+                "🔍 Starting detailed subprocessor analysis for {}",
+                domain
+            ));
         }
-        
+
         // Check if we have a cached working URL for this domain
         let cached_url = {
             let cache = self.cache.read().await;
@@ -986,45 +1068,63 @@ impl SubprocessorAnalyzer {
 
         if let Some(url) = cached_url {
             debug!("Cache hit for domain {}: using cached URL {}", domain, url);
-            debug!("📋 CACHE HIT PATH: Using cached URL for {}: {}", domain, url);
+            debug!(
+                "📋 CACHE HIT PATH: Using cached URL for {}: {}",
+                domain, url
+            );
             if let Some(debug_logger) = &debug_logger {
                 debug_logger.log_cache_hit_organization(domain, 1); // Just indicating cache hit
                 debug_logger.debug(&format!("🔗 Using cached URL: {}", url));
                 debug_logger.debug(&format!("🚀 Making HTTP request to cached URL: {}", url));
             }
-            
+
             // Always scrape fresh content from cached URL
             // Apply HTTP rate limiting before the request
             if let Some(ctx) = rate_limit_ctx {
                 ctx.http_limiter.acquire(domain).await;
             }
             let request_start = std::time::Instant::now();
-            debug!("🔥🔥🔥 CACHED PATH: ABOUT TO CALL scrape_subprocessor_page for: {}", url);
+            debug!(
+                "🔥🔥🔥 CACHED PATH: ABOUT TO CALL scrape_subprocessor_page for: {}",
+                url
+            );
             match self.scrape_subprocessor_page(&url, logger, domain).await {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
-                    debug!("Scraped {} subprocessors from cached URL: {}", subprocessors.len(), url);
+                    debug!(
+                        "Scraped {} subprocessors from cached URL: {}",
+                        subprocessors.len(),
+                        url
+                    );
                     if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("✅ HTTP request to cached URL {} completed in {:.2}s (found {} subprocessors)", 
+                        debug_logger.debug(&format!("✅ HTTP request to cached URL {} completed in {:.2}s (found {} subprocessors)",
                             url, elapsed.as_secs_f64(), subprocessors.len()));
                     }
-                    
+
                     // Update the cache access time regardless of whether results are empty
                     let cache = self.cache.read().await;
                     if let Err(e) = cache.cache_working_url(domain, &url).await {
                         debug!("Failed to update cache timestamp for {}: {}", domain, e);
                     }
-                    
+
                     // Return results even if empty - empty results are valid and should be cached
                     if !subprocessors.is_empty() {
-                        debug!("Cached URL {} returned {} subprocessors for {}", url, subprocessors.len(), domain);
+                        debug!(
+                            "Cached URL {} returned {} subprocessors for {}",
+                            url,
+                            subprocessors.len(),
+                            domain
+                        );
                     } else {
                         debug!("Cached URL {} returned no subprocessors for {} (this is valid and cached)", url, domain);
                     }
                     return Ok(filter_subprocessor_results(subprocessors));
                 }
                 Err(e) => {
-                    debug!("Cached URL {} failed for {}: {}, will try other URLs", url, domain, e);
+                    debug!(
+                        "Cached URL {} failed for {}: {}, will try other URLs",
+                        url, domain, e
+                    );
                     if let Some(debug_logger) = &debug_logger {
                         debug_logger.debug(&format!("❌ Cached URL {} failed: {}", url, e));
                     }
@@ -1046,37 +1146,59 @@ impl SubprocessorAnalyzer {
         // Note: Vanta trust center detection happens inside scrape_subprocessor_page
         // when it detects "assets.vanta.com" in the HTML response
         let subprocessor_urls = self.generate_subprocessor_urls(domain);
-        
+
         // Limit URL testing to prevent performance degradation
         const MAX_URLS_TO_TEST: usize = 25;
         const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(15);
-        
+
         let urls_to_test = if subprocessor_urls.len() > MAX_URLS_TO_TEST {
-            debug!("Limiting URL testing to first {} URLs out of {} generated for performance", MAX_URLS_TO_TEST, subprocessor_urls.len());
+            debug!(
+                "Limiting URL testing to first {} URLs out of {} generated for performance",
+                MAX_URLS_TO_TEST,
+                subprocessor_urls.len()
+            );
             &subprocessor_urls[0..MAX_URLS_TO_TEST]
         } else {
             &subprocessor_urls
         };
-        
+
         if let Some(debug_logger) = &debug_logger {
-            debug_logger.debug(&format!("🌐 Testing {} subprocessor URLs for {} (limited from {})", 
-                urls_to_test.len(), domain, subprocessor_urls.len()));
+            debug_logger.debug(&format!(
+                "🌐 Testing {} subprocessor URLs for {} (limited from {})",
+                urls_to_test.len(),
+                domain,
+                subprocessor_urls.len()
+            ));
         }
-        debug!("Analyzing {} potential subprocessor URLs for domain: {}", urls_to_test.len(), domain);
+        debug!(
+            "Analyzing {} potential subprocessor URLs for domain: {}",
+            urls_to_test.len(),
+            domain
+        );
 
         let analysis_start = std::time::Instant::now();
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Check if we've exceeded our time budget
             if analysis_start.elapsed() > MAX_ANALYSIS_TIME {
-                debug!("Subprocessor analysis time limit exceeded for {}, stopping URL discovery", domain);
+                debug!(
+                    "Subprocessor analysis time limit exceeded for {}, stopping URL discovery",
+                    domain
+                );
                 if let Some(debug_logger) = &debug_logger {
-                    debug_logger.debug(&format!("⏰ Time limit exceeded after {:.2}s, stopping URL discovery", analysis_start.elapsed().as_secs_f64()));
+                    debug_logger.debug(&format!(
+                        "⏰ Time limit exceeded after {:.2}s, stopping URL discovery",
+                        analysis_start.elapsed().as_secs_f64()
+                    ));
                 }
                 break;
             }
             if let Some(debug_logger) = &debug_logger {
-                debug_logger.debug(&format!("🔗 Checking URL {}/{}: {}",
-                    url_index + 1, urls_to_test.len(), url));
+                debug_logger.debug(&format!(
+                    "🔗 Checking URL {}/{}: {}",
+                    url_index + 1,
+                    urls_to_test.len(),
+                    url
+                ));
                 debug_logger.debug(&format!("🚀 Making HTTP request to: {}", url));
             }
 
@@ -1089,10 +1211,18 @@ impl SubprocessorAnalyzer {
             match self.scrape_subprocessor_page(&url, logger, domain).await {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
-                    debug!("Found {} subprocessors from URL: {}", subprocessors.len(), url);
+                    debug!(
+                        "Found {} subprocessors from URL: {}",
+                        subprocessors.len(),
+                        url
+                    );
                     if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("✅ HTTP request to {} completed in {:.2}s (found {} subprocessors)",
-                            url, elapsed.as_secs_f64(), subprocessors.len()));
+                        debug_logger.debug(&format!(
+                            "✅ HTTP request to {} completed in {:.2}s (found {} subprocessors)",
+                            url,
+                            elapsed.as_secs_f64(),
+                            subprocessors.len()
+                        ));
                     }
 
                     if !subprocessors.is_empty() {
@@ -1102,24 +1232,38 @@ impl SubprocessorAnalyzer {
                             if let Err(e) = cache.cache_working_url(domain, &url).await {
                                 debug!("Failed to cache working URL for {}: {}", domain, e);
                             } else {
-                                debug!("Successfully cached URL for {}: {} (found {} subprocessors)", domain, url, subprocessors.len());
+                                debug!(
+                                    "Successfully cached URL for {}: {} (found {} subprocessors)",
+                                    domain,
+                                    url,
+                                    subprocessors.len()
+                                );
                             }
                         }
                     }
 
                     if !subprocessors.is_empty() {
-                        debug!("Found working subprocessor URL for {}: {} - stopping URL discovery", domain, url);
+                        debug!(
+                            "Found working subprocessor URL for {}: {} - stopping URL discovery",
+                            domain, url
+                        );
                         if let Some(debug_logger) = &debug_logger {
-                            debug_logger.debug(&format!("🎯 SUCCESS: Found {} subprocessors, stopping URL discovery", subprocessors.len()));
+                            debug_logger.debug(&format!(
+                                "🎯 SUCCESS: Found {} subprocessors, stopping URL discovery",
+                                subprocessors.len()
+                            ));
                         }
                         return Ok(filter_subprocessor_results(subprocessors));
                     } else {
                         // HTTP succeeded but no subprocessors found - continue trying other URLs
                         debug!("HTTP request to {} succeeded but found 0 subprocessors - continuing to test other URLs", url);
                         if let Some(debug_logger) = &debug_logger {
-                            debug_logger.debug(&format!("✅ No subprocessors found on {} (continuing to next URL)", url));
+                            debug_logger.debug(&format!(
+                                "✅ No subprocessors found on {} (continuing to next URL)",
+                                url
+                            ));
                         }
-                        
+
                         // Continue to the next URL instead of returning
                         continue;
                     }
@@ -1129,12 +1273,22 @@ impl SubprocessorAnalyzer {
                     let error_msg = e.to_string();
                     debug!("Failed to scrape {}: {}", url, error_msg);
                     if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("❌ HTTP request to {} failed in {:.2}s: {}", 
-                            url, elapsed.as_secs_f64(), error_msg));
+                        debug_logger.debug(&format!(
+                            "❌ HTTP request to {} failed in {:.2}s: {}",
+                            url,
+                            elapsed.as_secs_f64(),
+                            error_msg
+                        ));
                     }
-                    
+
                     if let Some(logger) = logger {
-                        logger.log_failure(domain, "HTTP::SUBPROCESSOR", &url, None, &format!("Failed to scrape: {}", e));
+                        logger.log_failure(
+                            domain,
+                            "HTTP::SUBPROCESSOR",
+                            &url,
+                            None,
+                            &format!("Failed to scrape: {}", e),
+                        );
                     }
                 }
             }
@@ -1144,12 +1298,12 @@ impl SubprocessorAnalyzer {
         debug!("No subprocessor pages found for domain: {}", domain);
         Ok(Vec::new())
     }
-    
+
     /// Get a reference to the cache for external access
     pub fn get_cache(&self) -> Arc<RwLock<SubprocessorCache>> {
         self.cache.clone()
     }
-    
+
     /// Clear cache for a specific domain (removes their cache file)
     pub async fn clear_organization_cache(&self, domain: &str) -> bool {
         let cache = self.cache.read().await;
@@ -1161,7 +1315,7 @@ impl SubprocessorAnalyzer {
             }
         }
     }
-    
+
     /// Clear all cache files (force fresh analysis for all domains)
     pub async fn clear_all_cache(&self) {
         let cache = self.cache.read().await;
@@ -1227,7 +1381,7 @@ impl SubprocessorAnalyzer {
             format!("https://{}/legal/service-providers", domain),      // Stripe: https://stripe.com/legal/service-providers
             format!("https://www.{}/legal/service-providers", domain),  // Stripe variant
             format!("https://www.{}/en/trust/subprocessors/", domain),  // Zoom: redirects but pattern seen
-            
+
             // Direct subprocessor pages (keep early for common patterns)
             format!("https://{}/subprocessors", domain),
             format!("https://{}/sub-processors", domain),
@@ -1238,7 +1392,7 @@ impl SubprocessorAnalyzer {
             format!("https://{}/sub-processors.html", domain),
             format!("https://www.{}/subprocessors.html", domain),
             format!("https://www.{}/sub-processors.html", domain),
-            
+
             // Legal/Privacy section patterns
             format!("https://{}/legal/subprocessors", domain),
             format!("https://www.{}/legal/subprocessors", domain),
@@ -1253,8 +1407,8 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/privacy/sub-processors.html", domain),
             format!("https://{}/privacy/subprocessors.html", domain),
             format!("https://www.{}/privacy/subprocessors.html", domain),
-            
-            // Policy section patterns  
+
+            // Policy section patterns
             format!("https://{}/policies/subprocessors", domain),
             format!("https://www.{}/policies/subprocessors", domain),
             format!("https://{}/policies/subprocessors/", domain),  // Canva pattern with trailing slash
@@ -1263,7 +1417,7 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/policies/sub-processor-list", domain),
             format!("https://{}/policy/subprocessors", domain),
             format!("https://www.{}/policy/subprocessors", domain),
-            
+
             // Trust/Security center patterns
             format!("https://{}/trust/subprocessors", domain),
             format!("https://www.{}/trust/subprocessors", domain),
@@ -1272,46 +1426,46 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/security/subprocessors", domain),
             format!("https://{}/trust-center/subprocessors", domain),
             format!("https://www.{}/trust-center/subprocessors", domain),
-            
+
             // NEW: Combined trust/privacy patterns (DocuSign)
             format!("https://{}/trust/privacy/subprocessors-list", domain),
             format!("https://www.{}/trust/privacy/subprocessors-list", domain),
-            
+
             // NEW: Subdomain patterns found in Perplexity data
             format!("https://workspace.{}/terms/subprocessors/", domain),  // Google Workspace
             format!("https://legal.{}/sub-processors-page", domain),  // HubSpot
             format!("https://go.{}/fwlink/p/?linkid=2096306", domain),  // Microsoft redirect
             format!("https://compliance.{}/en/services/{}", base_domain, base_domain),  // Heroku/Salesforce
             format!("https://subprocessor.{}-legal.com/subprocessorlist.html", base_domain),  // Dropbox
-            
+
             // NEW: Company-specific patterns
             format!("https://www.{}/{}-subprocessors/", domain, base_domain),  // JAMF pattern
-            
+
             // NEW: Enterprise/business section patterns (Apple)
             format!("https://www.{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf", domain),
             format!("https://{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf", domain),
-            
+
             // NEW: Localized patterns (Sage)
             format!("https://www.{}/en-gb/trust-security/privacy/customer-due-diligence/", domain),
             format!("https://{}/en-gb/trust-security/privacy/customer-due-diligence/", domain),
             format!("https://www.{}/en-us/trust-security/privacy/customer-due-diligence/", domain),
-            
+
             // Company/About section patterns
             format!("https://{}/company/subprocessors", domain),
             format!("https://www.{}/company/subprocessors", domain),
             format!("https://{}/about/subprocessors", domain),
             format!("https://www.{}/about/subprocessors", domain),
-            
+
             // GDPR-specific patterns
             format!("https://{}/gdpr/subprocessors", domain),
             format!("https://www.{}/gdpr/subprocessors", domain),
             format!("https://{}/data-protection/subprocessors", domain),
             format!("https://www.{}/data-protection/subprocessors", domain),
-            
+
             // DPA (Data Processing Agreement) patterns
             format!("https://{}/dpa/subprocessors", domain),
             format!("https://www.{}/dpa/subprocessors", domain),
-            
+
             // Vendor/Third-party patterns
             format!("https://{}/vendors", domain),
             format!("https://www.{}/vendors", domain),
@@ -1559,40 +1713,67 @@ impl SubprocessorAnalyzer {
             format!("https://{}.vanta.com/trust/subprocessors", company_name),
             // Vanta app-hosted (some companies use app subdomain)
             format!("https://app.vanta.com/{}/trust/subprocessors", company_name),
-            format!("https://app.vanta.com/{}/trust-center/subprocessors", company_name),
+            format!(
+                "https://app.vanta.com/{}/trust-center/subprocessors",
+                company_name
+            ),
         ]);
 
         // Drata Trust Center patterns
         // Drata trust centers: https://[company].drata.com/trust-center/subprocessors
         //                     https://trust.drata.com/[company]/subprocessors
         urls.extend(vec![
-            format!("https://{}.drata.com/trust-center/subprocessors", company_name),
-            format!("https://{}.drata.com/trust-center/sub-processors", company_name),
+            format!(
+                "https://{}.drata.com/trust-center/subprocessors",
+                company_name
+            ),
+            format!(
+                "https://{}.drata.com/trust-center/sub-processors",
+                company_name
+            ),
             format!("https://{}.drata.com/trust-center/vendors", company_name),
             format!("https://{}.drata.com/trust-center", company_name), // Main page may list
             format!("https://{}.drata.com/subprocessors", company_name),
             format!("https://trust.drata.com/{}/subprocessors", company_name),
-            format!("https://app.drata.com/{}/trust-center/subprocessors", company_name),
+            format!(
+                "https://app.drata.com/{}/trust-center/subprocessors",
+                company_name
+            ),
         ]);
 
         // SecureFrame Trust Center patterns
         // SecureFrame trust centers: https://[company].secureframe.com/trust/subprocessors
         //                           https://trust.secureframe.com/[company]/subprocessors
         urls.extend(vec![
-            format!("https://{}.secureframe.com/trust/subprocessors", company_name),
-            format!("https://{}.secureframe.com/trust/sub-processors", company_name),
+            format!(
+                "https://{}.secureframe.com/trust/subprocessors",
+                company_name
+            ),
+            format!(
+                "https://{}.secureframe.com/trust/sub-processors",
+                company_name
+            ),
             format!("https://{}.secureframe.com/trust/vendors", company_name),
             format!("https://{}.secureframe.com/trust", company_name),
             format!("https://{}.secureframe.com/subprocessors", company_name),
-            format!("https://trust.secureframe.com/{}/subprocessors", company_name),
-            format!("https://app.secureframe.com/{}/trust/subprocessors", company_name),
+            format!(
+                "https://trust.secureframe.com/{}/subprocessors",
+                company_name
+            ),
+            format!(
+                "https://app.secureframe.com/{}/trust/subprocessors",
+                company_name
+            ),
         ]);
 
         // Thoropass (formerly Laika) Trust Center patterns
         // Thoropass trust centers: https://[company].thoropass.com/trust/subprocessors
         urls.extend(vec![
             format!("https://{}.thoropass.com/trust/subprocessors", company_name),
-            format!("https://{}.thoropass.com/trust/sub-processors", company_name),
+            format!(
+                "https://{}.thoropass.com/trust/sub-processors",
+                company_name
+            ),
             format!("https://{}.thoropass.com/trust/vendors", company_name),
             format!("https://{}.thoropass.com/trust", company_name),
             format!("https://{}.thoropass.com/subprocessors", company_name),
@@ -1619,9 +1800,18 @@ impl SubprocessorAnalyzer {
         // Skip when domain already is a trust subdomain to avoid trust.trust.{domain}
         if !is_trust_subdomain {
             urls.extend(vec![
-                format!("https://trust.{}/product/{}/subprocessors", base_domain, company_name),
-                format!("https://trust.{}/product/{}/sub-processors", base_domain, company_name),
-                format!("https://trust.{}/product/{}/vendors", base_domain, company_name),
+                format!(
+                    "https://trust.{}/product/{}/subprocessors",
+                    base_domain, company_name
+                ),
+                format!(
+                    "https://trust.{}/product/{}/sub-processors",
+                    base_domain, company_name
+                ),
+                format!(
+                    "https://trust.{}/product/{}/vendors",
+                    base_domain, company_name
+                ),
             ]);
         }
 
@@ -1629,10 +1819,16 @@ impl SubprocessorAnalyzer {
         // OneTrust provides various trust center solutions
         urls.extend(vec![
             format!("https://{}.onetrust.com/trust/subprocessors", company_name),
-            format!("https://{}.onetrust.com/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.onetrust.com/trust-center/subprocessors",
+                company_name
+            ),
             format!("https://{}.onetrust.com/subprocessors", company_name),
             format!("https://privacyportal.{}.com/subprocessors", company_name), // OneTrust privacy portal pattern
-            format!("https://privacyportal-{}.onetrust.com/subprocessors", company_name),
+            format!(
+                "https://privacyportal-{}.onetrust.com/subprocessors",
+                company_name
+            ),
         ]);
 
         // Conveyor Trust Center patterns
@@ -1649,34 +1845,52 @@ impl SubprocessorAnalyzer {
         // Scytale Trust Center patterns
         urls.extend(vec![
             format!("https://{}.scytale.ai/trust/subprocessors", company_name),
-            format!("https://{}.scytale.ai/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.scytale.ai/trust-center/subprocessors",
+                company_name
+            ),
             format!("https://trust.scytale.ai/{}/subprocessors", company_name),
         ]);
 
         // Sprinto Trust Center patterns
         urls.extend(vec![
             format!("https://{}.sprinto.com/trust/subprocessors", company_name),
-            format!("https://{}.sprinto.com/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.sprinto.com/trust-center/subprocessors",
+                company_name
+            ),
             format!("https://trust.sprinto.com/{}/subprocessors", company_name),
         ]);
 
         // Scrut Trust Center patterns
         urls.extend(vec![
             format!("https://{}.scrut.io/trust/subprocessors", company_name),
-            format!("https://{}.scrut.io/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.scrut.io/trust-center/subprocessors",
+                company_name
+            ),
             format!("https://trust.scrut.io/{}/subprocessors", company_name),
         ]);
 
         // Strike Graph Trust Center patterns
         urls.extend(vec![
-            format!("https://{}.strikegraph.com/trust/subprocessors", company_name),
-            format!("https://{}.strikegraph.com/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.strikegraph.com/trust/subprocessors",
+                company_name
+            ),
+            format!(
+                "https://{}.strikegraph.com/trust-center/subprocessors",
+                company_name
+            ),
         ]);
 
         // Anecdotes Trust Center patterns
         urls.extend(vec![
             format!("https://{}.anecdotes.ai/trust/subprocessors", company_name),
-            format!("https://{}.anecdotes.ai/trust-center/subprocessors", company_name),
+            format!(
+                "https://{}.anecdotes.ai/trust-center/subprocessors",
+                company_name
+            ),
         ]);
 
         // Delve (now part of OneTrust) patterns
@@ -1684,13 +1898,19 @@ impl SubprocessorAnalyzer {
             format!("https://{}.delve.com/trust/subprocessors", company_name),
             format!("https://trust.delve.com/{}/subprocessors", company_name),
         ]);
-        
+
         urls
     }
 
     /// Scrape a single subprocessor page and extract vendor domains
-    pub async fn scrape_subprocessor_page(&self, url: &str, logger: Option<&dyn LogFailure>, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
-        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None).await
+    pub async fn scrape_subprocessor_page(
+        &self,
+        url: &str,
+        logger: Option<&dyn LogFailure>,
+        source_domain: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None)
+            .await
     }
 
     /// Scrape a single subprocessor page with configurable retry and backoff
@@ -1702,7 +1922,10 @@ impl SubprocessorAnalyzer {
         rate_limit_ctx: Option<&RateLimitContext>,
     ) -> Result<Vec<SubprocessorDomain>> {
         debug!("🔥🔥🔥 SCRAPE_SUBPROCESSOR_PAGE CALLED: {}", url);
-        debug!("🚀🚀🚀 STARTING DETAILED SCRAPE of subprocessor page: {}", url);
+        debug!(
+            "🚀🚀🚀 STARTING DETAILED SCRAPE of subprocessor page: {}",
+            url
+        );
 
         // Get retry configuration from rate_limit_ctx or use defaults
         let (max_retries, backoff_config) = if let Some(ctx) = rate_limit_ctx {
@@ -1716,7 +1939,10 @@ impl SubprocessorAnalyzer {
         let mut response = None;
 
         for attempt in 1..=max_retries {
-            debug!("HTTP request attempt {}/{} for URL: {}", attempt, max_retries, url);
+            debug!(
+                "HTTP request attempt {}/{} for URL: {}",
+                attempt, max_retries, url
+            );
             match self.client.get(url)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9")
@@ -1749,29 +1975,39 @@ impl SubprocessorAnalyzer {
         }
 
         let response = response.ok_or_else(|| {
-            anyhow::anyhow!("All {} HTTP attempts failed for URL {}: {}", max_retries, url, last_error.unwrap())
+            anyhow::anyhow!(
+                "All {} HTTP attempts failed for URL {}: {}",
+                max_retries,
+                url,
+                last_error.unwrap()
+            )
         })?;
-        
+
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
         }
 
         // Security: Check content type before processing
-        let content_type = response.headers()
+        let content_type = response
+            .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        
+
         debug!("🔥🔥🔥 CONTENT-TYPE: {}", content_type);
-        
+
         // Accept HTML, XHTML, and PDF documents
-        let is_html = content_type.starts_with("text/html") || content_type.starts_with("application/xhtml");
+        let is_html =
+            content_type.starts_with("text/html") || content_type.starts_with("application/xhtml");
         let is_pdf = content_type.starts_with("application/pdf");
-        
+
         debug!("🔥🔥🔥 IS_HTML: {}, IS_PDF: {}", is_html, is_pdf);
-        
+
         if !is_html && !is_pdf {
-            return Err(anyhow::anyhow!("Invalid content type: {} (expected HTML or PDF)", content_type));
+            return Err(anyhow::anyhow!(
+                "Invalid content type: {} (expected HTML or PDF)",
+                content_type
+            ));
         }
 
         // Stream the response body with size cap to prevent memory exhaustion
@@ -1780,16 +2016,25 @@ impl SubprocessorAnalyzer {
         // Handle PDF documents differently than HTML
         if is_pdf {
             debug!("Processing PDF document from URL: {}", url);
-            return self.extract_from_pdf_content(&content, url, source_domain).await;
+            return self
+                .extract_from_pdf_content(&content, url, source_domain)
+                .await;
         }
 
         // ================================================================
         // Vanta Trust Center: Detect and fetch via GraphQL API
         // ================================================================
         if content.contains("assets.vanta.com") {
-            debug!("Vanta trust center detected in HTML for {}, trying GraphQL API", source_domain);
+            debug!(
+                "Vanta trust center detected in HTML for {}, trying GraphQL API",
+                source_domain
+            );
             if let Some(results) = self.try_vanta_graphql_from_html(&content).await {
-                debug!("Vanta GraphQL returned {} subprocessors for {}", results.len(), source_domain);
+                debug!(
+                    "Vanta GraphQL returned {} subprocessors for {}",
+                    results.len(),
+                    source_domain
+                );
                 return Ok(results);
             }
         }
@@ -1810,16 +2055,31 @@ impl SubprocessorAnalyzer {
                 let is_stale = strategy.discovery_metadata.is_stale(30);
                 let is_unreliable = strategy.discovery_metadata.is_unreliable(3);
                 if !is_stale && !is_unreliable {
-                    debug!("Found cached trust center strategy for {}, executing", source_domain);
+                    debug!(
+                        "Found cached trust center strategy for {}, executing",
+                        source_domain
+                    );
                     match crate::trust_center::executor::execute_strategy(
-                        strategy, &self.client, Some(&content), source_domain
-                    ).await {
+                        strategy,
+                        &self.client,
+                        Some(&content),
+                        source_domain,
+                    )
+                    .await
+                    {
                         Ok(vendors) if !vendors.is_empty() => {
-                            debug!("Trust center strategy returned {} vendors for {}", vendors.len(), source_domain);
+                            debug!(
+                                "Trust center strategy returned {} vendors for {}",
+                                vendors.len(),
+                                source_domain
+                            );
                             return Ok(vendors);
                         }
                         Ok(_) => {
-                            debug!("Trust center strategy returned no vendors for {}", source_domain);
+                            debug!(
+                                "Trust center strategy returned no vendors for {}",
+                                source_domain
+                            );
                         }
                         Err(e) => {
                             debug!("Trust center strategy failed for {}: {}", source_domain, e);
@@ -1829,19 +2089,37 @@ impl SubprocessorAnalyzer {
             }
 
             // If no cached strategy and HTML looks like an SPA, try auto-discovery
-            if cached_strategy.is_none() && crate::trust_center::discovery::is_likely_spa(&content) {
-                debug!("SPA detected for {}, running trust center auto-discovery", source_domain);
+            if cached_strategy.is_none() && crate::trust_center::discovery::is_likely_spa(&content)
+            {
+                debug!(
+                    "SPA detected for {}, running trust center auto-discovery",
+                    source_domain
+                );
                 match crate::trust_center::discovery::discover_strategy(url, &content).await {
                     Ok(Some(strategy)) => {
-                        debug!("Auto-discovered trust center strategy for {}", source_domain);
+                        debug!(
+                            "Auto-discovered trust center strategy for {}",
+                            source_domain
+                        );
                         match crate::trust_center::executor::execute_strategy(
-                            &strategy, &self.client, Some(&content), source_domain
-                        ).await {
+                            &strategy,
+                            &self.client,
+                            Some(&content),
+                            source_domain,
+                        )
+                        .await
+                        {
                             Ok(vendors) if !vendors.is_empty() => {
-                                debug!("Auto-discovered strategy returned {} vendors for {}", vendors.len(), source_domain);
+                                debug!(
+                                    "Auto-discovered strategy returned {} vendors for {}",
+                                    vendors.len(),
+                                    source_domain
+                                );
                                 // Cache the strategy for future use
                                 let cache = self.cache.write().await;
-                                if let Ok(mut entry) = cache.get_cached_entry(source_domain).await
+                                if let Ok(mut entry) = cache
+                                    .get_cached_entry(source_domain)
+                                    .await
                                     .ok_or_else(|| anyhow::anyhow!("no cache entry"))
                                 {
                                     entry.trust_center_strategy = Some(strategy);
@@ -1849,12 +2127,16 @@ impl SubprocessorAnalyzer {
                                     let _ = tokio::fs::write(
                                         &cache_file,
                                         serde_json::to_string_pretty(&entry).unwrap_or_default(),
-                                    ).await;
+                                    )
+                                    .await;
                                 }
                                 return Ok(vendors);
                             }
                             Ok(_) => {
-                                debug!("Auto-discovered strategy returned no vendors for {}", source_domain);
+                                debug!(
+                                    "Auto-discovered strategy returned no vendors for {}",
+                                    source_domain
+                                );
                             }
                             Err(e) => {
                                 debug!("Auto-discovered strategy execution failed: {}", e);
@@ -1865,7 +2147,10 @@ impl SubprocessorAnalyzer {
                         debug!("No trust center strategy discovered for {}", source_domain);
                     }
                     Err(e) => {
-                        debug!("Trust center auto-discovery failed for {}: {}", source_domain, e);
+                        debug!(
+                            "Trust center auto-discovery failed for {}: {}",
+                            source_domain, e
+                        );
                     }
                 }
             }
@@ -1881,7 +2166,9 @@ impl SubprocessorAnalyzer {
             let url_for_browser = url.to_string();
             match tokio::task::spawn_blocking(move || -> Result<String> {
                 let guard = crate::browser_pool::create_browser()?;
-                let tab = guard.browser.new_tab()
+                let tab = guard
+                    .browser
+                    .new_tab()
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
                 tab.navigate_to(&url_for_browser)
                     .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
@@ -1889,24 +2176,41 @@ impl SubprocessorAnalyzer {
                     .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
                 // Wait for JavaScript to render content
                 std::thread::sleep(Duration::from_millis(5000));
-                let rendered = tab.get_content()
+                let rendered = tab
+                    .get_content()
                     .map_err(|e| anyhow::anyhow!("Failed to get rendered content: {}", e))?;
                 Ok(rendered)
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(rendered)) if rendered.len() > content.len() => {
-                    debug!("Browser rendered {} chars (was {} static) for {}", rendered.len(), content.len(), source_domain);
+                    debug!(
+                        "Browser rendered {} chars (was {} static) for {}",
+                        rendered.len(),
+                        content.len(),
+                        source_domain
+                    );
                     rendered
                 }
                 Ok(Ok(_rendered)) => {
-                    debug!("Browser rendering didn't produce larger content for {}, using static HTML", source_domain);
+                    debug!(
+                        "Browser rendering didn't produce larger content for {}, using static HTML",
+                        source_domain
+                    );
                     content
                 }
                 Ok(Err(e)) => {
-                    debug!("Browser rendering failed for {}: {}, using static HTML", source_domain, e);
+                    debug!(
+                        "Browser rendering failed for {}: {}, using static HTML",
+                        source_domain, e
+                    );
                     content
                 }
                 Err(e) => {
-                    debug!("Browser task panicked for {}: {}, using static HTML", source_domain, e);
+                    debug!(
+                        "Browser task panicked for {}: {}, using static HTML",
+                        source_domain, e
+                    );
                     content
                 }
             }
@@ -1916,36 +2220,52 @@ impl SubprocessorAnalyzer {
 
         // Process HTML content
         let document = Html::parse_document(&content);
-        debug!("🚀🚀🚀 HTML PARSED successfully, content length: {} chars", content.len());
-        debug!("🔥🔥🔥 HTML CONTENT PREVIEW: {}", &content[..std::cmp::min(content.len(), 1000)]);
-        
+        debug!(
+            "🚀🚀🚀 HTML PARSED successfully, content length: {} chars",
+            content.len()
+        );
+        debug!(
+            "🔥🔥🔥 HTML CONTENT PREVIEW: {}",
+            &content[..std::cmp::min(content.len(), 1000)]
+        );
+
         // Debug: Check for div elements that might contain subprocessor info
         let divs: Vec<_> = document.select(&DIV_SELECTOR).collect();
         debug!("🔥🔥🔥 Found {} div elements total", divs.len());
-        
+
         // Check for specific div patterns that might contain subprocessors
         let common_selectors = [
             "div[class*='subprocessor']",
-            "div[class*='vendor']", 
+            "div[class*='vendor']",
             "div[class*='partner']",
             "div[class*='processor']",
-            "div[class*='supplier']"
+            "div[class*='supplier']",
         ];
-        
+
         for selector_str in &common_selectors {
             if let Ok(selector) = Selector::parse(selector_str) {
                 let elements: Vec<_> = document.select(&selector).collect();
-                debug!("🔥🔥🔥 Found {} elements with selector: {}", elements.len(), selector_str);
+                debug!(
+                    "🔥🔥🔥 Found {} elements with selector: {}",
+                    elements.len(),
+                    selector_str
+                );
             }
         }
 
-        // Load extraction patterns from cache (use default if not cached)  
+        // Load extraction patterns from cache (use default if not cached)
         let patterns = {
             let cache = self.cache.read().await;
             cache.get_extraction_patterns(source_domain).await
         };
-        debug!("🚀🚀🚀 LOADED EXTRACTION PATTERNS for domain: {}", source_domain);
-        debug!("🔥🔥🔥 EXTRACTION PATTERNS: entity_column_selectors={:?}, table_selectors={:?}", patterns.entity_column_selectors, patterns.table_selectors);
+        debug!(
+            "🚀🚀🚀 LOADED EXTRACTION PATTERNS for domain: {}",
+            source_domain
+        );
+        debug!(
+            "🔥🔥🔥 EXTRACTION PATTERNS: entity_column_selectors={:?}, table_selectors={:?}",
+            patterns.entity_column_selectors, patterns.table_selectors
+        );
 
         // Extract vendors using pattern-based strategies
         let mut vendors = Vec::new();
@@ -1959,14 +2279,26 @@ impl SubprocessorAnalyzer {
                 .as_secs(),
             adaptive_patterns: None,
         };
-        
+
         // Use cache-derived patterns exclusively - either domain-specific or minimal bootstrap
         if patterns.is_domain_specific {
             if let Some(custom_rules) = &patterns.custom_extraction_rules {
-                debug!("🔥🔥🔥 USING DOMAIN-SPECIFIC CACHE PATTERNS for {}", source_domain);
-                let extraction_result = self.extract_with_custom_rules(&document, &content, url, custom_rules, source_domain)?;
-                debug!("🔥🔥🔥 DOMAIN-SPECIFIC EXTRACTION FOUND {} vendors ({} pending confirmations)",
-                       extraction_result.subprocessors.len(), extraction_result.pending_mappings.len());
+                debug!(
+                    "🔥🔥🔥 USING DOMAIN-SPECIFIC CACHE PATTERNS for {}",
+                    source_domain
+                );
+                let extraction_result = self.extract_with_custom_rules(
+                    &document,
+                    &content,
+                    url,
+                    custom_rules,
+                    source_domain,
+                )?;
+                debug!(
+                    "🔥🔥🔥 DOMAIN-SPECIFIC EXTRACTION FOUND {} vendors ({} pending confirmations)",
+                    extraction_result.subprocessors.len(),
+                    extraction_result.pending_mappings.len()
+                );
 
                 // Warn if extraction count is lower than what was previously successful
                 // This helps detect when page content changes break extraction patterns
@@ -1974,17 +2306,23 @@ impl SubprocessorAnalyzer {
                     let cache = self.cache.read().await;
                     if let Some(entry) = cache.get_cached_entry(source_domain).await {
                         if let Some(ref metadata) = entry.extraction_metadata {
-                            if extraction_result.subprocessors.len() < metadata.successful_extractions as usize
+                            if extraction_result.subprocessors.len()
+                                < metadata.successful_extractions as usize
                                 && metadata.successful_extractions > 0
                             {
                                 warn!("Subprocessor extraction for {} found {} vendors, but cache records {} successful extractions. \
                                        Page content may have changed or extraction patterns may need updating.",
                                       source_domain, extraction_result.subprocessors.len(), metadata.successful_extractions);
                                 // Log which vendors were found to help debug
-                                let found_domains: Vec<&str> = extraction_result.subprocessors.iter()
+                                let found_domains: Vec<&str> = extraction_result
+                                    .subprocessors
+                                    .iter()
                                     .map(|s| s.domain.as_str())
                                     .collect();
-                                debug!("Extracted domains for {}: {:?}", source_domain, found_domains);
+                                debug!(
+                                    "Extracted domains for {}: {:?}",
+                                    source_domain, found_domains
+                                );
                             }
                         }
                     }
@@ -1998,7 +2336,9 @@ impl SubprocessorAnalyzer {
                 vendors.extend(extraction_result.subprocessors);
 
                 // Decide whether to return domain-specific results or fall through to generic.
-                let should_skip_generic = custom_rules.special_handling.as_ref()
+                let should_skip_generic = custom_rules
+                    .special_handling
+                    .as_ref()
                     .map(|sh| sh.skip_generic_methods)
                     .unwrap_or(true);
 
@@ -2012,8 +2352,14 @@ impl SubprocessorAnalyzer {
                 // (e.g., when page structure changed and regex patterns became stale).
                 let prev_count = {
                     let cache = self.cache.read().await;
-                    cache.get_cached_entry(source_domain).await
-                        .and_then(|e| e.extraction_metadata.as_ref().map(|m| m.successful_extractions))
+                    cache
+                        .get_cached_entry(source_domain)
+                        .await
+                        .and_then(|e| {
+                            e.extraction_metadata
+                                .as_ref()
+                                .map(|m| m.successful_extractions)
+                        })
                         .unwrap_or(0) as usize
                 };
                 let found_enough = prev_count == 0 || vendors.len() >= prev_count / 2;
@@ -2023,42 +2369,54 @@ impl SubprocessorAnalyzer {
                 debug!("Domain-specific extraction found {} vendors (prev: {}), falling through to generic extraction", vendors.len(), prev_count);
             }
         } else {
-            debug!("🔥🔥🔥 NO DOMAIN-SPECIFIC PATTERNS - Using minimal bootstrap extraction for {}", source_domain);
+            debug!(
+                "🔥🔥🔥 NO DOMAIN-SPECIFIC PATTERNS - Using minimal bootstrap extraction for {}",
+                source_domain
+            );
         }
 
         // Strategy 1: Look for table-based layouts using cached patterns (PRIORITY METHOD)
         debug!("🔥🔥🔥 STARTING TABLE EXTRACTION");
-        let table_results = self.extract_from_tables_with_patterns(&document, &content, url, &patterns)?;
-        debug!("🔥🔥🔥 TABLE EXTRACTION FOUND {} vendors", table_results.0.len());
-        
+        let table_results =
+            self.extract_from_tables_with_patterns(&document, &content, url, &patterns)?;
+        debug!(
+            "🔥🔥🔥 TABLE EXTRACTION FOUND {} vendors",
+            table_results.0.len()
+        );
+
         // If table extraction found results, prioritize it over other methods to avoid false positives
         if !table_results.0.is_empty() {
             debug!("🔥🔥🔥 TABLE EXTRACTION SUCCESS - using table results only to avoid false positives");
             vendors.extend(table_results.0);
             if let Some(metadata) = table_results.1 {
-                extraction_metadata.successful_entity_column_index = metadata.successful_entity_column_index;
+                extraction_metadata.successful_entity_column_index =
+                    metadata.successful_entity_column_index;
                 extraction_metadata.successful_header_pattern = metadata.successful_header_pattern;
             }
-            
+
             // Generate and cache domain-specific patterns based on successful extractions
             debug!("🔥🔥🔥 PATTERN GENERATION: Creating domain-specific patterns from {} successful extractions", vendors.len());
-            debug!("Generating domain-specific extraction patterns from {} successful extractions", vendors.len());
-            
+            debug!(
+                "Generating domain-specific extraction patterns from {} successful extractions",
+                vendors.len()
+            );
+
             // Generate intelligent domain-specific patterns
-            let custom_rules = self.generate_domain_specific_patterns(&document, &content, &vendors, url);
-            
+            let custom_rules =
+                self.generate_domain_specific_patterns(&document, &content, &vendors, url);
+
             // Create domain-specific patterns (no generic fallbacks)
             let domain_specific_patterns = ExtractionPatterns {
-                entity_column_selectors: Vec::new(), // Remove generic patterns
-                entity_header_patterns: Vec::new(),  // Remove generic patterns
-                table_selectors: Vec::new(),         // Remove generic patterns  
-                list_selectors: Vec::new(),          // Remove generic patterns
-                context_patterns: Vec::new(),        // Remove generic patterns
+                entity_column_selectors: Vec::new(),    // Remove generic patterns
+                entity_header_patterns: Vec::new(),     // Remove generic patterns
+                table_selectors: Vec::new(),            // Remove generic patterns
+                list_selectors: Vec::new(),             // Remove generic patterns
+                context_patterns: Vec::new(),           // Remove generic patterns
                 domain_extraction_patterns: Vec::new(), // Remove generic patterns
                 custom_extraction_rules: Some(custom_rules),
                 is_domain_specific: true,
             };
-            
+
             // Create fresh extraction metadata for domain-specific patterns
             let domain_metadata = ExtractionMetadata {
                 successful_extractions: vendors.len() as u32,
@@ -2070,35 +2428,61 @@ impl SubprocessorAnalyzer {
                     .as_secs(),
                 adaptive_patterns: None,
             };
-            
+
             let cache = self.cache.write().await;
-            if let Err(e) = cache.update_extraction_info(source_domain, domain_specific_patterns, domain_metadata).await {
-                debug!("🔥🔥🔥 CACHE ERROR: Failed to update extraction patterns cache for {}: {}", source_domain, e);
-                debug!("Failed to update extraction patterns cache for {}: {}", source_domain, e);
+            if let Err(e) = cache
+                .update_extraction_info(source_domain, domain_specific_patterns, domain_metadata)
+                .await
+            {
+                debug!(
+                    "🔥🔥🔥 CACHE ERROR: Failed to update extraction patterns cache for {}: {}",
+                    source_domain, e
+                );
+                debug!(
+                    "Failed to update extraction patterns cache for {}: {}",
+                    source_domain, e
+                );
             } else {
-                debug!("🔥🔥🔥 CACHE SUCCESS: Successfully cached domain-specific patterns for {}", source_domain);
-                debug!("Successfully cached domain-specific patterns for {}", source_domain);
+                debug!(
+                    "🔥🔥🔥 CACHE SUCCESS: Successfully cached domain-specific patterns for {}",
+                    source_domain
+                );
+                debug!(
+                    "Successfully cached domain-specific patterns for {}",
+                    source_domain
+                );
             }
         } else {
             // Only use fallback methods if table extraction failed
             debug!("🔥🔥🔥 TABLE EXTRACTION FAILED - trying fallback methods");
-            
+
             // Strategy 2: Look for list-based layouts using cached patterns
             debug!("🔥🔥🔥 STARTING LIST EXTRACTION");
-            let list_results = self.extract_from_lists_with_patterns(&document, &content, url, &patterns)?;
-            debug!("🔥🔥🔥 LIST EXTRACTION FOUND {} vendors", list_results.len());
+            let list_results =
+                self.extract_from_lists_with_patterns(&document, &content, url, &patterns)?;
+            debug!(
+                "🔥🔥🔥 LIST EXTRACTION FOUND {} vendors",
+                list_results.len()
+            );
             vendors.extend(list_results);
-            
+
             // Strategy 3: Look for paragraph-based content (for text-based tables)
             debug!("🔥🔥🔥 STARTING PARAGRAPH EXTRACTION");
-            let paragraph_results = self.extract_from_paragraphs(&document, &content, url, &patterns)?;
-            debug!("🔥🔥🔥 PARAGRAPH EXTRACTION FOUND {} vendors", paragraph_results.len());
+            let paragraph_results =
+                self.extract_from_paragraphs(&document, &content, url, &patterns)?;
+            debug!(
+                "🔥🔥🔥 PARAGRAPH EXTRACTION FOUND {} vendors",
+                paragraph_results.len()
+            );
             vendors.extend(paragraph_results);
-            
+
             // Strategy 4: Look for structured data with company indicators (kept as fallback)
             debug!("🔥🔥🔥 STARTING STRUCTURED CONTENT EXTRACTION");
             let structured_results = self.extract_from_structured_content(&document, &content)?;
-            debug!("🔥🔥🔥 STRUCTURED CONTENT EXTRACTION FOUND {} vendors", structured_results.len());
+            debug!(
+                "🔥🔥🔥 STRUCTURED CONTENT EXTRACTION FOUND {} vendors",
+                structured_results.len()
+            );
             vendors.extend(structured_results);
         }
 
@@ -2109,17 +2493,25 @@ impl SubprocessorAnalyzer {
         if vendors.is_empty() {
             debug!("🔥🔥🔥 STATIC HTML PARSING FAILED - trying AI-powered analysis");
             debug!("Static HTML parsing returned no vendors, attempting intelligent analysis");
-            
+
             // Try AI-powered content analysis first
-            match self.scrape_with_intelligent_analysis(url, &content, source_domain).await {
+            match self
+                .scrape_with_intelligent_analysis(url, &content, source_domain)
+                .await
+            {
                 Ok(ai_vendors) => {
                     if !ai_vendors.is_empty() {
-                        debug!("🧠 AI ANALYSIS SUCCESS - found {} vendors", ai_vendors.len());
+                        debug!(
+                            "🧠 AI ANALYSIS SUCCESS - found {} vendors",
+                            ai_vendors.len()
+                        );
                         debug!("AI analysis successful, found {} vendors", ai_vendors.len());
                         return Ok(ai_vendors);
                     } else {
                         debug!("🧠 AI ANALYSIS - no vendors detected, falling back to headless browser");
-                        debug!("AI analysis returned no vendors, attempting headless browser fallback");
+                        debug!(
+                            "AI analysis returned no vendors, attempting headless browser fallback"
+                        );
                     }
                 }
                 Err(e) => {
@@ -2127,20 +2519,38 @@ impl SubprocessorAnalyzer {
                     debug!("AI analysis failed: {}", e);
                 }
             }
-            
+
             // Try headless browser scraping as final fallback
-            match self.scrape_with_headless_browser(url, logger, source_domain).await {
+            match self
+                .scrape_with_headless_browser(url, logger, source_domain)
+                .await
+            {
                 Ok(headless_vendors) => {
                     if !headless_vendors.is_empty() {
-                        debug!("🔥🔥🔥 HEADLESS BROWSER SUCCESS - found {} vendors", headless_vendors.len());
-                        debug!("Headless browser fallback successful, found {} vendors", headless_vendors.len());
-                        
+                        debug!(
+                            "🔥🔥🔥 HEADLESS BROWSER SUCCESS - found {} vendors",
+                            headless_vendors.len()
+                        );
+                        debug!(
+                            "Headless browser fallback successful, found {} vendors",
+                            headless_vendors.len()
+                        );
+
                         // Try AI analysis on the rendered content for pattern discovery
-                        let rendered_content = self.get_rendered_content_from_browser(url).await.unwrap_or_default();
+                        let rendered_content = self
+                            .get_rendered_content_from_browser(url)
+                            .await
+                            .unwrap_or_default();
                         if !rendered_content.is_empty() {
-                            let _ = self.scrape_with_intelligent_analysis(url, &rendered_content, source_domain).await;
+                            let _ = self
+                                .scrape_with_intelligent_analysis(
+                                    url,
+                                    &rendered_content,
+                                    source_domain,
+                                )
+                                .await;
                         }
-                        
+
                         return Ok(headless_vendors);
                     } else {
                         debug!("🔥🔥🔥 ALL METHODS FAILED - no vendors found with any approach");
@@ -2155,13 +2565,20 @@ impl SubprocessorAnalyzer {
 
             // NER fallback: extract organization names from rendered/static HTML as last resort
             if vendors.is_empty() && crate::ner_org::is_available() {
-                debug!("Attempting NER-based org extraction as final fallback for {}", source_domain);
+                debug!(
+                    "Attempting NER-based org extraction as final fallback for {}",
+                    source_domain
+                );
                 // Extract text content from HTML for NER processing
                 let text_content = extract_text_from_html(&content);
                 if text_content.len() >= 100 {
                     match crate::ner_org::extract_all_organizations(&text_content, Some(0.85)) {
                         Ok(ner_results) if !ner_results.is_empty() => {
-                            debug!("NER fallback found {} organizations for {}", ner_results.len(), source_domain);
+                            debug!(
+                                "NER fallback found {} organizations for {}",
+                                ner_results.len(),
+                                source_domain
+                            );
                             for org in &ner_results {
                                 // Skip if the org name matches the source domain's own org
                                 let org_lower = org.organization.to_lowercase();
@@ -2179,11 +2596,18 @@ impl SubprocessorAnalyzer {
                                 vendors.push(SubprocessorDomain {
                                     domain: format!("_org:{}", org.organization),
                                     source_type: crate::vendor::RecordType::HttpSubprocessor,
-                                    raw_record: format!("NER:{:.2}:{}", org.confidence, org.organization),
+                                    raw_record: format!(
+                                        "NER:{:.2}:{}",
+                                        org.confidence, org.organization
+                                    ),
                                 });
                             }
                             if !vendors.is_empty() {
-                                debug!("NER fallback returning {} vendors for {}", vendors.len(), source_domain);
+                                debug!(
+                                    "NER fallback returning {} vendors for {}",
+                                    vendors.len(),
+                                    source_domain
+                                );
                                 return Ok(vendors);
                             }
                         }
@@ -2193,37 +2617,59 @@ impl SubprocessorAnalyzer {
                 }
             }
         } else {
-            debug!("🔥🔥🔥 STATIC HTML PARSING SUCCESS - found {} vendors", vendors.len());
+            debug!(
+                "🔥🔥🔥 STATIC HTML PARSING SUCCESS - found {} vendors",
+                vendors.len()
+            );
         }
 
         Ok(vendors)
     }
 
     /// Intelligent content-first extraction using AI-powered pattern discovery
-    pub async fn scrape_with_intelligent_analysis(&self, url: &str, html_content: &str, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
-        debug!("🧠 INTELLIGENT ANALYSIS: Starting AI-powered content analysis for: {}", url);
+    pub async fn scrape_with_intelligent_analysis(
+        &self,
+        url: &str,
+        html_content: &str,
+        source_domain: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        debug!(
+            "🧠 INTELLIGENT ANALYSIS: Starting AI-powered content analysis for: {}",
+            url
+        );
         debug!("Starting intelligent content analysis for: {}", url);
 
         let document = Html::parse_document(html_content);
-        
+
         // Step 1: Content-first detection - find organization names using NLP patterns
-        let detected_orgs = self.detect_organizations_in_content(&document, html_content).await;
-        debug!("🧠 DETECTED {} potential organizations", detected_orgs.len());
-        
+        let detected_orgs = self
+            .detect_organizations_in_content(&document, html_content)
+            .await;
+        debug!(
+            "🧠 DETECTED {} potential organizations",
+            detected_orgs.len()
+        );
+
         if detected_orgs.is_empty() {
             debug!("🧠 No organizations detected - falling back to static patterns");
             return Ok(vec![]);
         }
 
         // Step 2: Analyze DOM context of detected organizations to derive patterns
-        let adaptive_patterns = self.derive_extraction_patterns(&detected_orgs, &document).await;
-        debug!("🧠 DERIVED {} adaptive patterns with confidence {:.2}", 
-            adaptive_patterns.discovered_selectors.len(), adaptive_patterns.confidence_score);
+        let adaptive_patterns = self
+            .derive_extraction_patterns(&detected_orgs, &document)
+            .await;
+        debug!(
+            "🧠 DERIVED {} adaptive patterns with confidence {:.2}",
+            adaptive_patterns.discovered_selectors.len(),
+            adaptive_patterns.confidence_score
+        );
 
         // Step 3: Extract organizations using derived patterns with confidence scoring
         let mut extracted_vendors = Vec::new();
         for selector in &adaptive_patterns.discovered_selectors {
-            if selector.confidence > 0.7 { // High confidence threshold
+            if selector.confidence > 0.7 {
+                // High confidence threshold
                 let vendors = self.extract_using_adaptive_selector(&document, selector, url);
                 extracted_vendors.extend(vendors);
             }
@@ -2231,10 +2677,14 @@ impl SubprocessorAnalyzer {
 
         // Step 4: Cache successful adaptive patterns for future use
         if !extracted_vendors.is_empty() && adaptive_patterns.confidence_score > 0.8 {
-            self.cache_adaptive_patterns(source_domain, adaptive_patterns).await;
+            self.cache_adaptive_patterns(source_domain, adaptive_patterns)
+                .await;
         }
 
-        debug!("🧠 INTELLIGENT ANALYSIS: Extracted {} vendors with AI patterns", extracted_vendors.len());
+        debug!(
+            "🧠 INTELLIGENT ANALYSIS: Extracted {} vendors with AI patterns",
+            extracted_vendors.len()
+        );
         Ok(extracted_vendors)
     }
 
@@ -2247,7 +2697,11 @@ impl SubprocessorAnalyzer {
     /// Improving these heuristics is out of scope for a bug fix; downstream consumers
     /// should treat results as candidates requiring validation (e.g., via VendorRegistry
     /// lookup or user confirmation through the pending mappings workflow).
-    async fn detect_organizations_in_content(&self, document: &Html, _html_content: &str) -> Vec<DetectedOrganization> {
+    async fn detect_organizations_in_content(
+        &self,
+        document: &Html,
+        _html_content: &str,
+    ) -> Vec<DetectedOrganization> {
         debug!("🔍 ORGANIZATION DETECTION: Scanning content for company patterns");
 
         let mut detected_orgs = Vec::new();
@@ -2265,13 +2719,13 @@ impl SubprocessorAnalyzer {
         // Prefer content-focused elements over generic * selector to avoid navigation noise
         // Priority: main content areas first, then fall back to all elements
         let content_selectors = [
-            "main *",           // Main content area
-            "article *",        // Article content
-            ".content *",       // Common content class
-            "[role='main'] *",  // ARIA main role
-            "table *",          // Table cells (subprocessor lists are often in tables)
-            "ul li, ol li",     // List items
-            "p",                // Paragraphs
+            "main *",          // Main content area
+            "article *",       // Article content
+            ".content *",      // Common content class
+            "[role='main'] *", // ARIA main role
+            "table *",         // Table cells (subprocessor lists are often in tables)
+            "ul li, ol li",    // List items
+            "p",               // Paragraphs
         ];
 
         for pattern_str in &org_patterns {
@@ -2290,7 +2744,8 @@ impl SubprocessorAnalyzer {
                             if let Ok(Some(captures)) = pattern.captures(&text) {
                                 if let Some(full_match) = captures.get(0) {
                                     let org_name = full_match.as_str().trim().to_string();
-                                    let confidence = self.calculate_organization_confidence(&org_name, &text);
+                                    let confidence =
+                                        self.calculate_organization_confidence(&org_name, &text);
 
                                     if confidence > 0.6 {
                                         let dom_context = self.extract_dom_context(&text_element);
@@ -2299,7 +2754,10 @@ impl SubprocessorAnalyzer {
                                             confidence,
                                             dom_context,
                                         });
-                                        debug!("🔍 FOUND: {} (confidence: {:.2})", org_name, confidence);
+                                        debug!(
+                                            "🔍 FOUND: {} (confidence: {:.2})",
+                                            org_name, confidence
+                                        );
                                         found_in_content = true;
                                     }
                                 }
@@ -2320,7 +2778,8 @@ impl SubprocessorAnalyzer {
                         if let Ok(Some(captures)) = pattern.captures(&text) {
                             if let Some(full_match) = captures.get(0) {
                                 let org_name = full_match.as_str().trim().to_string();
-                                let confidence = self.calculate_organization_confidence(&org_name, &text);
+                                let confidence =
+                                    self.calculate_organization_confidence(&org_name, &text);
 
                                 if confidence > 0.6 {
                                     let dom_context = self.extract_dom_context(&text_element);
@@ -2329,7 +2788,10 @@ impl SubprocessorAnalyzer {
                                         confidence,
                                         dom_context,
                                     });
-                                    debug!("🔍 FOUND (fallback): {} (confidence: {:.2})", org_name, confidence);
+                                    debug!(
+                                        "🔍 FOUND (fallback): {} (confidence: {:.2})",
+                                        org_name, confidence
+                                    );
                                 }
                             }
                         }
@@ -2343,8 +2805,10 @@ impl SubprocessorAnalyzer {
         for org in detected_orgs {
             let key = org.name.to_lowercase();
             match unique_orgs.get(&key) {
-                Some(existing) if existing.confidence >= org.confidence => {},
-                _ => { unique_orgs.insert(key, org); }
+                Some(existing) if existing.confidence >= org.confidence => {}
+                _ => {
+                    unique_orgs.insert(key, org);
+                }
             }
         }
 
@@ -2356,9 +2820,23 @@ impl SubprocessorAnalyzer {
         let mut confidence: f64 = 0.5; // Base confidence
 
         // Boost confidence for well-known tech companies
-        let known_companies = ["Google", "Microsoft", "Amazon", "Apple", "IBM", "Oracle", 
-                              "Salesforce", "Adobe", "Atlassian", "Stripe", "Zoom"];
-        if known_companies.iter().any(|&company| org_name.contains(company)) {
+        let known_companies = [
+            "Google",
+            "Microsoft",
+            "Amazon",
+            "Apple",
+            "IBM",
+            "Oracle",
+            "Salesforce",
+            "Adobe",
+            "Atlassian",
+            "Stripe",
+            "Zoom",
+        ];
+        if known_companies
+            .iter()
+            .any(|&company| org_name.contains(company))
+        {
             confidence += 0.3;
         }
 
@@ -2374,7 +2852,7 @@ impl SubprocessorAnalyzer {
 
         // Penalize very short or very long names
         match org_name.len() {
-            3..=50 => {},
+            3..=50 => {}
             _ => confidence -= 0.2,
         }
 
@@ -2385,31 +2863,27 @@ impl SubprocessorAnalyzer {
     fn extract_dom_context(&self, element: &scraper::ElementRef) -> DomContext {
         let mut parent_tags = Vec::new();
         let mut current = element.parent();
-        
+
         // Traverse up the DOM to capture parent structure
         while let Some(parent_element) = current {
             if let Some(element_ref) = scraper::ElementRef::wrap(parent_element) {
                 parent_tags.push(element_ref.value().name().to_string());
-                if parent_tags.len() >= 5 { break; } // Limit depth
+                if parent_tags.len() >= 5 {
+                    break;
+                } // Limit depth
             }
             current = parent_element.parent();
         }
 
         // Get CSS classes
-        let css_classes = element.value().classes()
-            .map(|c| c.to_string())
-            .collect();
+        let css_classes = element.value().classes().map(|c| c.to_string()).collect();
 
         // Build xpath-like selector
-        let xpath_like = format!("{} > {}", 
-            parent_tags.join(" > "), 
-            element.value().name());
+        let xpath_like = format!("{} > {}", parent_tags.join(" > "), element.value().name());
 
         DomContext {
             parent_tags,
-            sibling_count: element.parent()
-                .map(|p| p.children().count())
-                .unwrap_or(0),
+            sibling_count: element.parent().map(|p| p.children().count()).unwrap_or(0),
             css_classes,
             text_content: element.text().collect::<String>().trim().to_string(),
             xpath_like,
@@ -2424,8 +2898,17 @@ impl SubprocessorAnalyzer {
 
         // Navigation-related class/id patterns
         let nav_patterns = [
-            "nav", "menu", "header", "footer", "sidebar", "navigation",
-            "topbar", "navbar", "menubar", "breadcrumb", "sitemap",
+            "nav",
+            "menu",
+            "header",
+            "footer",
+            "sidebar",
+            "navigation",
+            "topbar",
+            "navbar",
+            "menubar",
+            "breadcrumb",
+            "sitemap",
         ];
 
         // Check the element itself
@@ -2435,8 +2918,16 @@ impl SubprocessorAnalyzer {
         }
 
         // Check element's classes and id
-        let classes: Vec<String> = element.value().classes().map(|c| c.to_lowercase()).collect();
-        let id = element.value().id().map(|i| i.to_lowercase()).unwrap_or_default();
+        let classes: Vec<String> = element
+            .value()
+            .classes()
+            .map(|c| c.to_lowercase())
+            .collect();
+        let id = element
+            .value()
+            .id()
+            .map(|i| i.to_lowercase())
+            .unwrap_or_default();
 
         for pattern in &nav_patterns {
             if classes.iter().any(|c| c.contains(pattern)) || id.contains(pattern) {
@@ -2461,15 +2952,21 @@ impl SubprocessorAnalyzer {
                 }
 
                 // Check parent's classes and id
-                let parent_classes: Vec<String> = parent_ref.value().classes()
+                let parent_classes: Vec<String> = parent_ref
+                    .value()
+                    .classes()
                     .map(|c| c.to_lowercase())
                     .collect();
-                let parent_id = parent_ref.value().id()
+                let parent_id = parent_ref
+                    .value()
+                    .id()
                     .map(|i| i.to_lowercase())
                     .unwrap_or_default();
 
                 for pattern in &nav_patterns {
-                    if parent_classes.iter().any(|c| c.contains(pattern)) || parent_id.contains(pattern) {
+                    if parent_classes.iter().any(|c| c.contains(pattern))
+                        || parent_id.contains(pattern)
+                    {
                         return true;
                     }
                 }
@@ -2483,33 +2980,45 @@ impl SubprocessorAnalyzer {
     }
 
     /// Derive extraction patterns from detected organizations' DOM contexts
-    async fn derive_extraction_patterns(&self, detected_orgs: &[DetectedOrganization], document: &Html) -> AdaptivePatterns {
-        debug!("🧠 PATTERN DERIVATION: Analyzing DOM patterns from {} organizations", detected_orgs.len());
-        
+    async fn derive_extraction_patterns(
+        &self,
+        detected_orgs: &[DetectedOrganization],
+        document: &Html,
+    ) -> AdaptivePatterns {
+        debug!(
+            "🧠 PATTERN DERIVATION: Analyzing DOM patterns from {} organizations",
+            detected_orgs.len()
+        );
+
         let mut discovered_selectors = Vec::new();
         let mut confidence_scores = Vec::new();
-        
+
         // Group organizations by similar DOM patterns
         let pattern_groups = self.group_by_dom_patterns(detected_orgs);
-        
+
         for (pattern_signature, orgs) in pattern_groups {
-            if orgs.len() >= 2 { // Require at least 2 similar patterns for confidence
+            if orgs.len() >= 2 {
+                // Require at least 2 similar patterns for confidence
                 let selector = self.generate_selector_from_pattern(&pattern_signature, &orgs);
                 let confidence = self.calculate_pattern_confidence(&orgs, document, &selector);
-                
+
                 if confidence > 0.6 {
-                    debug!("🧠 DERIVED PATTERN: {} (confidence: {:.2}, matches: {})", 
-                        selector.selector, selector.confidence, orgs.len());
+                    debug!(
+                        "🧠 DERIVED PATTERN: {} (confidence: {:.2}, matches: {})",
+                        selector.selector,
+                        selector.confidence,
+                        orgs.len()
+                    );
                     confidence_scores.push(confidence);
                     discovered_selectors.push(selector);
                 }
             }
         }
-        
-        let overall_confidence = if confidence_scores.is_empty() { 
-            0.0 
-        } else { 
-            confidence_scores.iter().sum::<f64>() / confidence_scores.len() as f64 
+
+        let overall_confidence = if confidence_scores.is_empty() {
+            0.0
+        } else {
+            confidence_scores.iter().sum::<f64>() / confidence_scores.len() as f64
         };
 
         AdaptivePatterns {
@@ -2524,33 +3033,42 @@ impl SubprocessorAnalyzer {
     }
 
     /// Group detected organizations by similar DOM patterns
-    fn group_by_dom_patterns<'a>(&self, orgs: &'a [DetectedOrganization]) -> BTreeMap<String, Vec<&'a DetectedOrganization>> {
+    fn group_by_dom_patterns<'a>(
+        &self,
+        orgs: &'a [DetectedOrganization],
+    ) -> BTreeMap<String, Vec<&'a DetectedOrganization>> {
         let mut groups = BTreeMap::new();
-        
+
         for org in orgs {
             // Create a pattern signature from DOM context
-            let signature = format!("{}_{}_{}", 
+            let signature = format!(
+                "{}_{}_{}",
                 org.dom_context.parent_tags.join(">"),
                 org.dom_context.css_classes.join("."),
                 org.dom_context.sibling_count
             );
-            
+
             groups.entry(signature).or_insert_with(Vec::new).push(org);
         }
-        
+
         groups
     }
 
     /// Generate CSS selector from DOM pattern analysis
-    fn generate_selector_from_pattern(&self, _pattern_signature: &str, orgs: &[&DetectedOrganization]) -> DomSelector {
+    fn generate_selector_from_pattern(
+        &self,
+        _pattern_signature: &str,
+        orgs: &[&DetectedOrganization],
+    ) -> DomSelector {
         // Analyze common DOM structure
         let first_org = &orgs[0];
         let parent_tags = &first_org.dom_context.parent_tags;
-        
+
         // Determine selector type based on DOM structure
         let selector_type = if parent_tags.contains(&"table".to_string()) {
             SelectorType::Table
-        } else if parent_tags.contains(&"ul".to_string()) || parent_tags.contains(&"ol".to_string()) {
+        } else if parent_tags.contains(&"ul".to_string()) || parent_tags.contains(&"ol".to_string())
+        {
             SelectorType::List
         } else if !first_org.dom_context.css_classes.is_empty() {
             SelectorType::Container
@@ -2566,30 +3084,23 @@ impl SubprocessorAnalyzer {
                 } else {
                     "table".to_string()
                 }
-            },
-            SelectorType::List => {
-                "ul li, ol li".to_string()
-            },
+            }
+            SelectorType::List => "ul li, ol li".to_string(),
             SelectorType::Container => {
                 if !first_org.dom_context.css_classes.is_empty() {
                     format!(".{}", first_org.dom_context.css_classes[0])
                 } else {
                     "div".to_string()
                 }
-            },
-            SelectorType::DirectText => {
-                parent_tags.last().unwrap_or(&"*".to_string()).clone()
-            },
+            }
+            SelectorType::DirectText => parent_tags.last().unwrap_or(&"*".to_string()).clone(),
         };
 
         // Calculate confidence based on consistency across detected orgs
         let confidence = self.calculate_selector_consistency(orgs);
-        
+
         // Sample matches for validation
-        let sample_matches = orgs.iter()
-            .take(3)
-            .map(|org| org.name.clone())
-            .collect();
+        let sample_matches = orgs.iter().take(3).map(|org| org.name.clone()).collect();
 
         DomSelector {
             selector,
@@ -2601,49 +3112,65 @@ impl SubprocessorAnalyzer {
 
     /// Calculate confidence score for pattern consistency
     fn calculate_selector_consistency(&self, orgs: &[&DetectedOrganization]) -> f64 {
-        if orgs.len() < 2 { return 0.5; }
-        
+        if orgs.len() < 2 {
+            return 0.5;
+        }
+
         let first_context = &orgs[0].dom_context;
         let mut similarity_scores = Vec::new();
-        
+
         for org in &orgs[1..] {
             let mut score = 0.0;
-            
+
             // Parent tag similarity
-            let common_parents = first_context.parent_tags.iter()
+            let common_parents = first_context
+                .parent_tags
+                .iter()
                 .filter(|tag| org.dom_context.parent_tags.contains(tag))
                 .count();
             score += (common_parents as f64) / first_context.parent_tags.len().max(1) as f64;
-            
-            // CSS class similarity  
-            let common_classes = first_context.css_classes.iter()
+
+            // CSS class similarity
+            let common_classes = first_context
+                .css_classes
+                .iter()
                 .filter(|class| org.dom_context.css_classes.contains(class))
                 .count();
             if !first_context.css_classes.is_empty() || !org.dom_context.css_classes.is_empty() {
-                score += (common_classes as f64) / first_context.css_classes.len().max(org.dom_context.css_classes.len()).max(1) as f64;
+                score += (common_classes as f64)
+                    / first_context
+                        .css_classes
+                        .len()
+                        .max(org.dom_context.css_classes.len())
+                        .max(1) as f64;
             }
-            
+
             similarity_scores.push(score / 2.0); // Average of the two metrics
         }
-        
+
         let avg_similarity = similarity_scores.iter().sum::<f64>() / similarity_scores.len() as f64;
         (avg_similarity + 0.3).min(1.0) // Boost base confidence
     }
 
     /// Calculate pattern confidence based on document analysis
-    fn calculate_pattern_confidence(&self, orgs: &[&DetectedOrganization], document: &Html, selector: &DomSelector) -> f64 {
+    fn calculate_pattern_confidence(
+        &self,
+        orgs: &[&DetectedOrganization],
+        document: &Html,
+        selector: &DomSelector,
+    ) -> f64 {
         // Test selector against document to see how many matches it produces
         if let Ok(css_selector) = Selector::parse(&selector.selector) {
             let matches = document.select(&css_selector).count();
             let org_count = orgs.len();
-            
+
             // Good patterns should match close to the number of detected orgs
             let match_ratio = if matches > 0 {
                 (org_count as f64) / (matches as f64)
             } else {
                 0.0
             };
-            
+
             // Ideal ratio is between 0.3 and 1.0 (not too many extra matches, not too few)
             let ratio_score = if (0.3..=1.0).contains(&match_ratio) {
                 match_ratio
@@ -2652,7 +3179,7 @@ impl SubprocessorAnalyzer {
             } else {
                 match_ratio * 0.5
             };
-            
+
             (ratio_score + selector.confidence) / 2.0
         } else {
             0.2 // Invalid selector gets low confidence
@@ -2660,9 +3187,14 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract organizations using an adaptive selector
-    fn extract_using_adaptive_selector(&self, document: &Html, selector: &DomSelector, url: &str) -> Vec<SubprocessorDomain> {
+    fn extract_using_adaptive_selector(
+        &self,
+        document: &Html,
+        selector: &DomSelector,
+        url: &str,
+    ) -> Vec<SubprocessorDomain> {
         let mut vendors = Vec::new();
-        
+
         if let Ok(css_selector) = Selector::parse(&selector.selector) {
             for element in document.select(&css_selector) {
                 let text = element.text().collect::<String>();
@@ -2677,21 +3209,22 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
+
         vendors
     }
 
     /// Cache adaptive patterns for future use
     async fn cache_adaptive_patterns(&self, source_domain: &str, patterns: AdaptivePatterns) {
         let cache = self.cache.write().await;
-        
+
         // Get existing cache entry to preserve domain-specific patterns
-        let existing_patterns = if let Some(existing) = cache.get_cached_entry(source_domain).await {
+        let existing_patterns = if let Some(existing) = cache.get_cached_entry(source_domain).await
+        {
             existing.extraction_patterns.unwrap_or_default()
         } else {
             ExtractionPatterns::default()
         };
-        
+
         let metadata = ExtractionMetadata {
             successful_extractions: 0, // Will be updated when patterns are used
             successful_entity_column_index: None,
@@ -2702,53 +3235,72 @@ impl SubprocessorAnalyzer {
                 .as_secs(),
             adaptive_patterns: Some(patterns),
         };
-        
+
         // Preserve existing domain-specific patterns instead of using default
-        if let Err(e) = cache.update_extraction_info(source_domain, existing_patterns, metadata).await {
-            debug!("Failed to cache adaptive patterns for {}: {}", source_domain, e);
+        if let Err(e) = cache
+            .update_extraction_info(source_domain, existing_patterns, metadata)
+            .await
+        {
+            debug!(
+                "Failed to cache adaptive patterns for {}: {}",
+                source_domain, e
+            );
         } else {
             debug!("🧠 CACHED adaptive patterns for {}", source_domain);
         }
     }
 
     /// Scrape subprocessor page using headless browser for JavaScript-generated content
-    pub async fn scrape_with_headless_browser(&self, url: &str, _logger: Option<&dyn LogFailure>, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
-        debug!("🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}", url);
+    pub async fn scrape_with_headless_browser(
+        &self,
+        url: &str,
+        _logger: Option<&dyn LogFailure>,
+        source_domain: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        debug!(
+            "🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}",
+            url
+        );
         debug!("Starting headless browser scraping for: {}", url);
 
         // Launch headless Chrome (auto-detects container for sandbox config)
         let guard = crate::browser_pool::create_browser()?;
 
-        let tab = guard.browser.new_tab().map_err(|e| {
-            anyhow::anyhow!("Failed to create new browser tab: {}", e)
-        })?;
+        let tab = guard
+            .browser
+            .new_tab()
+            .map_err(|e| anyhow::anyhow!("Failed to create new browser tab: {}", e))?;
 
         // Navigate to the page and wait for JavaScript to render
         debug!("🔥🔥🔥 HEADLESS BROWSER: Navigating to {}", url);
-        tab.navigate_to(url).map_err(|e| {
-            anyhow::anyhow!("Failed to navigate to {}: {}", url, e)
-        })?;
+        tab.navigate_to(url)
+            .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url, e))?;
 
         // Wait for the page to load completely
-        tab.wait_until_navigated().map_err(|e| {
-            anyhow::anyhow!("Page failed to load: {}", e)
-        })?;
+        tab.wait_until_navigated()
+            .map_err(|e| anyhow::anyhow!("Page failed to load: {}", e))?;
 
         // Wait a bit more for JavaScript content to render
         std::thread::sleep(Duration::from_millis(2000));
         debug!("🔥🔥🔥 HEADLESS BROWSER: Page loaded, extracting content");
 
         // Get the fully rendered HTML
-        let html_content = tab.get_content().map_err(|e| {
-            anyhow::anyhow!("Failed to get page content: {}", e)
-        })?;
+        let html_content = tab
+            .get_content()
+            .map_err(|e| anyhow::anyhow!("Failed to get page content: {}", e))?;
 
-        debug!("🔥🔥🔥 HEADLESS BROWSER: Got rendered HTML, length: {} chars", html_content.len());
-        debug!("🔥🔥🔥 HEADLESS BROWSER: HTML preview: {}", &html_content[..std::cmp::min(html_content.len(), 500)]);
+        debug!(
+            "🔥🔥🔥 HEADLESS BROWSER: Got rendered HTML, length: {} chars",
+            html_content.len()
+        );
+        debug!(
+            "🔥🔥🔥 HEADLESS BROWSER: HTML preview: {}",
+            &html_content[..std::cmp::min(html_content.len(), 500)]
+        );
 
         // Parse the rendered HTML and extract vendors
         let document = Html::parse_document(&html_content);
-        
+
         // Load extraction patterns from cache
         let patterns = {
             let cache = self.cache.read().await;
@@ -2773,8 +3325,17 @@ impl SubprocessorAnalyzer {
         // Use cache-derived patterns exclusively - either domain-specific or minimal bootstrap
         if patterns.is_domain_specific {
             if let Some(custom_rules) = &patterns.custom_extraction_rules {
-                debug!("🔥🔥🔥 HEADLESS BROWSER: USING DOMAIN-SPECIFIC CACHE PATTERNS for {}", source_domain);
-                let extraction_result = self.extract_with_custom_rules(&document, &html_content, url, custom_rules, source_domain)?;
+                debug!(
+                    "🔥🔥🔥 HEADLESS BROWSER: USING DOMAIN-SPECIFIC CACHE PATTERNS for {}",
+                    source_domain
+                );
+                let extraction_result = self.extract_with_custom_rules(
+                    &document,
+                    &html_content,
+                    url,
+                    custom_rules,
+                    source_domain,
+                )?;
                 debug!("🔥🔥🔥 HEADLESS BROWSER: DOMAIN-SPECIFIC EXTRACTION FOUND {} vendors ({} pending confirmations)",
                        extraction_result.subprocessors.len(), extraction_result.pending_mappings.len());
 
@@ -2791,26 +3352,38 @@ impl SubprocessorAnalyzer {
         }
 
         // Strategy 1: Look for table-based layouts (PRIORITY METHOD)
-        let table_results = self.extract_from_tables_with_patterns(&document, &html_content, url, &patterns)?;
-        
+        let table_results =
+            self.extract_from_tables_with_patterns(&document, &html_content, url, &patterns)?;
+
         // If table extraction found results, prioritize it over other methods to avoid false positives
         if !table_results.0.is_empty() {
             debug!("🔥🔥🔥 HEADLESS BROWSER: TABLE EXTRACTION SUCCESS - using table results only to avoid false positives");
             vendors.extend(table_results.0);
             if let Some(metadata) = table_results.1 {
-                extraction_metadata.successful_entity_column_index = metadata.successful_entity_column_index;
+                extraction_metadata.successful_entity_column_index =
+                    metadata.successful_entity_column_index;
                 extraction_metadata.successful_header_pattern = metadata.successful_header_pattern;
             }
         } else {
             // Only use fallback methods if table extraction failed
             debug!("🔥🔥🔥 HEADLESS BROWSER: TABLE EXTRACTION FAILED - trying fallback methods");
-            
+
             // Strategy 2: Look for list-based layouts
-            vendors.extend(self.extract_from_lists_with_patterns(&document, &html_content, url, &patterns)?);
-            
+            vendors.extend(self.extract_from_lists_with_patterns(
+                &document,
+                &html_content,
+                url,
+                &patterns,
+            )?);
+
             // Strategy 3: Look for paragraph-based content
-            vendors.extend(self.extract_from_paragraphs(&document, &html_content, url, &patterns)?);
-            
+            vendors.extend(self.extract_from_paragraphs(
+                &document,
+                &html_content,
+                url,
+                &patterns,
+            )?);
+
             // Strategy 4: Look for structured data with company indicators
             vendors.extend(self.extract_from_structured_content(&document, &html_content)?);
         }
@@ -2818,27 +3391,34 @@ impl SubprocessorAnalyzer {
         // Update extraction metadata
         extraction_metadata.successful_extractions = vendors.len() as u32;
 
-        debug!("🔥🔥🔥 HEADLESS BROWSER: Extraction complete, found {} vendors", vendors.len());
+        debug!(
+            "🔥🔥🔥 HEADLESS BROWSER: Extraction complete, found {} vendors",
+            vendors.len()
+        );
 
         // Generate and cache domain-specific patterns based on successful extractions
         if !vendors.is_empty() {
-            debug!("Generating domain-specific extraction patterns from {} successful extractions", vendors.len());
-            
+            debug!(
+                "Generating domain-specific extraction patterns from {} successful extractions",
+                vendors.len()
+            );
+
             // Generate intelligent domain-specific patterns
-            let custom_rules = self.generate_domain_specific_patterns(&document, &html_content, &vendors, url);
-            
+            let custom_rules =
+                self.generate_domain_specific_patterns(&document, &html_content, &vendors, url);
+
             // Create domain-specific patterns (no generic fallbacks)
             let domain_specific_patterns = ExtractionPatterns {
-                entity_column_selectors: Vec::new(), // Remove generic patterns
-                entity_header_patterns: Vec::new(),  // Remove generic patterns
-                table_selectors: Vec::new(),         // Remove generic patterns  
-                list_selectors: Vec::new(),          // Remove generic patterns
-                context_patterns: Vec::new(),        // Remove generic patterns
+                entity_column_selectors: Vec::new(),    // Remove generic patterns
+                entity_header_patterns: Vec::new(),     // Remove generic patterns
+                table_selectors: Vec::new(),            // Remove generic patterns
+                list_selectors: Vec::new(),             // Remove generic patterns
+                context_patterns: Vec::new(),           // Remove generic patterns
                 domain_extraction_patterns: Vec::new(), // Remove generic patterns
                 custom_extraction_rules: Some(custom_rules),
                 is_domain_specific: true,
             };
-            
+
             let cache = self.cache.write().await;
             // Create fresh extraction metadata for domain-specific patterns
             let domain_metadata = ExtractionMetadata {
@@ -2852,12 +3432,27 @@ impl SubprocessorAnalyzer {
                 adaptive_patterns: None,
             };
 
-            if let Err(e) = cache.update_extraction_info(source_domain, domain_specific_patterns, domain_metadata).await {
-                debug!("🔥🔥🔥 CACHE ERROR: Failed to update extraction patterns cache for {}: {}", source_domain, e);
-                debug!("Failed to update extraction patterns cache for {}: {}", source_domain, e);
+            if let Err(e) = cache
+                .update_extraction_info(source_domain, domain_specific_patterns, domain_metadata)
+                .await
+            {
+                debug!(
+                    "🔥🔥🔥 CACHE ERROR: Failed to update extraction patterns cache for {}: {}",
+                    source_domain, e
+                );
+                debug!(
+                    "Failed to update extraction patterns cache for {}: {}",
+                    source_domain, e
+                );
             } else {
-                debug!("🔥🔥🔥 CACHE SUCCESS: Successfully cached domain-specific patterns for {}", source_domain);
-                debug!("Successfully cached domain-specific patterns for {}", source_domain);
+                debug!(
+                    "🔥🔥🔥 CACHE SUCCESS: Successfully cached domain-specific patterns for {}",
+                    source_domain
+                );
+                debug!(
+                    "Successfully cached domain-specific patterns for {}",
+                    source_domain
+                );
             }
         }
 
@@ -2865,7 +3460,13 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract vendor domains from HTML tables using cached extraction patterns
-    pub fn extract_from_tables_with_patterns(&self, document: &Html, _html_content: &str, base_url: &str, patterns: &ExtractionPatterns) -> Result<(Vec<SubprocessorDomain>, Option<ExtractionMetadata>)> {
+    pub fn extract_from_tables_with_patterns(
+        &self,
+        document: &Html,
+        _html_content: &str,
+        base_url: &str,
+        patterns: &ExtractionPatterns,
+    ) -> Result<(Vec<SubprocessorDomain>, Option<ExtractionMetadata>)> {
         let mut vendors = Vec::new();
         let mut metadata = ExtractionMetadata {
             successful_extractions: 0,
@@ -2877,23 +3478,32 @@ impl SubprocessorAnalyzer {
                 .as_secs(),
             adaptive_patterns: None,
         };
-        
+
         // Check for subprocessor context using cached patterns
         debug!("🚀🚀🚀 STARTING CONTEXT DETECTION");
         debug!("🔥🔥🔥 STARTING CONTEXT DETECTION - looking for subprocessor indicators");
         let mut found_subprocessor_context = false;
 
         let paragraphs: Vec<_> = document.select(&PARAGRAPH_SELECTOR).collect();
-        debug!("🚀🚀🚀 Found {} paragraph elements for context detection", paragraphs.len());
-        debug!("🔥🔥🔥 Found {} paragraph elements to search for context", paragraphs.len());
-        
+        debug!(
+            "🚀🚀🚀 Found {} paragraph elements for context detection",
+            paragraphs.len()
+        );
+        debug!(
+            "🔥🔥🔥 Found {} paragraph elements to search for context",
+            paragraphs.len()
+        );
+
         for (p_index, paragraph) in paragraphs.iter().enumerate() {
             let text = paragraph.text().collect::<String>().to_lowercase();
             debug!("🚀🚀🚀 Paragraph {}: '{}'", p_index, text.trim());
             for context_pattern in &patterns.context_patterns {
                 if text.contains(context_pattern) {
                     found_subprocessor_context = true;
-                    debug!("Found subprocessor context with pattern: {}", context_pattern);
+                    debug!(
+                        "Found subprocessor context with pattern: {}",
+                        context_pattern
+                    );
                     break;
                 }
             }
@@ -2901,14 +3511,14 @@ impl SubprocessorAnalyzer {
                 break;
             }
         }
-        
+
         // Fallback: Check if this is likely a subprocessor page based on URL
         if !found_subprocessor_context {
-            let is_likely_subprocessor_page = base_url.contains("subprocessor") || 
-                                               base_url.contains("sub-processor") ||
-                                               base_url.contains("legal/subprocessor") ||
-                                               (base_url.contains("legal/") && base_url.contains("processor"));
-            
+            let is_likely_subprocessor_page = base_url.contains("subprocessor")
+                || base_url.contains("sub-processor")
+                || base_url.contains("legal/subprocessor")
+                || (base_url.contains("legal/") && base_url.contains("processor"));
+
             if is_likely_subprocessor_page {
                 debug!("No explicit subprocessor context found, but URL suggests subprocessor page - proceeding anyway");
             } else {
@@ -2916,21 +3526,32 @@ impl SubprocessorAnalyzer {
                 return Ok((vendors, None));
             }
         }
-        
+
         // Extract domains from tables using cached patterns
-        debug!("🔥🔥🔥 SEARCHING FOR TABLES - {} table selectors to try", patterns.table_selectors.len());
+        debug!(
+            "🔥🔥🔥 SEARCHING FOR TABLES - {} table selectors to try",
+            patterns.table_selectors.len()
+        );
         for table_selector_pattern in &patterns.table_selectors {
             debug!("🔍 Trying table selector: {}", table_selector_pattern);
             debug!("🔥🔥🔥 Trying table selector: {}", table_selector_pattern);
             if let Ok(table_selector) = Selector::parse(table_selector_pattern) {
                 let tables: Vec<_> = document.select(&table_selector).collect();
-                debug!("📊 Found {} table(s) with selector: {}", tables.len(), table_selector_pattern);
-                debug!("🔥🔥🔥 Found {} table(s) with selector: {}", tables.len(), table_selector_pattern);
-                
+                debug!(
+                    "📊 Found {} table(s) with selector: {}",
+                    tables.len(),
+                    table_selector_pattern
+                );
+                debug!(
+                    "🔥🔥🔥 Found {} table(s) with selector: {}",
+                    tables.len(),
+                    table_selector_pattern
+                );
+
                 for (table_index, table) in tables.iter().enumerate() {
                     debug!("🔍 Processing table {}/{}", table_index + 1, tables.len());
                     let mut entity_name_column = 0; // Default to first column
-                    
+
                     // Look for table headers to identify the correct column for entity names
                     let header_rows: Vec<_> = table.select(&HEADER_ROW_SELECTOR).collect();
                     debug!("🔍 Found {} header row(s)", header_rows.len());
@@ -2938,26 +3559,37 @@ impl SubprocessorAnalyzer {
                     if !header_rows.is_empty() {
                         let first_header_row = header_rows[0];
                         // Handle both <th> and <td> headers (some sites use <td> for headers)
-                        let headers: Vec<_> = first_header_row.select(&HEADER_CELL_SELECTOR).collect();
+                        let headers: Vec<_> =
+                            first_header_row.select(&HEADER_CELL_SELECTOR).collect();
                         debug!("📋 Found {} header cell(s) in first row", headers.len());
-                        
+
                         // Log all header texts for debugging
                         for (index, header) in headers.iter().enumerate() {
                             let header_text = header.text().collect::<String>();
                             let header_html = header.html();
-                            debug!("📋 Header {}: text='{}' html='{}'", index, header_text.trim(), header_html.trim());
+                            debug!(
+                                "📋 Header {}: text='{}' html='{}'",
+                                index,
+                                header_text.trim(),
+                                header_html.trim()
+                            );
                         }
-                        
+
                         // Look for entity column using cached header patterns
                         for (index, header) in headers.iter().enumerate() {
                             let header_text = header.text().collect::<String>().to_lowercase();
-                            debug!("🔍 Checking header {} text: '{}' against patterns", index, header_text.trim());
-                            
+                            debug!(
+                                "🔍 Checking header {} text: '{}' against patterns",
+                                index,
+                                header_text.trim()
+                            );
+
                             for header_pattern in &patterns.entity_header_patterns {
                                 debug!("🔍 Testing pattern: '{}'", header_pattern);
                                 if header_text.contains(header_pattern) {
                                     entity_name_column = index;
-                                    metadata.successful_header_pattern = Some(header_pattern.clone());
+                                    metadata.successful_header_pattern =
+                                        Some(header_pattern.clone());
                                     metadata.successful_entity_column_index = Some(index);
                                     debug!("✅ Found entity name column at index {} with header pattern: '{}'", index, header_pattern);
                                     break;
@@ -2967,14 +3599,14 @@ impl SubprocessorAnalyzer {
                                 break;
                             }
                         }
-                        
+
                         if metadata.successful_header_pattern.is_none() {
                             debug!("❌ No header pattern matched, using default column 0");
                         }
                     } else {
                         debug!("❌ No header rows found, using default column 0");
                     }
-                    
+
                     // Process data rows
                     let all_rows: Vec<_> = table.select(&DATA_ROW_SELECTOR).collect();
                     debug!("🔍 Found {} total rows in table", all_rows.len());
@@ -2982,9 +3614,14 @@ impl SubprocessorAnalyzer {
                     for (row_index, row) in all_rows.iter().enumerate() {
                         let cells: Vec<_> = row.select(&CELL_SELECTOR).collect();
                         let has_th_elements = row.select(&TH_SELECTOR).next().is_some();
-                        
-                        debug!("🔍 Row {}: {} cells, has_th_elements={}", row_index, cells.len(), has_th_elements);
-                        
+
+                        debug!(
+                            "🔍 Row {}: {} cells, has_th_elements={}",
+                            row_index,
+                            cells.len(),
+                            has_th_elements
+                        );
+
                         // Log cell contents for debugging
                         for (cell_index, cell) in cells.iter().enumerate() {
                             let cell_text = cell.text().collect::<String>().trim().to_string();
@@ -2994,39 +3631,52 @@ impl SubprocessorAnalyzer {
                                 debug!("📋 Row {} Cell {}: (empty)", row_index, cell_index);
                             }
                         }
-                        
+
                         // Skip empty rows or header rows
                         if cells.is_empty() || has_th_elements {
-                            debug!("⏭️ Skipping row {} (empty={}, has_th={})", row_index, cells.is_empty(), has_th_elements);
+                            debug!(
+                                "⏭️ Skipping row {} (empty={}, has_th={})",
+                                row_index,
+                                cells.is_empty(),
+                                has_th_elements
+                            );
                             continue;
                         }
-                        
+
                         // Get the entity name from the identified column
                         if let Some(entity_cell) = cells.get(entity_name_column) {
                             // Join text nodes with newlines so <br>-separated content is
                             // split into separate lines for individual processing instead
                             // of concatenating into one long string
-                            let cell_text: String = entity_cell.text()
+                            let cell_text: String = entity_cell
+                                .text()
                                 .map(|t| t.trim())
                                 .filter(|t| !t.is_empty())
                                 .collect::<Vec<&str>>()
                                 .join("\n");
-                            debug!("🔍 Processing entity cell from column {}: '{}'", entity_name_column, cell_text.replace('\n', " | "));
-                            
+                            debug!(
+                                "🔍 Processing entity cell from column {}: '{}'",
+                                entity_name_column,
+                                cell_text.replace('\n', " | ")
+                            );
+
                             // Handle complex cells that might contain multiple lines or additional info
                             let lines: Vec<&str> = cell_text.lines().collect();
                             let mut found_company = false;
-                            
+
                             // Try to extract from the first line first (most likely company name)
                             for (i, line) in lines.iter().enumerate() {
                                 let line_text = line.trim();
-                                
+
                                 // Skip empty lines, lines that are too short, or lines that
                                 // are unreasonably long (likely concatenated row content)
-                                if line_text.is_empty() || line_text.len() < 3 || line_text.len() > 80 {
+                                if line_text.is_empty()
+                                    || line_text.len() < 3
+                                    || line_text.len() > 80
+                                {
                                     continue;
                                 }
-                                
+
                                 // For complex cells, first line is usually the company name
                                 // Additional lines might be addresses, etc.
                                 let entity_name = if i == 0 {
@@ -3034,23 +3684,41 @@ impl SubprocessorAnalyzer {
                                 } else {
                                     // For subsequent lines, check if they might be company names
                                     // Skip lines that look like addresses or other info
-                                    if line_text.contains("Avenue") || 
-                                       line_text.contains("Street") || 
-                                       line_text.contains("Suite") ||
-                                       line_text.chars().any(|c| c.is_digit(10)) &&
-                                       (line_text.contains("WA ") || line_text.contains("NY ") || line_text.contains("CA ") || 
-                                        line_text.len() < 20) {
+                                    if line_text.contains("Avenue")
+                                        || line_text.contains("Street")
+                                        || line_text.contains("Suite")
+                                        || line_text.chars().any(|c| c.is_digit(10))
+                                            && (line_text.contains("WA ")
+                                                || line_text.contains("NY ")
+                                                || line_text.contains("CA ")
+                                                || line_text.len() < 20)
+                                    {
                                         continue; // Skip address-like lines
                                     }
                                     line_text.to_string()
                                 };
-                                
-                                debug!("Processing entity name from column {} line {}: {}", entity_name_column, i, entity_name);
-                                
+
+                                debug!(
+                                    "Processing entity name from column {} line {}: {}",
+                                    entity_name_column, i, entity_name
+                                );
+
                                 // Try to extract domain using cached patterns
-                                if let Some(domain) = self.extract_domain_from_entity_name_with_patterns(&entity_name, patterns) {
-                                    let evidence = self.create_enhanced_evidence(entity_cell, &entity_name, base_url);
-                                    debug!("Extracted domain: {} from entity: {}", domain, entity_name);
+                                if let Some(domain) = self
+                                    .extract_domain_from_entity_name_with_patterns(
+                                        &entity_name,
+                                        patterns,
+                                    )
+                                {
+                                    let evidence = self.create_enhanced_evidence(
+                                        entity_cell,
+                                        &entity_name,
+                                        base_url,
+                                    );
+                                    debug!(
+                                        "Extracted domain: {} from entity: {}",
+                                        domain, entity_name
+                                    );
                                     vendors.push(SubprocessorDomain {
                                         domain,
                                         source_type: RecordType::HttpSubprocessor,
@@ -3060,34 +3728,52 @@ impl SubprocessorAnalyzer {
                                     break; // Found a company in this cell, move to next cell
                                 }
                             }
-                            
+
                             if !found_company {
-                                debug!("Could not extract domain from cell content: {}", cell_text.replace('\n', " | "));
+                                debug!(
+                                    "Could not extract domain from cell content: {}",
+                                    cell_text.replace('\n', " | ")
+                                );
                             }
                         }
                     }
                 }
             }
         }
-        
+
         metadata.successful_extractions = vendors.len() as u32;
-        debug!("Extracted {} domains from subprocessor tables using patterns", vendors.len());
-        
+        debug!(
+            "Extracted {} domains from subprocessor tables using patterns",
+            vendors.len()
+        );
+
         let has_vendors = !vendors.is_empty();
         Ok((vendors, if has_vendors { Some(metadata) } else { None }))
     }
-    
+
     /// Legacy method for backward compatibility
-    pub fn extract_from_tables(&self, document: &Html, _html_content: &str, base_url: &str) -> Result<Vec<SubprocessorDomain>> {
+    pub fn extract_from_tables(
+        &self,
+        document: &Html,
+        _html_content: &str,
+        base_url: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
         let patterns = ExtractionPatterns::default();
-        let (vendors, _) = self.extract_from_tables_with_patterns(document, _html_content, base_url, &patterns)?;
+        let (vendors, _) =
+            self.extract_from_tables_with_patterns(document, _html_content, base_url, &patterns)?;
         Ok(vendors)
     }
 
     /// Extract vendor domains from HTML lists using cached extraction patterns
-    pub fn extract_from_lists_with_patterns(&self, document: &Html, _html_content: &str, base_url: &str, patterns: &ExtractionPatterns) -> Result<Vec<SubprocessorDomain>> {
+    pub fn extract_from_lists_with_patterns(
+        &self,
+        document: &Html,
+        _html_content: &str,
+        base_url: &str,
+        patterns: &ExtractionPatterns,
+    ) -> Result<Vec<SubprocessorDomain>> {
         let mut vendors = Vec::new();
-        
+
         // Check for subprocessor context using cached patterns
         let mut found_subprocessor_context = false;
 
@@ -3096,7 +3782,10 @@ impl SubprocessorAnalyzer {
             for context_pattern in &patterns.context_patterns {
                 if text.contains(context_pattern) {
                     found_subprocessor_context = true;
-                    debug!("Found subprocessor context in lists with pattern: {}", context_pattern);
+                    debug!(
+                        "Found subprocessor context in lists with pattern: {}",
+                        context_pattern
+                    );
                     break;
                 }
             }
@@ -3104,27 +3793,30 @@ impl SubprocessorAnalyzer {
                 break;
             }
         }
-        
+
         if !found_subprocessor_context {
             debug!("No subprocessor context found for list extraction");
             return Ok(vendors);
         }
-        
+
         // Extract from lists using cached patterns
         for list_selector_pattern in &patterns.list_selectors {
             if let Ok(list_selector) = Selector::parse(list_selector_pattern) {
                 for list_element in document.select(&list_selector) {
                     let text = list_element.text().collect::<String>().trim().to_string();
-                    
+
                     if text.len() < 3 || text.chars().all(|c| c.is_whitespace()) {
                         continue;
                     }
-                    
+
                     // Only process text that looks like an organization name
                     if self.looks_like_organization_name(&text) {
                         // Try to extract domain using cached patterns
-                        if let Some(domain) = self.extract_domain_from_entity_name_with_patterns(&text, patterns) {
-                            let evidence = self.create_enhanced_evidence(&list_element, &text, base_url);
+                        if let Some(domain) =
+                            self.extract_domain_from_entity_name_with_patterns(&text, patterns)
+                        {
+                            let evidence =
+                                self.create_enhanced_evidence(&list_element, &text, base_url);
                             debug!("Extracted domain from list: {} from text: {}", domain, text);
                             vendors.push(SubprocessorDomain {
                                 domain,
@@ -3136,112 +3828,253 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
-        debug!("Extracted {} domains from subprocessor lists using patterns", vendors.len());
+
+        debug!(
+            "Extracted {} domains from subprocessor lists using patterns",
+            vendors.len()
+        );
         Ok(vendors)
     }
 
     /// Check if text looks like an organization name (has proper business suffixes or patterns)
     fn looks_like_organization_name(&self, text: &str) -> bool {
         let text_lower = text.to_lowercase().trim().to_string();
-        
+
         // Skip very short text or navigation-like terms
         if text_lower.len() < 4 {
             return false;
         }
-        
+
         // Skip common navigation/UI terms that aren't organizations
         let navigation_terms = [
-            "home", "about", "contact", "login", "signup", "search", "menu",
-            "products", "services", "solutions", "platform", "pricing", "features",
-            "enterprise", "business", "developers", "partners", "support", "help",
-            "blog", "news", "events", "careers", "company", "legal", "privacy",
-            "terms", "policy", "cookie", "security", "trust", "compliance",
-            "documentation", "docs", "api", "integration", "marketplace",
-            "community", "forum", "resources", "downloads", "training",
-            "academy", "certification", "overview", "getting started",
-            "dashboard", "account", "profile", "settings", "preferences",
-            "notifications", "inbox", "messages", "calendar", "reports",
-            "analytics", "insights", "metrics", "performance", "monitoring",
-            "automation", "workflow", "templates", "campaigns", "segments",
-            "lists", "forms", "surveys", "reviews", "feedback", "ratings",
-            "shipping", "billing", "payment", "subscription", "upgrade",
-            "downgrade", "cancel", "pause", "resume", "archive", "delete",
-            "import", "export", "sync", "backup", "restore", "migrate",
-            "integration", "webhook", "api", "sdk", "library", "plugin"
+            "home",
+            "about",
+            "contact",
+            "login",
+            "signup",
+            "search",
+            "menu",
+            "products",
+            "services",
+            "solutions",
+            "platform",
+            "pricing",
+            "features",
+            "enterprise",
+            "business",
+            "developers",
+            "partners",
+            "support",
+            "help",
+            "blog",
+            "news",
+            "events",
+            "careers",
+            "company",
+            "legal",
+            "privacy",
+            "terms",
+            "policy",
+            "cookie",
+            "security",
+            "trust",
+            "compliance",
+            "documentation",
+            "docs",
+            "api",
+            "integration",
+            "marketplace",
+            "community",
+            "forum",
+            "resources",
+            "downloads",
+            "training",
+            "academy",
+            "certification",
+            "overview",
+            "getting started",
+            "dashboard",
+            "account",
+            "profile",
+            "settings",
+            "preferences",
+            "notifications",
+            "inbox",
+            "messages",
+            "calendar",
+            "reports",
+            "analytics",
+            "insights",
+            "metrics",
+            "performance",
+            "monitoring",
+            "automation",
+            "workflow",
+            "templates",
+            "campaigns",
+            "segments",
+            "lists",
+            "forms",
+            "surveys",
+            "reviews",
+            "feedback",
+            "ratings",
+            "shipping",
+            "billing",
+            "payment",
+            "subscription",
+            "upgrade",
+            "downgrade",
+            "cancel",
+            "pause",
+            "resume",
+            "archive",
+            "delete",
+            "import",
+            "export",
+            "sync",
+            "backup",
+            "restore",
+            "migrate",
+            "integration",
+            "webhook",
+            "api",
+            "sdk",
+            "library",
+            "plugin",
         ];
-        
+
         for term in &navigation_terms {
             if text_lower == *term {
                 return false;
             }
         }
-        
+
         // Look for organization indicators (company suffixes or patterns)
         let organization_patterns = [
             // Company suffixes
-            "inc.", "inc", "corporation", "corp.", "corp", "limited", "ltd.", "ltd",
-            "llc", "llp", "pllc", "company", "co.", "co", "group", "holdings",
-            "enterprises", "industries", "solutions", "technologies", "tech",
-            "systems", "software", "services", "consulting", "partners",
+            "inc.",
+            "inc",
+            "corporation",
+            "corp.",
+            "corp",
+            "limited",
+            "ltd.",
+            "ltd",
+            "llc",
+            "llp",
+            "pllc",
+            "company",
+            "co.",
+            "co",
+            "group",
+            "holdings",
+            "enterprises",
+            "industries",
+            "solutions",
+            "technologies",
+            "tech",
+            "systems",
+            "software",
+            "services",
+            "consulting",
+            "partners",
             // Other business indicators
-            "& co", "and company", "and co", " gmbh", " ag", " sa", " bv", " ltd",
+            "& co",
+            "and company",
+            "and co",
+            " gmbh",
+            " ag",
+            " sa",
+            " bv",
+            " ltd",
             // Service/Tech company patterns
-            "technologies", "software", "systems", "solutions", "consulting",
-            "services", "ventures", "capital", "investments", "partners",
+            "technologies",
+            "software",
+            "systems",
+            "solutions",
+            "consulting",
+            "services",
+            "ventures",
+            "capital",
+            "investments",
+            "partners",
             // Name + descriptive patterns
-            " web services", " cloud", " platform", " network", " digital",
-            " media", " communications", " financial", " security", " analytics"
+            " web services",
+            " cloud",
+            " platform",
+            " network",
+            " digital",
+            " media",
+            " communications",
+            " financial",
+            " security",
+            " analytics",
         ];
-        
+
         for pattern in &organization_patterns {
             if text_lower.contains(pattern) {
                 return true;
             }
         }
-        
+
         // Additional check: multi-word capitalized names (like "Amazon Web Services")
         // that might be company names even without explicit suffixes
         let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() >= 2 && words.len() <= 6 {  // Reasonable company name length
+        if words.len() >= 2 && words.len() <= 6 {
+            // Reasonable company name length
             let has_proper_capitalization = words.iter().all(|word| {
-                word.chars().next().map_or(false, |c| c.is_uppercase()) &&
-                word.len() > 2  // Skip short words like "a", "of", "the"
+                word.chars().next().map_or(false, |c| c.is_uppercase()) && word.len() > 2
+                // Skip short words like "a", "of", "the"
             });
-            
+
             if has_proper_capitalization {
                 // Additional filter: avoid generic phrases that might be capitalized
                 let generic_phrases = [
-                    "Terms Of Service", "Privacy Policy", "Cookie Policy",
-                    "End User License", "Service Level Agreement",
-                    "Data Processing Agreement", "Master Service Agreement",
-                    "Software License Agreement", "Terms And Conditions"
+                    "Terms Of Service",
+                    "Privacy Policy",
+                    "Cookie Policy",
+                    "End User License",
+                    "Service Level Agreement",
+                    "Data Processing Agreement",
+                    "Master Service Agreement",
+                    "Software License Agreement",
+                    "Terms And Conditions",
                 ];
-                
+
                 let text_title_case = words.join(" ");
                 for phrase in &generic_phrases {
                     if text_title_case.to_lowercase() == phrase.to_lowercase() {
                         return false;
                     }
                 }
-                
+
                 return true;
             }
         }
-        
+
         false
     }
-    
-    /// Legacy method for backward compatibility 
-    pub fn extract_from_lists(&self, document: &Html, _html_content: &str, base_url: &str) -> Result<Vec<SubprocessorDomain>> {
+
+    /// Legacy method for backward compatibility
+    pub fn extract_from_lists(
+        &self,
+        document: &Html,
+        _html_content: &str,
+        base_url: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
         let patterns = ExtractionPatterns::default();
         self.extract_from_lists_with_patterns(document, _html_content, base_url, &patterns)
     }
-    
+
     /// Extract domain from company entity name using cached patterns with enhanced matching
-    pub fn extract_domain_from_entity_name_with_patterns(&self, entity_name: &str, patterns: &ExtractionPatterns) -> Option<String> {
+    pub fn extract_domain_from_entity_name_with_patterns(
+        &self,
+        entity_name: &str,
+        patterns: &ExtractionPatterns,
+    ) -> Option<String> {
         let entity_lower = entity_name.to_lowercase().trim().to_string();
-        
+
         // First, try direct domain extraction patterns (validated against ReDoS - H006)
         for pattern_str in &patterns.domain_extraction_patterns {
             if let Some(regex) = validate_and_compile_regex(pattern_str) {
@@ -3249,25 +4082,31 @@ impl SubprocessorAnalyzer {
                     if let Some(domain_match) = cap.get(1).or_else(|| cap.get(2)) {
                         let domain = domain_match.as_str().to_lowercase();
                         if self.is_valid_domain(&domain) {
-                            debug!("Extracted domain '{}' using pattern: {}", domain, pattern_str);
+                            debug!(
+                                "Extracted domain '{}' using pattern: {}",
+                                domain, pattern_str
+                            );
                             return Some(domain);
                         }
                     }
                 }
             }
         }
-        
+
         // Enhanced organization name to domain mapping for subprocessor entities
         let domain = self.map_organization_to_domain(&entity_lower);
         if let Some(mapped_domain) = domain {
-            debug!("Mapped organization '{}' to domain: {}", entity_name, mapped_domain);
+            debug!(
+                "Mapped organization '{}' to domain: {}",
+                entity_name, mapped_domain
+            );
             return Some(mapped_domain);
         }
-        
+
         // Fallback to legacy method
         self.extract_domain_from_entity_name(entity_name)
     }
-    
+
     /// Map organization names to their likely domain names for subprocessor extraction
     fn map_organization_to_domain(&self, org_name: &str) -> Option<String> {
         let trimmed = org_name.trim();
@@ -3283,8 +4122,9 @@ impl SubprocessorAnalyzer {
         // Use regex for word-boundary-aware suffix removal to avoid truncating
         // words like "Communications" when removing " co" or "Company" when removing " co"
         let suffix_regex = regex::Regex::new(
-            r"(?i),?\s*\b(inc\.?|llc\.?|ltd\.?|l\.?p\.?|corp\.?|corporation|company|co\.?)$"
-        ).ok();
+            r"(?i),?\s*\b(inc\.?|llc\.?|ltd\.?|l\.?p\.?|corp\.?|corporation|company|co\.?)$",
+        )
+        .ok();
         let cleaned_str = trimmed.replace(",", "").replace(".", "");
         let cleaned = if let Some(ref re) = suffix_regex {
             re.replace_all(&cleaned_str, "").trim().to_lowercase()
@@ -3292,15 +4132,14 @@ impl SubprocessorAnalyzer {
             cleaned_str.trim().to_lowercase().into()
         };
         let cleaned = cleaned.to_string();
-        
+
         // Common organization to domain mappings for tech/SaaS companies
         let mappings = [
             // From Klaviyo samples
             ("ada support", "ada.cx"),
-            ("amazon web services", "aws.amazon.com"), 
+            ("amazon web services", "aws.amazon.com"),
             ("chronosphere", "chronosphere.io"),
             ("cloudflare", "cloudflare.com"),
-            
             // Common subprocessors
             ("google", "google.com"),
             ("microsoft", "microsoft.com"),
@@ -3346,14 +4185,14 @@ impl SubprocessorAnalyzer {
             ("constant contact", "constantcontact.com"),
             ("campaign monitor", "campaignmonitor.com"),
         ];
-        
+
         // Check for direct matches
         for (org, domain) in &mappings {
             if cleaned.contains(org) {
                 return Some(domain.to_string());
             }
         }
-        
+
         // Only try to infer domains for well-known organization names
         // Removed automatic domain inference to prevent false positives from navigation links
         if cleaned.len() > 2 && !cleaned.contains(" ") {
@@ -3376,70 +4215,317 @@ impl SubprocessorAnalyzer {
             // Only infer domains for organization names that are likely actual companies
             // and not navigation terms like "home", "community", "enterprise", etc.
             let navigation_terms = [
-                "home", "about", "contact", "privacy", "terms", "help", "support",
-                "community", "forum", "blog", "news", "events", "careers", "jobs",
-                "login", "signup", "register", "account", "profile", "settings",
-                "dashboard", "admin", "search", "browse", "explore", "discover",
-                "features", "products", "services", "solutions", "pricing", "plans",
-                "enterprise", "business", "commercial", "professional", "personal",
-                "free", "premium", "pro", "basic", "standard", "advanced",
-                "developers", "api", "docs", "documentation", "guides", "tutorials",
-                "resources", "tools", "downloads", "software", "platform", "app",
-                "mobile", "desktop", "web", "online", "cloud", "saas",
-                "academy", "education", "training", "learning", "courses", "certification",
-                "partners", "integrations", "marketplace", "store", "shop", "cart",
-                "checkout", "payment", "billing", "invoice", "subscription", "license",
-                "reviews", "testimonials", "case", "studies", "success", "stories",
-                "newsletter", "updates", "announcements", "releases", "changelog",
-                "legal", "compliance", "security", "privacy", "cookies", "gdpr",
-                "feedback", "survey", "contact", "sales", "demo", "trial", "quote",
-                "templates", "themes", "design", "customize", "builder", "editor",
-                "analytics", "reports", "statistics", "metrics", "insights", "data",
-                "integration", "workflow", "automation", "marketing", "advertising",
-                "social", "media", "content", "publishing", "campaign", "email",
-                "notifications", "alerts", "messages", "chat", "communication",
-                "collaboration", "team", "workspace", "project", "management",
-                "portfolio", "gallery", "showcase", "examples", "samples", "demos",
+                "home",
+                "about",
+                "contact",
+                "privacy",
+                "terms",
+                "help",
+                "support",
+                "community",
+                "forum",
+                "blog",
+                "news",
+                "events",
+                "careers",
+                "jobs",
+                "login",
+                "signup",
+                "register",
+                "account",
+                "profile",
+                "settings",
+                "dashboard",
+                "admin",
+                "search",
+                "browse",
+                "explore",
+                "discover",
+                "features",
+                "products",
+                "services",
+                "solutions",
+                "pricing",
+                "plans",
+                "enterprise",
+                "business",
+                "commercial",
+                "professional",
+                "personal",
+                "free",
+                "premium",
+                "pro",
+                "basic",
+                "standard",
+                "advanced",
+                "developers",
+                "api",
+                "docs",
+                "documentation",
+                "guides",
+                "tutorials",
+                "resources",
+                "tools",
+                "downloads",
+                "software",
+                "platform",
+                "app",
+                "mobile",
+                "desktop",
+                "web",
+                "online",
+                "cloud",
+                "saas",
+                "academy",
+                "education",
+                "training",
+                "learning",
+                "courses",
+                "certification",
+                "partners",
+                "integrations",
+                "marketplace",
+                "store",
+                "shop",
+                "cart",
+                "checkout",
+                "payment",
+                "billing",
+                "invoice",
+                "subscription",
+                "license",
+                "reviews",
+                "testimonials",
+                "case",
+                "studies",
+                "success",
+                "stories",
+                "newsletter",
+                "updates",
+                "announcements",
+                "releases",
+                "changelog",
+                "legal",
+                "compliance",
+                "security",
+                "privacy",
+                "cookies",
+                "gdpr",
+                "feedback",
+                "survey",
+                "contact",
+                "sales",
+                "demo",
+                "trial",
+                "quote",
+                "templates",
+                "themes",
+                "design",
+                "customize",
+                "builder",
+                "editor",
+                "analytics",
+                "reports",
+                "statistics",
+                "metrics",
+                "insights",
+                "data",
+                "integration",
+                "workflow",
+                "automation",
+                "marketing",
+                "advertising",
+                "social",
+                "media",
+                "content",
+                "publishing",
+                "campaign",
+                "email",
+                "notifications",
+                "alerts",
+                "messages",
+                "chat",
+                "communication",
+                "collaboration",
+                "team",
+                "workspace",
+                "project",
+                "management",
+                "portfolio",
+                "gallery",
+                "showcase",
+                "examples",
+                "samples",
+                "demos",
                 // Generic business/company terms that aren't specific vendors
-                "technologies", "technology", "solutions", "services", "systems",
-                "consulting", "group", "partners", "international", "global",
-                "corporation", "limited", "holdings", "ventures", "capital",
-                "enterprises", "associates", "industries", "incorporated",
+                "technologies",
+                "technology",
+                "solutions",
+                "services",
+                "systems",
+                "consulting",
+                "group",
+                "partners",
+                "international",
+                "global",
+                "corporation",
+                "limited",
+                "holdings",
+                "ventures",
+                "capital",
+                "enterprises",
+                "associates",
+                "industries",
+                "incorporated",
                 // Plurals and additional generic terms missed by singular forms
-                "platforms", "applications", "products", "features", "tools",
-                "operations", "commerce", "corporate", "labs", "identifiers",
-                "realtime", "engineering", "science", "networks", "digital",
-                "storage", "hosting", "infrastructure", "intelligence",
-                "processing", "connectors", "middleware", "optimization",
-                "delivery", "distribution", "logistics", "manufacturing",
-                "healthcare", "financial", "insurance", "banking", "retail",
-                "automotive", "aerospace", "defense", "energy", "utilities",
-                "telecom", "telecommunications", "wireless", "broadband",
-                "provider", "providers", "vendor", "vendors", "supplier",
-                "suppliers", "customer", "customers", "client", "clients",
-                "overview", "summary", "description", "purpose", "function",
-                "category", "categories", "type", "types", "status", "location",
-                "region", "country", "state", "city", "address",
+                "platforms",
+                "applications",
+                "products",
+                "features",
+                "tools",
+                "operations",
+                "commerce",
+                "corporate",
+                "labs",
+                "identifiers",
+                "realtime",
+                "engineering",
+                "science",
+                "networks",
+                "digital",
+                "storage",
+                "hosting",
+                "infrastructure",
+                "intelligence",
+                "processing",
+                "connectors",
+                "middleware",
+                "optimization",
+                "delivery",
+                "distribution",
+                "logistics",
+                "manufacturing",
+                "healthcare",
+                "financial",
+                "insurance",
+                "banking",
+                "retail",
+                "automotive",
+                "aerospace",
+                "defense",
+                "energy",
+                "utilities",
+                "telecom",
+                "telecommunications",
+                "wireless",
+                "broadband",
+                "provider",
+                "providers",
+                "vendor",
+                "vendors",
+                "supplier",
+                "suppliers",
+                "customer",
+                "customers",
+                "client",
+                "clients",
+                "overview",
+                "summary",
+                "description",
+                "purpose",
+                "function",
+                "category",
+                "categories",
+                "type",
+                "types",
+                "status",
+                "location",
+                "region",
+                "country",
+                "state",
+                "city",
+                "address",
                 // Common cookie/consent management names that bypass underscore check
-                "optanonalertboxclosed", "optanonconsent", "optanonactivegrps",
-                "bscookie", "lidc", "ysc", "pardot",
-                "usermatchhistory", "analyticssynchistory",
-                "inferences", "slugid", "domainid",
+                "optanonalertboxclosed",
+                "optanonconsent",
+                "optanonactivegrps",
+                "bscookie",
+                "lidc",
+                "ysc",
+                "pardot",
+                "usermatchhistory",
+                "analyticssynchistory",
+                "inferences",
+                "slugid",
+                "domainid",
                 // Country/region names that shouldn't be converted to domains
-                "japan", "ireland", "israel", "korea", "canada", "australia",
-                "germany", "france", "spain", "italy", "netherlands", "belgium",
-                "sweden", "norway", "denmark", "finland", "switzerland", "austria",
-                "poland", "portugal", "brazil", "mexico", "argentina", "chile",
-                "india", "china", "singapore", "malaysia", "indonesia", "thailand",
-                "philippines", "vietnam", "taiwan", "hongkong", "uk", "usa", "eu",
-                "emea", "apac", "latam", "americas", "europe", "asia", "africa",
+                "japan",
+                "ireland",
+                "israel",
+                "korea",
+                "canada",
+                "australia",
+                "germany",
+                "france",
+                "spain",
+                "italy",
+                "netherlands",
+                "belgium",
+                "sweden",
+                "norway",
+                "denmark",
+                "finland",
+                "switzerland",
+                "austria",
+                "poland",
+                "portugal",
+                "brazil",
+                "mexico",
+                "argentina",
+                "chile",
+                "india",
+                "china",
+                "singapore",
+                "malaysia",
+                "indonesia",
+                "thailand",
+                "philippines",
+                "vietnam",
+                "taiwan",
+                "hongkong",
+                "uk",
+                "usa",
+                "eu",
+                "emea",
+                "apac",
+                "latam",
+                "americas",
+                "europe",
+                "asia",
+                "africa",
                 // Common location descriptors
-                "north", "south", "east", "west", "central", "pacific", "atlantic",
+                "north",
+                "south",
+                "east",
+                "west",
+                "central",
+                "pacific",
+                "atlantic",
                 // Generic corporate structure terms
-                "pty", "superholdco", "holdco", "subco", "dados", "communications",
-                "affiliate", "subsidiary", "parent", "branch", "division", "unit"
+                "pty",
+                "superholdco",
+                "holdco",
+                "subco",
+                "dados",
+                "communications",
+                "affiliate",
+                "subsidiary",
+                "parent",
+                "branch",
+                "division",
+                "unit",
             ];
-            
+
             if !navigation_terms.contains(&cleaned.as_str()) {
                 let candidate = format!("{}.com", cleaned);
                 // Validate the inferred domain to prevent garbage like short-name FPs
@@ -3448,18 +4534,21 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Validate if a string is a reasonable domain name
     fn is_valid_domain(&self, domain: &str) -> bool {
         // Basic validation: must contain a dot and valid characters
-        if !domain.contains('.') ||
-           !domain.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-') ||
-           domain.starts_with('.') ||
-           domain.ends_with('.') ||
-           domain.len() < 4 {
+        if !domain.contains('.')
+            || !domain
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '-')
+            || domain.starts_with('.')
+            || domain.ends_with('.')
+            || domain.len() < 4
+        {
             return false;
         }
 
@@ -3469,13 +4558,21 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract vendor domains from paragraph-based content (for text-based tables and lists)
-    pub fn extract_from_paragraphs(&self, document: &Html, html_content: &str, base_url: &str, patterns: &ExtractionPatterns) -> Result<Vec<SubprocessorDomain>> {
+    pub fn extract_from_paragraphs(
+        &self,
+        document: &Html,
+        html_content: &str,
+        base_url: &str,
+        patterns: &ExtractionPatterns,
+    ) -> Result<Vec<SubprocessorDomain>> {
         let mut vendors = Vec::new();
 
         // Look for strong subprocessor context first
-        let has_subprocessor_context = patterns.context_patterns.iter()
+        let has_subprocessor_context = patterns
+            .context_patterns
+            .iter()
             .any(|pattern| html_content.to_lowercase().contains(pattern));
-        
+
         if !has_subprocessor_context {
             debug!("No subprocessor context found in paragraphs, skipping paragraph extraction");
             return Ok(vendors);
@@ -3516,19 +4613,29 @@ impl SubprocessorAnalyzer {
                     for capture in regex.captures_iter(&text) {
                         if let Some(company_match) = capture.get(1) {
                             let company_name = company_match.as_str();
-                            
+
                             // Skip very generic terms and apply organization name validation
-                            if company_name.len() < 3 || 
-                               company_name.to_lowercase().contains("service") ||
-                               company_name.to_lowercase().contains("provider") ||
-                               !self.looks_like_organization_name(company_name) {
+                            if company_name.len() < 3
+                                || company_name.to_lowercase().contains("service")
+                                || company_name.to_lowercase().contains("provider")
+                                || !self.looks_like_organization_name(company_name)
+                            {
                                 continue;
                             }
 
                             // Try to extract domain from company name
-                            if let Some(domain) = self.extract_domain_from_entity_name_with_patterns(company_name, patterns) {
-                                let evidence = self.create_enhanced_evidence(&paragraph, &text, base_url);
-                                debug!("Extracted domain from paragraph: {} from company: {}", domain, company_name);
+                            if let Some(domain) = self
+                                .extract_domain_from_entity_name_with_patterns(
+                                    company_name,
+                                    patterns,
+                                )
+                            {
+                                let evidence =
+                                    self.create_enhanced_evidence(&paragraph, &text, base_url);
+                                debug!(
+                                    "Extracted domain from paragraph: {} from company: {}",
+                                    domain, company_name
+                                );
                                 vendors.push(SubprocessorDomain {
                                     domain,
                                     source_type: RecordType::HttpSubprocessor,
@@ -3544,7 +4651,7 @@ impl SubprocessorAnalyzer {
         // Strategy 2: Look for structured text blocks that might be formatted as tables
         let text_content = document.root_element().text().collect::<String>();
         let lines: Vec<&str> = text_content.lines().collect();
-        
+
         // Look for lines that might contain company information
         for line in lines {
             let line = line.trim();
@@ -3563,10 +4670,18 @@ impl SubprocessorAnalyzer {
                     if let Some(capture) = regex.captures(line) {
                         if let Some(company_match) = capture.get(1) {
                             let company_name = company_match.as_str();
-                            
-                            if let Some(domain) = self.extract_domain_from_entity_name_with_patterns(company_name, patterns) {
+
+                            if let Some(domain) = self
+                                .extract_domain_from_entity_name_with_patterns(
+                                    company_name,
+                                    patterns,
+                                )
+                            {
                                 let evidence = format!("Text line: {}", line);
-                                debug!("Extracted domain from text line: {} from company: {}", domain, company_name);
+                                debug!(
+                                    "Extracted domain from text line: {} from company: {}",
+                                    domain, company_name
+                                );
                                 vendors.push(SubprocessorDomain {
                                     domain,
                                     source_type: RecordType::HttpSubprocessor,
@@ -3586,27 +4701,41 @@ impl SubprocessorAnalyzer {
     /// Extract vendor domains using domain-specific custom extraction rules
     /// This method takes precedence over generic extraction methods for domains with user-contributed patterns
     /// Returns both extracted vendors and any pending mappings that need user confirmation
-    pub fn extract_with_custom_rules(&self, document: &Html, html_content: &str, base_url: &str, custom_rules: &CustomExtractionRules, source_domain: &str) -> Result<SubprocessorExtractionResult> {
+    pub fn extract_with_custom_rules(
+        &self,
+        document: &Html,
+        html_content: &str,
+        base_url: &str,
+        custom_rules: &CustomExtractionRules,
+        source_domain: &str,
+    ) -> Result<SubprocessorExtractionResult> {
         let mut vendors = Vec::new();
         let mut pending_mappings = Vec::new();
         debug!("Starting domain-specific custom extraction with {} direct selectors and {} regex patterns",
                custom_rules.direct_selectors.len(), custom_rules.custom_regex_patterns.len());
 
         // Apply exclusion patterns if specified (validated against ReDoS - H006)
-        let exclusion_regexes: Vec<regex::Regex> = if let Some(special_handling) = &custom_rules.special_handling {
-            special_handling.exclusion_patterns.iter()
-                .filter_map(|pattern| validate_and_compile_regex(pattern))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let exclusion_regexes: Vec<regex::Regex> =
+            if let Some(special_handling) = &custom_rules.special_handling {
+                special_handling
+                    .exclusion_patterns
+                    .iter()
+                    .filter_map(|pattern| validate_and_compile_regex(pattern))
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Extract using direct CSS selectors
         for selector_rule in &custom_rules.direct_selectors {
             if let Ok(selector) = scraper::Selector::parse(&selector_rule.selector) {
                 let matched_elements: Vec<_> = document.select(&selector).collect();
-                debug!("Applying custom selector: {} - {} (matched {} elements)",
-                       selector_rule.selector, selector_rule.description, matched_elements.len());
+                debug!(
+                    "Applying custom selector: {} - {} (matched {} elements)",
+                    selector_rule.selector,
+                    selector_rule.description,
+                    matched_elements.len()
+                );
 
                 for element in matched_elements {
                     let mut text = if let Some(attr) = &selector_rule.attribute {
@@ -3622,8 +4751,12 @@ impl SubprocessorAnalyzer {
                             "lowercase" => text.to_lowercase(),
                             "remove_suffix" => {
                                 // Remove common business suffixes
-                                text.replace(" Inc", "").replace(" LLC", "").replace(" Corp", "").trim().to_string()
-                            },
+                                text.replace(" Inc", "")
+                                    .replace(" LLC", "")
+                                    .replace(" Corp", "")
+                                    .trim()
+                                    .to_string()
+                            }
                             _ => text,
                         };
                     }
@@ -3631,21 +4764,30 @@ impl SubprocessorAnalyzer {
                     if !text.is_empty() && text.len() > 2 {
                         // Reject org names that are too long or contain garbage
                         if !is_valid_org_name(&text) {
-                            debug!("Rejecting invalid org name from selector (quality check): '{}'", &text[..text.len().min(80)]);
+                            debug!(
+                                "Rejecting invalid org name from selector (quality check): '{}'",
+                                &text[..text.len().min(80)]
+                            );
                             continue;
                         }
 
                         // Check against exclusion patterns
-                        let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(&text));
+                        let should_exclude =
+                            exclusion_regexes.iter().any(|regex| regex.is_match(&text));
                         if should_exclude {
                             debug!("Excluding '{}' due to exclusion pattern", text);
                             continue;
                         }
 
                         // Try to extract domain from the organization name
-                        if let Some(result) = self.extract_domain_from_organization_name(&text, custom_rules) {
+                        if let Some(result) =
+                            self.extract_domain_from_organization_name(&text, custom_rules)
+                        {
                             let evidence = self.create_enhanced_evidence(&element, &text, base_url);
-                            debug!("Custom extraction found: {} -> {} (fallback: {})", text, result.domain, result.is_fallback);
+                            debug!(
+                                "Custom extraction found: {} -> {} (fallback: {})",
+                                text, result.domain, result.is_fallback
+                            );
 
                             // Track pending mappings that came from generic fallback
                             if result.is_fallback {
@@ -3662,19 +4804,26 @@ impl SubprocessorAnalyzer {
                                 raw_record: evidence,
                             });
                         } else {
-                            debug!("Custom extraction: no domain mapping found for '{}' (skipped)", text);
+                            debug!(
+                                "Custom extraction: no domain mapping found for '{}' (skipped)",
+                                text
+                            );
                         }
                     }
                 }
             } else {
-                debug!("Invalid CSS selector in custom rules: {}", selector_rule.selector);
+                debug!(
+                    "Invalid CSS selector in custom rules: {}",
+                    selector_rule.selector
+                );
             }
         }
 
         // Extract plain text from the document for regex matching.
         // SPA-rendered pages have company names in separate DOM elements (e.g. <div>Name</div><div>•</div>)
         // which become contiguous in plain text ("Name • ...") but NOT in raw HTML.
-        let plain_text: String = document.root_element()
+        let plain_text: String = document
+            .root_element()
             .text()
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
@@ -3684,7 +4833,10 @@ impl SubprocessorAnalyzer {
         // Run against both raw HTML and plain text to handle SPA-rendered content
         for regex_rule in &custom_rules.custom_regex_patterns {
             if let Some(regex) = validate_and_compile_regex(&regex_rule.pattern) {
-                debug!("Applying custom regex: {} - {}", regex_rule.pattern, regex_rule.description);
+                debug!(
+                    "Applying custom regex: {} - {}",
+                    regex_rule.pattern, regex_rule.description
+                );
 
                 // Run regex against both raw HTML and plain text
                 let sources: [&str; 2] = [html_content, &plain_text];
@@ -3696,25 +4848,38 @@ impl SubprocessorAnalyzer {
                             if !org_name.is_empty() && org_name.len() > 2 {
                                 // Reject org names that are too long or contain garbage
                                 if !is_valid_org_name(org_name) {
-                                    debug!("Rejecting invalid org name (quality check): '{}'", &org_name[..org_name.len().min(80)]);
+                                    debug!(
+                                        "Rejecting invalid org name (quality check): '{}'",
+                                        &org_name[..org_name.len().min(80)]
+                                    );
                                     continue;
                                 }
 
                                 // Check against exclusion patterns
-                                let should_exclude = exclusion_regexes.iter().any(|regex| regex.is_match(org_name));
+                                let should_exclude = exclusion_regexes
+                                    .iter()
+                                    .any(|regex| regex.is_match(org_name));
                                 if should_exclude {
                                     debug!("Excluding '{}' due to exclusion pattern", org_name);
                                     continue;
                                 }
 
-                                if let Some(result) = self.extract_domain_from_organization_name(org_name, custom_rules) {
+                                if let Some(result) = self
+                                    .extract_domain_from_organization_name(org_name, custom_rules)
+                                {
                                     // Deduplicate: skip if we already found this domain
                                     if vendors.iter().any(|v| v.domain == result.domain) {
                                         continue;
                                     }
 
-                                    let evidence = format!("Custom regex match: '{}' from pattern: {}", org_name, regex_rule.description);
-                                    debug!("Custom regex extraction found: {} -> {} (fallback: {})", org_name, result.domain, result.is_fallback);
+                                    let evidence = format!(
+                                        "Custom regex match: '{}' from pattern: {}",
+                                        org_name, regex_rule.description
+                                    );
+                                    debug!(
+                                        "Custom regex extraction found: {} -> {} (fallback: {})",
+                                        org_name, result.domain, result.is_fallback
+                                    );
 
                                     // Track pending mappings that came from generic fallback
                                     if result.is_fallback {
@@ -3736,11 +4901,18 @@ impl SubprocessorAnalyzer {
                     }
                 }
             } else {
-                debug!("Invalid regex pattern in custom rules: {}", regex_rule.pattern);
+                debug!(
+                    "Invalid regex pattern in custom rules: {}",
+                    regex_rule.pattern
+                );
             }
         }
 
-        debug!("Custom extraction completed, found {} vendors ({} pending confirmations)", vendors.len(), pending_mappings.len());
+        debug!(
+            "Custom extraction completed, found {} vendors ({} pending confirmations)",
+            vendors.len(),
+            pending_mappings.len()
+        );
         Ok(SubprocessorExtractionResult {
             subprocessors: vendors,
             pending_mappings,
@@ -3749,7 +4921,11 @@ impl SubprocessorAnalyzer {
 
     /// Extract domain from organization name using custom mapping rules if available
     /// Returns the domain and whether it was resolved via generic fallback (needs confirmation)
-    fn extract_domain_from_organization_name(&self, org_name: &str, custom_rules: &CustomExtractionRules) -> Option<DomainExtractionResult> {
+    fn extract_domain_from_organization_name(
+        &self,
+        org_name: &str,
+        custom_rules: &CustomExtractionRules,
+    ) -> Option<DomainExtractionResult> {
         let cleaned_org = org_name.trim().to_lowercase();
 
         // First, check custom organization-to-domain mappings
@@ -3766,7 +4942,8 @@ impl SubprocessorAnalyzer {
                         let is_better = match best_match {
                             None => true,
                             Some((best_pos, best_len, _)) => {
-                                pos < best_pos || (pos == best_pos && pattern_lower.len() > best_len)
+                                pos < best_pos
+                                    || (pos == best_pos && pattern_lower.len() > best_len)
                             }
                         };
                         if is_better {
@@ -3775,7 +4952,10 @@ impl SubprocessorAnalyzer {
                     }
                 }
                 if let Some((pos, _, domain)) = best_match {
-                    debug!("Used custom mapping: '{}' -> '{}' (matched at position {})", org_name, domain, pos);
+                    debug!(
+                        "Used custom mapping: '{}' -> '{}' (matched at position {})",
+                        org_name, domain, pos
+                    );
                     return Some(DomainExtractionResult {
                         domain: domain.to_string(),
                         is_fallback: false,
@@ -3786,7 +4966,10 @@ impl SubprocessorAnalyzer {
 
         // Fall back to standard domain extraction
         self.map_organization_to_domain(&cleaned_org).map(|domain| {
-            debug!("Used generic fallback mapping: '{}' -> '{}' (needs confirmation)", org_name, domain);
+            debug!(
+                "Used generic fallback mapping: '{}' -> '{}' (needs confirmation)",
+                org_name, domain
+            );
             DomainExtractionResult {
                 domain,
                 is_fallback: true,
@@ -3796,18 +4979,36 @@ impl SubprocessorAnalyzer {
 
     /// Generate intelligent domain-specific extraction patterns from successful extraction results
     /// This analyzes what worked and creates patterns that can be cached for future use
-    pub fn generate_domain_specific_patterns(&self, document: &Html, html_content: &str, successful_extractions: &[SubprocessorDomain], base_url: &str) -> CustomExtractionRules {
+    pub fn generate_domain_specific_patterns(
+        &self,
+        document: &Html,
+        html_content: &str,
+        successful_extractions: &[SubprocessorDomain],
+        base_url: &str,
+    ) -> CustomExtractionRules {
         let mut direct_selectors = Vec::new();
         let mut custom_regex_patterns = Vec::new();
         let mut custom_org_to_domain_mapping = std::collections::HashMap::new();
 
-        debug!("Generating domain-specific patterns from {} successful extractions", successful_extractions.len());
+        debug!(
+            "Generating domain-specific patterns from {} successful extractions",
+            successful_extractions.len()
+        );
 
         // Analyze successful table-based extractions
-        self.analyze_table_patterns(document, successful_extractions, &mut direct_selectors, &mut custom_org_to_domain_mapping);
+        self.analyze_table_patterns(
+            document,
+            successful_extractions,
+            &mut direct_selectors,
+            &mut custom_org_to_domain_mapping,
+        );
 
         // Analyze HTML structure for regex patterns
-        self.analyze_html_patterns(html_content, successful_extractions, &mut custom_regex_patterns);
+        self.analyze_html_patterns(
+            html_content,
+            successful_extractions,
+            &mut custom_regex_patterns,
+        );
 
         // Generate exclusion patterns to avoid common false positives
         let exclusion_patterns = self.generate_exclusion_patterns(base_url);
@@ -3817,24 +5018,32 @@ impl SubprocessorAnalyzer {
             custom_regex_patterns,
             special_handling: Some(SpecialHandling {
                 skip_generic_methods: true, // Use only domain-specific patterns
-                custom_org_to_domain_mapping: if custom_org_to_domain_mapping.is_empty() { None } else { Some(custom_org_to_domain_mapping) },
+                custom_org_to_domain_mapping: if custom_org_to_domain_mapping.is_empty() {
+                    None
+                } else {
+                    Some(custom_org_to_domain_mapping)
+                },
                 exclusion_patterns,
             }),
         }
     }
 
     /// Analyze successful table extractions to create targeted CSS selectors
-    fn analyze_table_patterns(&self, document: &Html, successful_extractions: &[SubprocessorDomain], 
-                             direct_selectors: &mut Vec<DirectSelector>, 
-                             custom_mappings: &mut std::collections::HashMap<String, String>) {
-        
+    fn analyze_table_patterns(
+        &self,
+        document: &Html,
+        successful_extractions: &[SubprocessorDomain],
+        direct_selectors: &mut Vec<DirectSelector>,
+        custom_mappings: &mut std::collections::HashMap<String, String>,
+    ) {
         // Find tables that contain subprocessor data
         if let Ok(table_selector) = scraper::Selector::parse("table") {
             for table in document.select(&table_selector) {
                 let table_text = table.text().collect::<String>().to_lowercase();
-                
+
                 // Extract company names from raw records for pattern matching
-                let company_names: Vec<String> = successful_extractions.iter()
+                let company_names: Vec<String> = successful_extractions
+                    .iter()
                     .filter_map(|extraction| {
                         // Extract company name from raw_record which contains HTML like "<td>Amazon Web Services, Inc.</td>"
                         if let Some(start) = extraction.raw_record.find(">") {
@@ -3850,15 +5059,21 @@ impl SubprocessorAnalyzer {
                     .collect();
 
                 // Check if this table contains our successful extractions (look for company names, not domains)
-                let matches_found = company_names.iter()
+                let matches_found = company_names
+                    .iter()
                     .filter(|company_name| table_text.contains(&company_name.to_lowercase()))
                     .count();
 
-                debug!("Table contains {} company name matches out of {} extracted companies", matches_found, company_names.len());
+                debug!(
+                    "Table contains {} company name matches out of {} extracted companies",
+                    matches_found,
+                    company_names.len()
+                );
 
-                if matches_found >= 3 { // Table must contain multiple successful matches
+                if matches_found >= 3 {
+                    // Table must contain multiple successful matches
                     debug!("Found productive table with {} matches", matches_found);
-                    
+
                     // Analyze table structure
                     if let Ok(td_selector) = scraper::Selector::parse("td") {
                         let mut column_analysis = std::collections::HashMap::new();
@@ -3866,19 +5081,33 @@ impl SubprocessorAnalyzer {
                         for (_row_idx, row) in table.select(&TR_SELECTOR).enumerate() {
                             for (col_idx, cell) in row.select(&td_selector).enumerate() {
                                 let cell_text = cell.text().collect::<String>().trim().to_string();
-                                
+
                                 // Check if this cell contains organization names
-                                for (extraction_idx, company_name) in company_names.iter().enumerate() {
-                                    if cell_text.to_lowercase().contains(&company_name.to_lowercase()) {
-                                        column_analysis.entry(col_idx).or_insert(Vec::new()).push(format!("{}:{}", extraction_idx, company_name));
-                                        debug!("Found company '{}' in column {} cell: '{}'", company_name, col_idx, cell_text);
+                                for (extraction_idx, company_name) in
+                                    company_names.iter().enumerate()
+                                {
+                                    if cell_text
+                                        .to_lowercase()
+                                        .contains(&company_name.to_lowercase())
+                                    {
+                                        column_analysis
+                                            .entry(col_idx)
+                                            .or_insert(Vec::new())
+                                            .push(format!("{}:{}", extraction_idx, company_name));
+                                        debug!(
+                                            "Found company '{}' in column {} cell: '{}'",
+                                            company_name, col_idx, cell_text
+                                        );
                                     }
                                 }
                             }
                         }
 
                         // Find the most productive column for organization names
-                        if let Some((best_col, _)) = column_analysis.iter().max_by_key(|(_, domains)| domains.len()) {
+                        if let Some((best_col, _)) = column_analysis
+                            .iter()
+                            .max_by_key(|(_, domains)| domains.len())
+                        {
                             let selector = format!("td:nth-child({})", best_col + 1);
                             direct_selectors.push(DirectSelector {
                                 selector: selector.clone(),
@@ -3901,36 +5130,50 @@ impl SubprocessorAnalyzer {
                             // and only create a mapping if THAT company name matches the cell
                             for extraction in successful_extractions.iter() {
                                 // Extract this extraction's company name from its raw_record
-                                let extraction_company_name = if let Some(start) = extraction.raw_record.find(">") {
-                                    if let Some(end) = extraction.raw_record.rfind("<") {
-                                        let name = extraction.raw_record[start + 1..end].trim();
-                                        if !name.is_empty() && name.len() > 3 {
-                                            Some(name.to_string())
+                                let extraction_company_name =
+                                    if let Some(start) = extraction.raw_record.find(">") {
+                                        if let Some(end) = extraction.raw_record.rfind("<") {
+                                            let name = extraction.raw_record[start + 1..end].trim();
+                                            if !name.is_empty() && name.len() > 3 {
+                                                Some(name.to_string())
+                                            } else {
+                                                None
+                                            }
                                         } else {
                                             None
                                         }
                                     } else {
                                         None
-                                    }
-                                } else {
-                                    None
-                                };
+                                    };
 
                                 if let Some(company_name) = extraction_company_name {
                                     // Only create mapping if THIS extraction's company name matches the cell
-                                    if cell_text.to_lowercase().contains(&company_name.to_lowercase()) {
+                                    if cell_text
+                                        .to_lowercase()
+                                        .contains(&company_name.to_lowercase())
+                                    {
                                         // Add direct mapping from company name to domain
-                                        custom_mappings.insert(company_name.to_lowercase(), extraction.domain.clone());
+                                        custom_mappings.insert(
+                                            company_name.to_lowercase(),
+                                            extraction.domain.clone(),
+                                        );
 
                                         // Also add variations of the company name
-                                        let org_variations = self.extract_organization_variations(&company_name);
+                                        let org_variations =
+                                            self.extract_organization_variations(&company_name);
                                         for org_name in org_variations {
                                             if !org_name.is_empty() && org_name.len() > 3 {
-                                                custom_mappings.insert(org_name.to_lowercase(), extraction.domain.clone());
+                                                custom_mappings.insert(
+                                                    org_name.to_lowercase(),
+                                                    extraction.domain.clone(),
+                                                );
                                             }
                                         }
 
-                                        debug!("Added verified domain mapping: '{}' -> '{}'", company_name, extraction.domain);
+                                        debug!(
+                                            "Added verified domain mapping: '{}' -> '{}'",
+                                            company_name, extraction.domain
+                                        );
                                     }
                                 }
                             }
@@ -3946,7 +5189,7 @@ impl SubprocessorAnalyzer {
     fn extract_organization_variations(&self, cell_text: &str) -> Vec<String> {
         let mut variations = Vec::new();
         let cleaned = cell_text.trim();
-        
+
         if cleaned.is_empty() || cleaned.len() < 3 {
             return variations;
         }
@@ -3955,7 +5198,9 @@ impl SubprocessorAnalyzer {
         variations.push(cleaned.to_string());
 
         // Extract text before common business suffixes
-        let suffixes = [", Inc.", ", LLC", ", Corp.", ", Ltd.", " Inc.", " LLC", " Corp.", " Ltd."];
+        let suffixes = [
+            ", Inc.", ", LLC", ", Corp.", ", Ltd.", " Inc.", " LLC", " Corp.", " Ltd.",
+        ];
         for suffix in &suffixes {
             if let Some(pos) = cleaned.find(suffix) {
                 let base_name = cleaned[..pos].trim();
@@ -3977,21 +5222,28 @@ impl SubprocessorAnalyzer {
     }
 
     /// Analyze HTML patterns to create targeted regex patterns
-    fn analyze_html_patterns(&self, html_content: &str, successful_extractions: &[SubprocessorDomain], 
-                            custom_regex_patterns: &mut Vec<CustomRegexPattern>) {
-        
+    fn analyze_html_patterns(
+        &self,
+        html_content: &str,
+        successful_extractions: &[SubprocessorDomain],
+        custom_regex_patterns: &mut Vec<CustomRegexPattern>,
+    ) {
         // Look for consistent HTML patterns around successful extractions
         for extraction in successful_extractions {
             // Find HTML contexts where this domain appears
             let domain = &extraction.domain;
             let domain_lower = domain.to_lowercase();
-            
+
             // Look for table cell patterns
-            if html_content.to_lowercase().contains(&format!("<td>{}", domain_lower)) {
+            if html_content
+                .to_lowercase()
+                .contains(&format!("<td>{}", domain_lower))
+            {
                 custom_regex_patterns.push(CustomRegexPattern {
                     pattern: r"<td>([^<,]+(?:,\s*(?:Inc|LLC|Corp|Ltd)\.?)?)</td>".to_string(),
                     capture_group: 1,
-                    description: "Extract company names from table cells with business suffixes".to_string(),
+                    description: "Extract company names from table cells with business suffixes"
+                        .to_string(),
                 });
                 break; // Only add this pattern once
             }
@@ -4002,9 +5254,11 @@ impl SubprocessorAnalyzer {
         // table rows/paragraphs (the + with \s gobbles entire document sections)
         if successful_extractions.len() > 5 {
             custom_regex_patterns.push(CustomRegexPattern {
-                pattern: r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))".to_string(),
+                pattern: r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))"
+                    .to_string(),
                 capture_group: 1,
-                description: "Extract properly capitalized company names with business suffixes".to_string(),
+                description: "Extract properly capitalized company names with business suffixes"
+                    .to_string(),
             });
         }
     }
@@ -4013,12 +5267,18 @@ impl SubprocessorAnalyzer {
     fn generate_exclusion_patterns(&self, base_url: &str) -> Vec<String> {
         let mut exclusions = vec![
             // Common navigation and UI elements
-            r"^(?i:home|about|contact|privacy|terms|help|support|login|signup|register)$".to_string(),
-            r"^(?i:dashboard|admin|search|browse|explore|discover|features|products|services)$".to_string(),
-            r"^(?i:pricing|plans|enterprise|business|professional|free|premium|pro|basic)$".to_string(),
-            r"^(?i:developers|api|docs|documentation|guides|tutorials|resources|tools)$".to_string(),
-            r"^(?i:partners|integrations|marketplace|academy|education|training|careers)$".to_string(),
-            r"^(?i:community|forum|blog|news|events|newsletter|updates|legal|security)$".to_string(),
+            r"^(?i:home|about|contact|privacy|terms|help|support|login|signup|register)$"
+                .to_string(),
+            r"^(?i:dashboard|admin|search|browse|explore|discover|features|products|services)$"
+                .to_string(),
+            r"^(?i:pricing|plans|enterprise|business|professional|free|premium|pro|basic)$"
+                .to_string(),
+            r"^(?i:developers|api|docs|documentation|guides|tutorials|resources|tools)$"
+                .to_string(),
+            r"^(?i:partners|integrations|marketplace|academy|education|training|careers)$"
+                .to_string(),
+            r"^(?i:community|forum|blog|news|events|newsletter|updates|legal|security)$"
+                .to_string(),
         ];
 
         // Add domain-specific exclusions based on the URL
@@ -4034,7 +5294,11 @@ impl SubprocessorAnalyzer {
     /// Extract vendor domains from structured content - DISABLED to prevent false positives
     /// The generic structured content extraction is too broad and causes false positives
     /// All legitimate subprocessor extraction should happen via tables and lists with proper context
-    pub fn extract_from_structured_content(&self, _document: &Html, _html_content: &str) -> Result<Vec<SubprocessorDomain>> {
+    pub fn extract_from_structured_content(
+        &self,
+        _document: &Html,
+        _html_content: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
         debug!("Structured content extraction disabled to prevent false positives");
         Ok(Vec::new())
     }
@@ -4043,16 +5307,16 @@ impl SubprocessorAnalyzer {
     pub fn extract_domain_from_entity_name(&self, entity_name: &str) -> Option<String> {
         // First, look for explicit domains in parentheses like "(Sentry.io)" or "(d/b/a Sinch Email)"
         let parentheses_regex = regex::Regex::new(r"\(([^)]+)\)").ok()?;
-        
+
         for capture in parentheses_regex.captures_iter(entity_name) {
             if let Some(parentheses_content) = capture.get(1) {
                 let content = parentheses_content.as_str();
-                
+
                 // Look for domain patterns within parentheses
                 if let Some(domain) = self.extract_direct_domain_from_text(content) {
                     return Some(domain);
                 }
-                
+
                 // Handle "d/b/a Company Name" format
                 if content.to_lowercase().contains("d/b/a") {
                     if let Some(dba_name) = content.splitn(2, "d/b/a").nth(1) {
@@ -4063,43 +5327,46 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
+
         // Try to infer domain from company name directly
         self.company_name_to_domain(entity_name)
     }
-    
+
     /// Extract domain from text using strict domain detection patterns
     pub fn extract_direct_domain_from_text(&self, text: &str) -> Option<String> {
         // Strict domain regex pattern - must have valid TLD
-        let domain_regex = regex::Regex::new(r"(?i)\b([a-zA-Z]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,10}\b").ok()?;
-        
+        let domain_regex = regex::Regex::new(
+            r"(?i)\b([a-zA-Z]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,10}\b",
+        )
+        .ok()?;
+
         for capture in domain_regex.captures_iter(text) {
             if let Some(domain_match) = capture.get(0) {
                 let domain = domain_match.as_str().to_lowercase();
-                
+
                 // Additional validation: reject IP addresses that might match
                 if self.is_ip_address(&domain) {
                     continue;
                 }
-                
+
                 // Filter out common false positives and validate domain
                 if self.is_valid_vendor_domain(&domain) {
                     return Some(domain);
                 }
             }
         }
-        
+
         None
     }
-    
+
     /// Convert company name to likely domain using intelligent mapping
     pub fn company_name_to_domain(&self, company_name: &str) -> Option<String> {
         let clean_name = company_name.to_lowercase();
-        
+
         // Known mappings for common cases
         let known_mappings = [
             ("ada support, inc", "ada.cx"),
-            ("amazon web services", "aws.amazon.com"), 
+            ("amazon web services", "aws.amazon.com"),
             ("cloudflare", "cloudflare.com"),
             ("functional software", "sentry.io"),
             ("mailgun technologies", "mailgun.com"),
@@ -4116,27 +5383,28 @@ impl SubprocessorAnalyzer {
             ("infobip", "infobip.com"),
             ("chronosphere", "chronosphere.io"),
         ];
-        
+
         // Check for exact or partial matches
         for (company_key, domain) in &known_mappings {
             if clean_name.contains(company_key) {
                 return Some(domain.to_string());
             }
         }
-        
+
         // Try to extract from company name patterns like "Company, Inc." -> "company.com"
         let company_patterns = [
             r"^([a-zA-Z]+),?\s+(inc\.?|llc\.?|corp\.?|ltd\.?).*$",
             r"^([a-zA-Z]+)\s+technologies.*$",
             r"^([a-zA-Z]+)\s+(inc\.?|llc\.?|corp\.?|ltd\.?).*$",
         ];
-        
+
         for pattern in &company_patterns {
             if let Ok(regex) = regex::Regex::new(pattern) {
                 if let Some(capture) = regex.captures(&clean_name) {
                     if let Some(company_match) = capture.get(1) {
                         let base_name = company_match.as_str().to_lowercase();
-                        if base_name.len() > 2 && base_name.chars().all(|c| c.is_ascii_alphabetic()) {
+                        if base_name.len() > 2 && base_name.chars().all(|c| c.is_ascii_alphabetic())
+                        {
                             let potential_domain = format!("{}.com", base_name);
                             if self.is_valid_vendor_domain(&potential_domain) {
                                 return Some(potential_domain);
@@ -4146,11 +5414,11 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
+
         None
     }
-    
-    /// Legacy method for backward compatibility 
+
+    /// Legacy method for backward compatibility
     pub fn extract_domain_from_text(&self, text: &str) -> Option<String> {
         self.extract_direct_domain_from_text(text)
     }
@@ -4164,18 +5432,38 @@ impl SubprocessorAnalyzer {
     /// Check if text looks like it contains vendor/company information
     pub fn looks_like_vendor_content(&self, text: &str) -> bool {
         let text_lower = text.to_lowercase();
-        
+
         // Keywords that suggest vendor/company content
         let vendor_keywords = [
-            "inc", "ltd", "llc", "corp", "corporation", "company", "technologies",
-            "systems", "solutions", "services", "platform", "software", "cloud",
-            "api", "hosting", "analytics", "security", "payment", "email",
+            "inc",
+            "ltd",
+            "llc",
+            "corp",
+            "corporation",
+            "company",
+            "technologies",
+            "systems",
+            "solutions",
+            "services",
+            "platform",
+            "software",
+            "cloud",
+            "api",
+            "hosting",
+            "analytics",
+            "security",
+            "payment",
+            "email",
         ];
-        
+
         // Must contain at least one vendor keyword and a domain-like pattern
-        vendor_keywords.iter().any(|&keyword| text_lower.contains(keyword)) &&
-        (text_lower.contains(".com") || text_lower.contains(".io") || 
-        text_lower.contains(".org") || text_lower.contains(".net"))
+        vendor_keywords
+            .iter()
+            .any(|&keyword| text_lower.contains(keyword))
+            && (text_lower.contains(".com")
+                || text_lower.contains(".io")
+                || text_lower.contains(".org")
+                || text_lower.contains(".net"))
     }
 
     /// Validate if a domain is likely a legitimate vendor domain
@@ -4186,16 +5474,28 @@ impl SubprocessorAnalyzer {
         }
 
         // RFC 1035: valid domain chars are alphanumeric, hyphens, and dots only
-        if !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        if !domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
             return false;
         }
 
         // Filter out common false positives and invalid domains
         let invalid_patterns = [
-            "example.com", "example.org", "localhost", "127.0.0.1",
-            "test.com", "domain.com", "yoursite.com", "website.com",
-            "email.com", "mail.com", // Common placeholders
-            "n/a.com", "none.com", "na.com", // Placeholder text parsed as domains
+            "example.com",
+            "example.org",
+            "localhost",
+            "127.0.0.1",
+            "test.com",
+            "domain.com",
+            "yoursite.com",
+            "website.com",
+            "email.com",
+            "mail.com", // Common placeholders
+            "n/a.com",
+            "none.com",
+            "na.com",   // Placeholder text parsed as domains
             "over.com", // Generic word false positive
         ];
 
@@ -4256,9 +5556,14 @@ impl SubprocessorAnalyzer {
 
         true
     }
-    
+
     /// Create enhanced evidence with text content (stripped HTML) and highlight URL (H005 fix)
-    pub fn create_enhanced_evidence(&self, element: &scraper::ElementRef, entity_name: &str, base_url: &str) -> String {
+    pub fn create_enhanced_evidence(
+        &self,
+        element: &scraper::ElementRef,
+        entity_name: &str,
+        base_url: &str,
+    ) -> String {
         // Get text content from the element instead of raw HTML to prevent stored XSS
         let text = element.text().collect::<String>();
         let text = text.trim();
@@ -4277,29 +5582,45 @@ impl SubprocessorAnalyzer {
         // Create URL with text highlight
         let highlight_url = self.create_highlight_url(base_url, entity_name);
 
-        format!("Found '{}' in: {}; URL: {}", entity_name, evidence_text, highlight_url)
+        format!(
+            "Found '{}' in: {}; URL: {}",
+            entity_name, evidence_text, highlight_url
+        )
     }
-    
+
     /// Create focused HTML evidence showing just the organization name and its immediate surrounding elements
-    fn create_focused_html_evidence(&self, element: &scraper::ElementRef, entity_name: &str) -> String {
+    fn create_focused_html_evidence(
+        &self,
+        element: &scraper::ElementRef,
+        entity_name: &str,
+    ) -> String {
         let element_html = element.html();
-        
+
         // If the element is small (likely a td, span, etc), just return it
         if element_html.len() <= 200 {
             return element_html;
         }
-        
+
         // For larger elements, try to extract just the part containing the entity name
         let text_content = element.text().collect::<String>();
-        if text_content.to_lowercase().contains(&entity_name.to_lowercase()) {
+        if text_content
+            .to_lowercase()
+            .contains(&entity_name.to_lowercase())
+        {
             // Look for the tag name of the element
             let tag_name = element.value().name();
-            
+
             // Try to find the specific inner element containing the entity name
-            if let Ok(selector) = scraper::Selector::parse(&format!("{} td, {} span, {} div, {} p", tag_name, tag_name, tag_name, tag_name)) {
+            if let Ok(selector) = scraper::Selector::parse(&format!(
+                "{} td, {} span, {} div, {} p",
+                tag_name, tag_name, tag_name, tag_name
+            )) {
                 for inner_element in element.select(&selector) {
                     let inner_text = inner_element.text().collect::<String>();
-                    if inner_text.to_lowercase().contains(&entity_name.to_lowercase()) {
+                    if inner_text
+                        .to_lowercase()
+                        .contains(&entity_name.to_lowercase())
+                    {
                         let inner_html = inner_element.html();
                         // Return the inner element if it's focused enough
                         if inner_html.len() <= 300 {
@@ -4309,34 +5630,39 @@ impl SubprocessorAnalyzer {
                 }
             }
         }
-        
+
         // Fallback: return just the tag with the entity name visible
-        format!("<{}>{}...</{}>", element.value().name(), entity_name, element.value().name())
+        format!(
+            "<{}>{}...</{}>",
+            element.value().name(),
+            entity_name,
+            element.value().name()
+        )
     }
-    
+
     /// Create a URL with text highlighting for easy navigation to the subprocessor entry
     pub fn create_highlight_url(&self, base_url: &str, entity_name: &str) -> String {
         // URL encode the entity name for the highlight parameter
         let encoded_text = urlencoding::encode(entity_name);
-        
+
         // Create the highlight URL using the :~:text= syntax
         format!("{}#:~:text={}", base_url, encoded_text)
     }
-    
+
     /// Create a concise evidence excerpt instead of storing full HTML content
     pub fn create_evidence_excerpt(&self, text: &str, domain: &str) -> String {
         const MAX_EXCERPT_LENGTH: usize = 500;
-        
+
         let text = text.trim();
-        
+
         // Find the position of the domain in the text
         if let Some(domain_pos) = text.to_lowercase().find(&domain.to_lowercase()) {
             // Create an excerpt around the domain
             let start = domain_pos.saturating_sub(100);
             let end = std::cmp::min(domain_pos + domain.len() + 100, text.len());
-            
+
             let excerpt = &text[start..end];
-            
+
             // If the excerpt is too long, truncate it
             if excerpt.len() > MAX_EXCERPT_LENGTH {
                 let truncated = &excerpt[..MAX_EXCERPT_LENGTH];
@@ -4360,11 +5686,19 @@ impl SubprocessorAnalyzer {
     /// Extract vendor domains from PDF content
     /// For now, this is a basic text-based extraction from PDF content
     /// In the future, this could be enhanced with a proper PDF parser
-    pub async fn extract_from_pdf_content(&self, pdf_content: &str, base_url: &str, source_domain: &str) -> Result<Vec<SubprocessorDomain>> {
-        debug!("Extracting subprocessors from PDF content for domain: {}", source_domain);
-        
+    pub async fn extract_from_pdf_content(
+        &self,
+        pdf_content: &str,
+        base_url: &str,
+        source_domain: &str,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        debug!(
+            "Extracting subprocessors from PDF content for domain: {}",
+            source_domain
+        );
+
         let mut vendors = Vec::new();
-        
+
         // PDF content when fetched as text often contains readable text mixed with PDF formatting
         // Look for patterns that suggest company names in the text
         let company_patterns = vec![
@@ -4387,22 +5721,31 @@ impl SubprocessorAnalyzer {
                 for capture in regex.captures_iter(pdf_content) {
                     if let Some(company_match) = capture.get(1) {
                         let company_name = company_match.as_str().trim();
-                        
+
                         // Skip very short matches or common false positives
-                        if company_name.len() < 5 || 
-                           company_name.to_lowercase().contains("pdf") ||
-                           company_name.to_lowercase().contains("page") ||
-                           company_name.to_lowercase().contains("document") {
+                        if company_name.len() < 5
+                            || company_name.to_lowercase().contains("pdf")
+                            || company_name.to_lowercase().contains("page")
+                            || company_name.to_lowercase().contains("document")
+                        {
                             continue;
                         }
 
                         // Try to extract domain from company name using patterns
-                        if let Some(domain) = self.extract_domain_from_entity_name_with_patterns(company_name, &patterns) {
-                            debug!("Extracted domain from PDF: {} from company: {}", domain, company_name);
+                        if let Some(domain) = self
+                            .extract_domain_from_entity_name_with_patterns(company_name, &patterns)
+                        {
+                            debug!(
+                                "Extracted domain from PDF: {} from company: {}",
+                                domain, company_name
+                            );
                             vendors.push(SubprocessorDomain {
                                 domain,
                                 source_type: RecordType::HttpSubprocessor,
-                                raw_record: format!("PDF content: {} (URL: {})", company_name, base_url),
+                                raw_record: format!(
+                                    "PDF content: {} (URL: {})",
+                                    company_name, base_url
+                                ),
                             });
                         }
                     }
@@ -4412,19 +5755,23 @@ impl SubprocessorAnalyzer {
 
         // Also look for explicit domain mentions in the PDF content
         // Require labels to be at least 3 chars to avoid PDF artifacts like b.mz, e.zz, n.ik
-        let domain_regex = regex::Regex::new(r"\b([a-zA-Z][a-zA-Z0-9\-]{2,61}\.)+[a-zA-Z]{2,10}\b").ok();
+        let domain_regex =
+            regex::Regex::new(r"\b([a-zA-Z][a-zA-Z0-9\-]{2,61}\.)+[a-zA-Z]{2,10}\b").ok();
         if let Some(regex) = domain_regex {
             for capture in regex.captures_iter(pdf_content) {
                 if let Some(domain_match) = capture.get(0) {
                     let domain = domain_match.as_str().to_lowercase();
-                    
+
                     // Filter out common false positives and validate domain
                     if self.is_valid_vendor_domain(&domain) {
                         debug!("Extracted explicit domain from PDF: {}", domain);
                         vendors.push(SubprocessorDomain {
                             domain: domain.clone(),
                             source_type: RecordType::HttpSubprocessor,
-                            raw_record: format!("PDF explicit domain: {} (URL: {})", domain, base_url),
+                            raw_record: format!(
+                                "PDF explicit domain: {} (URL: {})",
+                                domain, base_url
+                            ),
                         });
                     }
                 }
@@ -4435,7 +5782,11 @@ impl SubprocessorAnalyzer {
         let mut seen_domains = std::collections::HashSet::new();
         vendors.retain(|vendor| seen_domains.insert(vendor.domain.clone()));
 
-        debug!("Extracted {} unique domains from PDF for domain: {}", vendors.len(), source_domain);
+        debug!(
+            "Extracted {} unique domains from PDF for domain: {}",
+            vendors.len(),
+            source_domain
+        );
         Ok(vendors)
     }
 
@@ -4443,34 +5794,36 @@ impl SubprocessorAnalyzer {
     async fn get_rendered_content_from_browser(&self, url: &str) -> Result<String> {
         let guard = crate::browser_pool::create_browser()?;
 
-        let tab = guard.browser.new_tab().map_err(|e| {
-            anyhow::anyhow!("Failed to create new browser tab: {}", e)
-        })?;
-        
-        tab.navigate_to(url).map_err(|e| {
-            anyhow::anyhow!("Failed to navigate to {}: {}", url, e)
-        })?;
-        
-        tab.wait_until_navigated().map_err(|e| {
-            anyhow::anyhow!("Page failed to load: {}", e)
-        })?;
-        
+        let tab = guard
+            .browser
+            .new_tab()
+            .map_err(|e| anyhow::anyhow!("Failed to create new browser tab: {}", e))?;
+
+        tab.navigate_to(url)
+            .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url, e))?;
+
+        tab.wait_until_navigated()
+            .map_err(|e| anyhow::anyhow!("Page failed to load: {}", e))?;
+
         // Wait for JavaScript to render content
         std::thread::sleep(Duration::from_millis(2000));
-        
-        let html_content = tab.get_content().map_err(|e| {
-            anyhow::anyhow!("Failed to get page content: {}", e)
-        })?;
-        
-        debug!("Retrieved {} characters of rendered HTML content", html_content.len());
+
+        let html_content = tab
+            .get_content()
+            .map_err(|e| anyhow::anyhow!("Failed to get page content: {}", e))?;
+
+        debug!(
+            "Retrieved {} characters of rendered HTML content",
+            html_content.len()
+        );
         Ok(html_content)
     }
 }
 
 /// Extract vendor domains from subprocessor pages with logging support
 pub async fn extract_vendor_domains_from_subprocessors(
-    domain: &str, 
-    logger: Option<&dyn LogFailure>
+    domain: &str,
+    logger: Option<&dyn LogFailure>,
 ) -> Result<Vec<SubprocessorDomain>> {
     let analyzer = SubprocessorAnalyzer::new().await;
     // Cache is automatically saved when successful results are found
@@ -4481,7 +5834,7 @@ pub async fn extract_vendor_domains_from_subprocessors(
 pub async fn extract_vendor_domains_with_analyzer(
     analyzer: &SubprocessorAnalyzer,
     domain: &str,
-    logger: Option<&dyn LogFailure>
+    logger: Option<&dyn LogFailure>,
 ) -> Result<Vec<SubprocessorDomain>> {
     analyzer.analyze_domain(domain, logger).await
 }
@@ -4493,74 +5846,109 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
     logger: Option<&dyn LogFailure>,
     debug_logger: &crate::logger::AnalysisLogger,
 ) -> Result<Vec<SubprocessorDomain>> {
-    analyzer.analyze_domain_with_logging(domain, logger, Some(debug_logger)).await
+    analyzer
+        .analyze_domain_with_logging(domain, logger, Some(debug_logger))
+        .await
 }
 
 /// Post-process subprocessor extraction results to remove false positives.
 /// Applied as a final filter before returning results from analyze_domain_with_full_options.
 pub fn filter_subprocessor_results(vendors: Vec<SubprocessorDomain>) -> Vec<SubprocessorDomain> {
     let before_count = vendors.len();
-    let filtered: Vec<SubprocessorDomain> = vendors.into_iter().filter_map(|mut v| {
-        let domain = &v.domain;
+    let filtered: Vec<SubprocessorDomain> = vendors
+        .into_iter()
+        .filter_map(|mut v| {
+            let domain = &v.domain;
 
-        // BUG-001/002: Transform _org: sentinel entries — strip prefix so it doesn't
-        // leak into JSON output. The org name becomes the domain field (used for org
-        // lookup downstream), with the _org: prefix removed.
-        if let Some(org_name) = domain.strip_prefix("_org:") {
-            if is_ner_false_positive(org_name) {
-                debug!("Filtering false positive org: {}", org_name);
+            // BUG-001/002: Transform _org: sentinel entries — strip prefix so it doesn't
+            // leak into JSON output. The org name becomes the domain field (used for org
+            // lookup downstream), with the _org: prefix removed.
+            if let Some(org_name) = domain.strip_prefix("_org:") {
+                if is_ner_false_positive(org_name) {
+                    debug!("Filtering false positive org: {}", org_name);
+                    return None;
+                }
+                let clean_org = org_name.trim().to_string();
+                if !is_valid_org_name(&clean_org) {
+                    debug!("Filtering invalid org name: {}", clean_org);
+                    return None;
+                }
+                // Org names that contain spaces are company legal names (e.g. "Cloudflare, Inc."),
+                // NOT domains. These need org-to-domain resolution downstream, but they must NOT
+                // appear as the domain field in output. Only allow through if it looks like a
+                // plausible domain (no spaces, has a dot).
+                if clean_org.contains(' ') || !clean_org.contains('.') {
+                    debug!("Filtering org-only entry (not a domain): {}", clean_org);
+                    return None;
+                }
+                v.domain = clean_org;
+                return Some(v);
+            }
+
+            // Reject domains with whitespace (BUG-009: "il mj.com")
+            if domain.chars().any(|c| c.is_whitespace()) {
+                debug!("Filtering domain with whitespace: {}", domain);
                 return None;
             }
-            // Strip the _org: prefix; downstream code will use this for org resolution
-            // but it won't appear as a raw domain in output
-            let clean_org = org_name.to_string();
-            if !is_valid_org_name(&clean_org) {
-                debug!("Filtering invalid org name: {}", clean_org);
+
+            // Validate domain TLD
+            if let Some(tld) = domain.rsplit('.').next() {
+                if !is_valid_tld(tld) {
+                    debug!("Filtering domain with invalid TLD: {}", domain);
+                    return None;
+                }
+            }
+
+            // Reject common English words mistaken for domains (BUG-005)
+            if let Some(label) = domain.split('.').next() {
+                let label_lower = label.to_lowercase();
+                if is_common_english_word(&label_lower) {
+                    debug!("Filtering common word domain: {}", domain);
+                    return None;
+                }
+                if is_garbled_text(&label_lower) {
+                    debug!("Filtering garbled text domain: {}", domain);
+                    return None;
+                }
+            }
+
+            // Reject bare TLDs (BUG-004: "com" extracted from SPF)
+            let label_count = domain.split('.').count();
+            if label_count < 2 {
+                debug!("Filtering bare TLD: {}", domain);
                 return None;
             }
-            v.domain = clean_org;
-            return Some(v);
-        }
 
-        // Reject domains with whitespace (BUG-009: "il mj.com")
-        if domain.chars().any(|c| c.is_whitespace()) {
-            debug!("Filtering domain with whitespace: {}", domain);
-            return None;
-        }
-
-        // Validate domain TLD
-        if let Some(tld) = domain.rsplit('.').next() {
-            if !is_valid_tld(tld) {
-                debug!("Filtering domain with invalid TLD: {}", domain);
-                return None;
+            // Reject compound TLDs that are not real organizational domains
+            // e.g., "ac.uk", "co.uk", "com.au" — these are public suffixes, not companies
+            if label_count == 2 {
+                let compound_tlds = [
+                    "ac.uk", "co.uk", "org.uk", "gov.uk", "net.uk", "me.uk", "co.au", "com.au",
+                    "org.au", "net.au", "edu.au", "co.nz", "org.nz", "net.nz", "co.jp", "or.jp",
+                    "ne.jp", "ac.jp", "go.jp", "co.kr", "or.kr", "ne.kr", "ac.kr", "com.br",
+                    "org.br", "net.br", "edu.br", "com.mx", "org.mx", "net.mx", "com.cn", "org.cn",
+                    "net.cn", "co.in", "org.in", "net.in", "ac.in", "co.za", "org.za", "net.za",
+                    "co.il", "org.il", "net.il", "ac.il", "com.sg", "org.sg", "net.sg", "edu.sg",
+                    "com.hk", "org.hk", "net.hk", "edu.hk", "co.id", "or.id", "web.id", "com.tr",
+                    "org.tr", "net.tr", "com.ar", "org.ar", "net.ar", "co.th", "or.th", "ac.th",
+                ];
+                if compound_tlds.contains(&domain.to_lowercase().as_str()) {
+                    debug!("Filtering compound TLD: {}", domain);
+                    return None;
+                }
             }
-        }
 
-        // Reject common English words mistaken for domains (BUG-005)
-        if let Some(label) = domain.split('.').next() {
-            let label_lower = label.to_lowercase();
-            if is_common_english_word(&label_lower) {
-                debug!("Filtering common word domain: {}", domain);
-                return None;
-            }
-            if is_garbled_text(&label_lower) {
-                debug!("Filtering garbled text domain: {}", domain);
-                return None;
-            }
-        }
-
-        // Reject bare TLDs (BUG-004: "com" extracted from SPF)
-        let label_count = domain.split('.').count();
-        if label_count < 2 {
-            debug!("Filtering bare TLD: {}", domain);
-            return None;
-        }
-
-        Some(v)
-    }).collect();
+            Some(v)
+        })
+        .collect();
 
     if filtered.len() < before_count {
-        debug!("Filtered {} false positive results ({} → {})", before_count - filtered.len(), before_count, filtered.len());
+        debug!(
+            "Filtered {} false positive results ({} → {})",
+            before_count - filtered.len(),
+            before_count,
+            filtered.len()
+        );
     }
     filtered
 }
@@ -4599,24 +5987,106 @@ pub fn is_valid_tld(tld: &str) -> bool {
     // 3+ letter TLDs: check against known gTLDs and common new gTLDs
     const KNOWN_GTLDS: &[&str] = &[
         // Original gTLDs
-        "com", "org", "net", "edu", "gov", "mil", "int",
+        "com",
+        "org",
+        "net",
+        "edu",
+        "gov",
+        "mil",
+        "int",
         // Common new gTLDs
-        "app", "dev", "xyz", "online", "site", "tech", "store", "cloud", "info", "biz",
-        "pro", "name", "museum", "coop", "aero", "cat", "jobs", "mobi", "tel", "travel",
-        "asia", "post",
+        "app",
+        "dev",
+        "xyz",
+        "online",
+        "site",
+        "tech",
+        "store",
+        "cloud",
+        "info",
+        "biz",
+        "pro",
+        "name",
+        "museum",
+        "coop",
+        "aero",
+        "cat",
+        "jobs",
+        "mobi",
+        "tel",
+        "travel",
+        "asia",
+        "post",
         // Tech/startup popular
-        "io", "co", "ai", "gg", "tv", "fm", "ly", "to", "me", "cc", "ws",
+        "io",
+        "co",
+        "ai",
+        "gg",
+        "tv",
+        "fm",
+        "ly",
+        "to",
+        "me",
+        "cc",
+        "ws",
         // Business
-        "inc", "llc", "ltd", "gmbh", "sarl",
+        "inc",
+        "llc",
+        "ltd",
+        "gmbh",
+        "sarl",
         // Industry-specific
-        "health", "medical", "law", "legal", "finance", "bank", "insurance",
-        "security", "email", "software", "systems", "solutions", "services", "digital",
-        "media", "agency", "studio", "design", "consulting", "marketing", "global",
-        "world", "space", "one", "live", "life", "work", "team", "group", "network",
-        "community", "social", "blog", "news", "today", "exchange", "money", "capital",
-        "fund", "investments", "partners", "ventures", "holdings",
+        "health",
+        "medical",
+        "law",
+        "legal",
+        "finance",
+        "bank",
+        "insurance",
+        "security",
+        "email",
+        "software",
+        "systems",
+        "solutions",
+        "services",
+        "digital",
+        "media",
+        "agency",
+        "studio",
+        "design",
+        "consulting",
+        "marketing",
+        "global",
+        "world",
+        "space",
+        "one",
+        "live",
+        "life",
+        "work",
+        "team",
+        "group",
+        "network",
+        "community",
+        "social",
+        "blog",
+        "news",
+        "today",
+        "exchange",
+        "money",
+        "capital",
+        "fund",
+        "investments",
+        "partners",
+        "ventures",
+        "holdings",
         // Country-specific gTLDs
-        "com.au", "co.uk", "co.in", "com.br", "co.jp", "co.kr", "com.cn",
+        "com.au",
+        "co.uk",
+        "co.in",
+        "com.br",
+        "co.jp",
+        "co.kr",
+        "com.cn",
     ];
     KNOWN_GTLDS.contains(&tld_lower.as_str())
 }
@@ -4644,9 +6114,14 @@ pub fn is_valid_org_name(org_name: &str) -> bool {
     // Contains embedded country/location names that indicate concatenated table rows
     // Real org names don't contain "United States" or "Netherlands" mid-string
     let location_markers = [
-        "united states", "united kingdom", "european union",
-        "location of processing", "corporate location", "description of processing",
-        "name of subprocessor", "location of sub",
+        "united states",
+        "united kingdom",
+        "european union",
+        "location of processing",
+        "corporate location",
+        "description of processing",
+        "name of subprocessor",
+        "location of sub",
     ];
     for marker in &location_markers {
         if lower.contains(marker) {
@@ -4656,9 +6131,15 @@ pub fn is_valid_org_name(org_name: &str) -> bool {
 
     // Contains table header/structure phrases
     let table_headers = [
-        "third party subprocessors", "name of sub", "processing location",
-        "corporate location", "service description", "data processed",
-        "purpose of processing", "categories of data", "subsidiaries name",
+        "third party subprocessors",
+        "name of sub",
+        "processing location",
+        "corporate location",
+        "service description",
+        "data processed",
+        "purpose of processing",
+        "categories of data",
+        "subsidiaries name",
     ];
     for header in &table_headers {
         if lower.contains(header) {
@@ -4697,33 +6178,80 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
     }
 
     // Locale/language identifiers (en-us, zh-hans, pt-br, nb-no)
-    if lower.len() <= 7 && lower.contains('-') && lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if lower.len() <= 7
+        && lower.contains('-')
+        && lower.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return true;
     }
 
     // Standards, certifications, and regulatory frameworks that NER identifies
     // as organizations but are not vendors (BUG-003/010)
     let standards_and_frameworks = [
-        "iso", "iec", "iso/iec", "iso/iec 27001", "iso/iec 27017", "iso/iec 27018",
-        "iso 27001", "iso 27017", "iso 27018", "iso 27701", "iso 9001", "iso 22301",
-        "soc", "soc 1", "soc 2", "soc 3", "soc2", "soc1", "soc3",
-        "pci-dss", "pci dss", "pci",
-        "gdpr", "ccpa", "cpra", "hipaa", "hitech", "ferpa", "coppa", "glba",
-        "nist", "nist 800-53", "nist csf", "nist sp 800-171",
-        "fedramp", "fisma", "itar", "cmmc",
-        "csa", "csa star", "star",
-        "aicpa", "ssae 18", "ssae 16", "ssae",
-        "cis", "cis benchmarks",
-        "owasp", "owasp top 10",
-        "cobit", "itil",
-        "eu", "european union",
+        "iso",
+        "iec",
+        "iso/iec",
+        "iso/iec 27001",
+        "iso/iec 27017",
+        "iso/iec 27018",
+        "iso 27001",
+        "iso 27017",
+        "iso 27018",
+        "iso 27701",
+        "iso 9001",
+        "iso 22301",
+        "soc",
+        "soc 1",
+        "soc 2",
+        "soc 3",
+        "soc2",
+        "soc1",
+        "soc3",
+        "pci-dss",
+        "pci dss",
+        "pci",
+        "gdpr",
+        "ccpa",
+        "cpra",
+        "hipaa",
+        "hitech",
+        "ferpa",
+        "coppa",
+        "glba",
+        "nist",
+        "nist 800-53",
+        "nist csf",
+        "nist sp 800-171",
+        "fedramp",
+        "fisma",
+        "itar",
+        "cmmc",
+        "csa",
+        "csa star",
+        "star",
+        "aicpa",
+        "ssae 18",
+        "ssae 16",
+        "ssae",
+        "cis",
+        "cis benchmarks",
+        "owasp",
+        "owasp top 10",
+        "cobit",
+        "itil",
+        "eu",
+        "european union",
     ];
     if standards_and_frameworks.contains(&lower.as_str()) {
         return true;
     }
     // Standards with version numbers: "ISO 27001:2022", "SOC 2 Type II", etc.
-    if lower.starts_with("iso ") || lower.starts_with("iso/") || lower.starts_with("soc ")
-        || lower.starts_with("nist ") || lower.starts_with("pci") {
+    if lower.starts_with("iso ")
+        || lower.starts_with("iso/")
+        || lower.starts_with("soc ")
+        || lower.starts_with("nist ")
+        || lower.starts_with("pci")
+    {
         return true;
     }
 
@@ -4731,21 +6259,34 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
     // religious organizations, and similar entities that NER correctly identifies
     // as organizations but are not software/service vendors (BUG-003/010)
     let non_vendor_orgs = [
-        "the salvation army", "salvation army",
-        "red cross", "american red cross", "international red cross",
-        "united nations", "world health organization", "who",
-        "federal trade commission", "ftc",
-        "securities and exchange commission", "sec",
-        "department of defense", "dod",
-        "department of homeland security", "dhs",
-        "national security agency", "nsa",
-        "government accountability office", "gao",
+        "the salvation army",
+        "salvation army",
+        "red cross",
+        "american red cross",
+        "international red cross",
+        "united nations",
+        "world health organization",
+        "who",
+        "federal trade commission",
+        "ftc",
+        "securities and exchange commission",
+        "sec",
+        "department of defense",
+        "dod",
+        "department of homeland security",
+        "dhs",
+        "national security agency",
+        "nsa",
+        "government accountability office",
+        "gao",
         "european commission",
         "international organization for standardization",
         "international electrotechnical commission",
         "national institute of standards and technology",
-        "internet engineering task force", "ietf",
-        "world wide web consortium", "w3c",
+        "internet engineering task force",
+        "ietf",
+        "world wide web consortium",
+        "w3c",
         "ieee",
     ];
     if non_vendor_orgs.contains(&lower.as_str()) {
@@ -4755,11 +6296,10 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
     // ISO 639-1 language codes that NER misidentifies as organizations
     // (commonly found on internationalized Microsoft/Salesforce pages)
     let language_codes = [
-        "ar", "bg", "bn", "ca", "cs", "cy", "da", "de", "el", "en", "es", "et",
-        "eu", "fa", "fi", "fr", "ga", "gl", "gu", "he", "hi", "hr", "hu", "hy",
-        "id", "is", "it", "ja", "ka", "kk", "km", "kn", "ko", "lb", "lo", "lt",
-        "lv", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "no", "pa",
-        "pl", "ps", "pt", "ro", "ru", "si", "sk", "sl", "so", "sq", "sr", "sv",
+        "ar", "bg", "bn", "ca", "cs", "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi",
+        "fr", "ga", "gl", "gu", "he", "hi", "hr", "hu", "hy", "id", "is", "it", "ja", "ka", "kk",
+        "km", "kn", "ko", "lb", "lo", "lt", "lv", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne",
+        "nl", "no", "pa", "pl", "ps", "pt", "ro", "ru", "si", "sk", "sl", "so", "sq", "sr", "sv",
         "sw", "ta", "te", "th", "tl", "tr", "uk", "ur", "uz", "vi", "zh",
     ];
     if language_codes.contains(&lower.as_str()) {
@@ -4775,24 +6315,106 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
 pub fn is_common_english_word(label: &str) -> bool {
     const COMMON_WORDS: &[&str] = &[
         // Words found in vanta.com false positives (BUG-005)
-        "conditions", "prevention", "logging", "support", "services",
-        "compliance", "security", "privacy", "access", "control",
-        "monitoring", "management", "protection", "detection", "response",
-        "integration", "infrastructure", "configuration", "authentication",
-        "authorization", "encryption", "verification", "notification",
-        "application", "processing", "performance", "availability",
-        "documentation", "implementation", "certification", "remediation",
+        "conditions",
+        "prevention",
+        "logging",
+        "support",
+        "services",
+        "compliance",
+        "security",
+        "privacy",
+        "access",
+        "control",
+        "monitoring",
+        "management",
+        "protection",
+        "detection",
+        "response",
+        "integration",
+        "infrastructure",
+        "configuration",
+        "authentication",
+        "authorization",
+        "encryption",
+        "verification",
+        "notification",
+        "application",
+        "processing",
+        "performance",
+        "availability",
+        "documentation",
+        "implementation",
+        "certification",
+        "remediation",
+        // Geographic/proper nouns and country names that appear as domains but aren't vendors
+        "america",
+        "europe",
+        "africa",
+        "australia",
+        "romania",
+        "colombia",
+        "canada",
+        "germany",
+        "france",
+        "india",
+        "china",
+        "japan",
+        "brazil",
+        "mexico",
+        "spain",
+        "italy",
+        "russia",
+        "korea",
+        "ireland",
+        "singapore",
         // Common web page / legal boilerplate words
-        "contact", "about", "terms", "policy", "cookies", "disclaimer",
-        "copyright", "agreement", "overview", "features", "pricing",
-        "resources", "updates", "settings", "account", "download",
-        "information", "solutions", "products", "partners", "customers",
-        "careers", "enterprise", "platform", "dashboard",
+        "contact",
+        "about",
+        "terms",
+        "policy",
+        "cookies",
+        "disclaimer",
+        "copyright",
+        "agreement",
+        "overview",
+        "features",
+        "pricing",
+        "resources",
+        "updates",
+        "settings",
+        "account",
+        "download",
+        "information",
+        "solutions",
+        "products",
+        "partners",
+        "customers",
+        "careers",
+        "enterprise",
+        "platform",
+        "dashboard",
         // Common technical/UI words from page scraping
-        "button", "submit", "cancel", "delete", "search", "filter",
-        "loading", "error", "success", "warning", "undefined",
-        "header", "footer", "sidebar", "content", "container",
-        "section", "article", "navigation", "checkbox", "dropdown",
+        "button",
+        "submit",
+        "cancel",
+        "delete",
+        "search",
+        "filter",
+        "loading",
+        "error",
+        "success",
+        "warning",
+        "undefined",
+        "header",
+        "footer",
+        "sidebar",
+        "content",
+        "container",
+        "section",
+        "article",
+        "navigation",
+        "checkbox",
+        "dropdown",
     ];
     COMMON_WORDS.contains(&label)
 }
@@ -4809,12 +6431,19 @@ pub fn is_garbled_text(label: &str) -> bool {
     let vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
 
     // Count vowels and consonants (ignoring digits/hyphens)
-    let alpha_chars: Vec<char> = chars.iter().filter(|c| c.is_ascii_alphabetic()).cloned().collect();
+    let alpha_chars: Vec<char> = chars
+        .iter()
+        .filter(|c| c.is_ascii_alphabetic())
+        .cloned()
+        .collect();
     if alpha_chars.is_empty() {
         return true; // No alphabetic characters at all
     }
 
-    let vowel_count = alpha_chars.iter().filter(|c| vowels.contains(&c.to_ascii_lowercase())).count();
+    let vowel_count = alpha_chars
+        .iter()
+        .filter(|c| vowels.contains(&c.to_ascii_lowercase()))
+        .count();
     let consonant_count = alpha_chars.len() - vowel_count;
 
     // All-consonant sequences of 4+ chars are almost certainly garbled
@@ -4856,7 +6485,8 @@ fn extract_text_from_html(html: &str) -> String {
     let content_selectors = ["main", "article", "[role='main']", ".content", "#content"];
     for sel_str in &content_selectors {
         if let Ok(sel) = Selector::parse(sel_str) {
-            let texts: Vec<String> = document.select(&sel)
+            let texts: Vec<String> = document
+                .select(&sel)
                 .flat_map(|el| el.text())
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
@@ -4869,7 +6499,8 @@ fn extract_text_from_html(html: &str) -> String {
 
     // Fallback: extract all text from body
     if let Ok(body_sel) = Selector::parse("body") {
-        let texts: Vec<String> = document.select(&body_sel)
+        let texts: Vec<String> = document
+            .select(&body_sel)
             .flat_map(|el| el.text())
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
@@ -4878,4 +6509,93 @@ fn extract_text_from_html(html: &str) -> String {
     }
 
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vendor::RecordType;
+
+    fn make_domain(domain: &str) -> SubprocessorDomain {
+        SubprocessorDomain {
+            domain: domain.to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_filter_org_prefix_spaces_rejected() {
+        let vendors = vec![make_domain("_org:Cloudflare, Inc.")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Org with spaces should be filtered");
+    }
+
+    #[test]
+    fn test_filter_org_prefix_no_dot_rejected() {
+        let vendors = vec![make_domain("_org:Cloudflare")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Org without dot should be filtered");
+    }
+
+    #[test]
+    fn test_filter_org_prefix_valid_domain_kept() {
+        let vendors = vec![make_domain("_org:cloudflare.com")];
+        let result = filter_subprocessor_results(vendors);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "cloudflare.com");
+    }
+
+    #[test]
+    fn test_filter_org_prefix_trimmed() {
+        let vendors = vec![make_domain("_org: stripe.com ")];
+        let result = filter_subprocessor_results(vendors);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_filter_compound_tlds_rejected() {
+        let compound_tlds = vec![
+            "co.uk", "ac.uk", "com.au", "co.nz", "co.jp", "co.kr", "com.br", "com.mx", "com.cn",
+            "co.in", "co.za", "co.il", "com.sg", "com.hk", "co.id", "com.tr", "com.ar", "co.th",
+        ];
+        for tld in compound_tlds {
+            let vendors = vec![make_domain(tld)];
+            let result = filter_subprocessor_results(vendors);
+            assert!(
+                result.is_empty(),
+                "{} should be filtered as compound TLD",
+                tld
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_compound_tld_with_subdomain_kept() {
+        let vendors = vec![make_domain("example.co.uk")];
+        let result = filter_subprocessor_results(vendors);
+        assert_eq!(
+            result.len(),
+            1,
+            "example.co.uk is a real domain, not a bare compound TLD"
+        );
+    }
+
+    #[test]
+    fn test_is_common_english_word_country_names() {
+        assert!(is_common_english_word("america"));
+        assert!(is_common_english_word("romania"));
+        assert!(is_common_english_word("singapore"));
+        assert!(is_common_english_word("germany"));
+        assert!(is_common_english_word("brazil"));
+        assert!(is_common_english_word("ireland"));
+    }
+
+    #[test]
+    fn test_is_common_english_word_non_matches() {
+        assert!(!is_common_english_word("stripe"));
+        assert!(!is_common_english_word("cloudflare"));
+        assert!(!is_common_english_word("pendo"));
+    }
 }

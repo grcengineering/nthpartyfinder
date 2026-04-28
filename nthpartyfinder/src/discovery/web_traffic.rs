@@ -9,8 +9,8 @@
 //!    data to `app.pendo.io`).
 
 use anyhow::Result;
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -40,22 +40,17 @@ pub enum WebTrafficSource {
 }
 
 /// Regex patterns for extracting external resource URLs from HTML.
-static SCRIPT_SRC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"<script[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap()
-});
-static LINK_HREF_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"<link[^>]+href\s*=\s*["']([^"']+)["']"#).unwrap()
-});
-static IMG_SRC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"<img[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap()
-});
-static IFRAME_SRC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"<iframe[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap()
-});
+static SCRIPT_SRC_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<script[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
+static LINK_HREF_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<link[^>]+href\s*=\s*["']([^"']+)["']"#).unwrap());
+static IMG_SRC_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<img[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
+static IFRAME_SRC_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"<iframe[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
 // Catch data-src, data-href, and other lazy-loading attributes
-static DATA_SRC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"data-(?:src|href)\s*=\s*["'](https?://[^"']+)["']"#).unwrap()
-});
+static DATA_SRC_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"data-(?:src|href)\s*=\s*["'](https?://[^"']+)["']"#).unwrap());
 // Inline JavaScript URL patterns (e.g., fetch("https://..."), new Image().src = "https://...")
 static INLINE_URL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"["'](https?://[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}[^"']*?)["']"#).unwrap()
@@ -96,7 +91,11 @@ impl WebTrafficDiscovery {
         // Phase 1: Static HTML analysis (fast, no browser needed)
         match self.analyze_page_source(&url, &target_base_domain).await {
             Ok(results) => {
-                debug!("Web traffic: static analysis of {} found {} external domains", domain, results.len());
+                debug!(
+                    "Web traffic: static analysis of {} found {} external domains",
+                    domain,
+                    results.len()
+                );
                 for r in results {
                     all_results.entry(r.vendor_domain.clone()).or_insert(r);
                 }
@@ -107,9 +106,16 @@ impl WebTrafficDiscovery {
         }
 
         // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
-        match self.analyze_network_traffic(&url, &target_base_domain).await {
+        match self
+            .analyze_network_traffic(&url, &target_base_domain)
+            .await
+        {
             Ok(results) => {
-                debug!("Web traffic: network analysis of {} found {} external domains", domain, results.len());
+                debug!(
+                    "Web traffic: network analysis of {} found {} external domains",
+                    domain,
+                    results.len()
+                );
                 for r in results {
                     // Network traffic evidence is stronger — overwrite page source if same domain
                     all_results.insert(r.vendor_domain.clone(), r);
@@ -124,14 +130,25 @@ impl WebTrafficDiscovery {
     }
 
     /// Phase 1: Parse static HTML for external resource references.
-    async fn analyze_page_source(&self, url: &str, target_base_domain: &str) -> Result<Vec<WebTrafficResult>> {
+    async fn analyze_page_source(
+        &self,
+        url: &str,
+        target_base_domain: &str,
+    ) -> Result<Vec<WebTrafficResult>> {
         let response = self.client.get(url).send().await?;
         let html = response.text().await?;
-        Ok(extract_external_domains_from_html(&html, target_base_domain))
+        Ok(extract_external_domains_from_html(
+            &html,
+            target_base_domain,
+        ))
     }
 
     /// Phase 2: Load page in headless browser and capture all network requests.
-    async fn analyze_network_traffic(&self, url: &str, target_base_domain: &str) -> Result<Vec<WebTrafficResult>> {
+    async fn analyze_network_traffic(
+        &self,
+        url: &str,
+        target_base_domain: &str,
+    ) -> Result<Vec<WebTrafficResult>> {
         let captured_urls = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_clone = captured_urls.clone();
         let url_owned = url.to_string();
@@ -139,11 +156,14 @@ impl WebTrafficDiscovery {
 
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let guard = crate::browser_pool::create_browser()?;
-            let tab = guard.browser.new_tab()
+            let tab = guard
+                .browser
+                .new_tab()
                 .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
             // Intercept ALL network responses (not just JSON like trust_center does)
-            tab.register_response_handling("web_traffic_discovery",
+            tab.register_response_handling(
+                "web_traffic_discovery",
                 Box::new(move |event_params, _fetch_body| {
                     let resp = &event_params.response;
                     let resp_url = &resp.url;
@@ -151,8 +171,9 @@ impl WebTrafficDiscovery {
                     if let Ok(mut urls) = captured_clone.lock() {
                         urls.push(resp_url.clone());
                     }
-                })
-            ).map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
+                }),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
 
             // Navigate to page
             tab.navigate_to(&url_owned)
@@ -171,10 +192,14 @@ impl WebTrafficDiscovery {
             Ok(urls)
         });
 
-        let network_urls = handle.await
+        let network_urls = handle
+            .await
             .map_err(|e| anyhow::anyhow!("Browser task panicked: {}", e))??;
 
-        debug!("Web traffic: captured {} network requests", network_urls.len());
+        debug!(
+            "Web traffic: captured {} network requests",
+            network_urls.len()
+        );
 
         let mut results = Vec::new();
         let mut seen_domains = HashSet::new();
@@ -185,7 +210,9 @@ impl WebTrafficDiscovery {
                     let base_domain = domain_utils::extract_base_domain(host);
 
                     // Skip self-references and already-seen domains
-                    if base_domain == target_base_domain || !seen_domains.insert(base_domain.clone()) {
+                    if base_domain == target_base_domain
+                        || !seen_domains.insert(base_domain.clone())
+                    {
                         continue;
                     }
 
@@ -208,7 +235,10 @@ impl WebTrafficDiscovery {
 }
 
 /// Extract external domains from HTML content by parsing resource-loading elements.
-fn extract_external_domains_from_html(html: &str, target_base_domain: &str) -> Vec<WebTrafficResult> {
+fn extract_external_domains_from_html(
+    html: &str,
+    target_base_domain: &str,
+) -> Vec<WebTrafficResult> {
     let mut results = Vec::new();
     let mut seen_domains = HashSet::new();
 
@@ -241,15 +271,24 @@ fn extract_external_domains_from_html(html: &str, target_base_domain: &str) -> V
 
                         // Social media domains are only vendor signals when their
                         // SDK/script is loaded, not from simple hyperlinks or embeds
-                        if is_social_media_domain(&base_domain) && !is_active_resource_load(element_type) {
-                            debug!("Web traffic: skipping social media link {} (element: {})", base_domain, element_type);
+                        if is_social_media_domain(&base_domain)
+                            && !is_active_resource_load(element_type)
+                        {
+                            debug!(
+                                "Web traffic: skipping social media link {} (element: {})",
+                                base_domain, element_type
+                            );
                             continue;
                         }
 
                         results.push(WebTrafficResult {
                             vendor_domain: base_domain,
                             source: WebTrafficSource::PageSource,
-                            evidence: format!("HTML {} reference: {}", element_type, truncate_url(url_str, 200)),
+                            evidence: format!(
+                                "HTML {} reference: {}",
+                                element_type,
+                                truncate_url(url_str, 200)
+                            ),
                         });
                     }
                 }
@@ -263,7 +302,8 @@ fn extract_external_domains_from_html(html: &str, target_base_domain: &str) -> V
 /// Check if a domain is generic infrastructure/browser noise that shouldn't be reported
 /// as a vendor relationship (e.g., Chrome DevTools, localhost, browser internals).
 fn is_infrastructure_noise(domain: &str) -> bool {
-    matches!(domain,
+    matches!(
+        domain,
         "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"
         | "chromium.org" | "gstatic.com" | "googleapis.com"
         // W3C/standards bodies
@@ -276,17 +316,22 @@ fn is_infrastructure_noise(domain: &str) -> bool {
 /// `<script src="https://connect.facebook.net/sdk.js">`), NOT when they appear as
 /// simple hyperlinks (e.g., `<a href="https://facebook.com/company">`).
 fn is_social_media_domain(domain: &str) -> bool {
-    matches!(domain,
-        "facebook.com" | "facebook.net"
-        | "linkedin.com"
-        | "twitter.com" | "x.com"
-        | "youtube.com"
-        | "instagram.com"
-        | "tiktok.com"
-        | "pinterest.com"
-        | "reddit.com"
-        | "threads.net"
-        | "mastodon.social"
+    matches!(
+        domain,
+        "facebook.com"
+            | "facebook.net"
+            | "linkedin.com"
+            | "twitter.com"
+            | "x.com"
+            | "youtube.com"
+            | "instagram.com"
+            | "tiktok.com"
+            | "pinterest.com"
+            | "reddit.com"
+            | "threads.net"
+            | "mastodon.social"
+            | "discord.com"
+            | "discord.gg"
     )
 }
 
@@ -334,11 +379,20 @@ mod tests {
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(domains.contains(&"segment.io"), "Should find segment.io");
         // googleapis.com is filtered as infrastructure noise
-        assert!(!domains.contains(&"googleapis.com"), "Should filter googleapis.com");
+        assert!(
+            !domains.contains(&"googleapis.com"),
+            "Should filter googleapis.com"
+        );
         // facebook.com from <img> (tracking pixel) IS a vendor signal
-        assert!(domains.contains(&"facebook.com"), "Should find facebook.com tracking pixel");
+        assert!(
+            domains.contains(&"facebook.com"),
+            "Should find facebook.com tracking pixel"
+        );
         // youtube.com from <iframe> (embed) is NOT a vendor signal — social media filter
-        assert!(!domains.contains(&"youtube.com"), "Should filter youtube.com iframe embed");
+        assert!(
+            !domains.contains(&"youtube.com"),
+            "Should filter youtube.com iframe embed"
+        );
     }
 
     #[test]
@@ -375,8 +429,14 @@ mod tests {
         </script>"#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"amplitude.com"), "Should find amplitude.com in inline JS");
-        assert!(domains.contains(&"datadoghq.com"), "Should find datadoghq.com in inline JS");
+        assert!(
+            domains.contains(&"amplitude.com"),
+            "Should find amplitude.com in inline JS"
+        );
+        assert!(
+            domains.contains(&"datadoghq.com"),
+            "Should find datadoghq.com in inline JS"
+        );
     }
 
     #[test]
@@ -405,13 +465,31 @@ mod tests {
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         // Social media profile links should be filtered
-        assert!(!domains.contains(&"facebook.com"), "Should filter facebook.com profile link");
-        assert!(!domains.contains(&"twitter.com"), "Should filter twitter.com profile link");
-        assert!(!domains.contains(&"linkedin.com"), "Should filter linkedin.com profile link");
-        assert!(!domains.contains(&"youtube.com"), "Should filter youtube.com profile link");
-        assert!(!domains.contains(&"instagram.com"), "Should filter instagram.com profile link");
+        assert!(
+            !domains.contains(&"facebook.com"),
+            "Should filter facebook.com profile link"
+        );
+        assert!(
+            !domains.contains(&"twitter.com"),
+            "Should filter twitter.com profile link"
+        );
+        assert!(
+            !domains.contains(&"linkedin.com"),
+            "Should filter linkedin.com profile link"
+        );
+        assert!(
+            !domains.contains(&"youtube.com"),
+            "Should filter youtube.com profile link"
+        );
+        assert!(
+            !domains.contains(&"instagram.com"),
+            "Should filter instagram.com profile link"
+        );
         // Real vendor SDKs should still be found
-        assert!(domains.contains(&"segment.io"), "Should find segment.io SDK");
+        assert!(
+            domains.contains(&"segment.io"),
+            "Should find segment.io SDK"
+        );
     }
 
     #[test]
@@ -424,9 +502,38 @@ mod tests {
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         // Facebook SDK via script = vendor signal
-        assert!(domains.contains(&"facebook.net"), "Should find facebook.net SDK script");
+        assert!(
+            domains.contains(&"facebook.net"),
+            "Should find facebook.net SDK script"
+        );
         // Facebook tracking pixel via img = vendor signal
-        assert!(domains.contains(&"facebook.com"), "Should find facebook.com tracking pixel");
+        assert!(
+            domains.contains(&"facebook.com"),
+            "Should find facebook.com tracking pixel"
+        );
+    }
+
+    #[test]
+    fn test_discord_links_filtered() {
+        let html = r#"
+            <a href="https://discord.com/invite/ourserver">Join Discord</a>
+            <a href="https://discord.gg/abc123">Discord</a>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(
+            !domains.contains(&"discord.com"),
+            "Should filter discord.com profile link"
+        );
+        assert!(
+            !domains.contains(&"discord.gg"),
+            "Should filter discord.gg invite link"
+        );
+        assert!(
+            domains.contains(&"segment.io"),
+            "Should still find real vendor SDKs"
+        );
     }
 
     #[test]

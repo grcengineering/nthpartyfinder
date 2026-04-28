@@ -2,9 +2,17 @@
 pub fn extract_base_domain(domain: &str) -> String {
     // Remove common SPF and technical prefixes
     let spf_prefixes = vec![
-        "_spf.", "spf.", "_dmarc.", "dmarc.", "_domainkey.",
-        "selector1._domainkey.", "selector2._domainkey.",
-        "_smtp.", "smtp.", "mail.", "email."
+        "_spf.",
+        "spf.",
+        "_dmarc.",
+        "dmarc.",
+        "_domainkey.",
+        "selector1._domainkey.",
+        "selector2._domainkey.",
+        "_smtp.",
+        "smtp.",
+        "mail.",
+        "email.",
     ];
 
     let mut cleaned_domain = domain.to_lowercase();
@@ -12,7 +20,10 @@ pub fn extract_base_domain(domain: &str) -> String {
     // Remove SPF-specific prefixes
     for prefix in spf_prefixes {
         if cleaned_domain.starts_with(prefix) {
-            cleaned_domain = cleaned_domain.strip_prefix(prefix).unwrap_or(&cleaned_domain).to_string();
+            cleaned_domain = cleaned_domain
+                .strip_prefix(prefix)
+                .unwrap_or(&cleaned_domain)
+                .to_string();
             break;
         }
     }
@@ -37,8 +48,14 @@ pub fn extract_base_domain(domain: &str) -> String {
     }
 
     // Reject results that are only a public suffix (e.g., "co.uk", "com.au")
-    let compound_tlds = ["co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr",
-                         "com.br", "com.mx", "com.cn", "org.uk", "net.au"];
+    let compound_tlds = [
+        "co.uk", "ac.uk", "org.uk", "gov.uk", "net.uk", "me.uk", "co.au", "com.au", "net.au",
+        "org.au", "edu.au", "co.nz", "org.nz", "co.jp", "or.jp", "ac.jp", "ne.jp", "co.kr",
+        "or.kr", "ac.kr", "com.br", "org.br", "net.br", "com.mx", "org.mx", "com.cn", "org.cn",
+        "net.cn", "co.in", "org.in", "ac.in", "co.za", "org.za", "co.il", "org.il", "ac.il",
+        "com.sg", "edu.sg", "com.hk", "edu.hk", "co.id", "or.id", "com.tr", "org.tr", "com.ar",
+        "org.ar", "co.th", "or.th", "ac.th",
+    ];
     if compound_tlds.contains(&result.as_str()) {
         return cleaned_domain;
     }
@@ -49,18 +66,18 @@ pub fn extract_base_domain(domain: &str) -> String {
 /// Extract the organizational domain (e.g. mailgun.org from eu.mailgun.org)
 fn extract_organizational_domain(domain: &str) -> Option<String> {
     let parts: Vec<&str> = domain.split('.').collect();
-    
+
     // If it's already a base domain (2 parts), return as-is
     if parts.len() <= 2 {
         return Some(domain.to_string());
     }
-    
+
     // For domains with more than 2 parts, try to identify the organizational domain
     // Common patterns:
     // - eu.mailgun.org -> mailgun.org
     // - mail.google.com -> google.com
     // - subdomain.company.com -> company.com
-    
+
     // Get the organizational/apex domain.
     // FQDNs like s3.amazonaws.com or Nagios-842216103.us-east-1.elb.amazonaws.com
     // normalize to amazonaws.com — the vendor is the platform provider.
@@ -68,8 +85,14 @@ fn extract_organizational_domain(domain: &str) -> Option<String> {
     let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
 
     // Handle compound TLDs (e.g., .co.uk, .com.au) — need 3 parts for the apex
-    let compound_tlds = ["co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr",
-                         "com.br", "com.mx", "com.cn", "org.uk", "net.au"];
+    let compound_tlds = [
+        "co.uk", "ac.uk", "org.uk", "gov.uk", "net.uk", "me.uk", "co.au", "com.au", "net.au",
+        "org.au", "edu.au", "co.nz", "org.nz", "co.jp", "or.jp", "ac.jp", "ne.jp", "co.kr",
+        "or.kr", "ac.kr", "com.br", "org.br", "net.br", "com.mx", "org.mx", "com.cn", "org.cn",
+        "net.cn", "co.in", "org.in", "ac.in", "co.za", "org.za", "co.il", "org.il", "ac.il",
+        "com.sg", "edu.sg", "com.hk", "edu.hk", "co.id", "or.id", "com.tr", "org.tr", "com.ar",
+        "org.ar", "co.th", "or.th", "ac.th",
+    ];
     if compound_tlds.contains(&last_two.as_str()) {
         if parts.len() > 3 {
             Some(format!("{}.{}", parts[parts.len() - 3], last_two))
@@ -85,24 +108,38 @@ fn extract_organizational_domain(domain: &str) -> Option<String> {
 /// Normalize domain for DNS lookups (remove _spf prefixes but keep domain structure)
 pub fn normalize_for_dns_lookup(domain: &str) -> String {
     let mut normalized = domain.to_lowercase();
-    
+
     // Remove underscore prefixes that are SPF-specific
     if normalized.starts_with("_spf.") {
-        normalized = normalized.strip_prefix("_spf.").unwrap_or(&normalized).to_string();
+        normalized = normalized
+            .strip_prefix("_spf.")
+            .unwrap_or(&normalized)
+            .to_string();
     } else if normalized.starts_with("_dmarc.") {
-        normalized = normalized.strip_prefix("_dmarc.").unwrap_or(&normalized).to_string();
+        normalized = normalized
+            .strip_prefix("_dmarc.")
+            .unwrap_or(&normalized)
+            .to_string();
     }
-    
+
     normalized
 }
 
 /// Check if a domain is likely an organizational domain vs technical subdomain
 pub fn is_organizational_domain(domain: &str) -> bool {
     let technical_subdomains = vec![
-        "_spf", "spf", "_dmarc", "dmarc", "_domainkey", 
-        "selector1", "selector2", "mail", "smtp", "email"
+        "_spf",
+        "spf",
+        "_dmarc",
+        "dmarc",
+        "_domainkey",
+        "selector1",
+        "selector2",
+        "mail",
+        "smtp",
+        "email",
     ];
-    
+
     let parts: Vec<&str> = domain.split('.').collect();
     if let Some(first_part) = parts.first() {
         !technical_subdomains.contains(first_part)
@@ -155,10 +192,7 @@ mod tests {
         // GitHub Pages → github.io
         assert_eq!(extract_base_domain("myproject.github.io"), "github.io");
         // Heroku → herokuapp.com
-        assert_eq!(
-            extract_base_domain("myapp.herokuapp.com"),
-            "herokuapp.com"
-        );
+        assert_eq!(extract_base_domain("myapp.herokuapp.com"), "herokuapp.com");
         // Already apex → unchanged
         assert_eq!(extract_base_domain("amazonaws.com"), "amazonaws.com");
         assert_eq!(extract_base_domain("cloudfront.net"), "cloudfront.net");
@@ -167,16 +201,38 @@ mod tests {
     /// Regression test: compound TLDs are handled correctly
     #[test]
     fn test_compound_tld_handling() {
-        assert_eq!(
-            extract_base_domain("mail.example.co.uk"),
-            "example.co.uk"
-        );
-        assert_eq!(
-            extract_base_domain("api.company.com.au"),
-            "company.com.au"
-        );
+        assert_eq!(extract_base_domain("mail.example.co.uk"), "example.co.uk");
+        assert_eq!(extract_base_domain("api.company.com.au"), "company.com.au");
         // Already at apex with compound TLD
         assert_eq!(extract_base_domain("example.co.uk"), "example.co.uk");
+    }
+
+    #[test]
+    fn test_new_regional_compound_tlds() {
+        // India
+        assert_eq!(extract_base_domain("app.tcs.co.in"), "tcs.co.in");
+        assert_eq!(extract_base_domain("mail.infosys.org.in"), "infosys.org.in");
+        // South Africa
+        assert_eq!(extract_base_domain("api.company.co.za"), "company.co.za");
+        // Israel
+        assert_eq!(extract_base_domain("cdn.startup.co.il"), "startup.co.il");
+        // Singapore
+        assert_eq!(extract_base_domain("api.firm.com.sg"), "firm.com.sg");
+        // Hong Kong
+        assert_eq!(extract_base_domain("mail.corp.com.hk"), "corp.com.hk");
+        // Indonesia
+        assert_eq!(extract_base_domain("api.company.co.id"), "company.co.id");
+        // Turkey
+        assert_eq!(extract_base_domain("app.firma.com.tr"), "firma.com.tr");
+        // Argentina
+        assert_eq!(extract_base_domain("cdn.empresa.com.ar"), "empresa.com.ar");
+        // Thailand
+        assert_eq!(extract_base_domain("api.company.co.th"), "company.co.th");
+        assert_eq!(extract_base_domain("uni.example.ac.th"), "example.ac.th");
+        // Bare compound TLDs should return unchanged (2-label safety)
+        assert_eq!(extract_base_domain("co.in"), "co.in");
+        assert_eq!(extract_base_domain("co.za"), "co.za");
+        assert_eq!(extract_base_domain("co.th"), "co.th");
     }
 
     /// BUG-004 regression: SPF include domains must never be over-stripped to a bare TLD.
@@ -187,18 +243,28 @@ mod tests {
         let result = extract_base_domain("theaccessgroupSPF.smtp.com");
         assert!(result.contains('.'), "Must not return bare TLD");
         let label_count = result.split('.').count();
-        assert!(label_count >= 2, "Must have at least 2 labels, got: {}", result);
+        assert!(
+            label_count >= 2,
+            "Must have at least 2 labels, got: {}",
+            result
+        );
 
         // Edge case: "smtp.com" — stripping smtp. prefix leaves bare "com",
         // but safety check falls back to the original "smtp.com"
         let result2 = extract_base_domain("smtp.com");
-        assert_eq!(result2, "smtp.com", "Must fall back to original when over-stripped");
+        assert_eq!(
+            result2, "smtp.com",
+            "Must fall back to original when over-stripped"
+        );
     }
 
     #[test]
     fn test_normalize_for_dns_lookup() {
         assert_eq!(normalize_for_dns_lookup("_spf.mailgun.org"), "mailgun.org");
-        assert_eq!(normalize_for_dns_lookup("spf.eu.mailgun.org"), "spf.eu.mailgun.org");
+        assert_eq!(
+            normalize_for_dns_lookup("spf.eu.mailgun.org"),
+            "spf.eu.mailgun.org"
+        );
         assert_eq!(normalize_for_dns_lookup("google.com"), "google.com");
     }
 
