@@ -160,3 +160,46 @@ async fn test_minimal_html_returns_none() {
     let result = extract_organization_from_html(minimal_html, "test.com").unwrap();
     assert!(result.is_none(), "Minimal HTML should return None");
 }
+
+#[tokio::test]
+async fn test_extracts_org_from_opengraph_meta() {
+    let html = r#"<html><head>
+        <meta property="og:site_name" content="Acme Corp">
+    </head><body></body></html>"#;
+
+    let result = extract_organization_from_html(html, "acme.com").unwrap();
+    assert!(result.is_some(), "Should extract org from OG meta");
+    let org = result.unwrap();
+    assert_eq!(org.organization, "Acme Corp");
+    assert_eq!(org.source, WebOrgSource::OpenGraph);
+}
+
+#[tokio::test]
+async fn test_extracts_org_from_meta_application_name() {
+    let html = r#"<html><head>
+        <meta name="application-name" content="WidgetCo Dashboard">
+    </head><body></body></html>"#;
+
+    let result = extract_organization_from_html(html, "widget.co").unwrap();
+    assert!(
+        result.is_some(),
+        "Should extract from meta application-name"
+    );
+    let org = result.unwrap();
+    assert_eq!(org.source, WebOrgSource::MetaTag);
+}
+
+#[tokio::test]
+async fn test_schema_org_jsonld_extraction() {
+    let html = r#"<html><head>
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Organization","name":"Test Org LLC"}
+        </script>
+    </head><body></body></html>"#;
+
+    let result = extract_organization_from_html(html, "testorg.com").unwrap();
+    assert!(result.is_some());
+    let org = result.unwrap();
+    assert_eq!(org.organization, "Test Org LLC");
+    assert_eq!(org.source, WebOrgSource::SchemaOrg);
+}

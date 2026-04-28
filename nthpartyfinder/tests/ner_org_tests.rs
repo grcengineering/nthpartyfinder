@@ -125,6 +125,26 @@ mod ner_tests {
     }
 }
 
+#[cfg(feature = "embedded-ner")]
+mod ner_robustness_tests {
+    #[test]
+    fn ner_is_available_reflects_init_state() {
+        let available = nthpartyfinder::ner_org::is_available();
+        if available {
+            assert!(nthpartyfinder::ner_org::get().is_some());
+        }
+    }
+
+    #[test]
+    fn ner_extract_all_returns_vec() {
+        let result = nthpartyfinder::ner_org::extract_all_organizations(
+            "Microsoft Corporation and Google LLC announced a partnership.",
+            Some(0.3),
+        );
+        assert!(result.is_ok(), "extract_all should not error");
+    }
+}
+
 #[cfg(not(feature = "embedded-ner"))]
 mod ner_disabled_tests {
     use nthpartyfinder::ner_org;

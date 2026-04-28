@@ -528,22 +528,20 @@ fn test_case_insensitivity() {
 // ============================================================================
 
 #[tokio::test]
+#[ignore = "live-network smoke; run with --ignored locally"]
 async fn test_dns_resolution_google() {
-    // Test real DNS resolution for a known domain
     let result = dns::get_txt_records("google.com").await;
 
     assert!(result.is_ok());
     let records = result.unwrap();
-    // Google should have at least some TXT records (SPF, verification, etc.)
     assert!(records.len() > 0);
 }
 
 #[tokio::test]
+#[ignore = "live-network smoke; run with --ignored locally"]
 async fn test_dns_resolution_nonexistent_domain() {
-    // Test DNS resolution for a domain that definitely doesn't exist
     let result = dns::get_txt_records("this-domain-definitely-does-not-exist-123456789.com").await;
 
-    // Should return Ok with empty vec (not an error per code review)
     assert!(result.is_ok());
     let records = result.unwrap();
     assert_eq!(records.len(), 0);
@@ -559,8 +557,8 @@ async fn test_dns_resolution_invalid_domain() {
 }
 
 #[tokio::test]
+#[ignore = "live-network smoke; run with --ignored locally"]
 async fn test_dns_resolution_with_pool() {
-    // Test using explicit DNS pool
     let pool = DnsServerPool::new();
     let result = dns::get_txt_records_with_pool("google.com", &pool).await;
 
@@ -570,16 +568,14 @@ async fn test_dns_resolution_with_pool() {
 }
 
 #[tokio::test]
+#[ignore = "live-network smoke; run with --ignored locally"]
 async fn test_dns_server_rotation() {
-    // Test that DNS server rotation works
     let pool = DnsServerPool::new();
 
-    // Make multiple requests to trigger rotation
     for _ in 0..5 {
         let _ = dns::get_txt_records_with_pool("example.com", &pool).await;
     }
 
-    // If we get here without panic, rotation is working
     assert!(true);
 }
 

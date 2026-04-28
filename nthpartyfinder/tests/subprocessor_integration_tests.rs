@@ -235,16 +235,47 @@ async fn test_error_resilience() {
         // Should not panic, regardless of result
         match result {
             Ok(vendors) => {
-                // Results should be reasonable (not thousands of vendors)
                 assert!(
                     vendors.len() < 100,
                     "Should not return excessive vendors for: {}",
                     domain
                 );
             }
-            Err(_) => {
-                // Errors are acceptable for malformed input
-            }
+            Err(_) => {}
         }
     }
+}
+
+#[tokio::test]
+async fn test_table_extraction_with_fixture_html() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+
+    let html = r#"
+    <html><body>
+        <h1>Our Subprocessors</h1>
+        <table>
+            <thead><tr><th>Name</th><th>Service</th><th>Location</th></tr></thead>
+            <tbody>
+                <tr><td>Amazon Web Services</td><td>Cloud Hosting</td><td>US</td></tr>
+                <tr><td>Stripe Inc.</td><td>Payments</td><td>US</td></tr>
+                <tr><td>Twilio Inc.</td><td>Communications</td><td>US</td></tr>
+            </tbody>
+        </table>
+    </body></html>"#;
+
+    let document = scraper::Html::parse_document(html);
+    let result = analyzer.extract_from_tables(&document, html, "https://example.com");
+    assert!(result.is_ok(), "Should extract from well-formed table");
+}
+
+#[tokio::test]
+async fn test_large_html_body_does_not_panic() {
+    let analyzer = SubprocessorAnalyzer::new().await;
+
+    let large_body =
+        "<html><body>".to_string() + &"<p>vendor.com</p>\n".repeat(50_000) + "</body></html>";
+
+    let document = scraper::Html::parse_document(&large_body);
+    let result = analyzer.extract_from_lists(&document, &large_body, "https://example.com");
+    assert!(result.is_ok(), "Large body should not panic");
 }
