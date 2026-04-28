@@ -62,7 +62,7 @@ pub async fn list_cached_domains() -> Result<()> {
 
     println!("Cached Domains ({} total):", domains.len());
     println!("{}", "=".repeat(80));
-    println!("{:<40} {:<25} {}", "Domain", "Last Accessed", "URL");
+    println!("{:<40} {:<25} URL", "Domain", "Last Accessed");
     println!("{}", "-".repeat(80));
 
     for (domain, timestamp, url) in domains {

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::debug;
-use whois_rust::{WhoIs, WhoIsLookupOptions};
+use whois_rs::{WhoIs, WhoIsLookupOptions};
 
 /// Result of an organization lookup with verification status
 #[derive(Debug, Clone)]
@@ -636,9 +636,7 @@ pub fn is_placeholder_organization(org: &str) -> bool {
 
 fn clean_organization_name(org: &str) -> String {
     org.trim()
-        .replace('\n', " ")
-        .replace('\r', " ")
-        .replace('\t', " ")
+        .replace(['\n', '\r', '\t'], " ")
         .split_whitespace()
         .collect::<Vec<&str>>()
         .join(" ")
@@ -1144,10 +1142,8 @@ mod tests {
         let result = get_organization_with_rate_limit("google.com", false, 0.6, Some(&ctx)).await;
         assert!(result.is_ok(), "Should successfully look up organization");
         let org = result.unwrap();
-        assert!(
-            org.is_verified || !org.is_verified,
-            "Result should be valid (verified or inferred)"
-        );
+        // Sanity check: result should be valid (verified or inferred)
+        let _ = &org;
     }
 
     #[tokio::test]

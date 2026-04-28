@@ -580,8 +580,7 @@ fn analyze_response_with_evidence(
         let matched: Vec<String> = detection
             .success_indicators
             .iter()
-            .filter(|ind| body_lower.contains(&ind.to_lowercase()))
-            .map(|ind| ind.clone())
+            .filter(|ind| body_lower.contains(&ind.to_lowercase())).cloned()
             .collect();
 
         if !matched.is_empty() {

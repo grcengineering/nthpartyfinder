@@ -537,7 +537,7 @@ async fn test_extraction_patterns_functionality() {
 
     // Should extract some vendors using custom patterns
     assert!(
-        vendors.len() >= 1,
+        !vendors.is_empty(),
         "Should extract at least one vendor using custom patterns, found: {}",
         vendors.len()
     );
@@ -560,7 +560,7 @@ async fn test_extraction_patterns_functionality() {
 
     // Test metadata extraction
     assert!(metadata.is_some(), "Should return extraction metadata");
-    let metadata = metadata.unwrap();
+    let _metadata = metadata.unwrap();
     // Note: successful_extractions is always >= 0, but we're checking it exists and is accessible
 }
 

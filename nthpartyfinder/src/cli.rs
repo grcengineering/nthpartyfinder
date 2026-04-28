@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use dirs;
 
 #[derive(Parser, Debug)]
 #[command(name = "nthpartyfinder")]

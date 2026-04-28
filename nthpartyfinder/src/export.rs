@@ -3,7 +3,6 @@ use anyhow::Result;
 use askama::Template;
 use chrono::Utc;
 use csv::Writer;
-use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -20,7 +19,7 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
     let mut wtr = Writer::from_writer(file);
 
     // Write CSV headers
-    wtr.write_record(&[
+    wtr.write_record([
         "Root Customer Domain",
         "Root Customer Organization",
         "Nth Party Domain",
@@ -35,7 +34,7 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
 
     // Write data rows
     for relationship in relationships {
-        wtr.write_record(&[
+        wtr.write_record([
             &relationship.root_customer_domain,
             &relationship.root_customer_organization,
             &relationship.nth_party_domain,
@@ -181,7 +180,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     let root_organization = &relationships[0].root_customer_organization;
 
     // Header
-    content.push_str(&format!("# Nth Party Analysis Report\n\n"));
+    content.push_str("# Nth Party Analysis Report\n\n");
     content.push_str(&format!("**Domain:** {}\n", root_domain));
     content.push_str(&format!("**Organization:** {}\n\n", root_organization));
     content.push_str(&format!(
@@ -235,7 +234,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     for (record_type, count) in &type_counts {
         content.push_str(&format!("- **{}:** {} relationships\n", record_type, count));
     }
-    content.push_str("\n");
+    content.push('\n');
 
     // Breakdown by layer
     content.push_str("### Breakdown by Layer\n\n");
@@ -248,7 +247,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
             content.push_str(&format!("- **Layer {} vendors:** {}\n", layer, layer_count));
         }
     }
-    content.push_str("\n");
+    content.push('\n');
 
     // Mermaid.js graph
     content.push_str("## Vendor Relationship Graph\n\n");
@@ -375,7 +374,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
                 escape_markdown(&rel.nth_party_record)
             ));
         }
-        content.push_str("\n");
+        content.push('\n');
     }
 
     // Verification Relationships table
@@ -397,7 +396,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
                 escape_markdown(&rel.nth_party_record)
             ));
         }
-        content.push_str("\n");
+        content.push('\n');
     }
 
     // Webpage discovery relationships table
@@ -427,7 +426,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
                 escape_markdown(&rel.nth_party_record)
             ));
         }
-        content.push_str("\n");
+        content.push('\n');
     }
 
     // Other relationships
@@ -447,7 +446,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
                 escape_markdown(&rel.nth_party_record)
             ));
         }
-        content.push_str("\n");
+        content.push('\n');
     }
 
     // Risk assessment section
@@ -484,8 +483,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
 fn sanitize_mermaid_id(domain: &str) -> String {
     // L008 fix: ensure IDs are valid Mermaid identifiers (alphanumeric + underscore, no leading digit)
     let id: String = domain
-        .replace('.', "_")
-        .replace('-', "_")
+        .replace(['.', '-'], "_")
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_')
         .collect();

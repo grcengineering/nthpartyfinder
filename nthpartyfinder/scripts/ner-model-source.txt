@@ -1,0 +1,1 @@
+onnx-community/gliner_small-v2.1

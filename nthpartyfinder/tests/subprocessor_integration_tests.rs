@@ -1,7 +1,6 @@
 use nthpartyfinder::subprocessor::{
     extract_vendor_domains_from_subprocessors, SubprocessorAnalyzer,
 };
-use tokio;
 
 #[tokio::test]
 async fn test_subprocessor_analyzer_creation() {
@@ -233,15 +232,12 @@ async fn test_error_resilience() {
         let result = extract_vendor_domains_from_subprocessors(domain, None).await;
 
         // Should not panic, regardless of result
-        match result {
-            Ok(vendors) => {
-                assert!(
-                    vendors.len() < 100,
-                    "Should not return excessive vendors for: {}",
-                    domain
-                );
-            }
-            Err(_) => {}
+        if let Ok(vendors) = result {
+            assert!(
+                vendors.len() < 100,
+                "Should not return excessive vendors for: {}",
+                domain
+            );
         }
     }
 }

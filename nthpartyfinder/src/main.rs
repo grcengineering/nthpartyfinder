@@ -3,7 +3,6 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ctrlc;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -449,7 +448,7 @@ async fn main() -> Result<()> {
             "html" => format!("Nth Party Analysis for {}.html", domain),
             "json" => format!("Nth Party Analysis for {}.json", domain),
             "markdown" => format!("Nth Party Analysis for {}.md", domain),
-            "csv" | _ => format!("Nth Party Analysis for {}.csv", domain),
+            _ => format!("Nth Party Analysis for {}.csv", domain),
         }
     } else {
         format!("{}.{}", args.output, args.output_format)
@@ -1318,7 +1317,7 @@ async fn main() -> Result<()> {
         "json" => export::export_json(&results, &final_output_path)?,
         "markdown" => export::export_markdown(&results, &final_output_path)?,
         "html" => export::export_html(&results, &final_output_path)?,
-        "csv" | _ => export::export_csv(&results, &final_output_path)?,
+        _ => export::export_csv(&results, &final_output_path)?,
     }
 
     logger.log_export_success(&final_output_path);
@@ -1444,6 +1443,7 @@ async fn subprocessor_analysis_with_logging(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn discover_nth_parties(
     domain: &str,
     max_depth: Option<u32>,
@@ -1581,7 +1581,6 @@ async fn discover_nth_parties(
 
     {
         // Scope for TXT record processing and vendor discovery
-        let txt_records = txt_records; // bind into this block
         if !txt_records.is_empty() {
             logger.log_dns_lookup_success(domain, "DoH/DNS", txt_records.len());
             logger.debug(&format!(
@@ -1637,7 +1636,7 @@ async fn discover_nth_parties(
         }
 
         // Subprocessor web page analysis (if enabled)
-        if subprocessor_enabled && subprocessor_analyzer.is_some() {
+        if let Some(analyzer) = subprocessor_analyzer.filter(|_| subprocessor_enabled) {
             if current_depth == 1 {
                 let dns_vendor_count = all_vendor_domains.len();
                 logger.update_progress("Subprocessor page analysis").await;
@@ -1658,7 +1657,7 @@ async fn discover_nth_parties(
                 domain,
                 verification_logger,
                 logger.clone(),
-                subprocessor_analyzer.unwrap(),
+                analyzer,
             )
             .await
             {
@@ -1707,7 +1706,7 @@ async fn discover_nth_parties(
                                 ))
                                 .await;
                         }
-                        logger.debug(&format!("Subprocessor analysis completed: No vendor domains found in any subprocessor pages"));
+                        logger.debug("Subprocessor analysis completed: No vendor domains found in any subprocessor pages");
                     }
                 }
                 Err(e) => {
@@ -2301,6 +2300,7 @@ async fn discover_nth_parties(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_vendor_domain(
     vendor_domain: String,
     source_type: RecordType,
@@ -2765,9 +2765,7 @@ fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
         format!("{} ltd", base),
     ];
 
-    common_inferred_patterns
-        .iter()
-        .any(|pattern| org_lower == *pattern)
+    common_inferred_patterns.contains(&org_lower)
 }
 
 /// Prompt the user to confirm organizations that were inferred from domain names
@@ -3202,7 +3200,7 @@ async fn run_batch_analysis(
                 export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?
             }
             "html" => export::export_html(&export_relationships, &combined_path.to_string_lossy())?,
-            "csv" | _ => {
+            _ => {
                 export::export_csv(&export_relationships, &combined_path.to_string_lossy())?
             }
         }
@@ -3238,6 +3236,7 @@ async fn run_batch_analysis(
 }
 
 /// Analyze a single domain for batch processing
+#[allow(clippy::too_many_arguments)]
 async fn analyze_single_domain_for_batch(
     entry: &batch::DomainEntry,
     output_dir: &Path,
@@ -3312,7 +3311,7 @@ async fn analyze_single_domain_for_batch(
             "json" => export::export_json(&results, &output_path.to_string_lossy())?,
             "markdown" => export::export_markdown(&results, &output_path.to_string_lossy())?,
             "html" => export::export_html(&results, &output_path.to_string_lossy())?,
-            "csv" | _ => export::export_csv(&results, &output_path.to_string_lossy())?,
+            _ => export::export_csv(&results, &output_path.to_string_lossy())?,
         }
 
         Some(output_path.to_string_lossy().to_string())
@@ -3325,6 +3324,7 @@ async fn analyze_single_domain_for_batch(
 
 /// Minimal version of discover_nth_parties for batch processing
 /// Skips interactive prompts and discovery methods that require user input
+#[allow(clippy::too_many_arguments)]
 async fn discover_nth_parties_minimal(
     domain: &str,
     max_depth: Option<u32>,

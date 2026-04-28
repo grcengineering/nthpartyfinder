@@ -125,8 +125,8 @@ impl CtLogDiscovery {
                 let cn = common_name.trim().to_lowercase();
                 let cn_base = domain_utils::extract_base_domain(&cn);
 
-                if cn_base != base_domain && !Self::is_infrastructure_domain(&cn_base) {
-                    if seen_domains.insert(cn_base.clone()) {
+                if cn_base != base_domain && !Self::is_infrastructure_domain(&cn_base)
+                    && seen_domains.insert(cn_base.clone()) {
                         results.push(CtDiscoveryResult {
                             domain: cn_base.clone(),
                             source: format!("Certificate CN (crt.sh ID: {})", entry.id),
@@ -140,7 +140,6 @@ impl CtLogDiscovery {
 
                         debug!("Found vendor {} from CT log certificate CN", cn_base);
                     }
-                }
             }
         }
 

@@ -2,7 +2,6 @@ use crate::dns::LogFailure;
 use crate::rate_limit::RateLimitContext;
 use crate::vendor::RecordType;
 use anyhow::Result;
-use reqwest;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -1208,7 +1207,7 @@ impl SubprocessorAnalyzer {
             }
             let request_start = std::time::Instant::now();
             debug!("🔥🔥🔥 ABOUT TO CALL scrape_subprocessor_page for: {}", url);
-            match self.scrape_subprocessor_page(&url, logger, domain).await {
+            match self.scrape_subprocessor_page(url, logger, domain).await {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
                     debug!(
@@ -1229,7 +1228,7 @@ impl SubprocessorAnalyzer {
                         // Only cache URLs that actually found subprocessors
                         {
                             let cache = self.cache.read().await;
-                            if let Err(e) = cache.cache_working_url(domain, &url).await {
+                            if let Err(e) = cache.cache_working_url(domain, url).await {
                                 debug!("Failed to cache working URL for {}: {}", domain, e);
                             } else {
                                 debug!(
@@ -1285,7 +1284,7 @@ impl SubprocessorAnalyzer {
                         logger.log_failure(
                             domain,
                             "HTTP::SUBPROCESSOR",
-                            &url,
+                            url,
                             None,
                             &format!("Failed to scrape: {}", e),
                         );
@@ -2856,7 +2855,7 @@ impl SubprocessorAnalyzer {
             _ => confidence -= 0.2,
         }
 
-        confidence.min(1.0).max(0.0)
+        confidence.clamp(0.0, 1.0)
     }
 
     /// Extract DOM context information around an element
@@ -3687,7 +3686,7 @@ impl SubprocessorAnalyzer {
                                     if line_text.contains("Avenue")
                                         || line_text.contains("Street")
                                         || line_text.contains("Suite")
-                                        || line_text.chars().any(|c| c.is_digit(10))
+                                        || line_text.chars().any(|c| c.is_ascii_digit())
                                             && (line_text.contains("WA ")
                                                 || line_text.contains("NY ")
                                                 || line_text.contains("CA ")
@@ -4024,7 +4023,7 @@ impl SubprocessorAnalyzer {
         if words.len() >= 2 && words.len() <= 6 {
             // Reasonable company name length
             let has_proper_capitalization = words.iter().all(|word| {
-                word.chars().next().map_or(false, |c| c.is_uppercase()) && word.len() > 2
+                word.chars().next().is_some_and(|c| c.is_uppercase()) && word.len() > 2
                 // Skip short words like "a", "of", "the"
             });
 
@@ -4129,7 +4128,7 @@ impl SubprocessorAnalyzer {
         let cleaned = if let Some(ref re) = suffix_regex {
             re.replace_all(&cleaned_str, "").trim().to_lowercase()
         } else {
-            cleaned_str.trim().to_lowercase().into()
+            cleaned_str.trim().to_lowercase()
         };
         let cleaned = cleaned.to_string();
 
@@ -5078,7 +5077,7 @@ impl SubprocessorAnalyzer {
                     if let Ok(td_selector) = scraper::Selector::parse("td") {
                         let mut column_analysis = std::collections::HashMap::new();
 
-                        for (_row_idx, row) in table.select(&TR_SELECTOR).enumerate() {
+                        for row in table.select(&TR_SELECTOR) {
                             for (col_idx, cell) in row.select(&td_selector).enumerate() {
                                 let cell_text = cell.text().collect::<String>().trim().to_string();
 
@@ -5319,7 +5318,7 @@ impl SubprocessorAnalyzer {
 
                 // Handle "d/b/a Company Name" format
                 if content.to_lowercase().contains("d/b/a") {
-                    if let Some(dba_name) = content.splitn(2, "d/b/a").nth(1) {
+                    if let Some(dba_name) = content.split_once("d/b/a").map(|x| x.1) {
                         if let Some(domain) = self.company_name_to_domain(dba_name.trim()) {
                             return Some(domain);
                         }
@@ -5506,7 +5505,7 @@ impl SubprocessorAnalyzer {
         }
 
         // Check if domain is in invalid patterns
-        if invalid_patterns.iter().any(|&pattern| domain == pattern) {
+        if invalid_patterns.contains(&domain) {
             return false;
         }
 

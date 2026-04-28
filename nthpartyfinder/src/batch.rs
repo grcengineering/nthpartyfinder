@@ -312,7 +312,7 @@ fn is_valid_domain(domain: &str) -> bool {
 
 /// Generate a unique output filename for a domain
 pub fn domain_output_filename(domain: &str, format: &str) -> String {
-    let domain_clean = domain.replace('.', "_").replace(':', "_");
+    let domain_clean = domain.replace(['.', ':'], "_");
     format!("Nth Party Analysis for {}.{}", domain_clean, format)
 }
 

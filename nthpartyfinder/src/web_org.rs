@@ -453,35 +453,33 @@ fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
             let (left, right) = (parts.0.trim(), parts.1.trim());
 
             // Check if right side looks like a company name (preferred for | and -)
-            if sep == " | " || sep == " - " || sep == " – " || sep == " — " {
-                if is_valid_org_name(right) && !looks_like_page_name(right) {
+            if (sep == " | " || sep == " - " || sep == " – " || sep == " — ")
+                && is_valid_org_name(right) && !looks_like_page_name(right) {
                     return Some(WebOrgResult {
                         organization: clean_org_name(right),
                         confidence: 0.65,
                         source: WebOrgSource::TitleTag,
                     });
                 }
-            }
 
             // Check if left side looks like a company name (for ": " pattern)
-            if sep == ": " || sep == " :: " {
-                if is_valid_org_name(left) && !looks_like_page_name(left) {
+            if (sep == ": " || sep == " :: ")
+                && is_valid_org_name(left) && !looks_like_page_name(left) {
                     return Some(WebOrgResult {
                         organization: clean_org_name(left),
                         confidence: 0.65,
                         source: WebOrgSource::TitleTag,
                     });
                 }
-            }
         }
     }
 
     // If no separator, and title is short enough, it might be just the company name
     if title.len() < 50 && !title.contains("Home") && !title.contains("Welcome") {
         // Check if it doesn't look like a page title
-        if is_valid_org_name(&title) && !looks_like_page_name(&title) {
+        if is_valid_org_name(title) && !looks_like_page_name(title) {
             return Some(WebOrgResult {
-                organization: clean_org_name(&title),
+                organization: clean_org_name(title),
                 confidence: 0.50,
                 source: WebOrgSource::TitleTag,
             });
@@ -665,9 +663,7 @@ fn looks_like_page_name(name: &str) -> bool {
 fn clean_org_name(name: &str) -> String {
     let cleaned = name
         .trim()
-        .replace('\n', " ")
-        .replace('\r', " ")
-        .replace('\t', " ")
+        .replace(['\n', '\r', '\t'], " ")
         .split_whitespace()
         .collect::<Vec<&str>>()
         .join(" ");

@@ -1,4 +1,4 @@
-use nthpartyfinder::dns::{self, DnsServerPool, VendorDomain};
+use nthpartyfinder::dns::{self, DnsServerPool};
 use nthpartyfinder::vendor::RecordType;
 
 // ============================================================================
@@ -207,7 +207,7 @@ fn test_dmarc_no_version() {
 fn test_dmarc_sp_tag() {
     // sp tag should be extracted (although current implementation may not)
     let records = vec!["v=DMARC1; p=quarantine; sp=mailto:sub@example.com".to_string()];
-    let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
+    let _domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // This test may fail if sp is not properly extracted
     // Documenting as potential issue
@@ -220,7 +220,7 @@ fn test_dmarc_sp_tag() {
 #[test]
 fn test_dkim_basic_rsa() {
     let records = vec!["k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ...".to_string()];
-    let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
+    let _domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // DKIM extraction is limited - may not extract domains
     // This tests current behavior
@@ -229,7 +229,7 @@ fn test_dkim_basic_rsa() {
 #[test]
 fn test_dkim_ed25519() {
     let records = vec!["k=ed25519; p=base64encodedkey".to_string()];
-    let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
+    let _domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // DKIM records typically don't contain vendor domains directly
     // Testing to confirm expected behavior
@@ -505,7 +505,7 @@ fn test_mixed_record_types() {
 fn test_unicode_in_domain() {
     // Test punycode/unicode handling
     let records = vec!["v=spf1 include:münchen.de ~all".to_string()];
-    let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
+    let _domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // May or may not be extracted depending on validation
     // This documents the behavior
@@ -520,7 +520,7 @@ fn test_case_insensitivity() {
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Should still extract domains (case insensitive)
-    assert!(domains.len() >= 1);
+    assert!(!domains.is_empty());
 }
 
 // ============================================================================
@@ -534,7 +534,7 @@ async fn test_dns_resolution_google() {
 
     assert!(result.is_ok());
     let records = result.unwrap();
-    assert!(records.len() > 0);
+    assert!(!records.is_empty());
 }
 
 #[tokio::test]
@@ -564,7 +564,7 @@ async fn test_dns_resolution_with_pool() {
 
     assert!(result.is_ok());
     let records = result.unwrap();
-    assert!(records.len() > 0);
+    assert!(!records.is_empty());
 }
 
 #[tokio::test]
@@ -576,7 +576,7 @@ async fn test_dns_server_rotation() {
         let _ = dns::get_txt_records_with_pool("example.com", &pool).await;
     }
 
-    assert!(true);
+    // If we get here without panicking, the test passed
 }
 
 #[tokio::test]
@@ -657,7 +657,7 @@ fn test_ipv6_in_spf() {
 fn test_malformed_ip_in_spf() {
     // Test malformed IP - should not panic
     let records = vec!["v=spf1 ip4:999.999.999.999 ~all".to_string()];
-    let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
+    let _domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Should handle gracefully without panic
 }

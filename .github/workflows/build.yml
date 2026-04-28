@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  NER_MODEL_CACHE_KEY: ner-model-v1
 
 defaults:
   run:
@@ -26,6 +27,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nthpartyfinder -> target
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model
+        if: steps.cache-ner.outputs.cache-hit != 'true'
+        run: bash scripts/download-model.sh
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Clippy
@@ -40,6 +50,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nthpartyfinder -> target
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model
+        if: steps.cache-ner.outputs.cache-hit != 'true'
+        run: bash scripts/download-model.sh
       - name: Run unit tests
         run: cargo test --lib --locked --verbose
 
@@ -53,6 +72,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nthpartyfinder -> target
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model
+        if: steps.cache-ner.outputs.cache-hit != 'true'
+        run: bash scripts/download-model.sh
       - name: Run integration tests
         run: cargo test --test "*" --locked --verbose
         timeout-minutes: 10
@@ -71,6 +99,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: nthpartyfinder -> target
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model
+        if: steps.cache-ner.outputs.cache-hit != 'true'
+        run: bash scripts/download-model.sh
       - name: Generate coverage
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
       - name: Upload to Codecov
@@ -112,6 +149,21 @@ jobs:
         with:
           key: ${{ matrix.target }}
           workspaces: nthpartyfinder -> target
+
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model (Unix)
+        if: steps.cache-ner.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        run: bash scripts/download-model.sh
+      - name: Download NER model (Windows)
+        if: steps.cache-ner.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: nthpartyfinder
+        run: .\scripts\download-model.ps1
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'

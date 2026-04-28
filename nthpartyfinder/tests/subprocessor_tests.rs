@@ -1,5 +1,5 @@
 use nthpartyfinder::subprocessor::{
-    extract_vendor_domains_from_subprocessors, is_valid_org_name, is_valid_tld,
+    is_valid_org_name, is_valid_tld,
     SubprocessorAnalyzer,
 };
 

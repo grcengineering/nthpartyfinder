@@ -186,15 +186,14 @@ impl Checkpoint {
     /// Add a pending domain to process
     pub fn add_pending(&mut self, pending: PendingDomain) {
         // Only add if not already completed or pending
-        if !self.completed_domains.contains(&pending.domain) {
-            if !self
+        if !self.completed_domains.contains(&pending.domain)
+            && !self
                 .pending_domains
                 .iter()
                 .any(|p| p.domain == pending.domain)
             {
                 self.pending_domains.push(pending);
             }
-        }
     }
 
     /// Get the next pending domain to process (if any)
@@ -277,8 +276,10 @@ pub fn generate_settings_hash(
 
 /// Resume mode options
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Default)]
 pub enum ResumeMode {
     /// Prompt user if checkpoint exists
+    #[default]
     Prompt,
     /// Auto-resume if checkpoint exists
     AutoResume,
@@ -286,11 +287,6 @@ pub enum ResumeMode {
     Fresh,
 }
 
-impl Default for ResumeMode {
-    fn default() -> Self {
-        ResumeMode::Prompt
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -156,15 +156,13 @@ impl NerOrganizationExtractor {
                 .map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
         ];
 
-        for path_opt in search_paths {
-            if let Some(path) = path_opt {
-                if path.exists() {
-                    let abs_path = path.canonicalize().unwrap_or(path.clone());
-                    let path_str = abs_path.to_string_lossy().to_string();
-                    info!("Found ONNX Runtime at: {}", path_str);
-                    std::env::set_var("ORT_DYLIB_PATH", &path_str);
-                    return Ok(());
-                }
+        for path in search_paths.into_iter().flatten() {
+            if path.exists() {
+                let abs_path = path.canonicalize().unwrap_or(path.clone());
+                let path_str = abs_path.to_string_lossy().to_string();
+                info!("Found ONNX Runtime at: {}", path_str);
+                std::env::set_var("ORT_DYLIB_PATH", &path_str);
+                return Ok(());
             }
         }
 
@@ -269,9 +267,9 @@ impl NerOrganizationExtractor {
                     || entity_type == "brand"
                 {
                     let confidence = span.probability();
-                    if confidence >= self.min_confidence {
-                        if best_match.is_none()
-                            || confidence > best_match.as_ref().unwrap().confidence
+                    if confidence >= self.min_confidence
+                        && (best_match.is_none()
+                            || confidence > best_match.as_ref().unwrap().confidence)
                         {
                             let org_name = span.text().trim().to_string();
                             if !org_name.is_empty() {
@@ -281,7 +279,6 @@ impl NerOrganizationExtractor {
                                 });
                             }
                         }
-                    }
                 }
             }
         }
@@ -654,11 +651,11 @@ mod tests {
                 Ok(None) => {
                     println!("Input: \"{}\"", text);
                     println!("  Extracted: None");
-                    if expected.is_none() {
+                    if let Some(exp) = expected {
+                        println!("  ❌ FAIL - Expected {}", exp);
+                    } else {
                         println!("  ✅ PASS - Expected no extraction");
                         passed += 1;
-                    } else {
-                        println!("  ❌ FAIL - Expected {}", expected.unwrap());
                     }
                 }
                 Err(e) => {

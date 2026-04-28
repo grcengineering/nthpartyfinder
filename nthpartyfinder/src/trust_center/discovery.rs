@@ -200,7 +200,7 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
                     || resp_url.contains("graphql")
                     || resp_url.contains("/api/");
 
-                if is_json && status >= 200 && status < 300 {
+                if is_json && (200..300).contains(&status) {
                     // Small delay for body to become available
                     std::thread::sleep(Duration::from_millis(100));
                     if let Ok(body_obj) = fetch_body() {
@@ -464,7 +464,7 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
                     .get("company")
                     .and_then(|c| c.get("name"))
                     .and_then(|n| n.as_str())
-                    .map_or(false, |s| !s.is_empty())
+                    .is_some_and(|s| !s.is_empty())
             });
 
             if !has_company {
@@ -529,6 +529,7 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 /// The data uses a relational model:
 ///   - `_embedded.subprocessors[]` has `canonical_asset_id`, `description`, `data_locations`
 ///   - `_embedded.canonical_assets[]` has `id`, `name`, `website`
+///
 /// Subprocessor names/domains are resolved by joining on `canonical_asset_id` → `id`.
 ///
 /// Conveyor also has a public REST API that returns the same data:

@@ -362,7 +362,7 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
 
     /// Check if a field path (possibly dot-separated) resolves to a non-empty string.
     fn has_field_value(item: &serde_json::Value, field_path: &str) -> bool {
-        get_nested_str(item, field_path).map_or(false, |s| !s.is_empty())
+        get_nested_str(item, field_path).is_some_and(|s| !s.is_empty())
     }
 
     let has_name_field = sample
@@ -436,7 +436,7 @@ pub fn detect_field_mapping(items: &[serde_json::Value]) -> DetectedFieldMapping
         for field in candidates {
             let match_count = sample
                 .iter()
-                .filter(|item| get_nested_str(item, field).map_or(false, |s| !s.is_empty()))
+                .filter(|item| get_nested_str(item, field).is_some_and(|s| !s.is_empty()))
                 .count();
             if match_count as f64 / sample.len() as f64 > 0.5 {
                 return Some(field.to_string());

@@ -522,7 +522,7 @@ impl AppConfig {
         )?;
 
         // Validate verification patterns are valid regex
-        for (pattern, _domain) in &self.patterns.verification {
+        for pattern in self.patterns.verification.keys() {
             self.validate_regex(&format!("patterns.verification.\"{}\"", pattern), pattern)?;
         }
 

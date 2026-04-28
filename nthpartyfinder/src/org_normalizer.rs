@@ -460,7 +460,7 @@ fn remove_corporate_suffixes(name: &str) -> String {
     }
 
     // Also remove trailing punctuation like commas, periods
-    result = result.trim_end_matches(&[',', '.', ' ']).to_string();
+    result = result.trim_end_matches([',', '.', ' ']).to_string();
 
     result
 }
@@ -564,11 +564,11 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 
     let mut matrix = vec![vec![0usize; len2 + 1]; len1 + 1];
 
-    for i in 0..=len1 {
-        matrix[i][0] = i;
+    for (i, row) in matrix.iter_mut().enumerate().take(len1 + 1) {
+        row[0] = i;
     }
-    for j in 0..=len2 {
-        matrix[0][j] = j;
+    for (j, val) in matrix[0].iter_mut().enumerate().take(len2 + 1) {
+        *val = j;
     }
 
     for i in 1..=len1 {

@@ -182,7 +182,7 @@ fn test_within_same_spf_record_still_deduplicated() {
 #[test]
 fn test_ct_log_discovery_infrastructure_filtering() {
     // Test that infrastructure domains are correctly filtered
-    use nthpartyfinder::discovery::ct_logs::CtLogDiscovery;
+    
 
     // These should be filtered as infrastructure
     assert!(is_infrastructure("cloudflare.com"));
@@ -240,12 +240,11 @@ fn is_infrastructure(domain: &str) -> bool {
 #[test]
 fn test_ct_log_discovery_creates_with_timeout() {
     // Test that CtLogDiscovery can be created with various timeouts
-    let discovery = CtLogDiscovery::new(Duration::from_secs(30));
+    let _discovery = CtLogDiscovery::new(Duration::from_secs(30));
     // If we get here, creation succeeded
-    assert!(true);
 
-    let discovery_short = CtLogDiscovery::new(Duration::from_secs(5));
-    assert!(true);
+    let _discovery_short = CtLogDiscovery::new(Duration::from_secs(5));
+    // If we get here, creation succeeded
 }
 
 #[tokio::test]
@@ -908,7 +907,7 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
         });
     }
 
-    let total_before_dedup = all_vendor_domains.len();
+    let _total_before_dedup = all_vendor_domains.len();
 
     // Apply dedup logic (must prefer HttpSubprocessor)
     let mut seen_domains: HashMap<String, usize> = HashMap::new();
@@ -931,7 +930,7 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
     }
 
     // Count how many HttpSubprocessor entries survived
-    let subprocessor_count = deduped
+    let _subprocessor_count = deduped
         .iter()
         .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
         .count();

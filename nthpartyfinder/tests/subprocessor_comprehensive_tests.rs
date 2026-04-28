@@ -21,8 +21,7 @@ use std::time::Instant;
 async fn test_cache_initialization() {
     let _cache = SubprocessorCache::load().await;
 
-    // Cache should initialize successfully
-    assert!(true, "Cache initialization should not panic");
+    // Cache should initialize successfully (reaching here without panic is the assertion)
 }
 
 #[tokio::test]

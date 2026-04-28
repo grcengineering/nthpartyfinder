@@ -119,10 +119,10 @@ impl VendorRegistry {
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();
-                if path.extension().map_or(true, |e| e != "json") {
+                if path.extension().is_none_or(|e| e != "json") {
                     return None;
                 }
-                if path.file_name().map_or(false, |n| n == "_schema.json") {
+                if path.file_name().is_some_and(|n| n == "_schema.json") {
                     return None;
                 }
                 Some(path)
@@ -153,9 +153,7 @@ impl VendorRegistry {
                             .insert(domain.to_lowercase(), vendor_id.clone());
                     }
                     let primary = config.primary_domain.to_lowercase();
-                    if !registry.domain_to_vendor.contains_key(&primary) {
-                        registry.domain_to_vendor.insert(primary, vendor_id.clone());
-                    }
+                    registry.domain_to_vendor.entry(primary).or_insert_with(|| vendor_id.clone());
                     for alias in &config.provider_aliases {
                         registry
                             .alias_to_vendor
@@ -193,9 +191,7 @@ impl VendorRegistry {
                 .insert(domain.to_lowercase(), vendor_id.clone());
         }
         let primary = config.primary_domain.to_lowercase();
-        if !self.domain_to_vendor.contains_key(&primary) {
-            self.domain_to_vendor.insert(primary, vendor_id.clone());
-        }
+        self.domain_to_vendor.entry(primary).or_insert_with(|| vendor_id.clone());
         for alias in &config.provider_aliases {
             self.alias_to_vendor
                 .insert(alias.to_lowercase(), vendor_id.clone());
@@ -299,15 +295,14 @@ static VENDOR_REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
 fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
     let cwd_config = PathBuf::from("./config");
-    if cwd_config.exists() && cwd_config.is_dir() {
-        if cwd_config.join("vendors").exists() {
+    if cwd_config.exists() && cwd_config.is_dir()
+        && cwd_config.join("vendors").exists() {
             debug!(
                 "Found config directory at: {:?}",
                 cwd_config.canonicalize().unwrap_or(cwd_config.clone())
             );
             return Some(cwd_config);
         }
-    }
 
     // Priority 2: Relative to executable directory
     if let Ok(exe_path) = std::env::current_exe() {
@@ -386,7 +381,7 @@ pub fn lookup_organization(domain: &str) -> Option<String> {
 
 /// Check if a domain is known in the global registry
 pub fn is_known_domain(domain: &str) -> bool {
-    get().map_or(false, |r| r.is_known_domain(domain))
+    get().is_some_and(|r| r.is_known_domain(domain))
 }
 
 /// Get vendor by domain from global registry

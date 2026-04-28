@@ -30,7 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["registry", "fmt"] }
 url = "2.5"
 reqwest = { version = "0.11", features = ["json", "stream"] }
-whois-rust = "1.6"
+whois-rs = "1.6"
 dirs = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
 askama = "0.12"
@@ -42,7 +42,7 @@ urlencoding = "2.1"
 ctrlc = "3.4"
 colored = "2.1"
 # DNS over HTTPS support
-hickory-resolver = { version = "0.24", features = ["dns-over-https", "dns-over-https-rustls"] }
+hickory-resolver = { version = "0.25", features = ["https-ring"] }
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis

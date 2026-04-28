@@ -343,7 +343,7 @@ fn extract_subprocessors_from_json(
                 .url_field
                 .as_ref()
                 .and_then(|url_field| get_nested_str(item, url_field))
-                .and_then(|url_text| extract_domain_from_url_text(url_text));
+                .and_then(extract_domain_from_url_text);
             (name, domain, None)
         };
 
@@ -441,7 +441,7 @@ fn resolve_canonical_asset(
     let name = asset.map(|a| a.name.clone());
     let domain = asset
         .and_then(|a| a.website.as_deref())
-        .and_then(|url| extract_domain_from_url_text(url));
+        .and_then(extract_domain_from_url_text);
 
     // Build evidence: name + description from the subprocessor item
     let description = get_nested_str(
@@ -512,7 +512,7 @@ fn resolve_slug(template: &str, slug: Option<&str>) -> String {
 }
 
 /// Get HTML content, either from provided content or by indicating browser is needed.
-fn require_html<'a>(html_content: Option<&'a str>, endpoint: &EndpointConfig) -> Result<String> {
+fn require_html(html_content: Option<&str>, endpoint: &EndpointConfig) -> Result<String> {
     match html_content {
         Some(content) => Ok(content.to_string()),
         None => {

@@ -189,6 +189,7 @@ pub struct VendorRelationship {
 }
 
 impl VendorRelationship {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         nth_party_domain: String,
         nth_party_organization: String,

@@ -3,11 +3,12 @@ use crate::domain_utils;
 use crate::rate_limit::RateLimitContext;
 use crate::vendor::RecordType;
 use anyhow::Result;
-use hickory_resolver::config::LookupIpStrategy;
-use hickory_resolver::{config::*, TokioAsyncResolver};
+use hickory_resolver::config::{LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts};
+use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use reqwest;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,6 +199,12 @@ impl DnsServerPool {
     }
 }
 
+impl Default for DnsServerPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 impl DnsServerPool {
     /// Create a DnsServerPool with custom DoH URLs for testing.
@@ -350,7 +357,7 @@ impl DnsServerPool {
         &self,
         server: &DnsServerConfig,
         use_tcp: bool,
-    ) -> Result<TokioAsyncResolver> {
+    ) -> Result<TokioResolver> {
         let mut config = ResolverConfig::new();
 
         let socket_addr = server.address.parse().map_err(|e| {
@@ -372,20 +379,19 @@ impl DnsServerPool {
             tls_dns_name: None,
             trust_negative_responses: true,
             bind_addr: None,
-            tls_config: None,
+            http_endpoint: None,
         });
 
         let mut opts = ResolverOpts::default();
         opts.timeout = std::time::Duration::from_secs(server.timeout_secs);
         opts.attempts = 1; // Single attempt for speed
         opts.edns0 = true;
-        opts.use_hosts_file = false;
+        opts.use_hosts_file = ResolveHosts::Never;
         opts.ip_strategy = LookupIpStrategy::Ipv4thenIpv6; // Prefer IPv4 for speed
         opts.validate = false;
         opts.num_concurrent_reqs = 4; // Increased concurrency
-        opts.rotate = true; // Enable rotation for better load distribution
 
-        Ok(TokioAsyncResolver::tokio(config, opts))
+        Ok(TokioResolver::builder_with_config(config, TokioConnectionProvider::default()).with_options(opts).build())
     }
 
     /// Fast bulk DNS lookup optimized for subdomain scanning.
@@ -416,23 +422,16 @@ impl DnsServerPool {
 
         // Fallback to traditional DNS (single attempt, UDP only)
         let dns_server = self.next_dns_server();
-        match self.create_dns_resolver(dns_server, false) {
-            Ok(resolver) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(2000),
-                    resolver.txt_lookup(domain),
-                )
-                .await
-                {
-                    Ok(Ok(txt_lookup)) => {
-                        let records: Vec<String> =
-                            txt_lookup.iter().map(|r| r.to_string()).collect();
-                        return Ok(records);
-                    }
-                    _ => {}
-                }
+        if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
+            if let Ok(Ok(txt_lookup)) = tokio::time::timeout(
+                std::time::Duration::from_millis(2000),
+                resolver.txt_lookup(domain),
+            )
+            .await {
+                let records: Vec<String> =
+                    txt_lookup.iter().map(|r| r.to_string()).collect();
+                return Ok(records);
             }
-            Err(_) => {}
         }
 
         Ok(vec![])
@@ -453,32 +452,26 @@ impl DnsServerPool {
 
         // Fallback to traditional DNS
         let dns_server = self.next_dns_server();
-        match self.create_dns_resolver(dns_server, false) {
-            Ok(resolver) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(2000),
-                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
-                )
-                .await
-                {
-                    Ok(Ok(lookup)) => {
-                        use hickory_resolver::proto::rr::RData;
-                        let records: Vec<String> = lookup
-                            .record_iter()
-                            .filter_map(|r| {
-                                if let Some(RData::CNAME(ref cname)) = r.data() {
-                                    Some(cname.to_string().trim_end_matches('.').to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        return Ok(records);
-                    }
-                    _ => {}
-                }
+        if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
+            if let Ok(Ok(lookup)) = tokio::time::timeout(
+                std::time::Duration::from_millis(2000),
+                resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
+            )
+            .await {
+                use hickory_resolver::proto::rr::RData;
+                let records: Vec<String> = lookup
+                    .record_iter()
+                    .filter_map(|r| {
+                        match r.data() {
+                            RData::CNAME(ref cname) => {
+                                Some(cname.to_string().trim_end_matches('.').to_string())
+                            }
+                            _ => None,
+                        }
+                    })
+                    .collect();
+                return Ok(records);
             }
-            Err(_) => {}
         }
 
         Ok(vec![])
@@ -554,42 +547,37 @@ pub async fn get_txt_records_with_rate_limit(
             tokio::pin!(dns_fut);
 
             // Use select to return whichever finishes first with results
-            loop {
-                tokio::select! {
-                    biased;
-                    result = &mut doh_fut => {
-                        if let Some(records) = result {
-                            info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
-                            return Some(records);
-                        }
-                        // DoH failed — wait for DNS
-                        if let Some(records) = (&mut dns_fut).await {
-                            debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
-                            return Some(records);
-                        }
-                        return None;
+            tokio::select! {
+                biased;
+                result = &mut doh_fut => {
+                    if let Some(records) = result {
+                        info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                        return Some(records);
                     }
-                    result = &mut dns_fut => {
-                        if let Some(records) = result {
-                            debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
-                            return Some(records);
-                        }
-                        // DNS failed — wait for DoH
-                        if let Some(records) = (&mut doh_fut).await {
-                            info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
-                            return Some(records);
-                        }
-                        return None;
+                    // DoH failed — wait for DNS
+                    if let Some(records) = (&mut dns_fut).await {
+                        debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                        return Some(records);
                     }
+                    None
+                }
+                result = &mut dns_fut => {
+                    if let Some(records) = result {
+                        debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                        return Some(records);
+                    }
+                    // DNS failed — wait for DoH
+                    if let Some(records) = (&mut doh_fut).await {
+                        info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                        return Some(records);
+                    }
+                    None
                 }
             }
         }
     ).await;
 
-    match race_result {
-        Ok(Some(records)) => return Ok(records),
-        _ => {}
-    }
+    if let Ok(Some(records)) = race_result { return Ok(records) }
 
     // Final fallback: system resolver (only if both racing attempts failed)
     debug!("DNS race failed for {}, trying system resolver", domain);
@@ -610,7 +598,7 @@ pub async fn get_txt_records_with_rate_limit(
 }
 
 async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
-    let resolver = TokioAsyncResolver::tokio_from_system_conf()?;
+    let resolver = TokioResolver::builder_tokio()?.build();
 
     let txt_lookup = resolver.txt_lookup(domain).await?;
     let records: Vec<String> = txt_lookup.iter().map(|record| record.to_string()).collect();
@@ -696,7 +684,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
 
         // Extract vendor domains based on record patterns
         if let Some(domains) =
-            extract_from_spf_record(&record_clean, logger, source_domain, &record)
+            extract_from_spf_record(&record_clean, logger, source_domain, record)
         {
             record_matched = true;
             for domain_info in domains {
@@ -712,7 +700,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
         }
 
         if let Some(domains) =
-            extract_from_dkim_record(&record_clean, logger, source_domain, &record)
+            extract_from_dkim_record(&record_clean, logger, source_domain, record)
         {
             record_matched = true;
             for domain_info in domains {
@@ -728,7 +716,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
         }
 
         if let Some(domains) =
-            extract_from_dmarc_record(&record_clean, logger, source_domain, &record)
+            extract_from_dmarc_record(&record_clean, logger, source_domain, record)
         {
             record_matched = true;
             for domain_info in domains {
@@ -744,7 +732,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
         }
 
         if let Some(domains) =
-            extract_from_verification_record(&record_clean, logger, source_domain, &record)
+            extract_from_verification_record(&record_clean, logger, source_domain, record)
         {
             record_matched = true;
             for domain_info in domains {
@@ -767,7 +755,7 @@ pub fn extract_vendor_domains_with_source_and_logger(
                     logger.log_failure(
                         source_domain,
                         "UNMATCHED_TXT",
-                        &record,
+                        record,
                         None,
                         "No pattern matched this TXT record",
                     );
