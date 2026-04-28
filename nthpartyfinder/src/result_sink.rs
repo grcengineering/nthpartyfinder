@@ -240,15 +240,13 @@ fn is_process_running(pid: u32) -> bool {
 }
 
 /// Check available disk space at the given path, returning bytes free.
-pub fn check_disk_space(path: &Path) -> Result<u64> {
-    // Use the `df` approach via statvfs on Linux
+pub fn check_disk_space(_path: &Path) -> Result<u64> {
     #[cfg(unix)]
     {
-        // Shell out to df for available space
         let output = std::process::Command::new("df")
             .arg("--output=avail")
             .arg("-B1")
-            .arg(path)
+            .arg(_path)
             .output()
             .context("Failed to run df command")?;
 
