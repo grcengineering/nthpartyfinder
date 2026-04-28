@@ -58,7 +58,7 @@ pub async fn list_cached_domains() -> Result<()> {
     }
 
     // Sort by last access time (most recent first)
-    domains.sort_by(|a, b| b.1.cmp(&a.1));
+    domains.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     println!("Cached Domains ({} total):", domains.len());
     println!("{}", "=".repeat(80));

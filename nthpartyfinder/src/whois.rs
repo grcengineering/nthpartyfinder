@@ -800,7 +800,7 @@ where
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let progress_counter = Arc::new(tokio::sync::Mutex::new(0usize));
 
-    let results: Vec<(String, String)> = stream::iter(uncached_domains.into_iter())
+    let results: Vec<(String, String)> = stream::iter(uncached_domains)
         .map(|domain| {
             let semaphore = semaphore.clone();
             let progress_counter = progress_counter.clone();

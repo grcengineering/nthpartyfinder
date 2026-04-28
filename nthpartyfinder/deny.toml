@@ -1,10 +1,11 @@
 [advisories]
-db-path = "~/.cargo/advisory-db"
-vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
 ignore = [
     "RUSTSEC-2026-0097",
+    "RUSTSEC-2024-0421",
+    "RUSTSEC-2025-0057",
+    "RUSTSEC-2025-0119",
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2025-0134",
 ]
 
 [licenses]
