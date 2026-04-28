@@ -4,9 +4,9 @@
 // memory pressure is high. NEVER stops processing — only slows down.
 // This prevents virtual memory exhaustion that caused Windows BSODs.
 
-use sysinfo::System;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use sysinfo::System;
 
 /// Memory pressure levels with corresponding throttle actions.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,7 +75,8 @@ impl MemoryMonitor {
             PressureLevel::Critical => 1,
         };
 
-        self.effective_concurrency.store(new_concurrency, Ordering::Relaxed);
+        self.effective_concurrency
+            .store(new_concurrency, Ordering::Relaxed);
         (level, new_concurrency)
     }
 

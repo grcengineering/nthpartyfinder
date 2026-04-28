@@ -1,18 +1,18 @@
+use colored::{control, Colorize};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::fs::OpenOptions;
+use std::io::{self, IsTerminal, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use tokio::sync::RwLock;
-use std::io::{self, IsTerminal, Write};
-use std::fs::OpenOptions;
-use std::path::Path;
-use colored::{Colorize, control};
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum VerbosityLevel {
-    Silent = 0,    // Only show progress bar and final summary
-    Summary = 1,   // High-level analysis progress (default)
-    Detailed = 2,  // Detailed steps, results, warnings
-    Debug = 3,     // All messages including debug info and errors
+    Silent = 0,   // Only show progress bar and final summary
+    Summary = 1,  // High-level analysis progress (default)
+    Detailed = 2, // Detailed steps, results, warnings
+    Debug = 3,    // All messages including debug info and errors
 }
 
 impl VerbosityLevel {
@@ -28,10 +28,10 @@ impl VerbosityLevel {
 /// UI phase state machine for tracking progress bar lifecycle
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UiPhase {
-    PreInit,       // Before any bars are created
-    Initializing,  // Init progress bar active
-    Scanning,      // Scan progress bar active with sub-progress
-    Complete,      // All bars finished
+    PreInit,      // Before any bars are created
+    Initializing, // Init progress bar active
+    Scanning,     // Scan progress bar active with sub-progress
+    Complete,     // All bars finished
 }
 
 #[derive(Clone)]
@@ -151,7 +151,11 @@ impl AnalysisLogger {
         }
     }
 
-    pub fn with_log_file_and_color(verbosity: VerbosityLevel, log_file_path: String, no_color: bool) -> Self {
+    pub fn with_log_file_and_color(
+        verbosity: VerbosityLevel,
+        log_file_path: String,
+        no_color: bool,
+    ) -> Self {
         let color_enabled = Self::should_enable_colors(no_color);
         Self::configure_colored(color_enabled);
 
@@ -198,7 +202,7 @@ impl AnalysisLogger {
                 .template(template)
                 .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("##-")
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
         pb.set_position(0);
         pb.set_message("Initializing...");
@@ -211,7 +215,9 @@ impl AnalysisLogger {
         *phase_guard = UiPhase::Initializing;
 
         // Record start time at the very beginning
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during start_init_progress");
         metadata.start_time = Some(SystemTime::now());
     }
@@ -259,7 +265,11 @@ impl AnalysisLogger {
         let bar_guard = self.main_bar.read().await;
         if let Some(pb) = bar_guard.as_ref() {
             let done_line = if self.color_enabled {
-                format!("  {} {}", "✓".green().bold(), "Initialization complete".bold())
+                format!(
+                    "  {} {}",
+                    "✓".green().bold(),
+                    "Initialization complete".bold()
+                )
             } else {
                 "  ✓ Initialization complete".to_string()
             };
@@ -295,15 +305,15 @@ impl AnalysisLogger {
                 } else {
                     "[{elapsed_precise}] {spinner} [{bar:40}] {percent}% {msg}"
                 };
-                let main_pb = self.multi_progress.add(
-                    ProgressBar::new(100).with_elapsed(self.app_start.elapsed())
-                );
+                let main_pb = self
+                    .multi_progress
+                    .add(ProgressBar::new(100).with_elapsed(self.app_start.elapsed()));
                 main_pb.set_style(
                     ProgressStyle::default_bar()
                         .template(template)
                         .unwrap_or_else(|_| ProgressStyle::default_bar())
                         .progress_chars("##-")
-                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
                 );
                 main_pb.set_position(10);
                 main_pb.set_message("Starting vendor discovery...");
@@ -320,9 +330,9 @@ impl AnalysisLogger {
             ProgressStyle::default_spinner()
                 .template(detail_template)
                 .unwrap_or_else(|_| ProgressStyle::default_spinner())
-                .tick_chars("   ")  // invisible spinner — just shows message
+                .tick_chars("   "), // invisible spinner — just shows message
         );
-        detail_pb.set_message("");  // hidden initially
+        detail_pb.set_message(""); // hidden initially
 
         {
             let mut detail_guard = self.detail_bar.write().await;
@@ -418,7 +428,10 @@ impl AnalysisLogger {
                 "SUCCESS" => (level.bright_green().bold(), message.bright_green()),
                 _ => (level.normal().bold(), message.normal()),
             };
-            format!("[{}] {}: {}", timestamp_colored, level_colored, message_colored)
+            format!(
+                "[{}] {}: {}",
+                timestamp_colored, level_colored, message_colored
+            )
         } else {
             plain_msg.clone()
         };
@@ -502,7 +515,9 @@ impl AnalysisLogger {
         }
 
         // Record end time
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during finish_progress");
         metadata.end_time = Some(SystemTime::now());
 
@@ -524,7 +539,7 @@ impl AnalysisLogger {
             ProgressStyle::default_spinner()
                 .template(template)
                 .unwrap_or_else(|_| ProgressStyle::default_spinner())
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
         );
         pb.set_message(message.to_string());
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -533,7 +548,9 @@ impl AnalysisLogger {
         *bar_guard = Some(pb);
 
         // Record start time
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during start_spinner");
         metadata.start_time = Some(SystemTime::now());
     }
@@ -559,7 +576,7 @@ impl AnalysisLogger {
             ProgressStyle::default_bar()
                 .template(template)
                 .unwrap_or_else(|_| ProgressStyle::default_bar())
-                .progress_chars("##-")
+                .progress_chars("##-"),
         );
         pb.set_message("Processing...");
 
@@ -587,31 +604,41 @@ impl AnalysisLogger {
     // ═══════════════════════════════════════════════════════════════════
 
     pub fn record_dns_method(&self, method: &str) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_dns_method");
         metadata.dns_method_used = method.to_string();
     }
 
     pub fn record_txt_records_found(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_txt_records_found");
         metadata.total_txt_records_found += count;
     }
 
     pub fn record_domain_processed(&self) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_domain_processed");
         metadata.total_domains_processed += 1;
     }
 
     pub fn record_vendor_relationships(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_vendor_relationships");
         metadata.total_vendor_relationships = count;
     }
 
     pub fn record_depth_reached(&self, depth: u32) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_depth_reached");
         if depth > metadata.max_depth_reached {
             metadata.max_depth_reached = depth;
@@ -619,20 +646,26 @@ impl AnalysisLogger {
     }
 
     pub fn record_unique_vendors(&self, count: usize) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_unique_vendors");
         metadata.unique_vendors = count;
     }
 
     pub fn record_output_file(&self, path: &str) {
-        let mut metadata = self.analysis_metadata.lock()
+        let mut metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during record_output_file");
         metadata.output_file = path.to_string();
     }
 
     // Final summary message
     pub fn print_final_summary(&self) {
-        let metadata = self.analysis_metadata.lock()
+        let metadata = self
+            .analysis_metadata
+            .lock()
             .expect("analysis_metadata mutex poisoned during print_final_summary");
 
         // Ensure clean output after progress bar
@@ -645,30 +678,62 @@ impl AnalysisLogger {
 
             if let (Some(start), Some(end)) = (metadata.start_time, metadata.end_time) {
                 let duration = end.duration_since(start).unwrap_or_default();
-                println!("{}: {:.2}s", "Analysis Duration".bold(), duration.as_secs_f64());
+                println!(
+                    "{}: {:.2}s",
+                    "Analysis Duration".bold(),
+                    duration.as_secs_f64()
+                );
             }
 
-            println!("{}: {}", "DNS Resolution Method".bold(), metadata.dns_method_used);
-            println!("{}: {}", "Domains Processed".bold(), metadata.total_domains_processed);
-            println!("{}: {}", "TXT Records Found".bold(), metadata.total_txt_records_found);
-            println!("{}: {}", "Vendor Relationships".bold(), metadata.total_vendor_relationships);
+            println!(
+                "{}: {}",
+                "DNS Resolution Method".bold(),
+                metadata.dns_method_used
+            );
+            println!(
+                "{}: {}",
+                "Domains Processed".bold(),
+                metadata.total_domains_processed
+            );
+            println!(
+                "{}: {}",
+                "TXT Records Found".bold(),
+                metadata.total_txt_records_found
+            );
+            println!(
+                "{}: {}",
+                "Vendor Relationships".bold(),
+                metadata.total_vendor_relationships
+            );
             println!("{}: {}", "Unique Vendors".bold(), metadata.unique_vendors);
             println!("{}: {}", "Maximum Depth".bold(), metadata.max_depth_reached);
 
             if !metadata.output_file.is_empty() {
-                println!("{}: {}", "Results Exported".bold(), metadata.output_file.green());
+                println!(
+                    "{}: {}",
+                    "Results Exported".bold(),
+                    metadata.output_file.green()
+                );
             }
 
             println!("{}\n", "========================".bold().cyan());
 
             // Success message
             if metadata.total_vendor_relationships > 0 {
-                println!("{} Analysis completed successfully! Found {} vendor relationships.",
+                println!(
+                    "{} Analysis completed successfully! Found {} vendor relationships.",
                     "SUCCESS:".bright_green().bold(),
-                    metadata.total_vendor_relationships.to_string().bright_green().bold());
+                    metadata
+                        .total_vendor_relationships
+                        .to_string()
+                        .bright_green()
+                        .bold()
+                );
             } else {
-                println!("{} Analysis completed. No vendor relationships found.",
-                    "SUCCESS:".bright_green().bold());
+                println!(
+                    "{} Analysis completed. No vendor relationships found.",
+                    "SUCCESS:".bright_green().bold()
+                );
             }
         } else {
             println!("\n=== ANALYSIS SUMMARY ===");
@@ -681,7 +746,10 @@ impl AnalysisLogger {
             println!("DNS Resolution Method: {}", metadata.dns_method_used);
             println!("Domains Processed: {}", metadata.total_domains_processed);
             println!("TXT Records Found: {}", metadata.total_txt_records_found);
-            println!("Vendor Relationships: {}", metadata.total_vendor_relationships);
+            println!(
+                "Vendor Relationships: {}",
+                metadata.total_vendor_relationships
+            );
             println!("Unique Vendors: {}", metadata.unique_vendors);
             println!("Maximum Depth: {}", metadata.max_depth_reached);
 
@@ -693,7 +761,10 @@ impl AnalysisLogger {
 
             // Success message
             if metadata.total_vendor_relationships > 0 {
-                println!("SUCCESS: Analysis completed successfully! Found {} vendor relationships.", metadata.total_vendor_relationships);
+                println!(
+                    "SUCCESS: Analysis completed successfully! Found {} vendor relationships.",
+                    metadata.total_vendor_relationships
+                );
             } else {
                 println!("SUCCESS: Analysis completed. No vendor relationships found.");
             }
@@ -705,7 +776,10 @@ impl AnalysisLogger {
     // ═══════════════════════════════════════════════════════════════════
 
     pub fn log_initialization(&self, domain: &str) {
-        self.info(&format!("Starting Nth Party Analysis for domain: {}", domain));
+        self.info(&format!(
+            "Starting Nth Party Analysis for domain: {}",
+            domain
+        ));
     }
 
     pub fn log_dns_lookup_start(&self, domain: &str) {
@@ -717,9 +791,15 @@ impl AnalysisLogger {
         self.record_dns_method(method);
 
         if record_count > 0 {
-            self.info(&format!("DNS lookup successful: {} TXT records found for {} (via {})", record_count, domain, method));
+            self.info(&format!(
+                "DNS lookup successful: {} TXT records found for {} (via {})",
+                record_count, domain, method
+            ));
         } else {
-            self.debug(&format!("DNS lookup completed: No TXT records found for {} (via {})", domain, method));
+            self.debug(&format!(
+                "DNS lookup completed: No TXT records found for {} (via {})",
+                domain, method
+            ));
         }
     }
 
@@ -729,18 +809,30 @@ impl AnalysisLogger {
 
     pub fn log_vendor_discovery(&self, domain: &str, vendor_count: usize) {
         if vendor_count > 0 {
-            self.info(&format!("Vendor discovery: {} vendors identified for {}", vendor_count, domain));
+            self.info(&format!(
+                "Vendor discovery: {} vendors identified for {}",
+                vendor_count, domain
+            ));
         } else {
-            self.debug(&format!("Vendor discovery: No vendors found for {}", domain));
+            self.debug(&format!(
+                "Vendor discovery: No vendors found for {}",
+                domain
+            ));
         }
     }
 
     pub fn log_parallel_processing_start(&self, domain_count: usize, depth: u32) {
-        self.info(&format!("Processing {} domains at depth {} (parallel execution)", domain_count, depth));
+        self.info(&format!(
+            "Processing {} domains at depth {} (parallel execution)",
+            domain_count, depth
+        ));
     }
 
     pub fn log_parallel_processing_complete(&self, relationship_count: usize) {
-        self.info(&format!("Parallel processing completed: {} relationships established", relationship_count));
+        self.info(&format!(
+            "Parallel processing completed: {} relationships established",
+            relationship_count
+        ));
     }
 
     pub fn log_export_start(&self, format: &str) {
@@ -762,9 +854,15 @@ impl AnalysisLogger {
 
     pub fn log_subprocessor_analysis(&self, domain: &str, vendor_count: usize) {
         if vendor_count > 0 {
-            self.info(&format!("Subprocessor analysis: {} additional vendors found for {}", vendor_count, domain));
+            self.info(&format!(
+                "Subprocessor analysis: {} additional vendors found for {}",
+                vendor_count, domain
+            ));
         } else {
-            self.debug(&format!("Subprocessor analysis: No additional vendors found for {}", domain));
+            self.debug(&format!(
+                "Subprocessor analysis: No additional vendors found for {}",
+                domain
+            ));
         }
     }
 
@@ -774,7 +872,10 @@ impl AnalysisLogger {
 
     pub fn log_subprocessor_url_success(&self, url: &str, vendor_count: usize) {
         if vendor_count > 0 {
-            self.debug(&format!("Successfully scraped {}: {} vendors found", url, vendor_count));
+            self.debug(&format!(
+                "Successfully scraped {}: {} vendors found",
+                url, vendor_count
+            ));
         } else {
             self.debug(&format!("Successfully scraped {}: no vendors found", url));
         }
@@ -785,27 +886,45 @@ impl AnalysisLogger {
     }
 
     pub fn log_cache_hit_organization(&self, domain: &str, vendor_count: usize) {
-        self.debug(&format!("Cache hit - organization {}: {} vendors from cache", domain, vendor_count));
+        self.debug(&format!(
+            "Cache hit - organization {}: {} vendors from cache",
+            domain, vendor_count
+        ));
     }
 
     pub fn log_cache_miss_organization(&self, domain: &str) {
-        self.debug(&format!("Cache miss - organization {}: performing fresh analysis", domain));
+        self.debug(&format!(
+            "Cache miss - organization {}: performing fresh analysis",
+            domain
+        ));
     }
 
     pub fn log_cache_hit_url(&self, url: &str, status: &str) {
         if status.contains("(retrying)") {
-            self.debug(&format!("Cache hit - URL {}: {} - retrying to check if fixed", url, status));
+            self.debug(&format!(
+                "Cache hit - URL {}: {} - retrying to check if fixed",
+                url, status
+            ));
         } else {
-            self.debug(&format!("Cache hit - URL {}: {} - verifying still works", url, status));
+            self.debug(&format!(
+                "Cache hit - URL {}: {} - verifying still works",
+                url, status
+            ));
         }
     }
 
     pub fn log_cache_miss_url(&self, url: &str) {
-        self.debug(&format!("Cache miss - URL {}: attempting fresh request", url));
+        self.debug(&format!(
+            "Cache miss - URL {}: attempting fresh request",
+            url
+        ));
     }
 
     pub fn log_cache_save(&self, url_count: usize, org_count: usize) {
-        self.debug(&format!("Saved subprocessor cache: {} URLs, {} organizations", url_count, org_count));
+        self.debug(&format!(
+            "Saved subprocessor cache: {} URLs, {} organizations",
+            url_count, org_count
+        ));
     }
 
     /// Export all collected logs to the specified file

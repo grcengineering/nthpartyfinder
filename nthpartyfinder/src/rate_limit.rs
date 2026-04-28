@@ -3,13 +3,13 @@
 //! Provides configurable rate limiting using token bucket algorithm
 //! with support for different backoff strategies on retries.
 
+use crate::config::{BackoffStrategy, RateLimitConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tracing::{debug, warn};
-use crate::config::{RateLimitConfig, BackoffStrategy};
 
 /// A token bucket rate limiter for controlling request rates
 #[derive(Debug)]
@@ -313,9 +313,18 @@ mod tests {
         };
 
         assert_eq!(config.calculate_backoff_delay(0), Duration::ZERO);
-        assert_eq!(config.calculate_backoff_delay(1), Duration::from_millis(1000));
-        assert_eq!(config.calculate_backoff_delay(2), Duration::from_millis(2000));
-        assert_eq!(config.calculate_backoff_delay(3), Duration::from_millis(3000));
+        assert_eq!(
+            config.calculate_backoff_delay(1),
+            Duration::from_millis(1000)
+        );
+        assert_eq!(
+            config.calculate_backoff_delay(2),
+            Duration::from_millis(2000)
+        );
+        assert_eq!(
+            config.calculate_backoff_delay(3),
+            Duration::from_millis(3000)
+        );
     }
 
     #[test]
@@ -331,9 +340,18 @@ mod tests {
         };
 
         assert_eq!(config.calculate_backoff_delay(0), Duration::ZERO);
-        assert_eq!(config.calculate_backoff_delay(1), Duration::from_millis(1000)); // 1000 * 2^0
-        assert_eq!(config.calculate_backoff_delay(2), Duration::from_millis(2000)); // 1000 * 2^1
-        assert_eq!(config.calculate_backoff_delay(3), Duration::from_millis(4000)); // 1000 * 2^2
+        assert_eq!(
+            config.calculate_backoff_delay(1),
+            Duration::from_millis(1000)
+        ); // 1000 * 2^0
+        assert_eq!(
+            config.calculate_backoff_delay(2),
+            Duration::from_millis(2000)
+        ); // 1000 * 2^1
+        assert_eq!(
+            config.calculate_backoff_delay(3),
+            Duration::from_millis(4000)
+        ); // 1000 * 2^2
     }
 
     #[test]
@@ -349,7 +367,10 @@ mod tests {
         };
 
         // 1000 * 2^9 = 512000, but should be capped at 5000
-        assert_eq!(config.calculate_backoff_delay(10), Duration::from_millis(5000));
+        assert_eq!(
+            config.calculate_backoff_delay(10),
+            Duration::from_millis(5000)
+        );
     }
 
     #[tokio::test]

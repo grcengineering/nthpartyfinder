@@ -4,9 +4,7 @@
 //! They require network access and a headless Chrome browser.
 
 use nthpartyfinder::web_org::{
-    extract_organization_from_html,
-    extract_organization_with_fallback,
-    WebOrgSource,
+    extract_organization_from_html, extract_organization_with_fallback, WebOrgSource,
 };
 
 /// Test that the fallback function extracts organization from SPA domains
@@ -40,12 +38,16 @@ async fn test_spa_domains_with_headless_fallback() {
                 let expected_lower = expected_contains.to_lowercase();
 
                 if org_lower.contains(&expected_lower) {
-                    println!("PASS - \"{}\" (source: {}, conf: {:.2})",
-                             result.organization, result.source, result.confidence);
+                    println!(
+                        "PASS - \"{}\" (source: {}, conf: {:.2})",
+                        result.organization, result.source, result.confidence
+                    );
                     passed += 1;
                 } else {
-                    println!("PARTIAL - Got \"{}\" but expected to contain \"{}\"",
-                             result.organization, expected_contains);
+                    println!(
+                        "PARTIAL - Got \"{}\" but expected to contain \"{}\"",
+                        result.organization, expected_contains
+                    );
                     // Still count as pass if we got a result
                     passed += 1;
                 }
@@ -82,7 +84,10 @@ async fn test_headless_only_mode() {
     assert!(result.is_ok(), "Function should not error");
 
     if let Ok(Some(org)) = result {
-        println!("Headless-only for slack.com: {} (source: {})", org.organization, org.source);
+        println!(
+            "Headless-only for slack.com: {} (source: {})",
+            org.organization, org.source
+        );
         assert!(
             org.organization.to_lowercase().contains("slack"),
             "Expected organization to contain 'slack', got: {}",
@@ -103,7 +108,10 @@ async fn test_http_first_for_well_structured_sites() {
     assert!(result.is_ok(), "Function should not error");
 
     if let Ok(Some(org)) = result {
-        println!("HTTP-first for github.com: {} (source: {})", org.organization, org.source);
+        println!(
+            "HTTP-first for github.com: {} (source: {})",
+            org.organization, org.source
+        );
         assert!(
             org.organization.to_lowercase().contains("github"),
             "Expected organization to contain 'github', got: {}",
@@ -138,7 +146,10 @@ async fn test_schema_org_preferred_over_opengraph() {
     let org = result.unwrap();
     assert_eq!(org.organization, "Schema.org Name Inc.");
     assert_eq!(org.source, WebOrgSource::SchemaOrg);
-    assert!(org.confidence > 0.9, "Schema.org should have high confidence");
+    assert!(
+        org.confidence > 0.9,
+        "Schema.org should have high confidence"
+    );
 }
 
 /// Test that empty or minimal HTML returns None

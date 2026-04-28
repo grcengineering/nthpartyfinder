@@ -25,14 +25,26 @@ fn setup_config_dir(tmp: &TempDir) {
     fs::create_dir_all(&dst).unwrap();
 
     // Copy the main config file
-    fs::copy(src.join("nthpartyfinder.toml"), dst.join("nthpartyfinder.toml")).unwrap();
+    fs::copy(
+        src.join("nthpartyfinder.toml"),
+        dst.join("nthpartyfinder.toml"),
+    )
+    .unwrap();
 
     // Copy vendor data files needed by vendor_registry::init()
     if src.join("known_vendors.json").exists() {
-        fs::copy(src.join("known_vendors.json"), dst.join("known_vendors.json")).unwrap();
+        fs::copy(
+            src.join("known_vendors.json"),
+            dst.join("known_vendors.json"),
+        )
+        .unwrap();
     }
     if src.join("saas_platforms.json").exists() {
-        fs::copy(src.join("saas_platforms.json"), dst.join("saas_platforms.json")).unwrap();
+        fs::copy(
+            src.join("saas_platforms.json"),
+            dst.join("saas_platforms.json"),
+        )
+        .unwrap();
     }
 
     // Copy vendors subdirectory if it exists
@@ -78,9 +90,10 @@ fn test_missing_config_exits_fast_not_hangs() {
         .timeout(std::time::Duration::from_secs(10))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Configuration file not found").or(
-            predicate::str::contains("Run with --init"),
-        ));
+        .stderr(
+            predicate::str::contains("Configuration file not found")
+                .or(predicate::str::contains("Run with --init")),
+        );
 }
 
 /// Verify the error message includes actionable guidance.
@@ -116,14 +129,22 @@ fn test_init_creates_config_file() {
         .timeout(std::time::Duration::from_secs(10))
         .assert()
         .success()
-        .stdout(predicate::str::contains("Created default configuration file"));
+        .stdout(predicate::str::contains(
+            "Created default configuration file",
+        ));
 
     assert!(config_path.exists(), "config file should have been created");
 
     // Verify it's valid TOML with expected sections
     let content = fs::read_to_string(&config_path).unwrap();
-    assert!(content.contains("[http]"), "config should have [http] section");
-    assert!(content.contains("[dns]"), "config should have [dns] section");
+    assert!(
+        content.contains("[http]"),
+        "config should have [http] section"
+    );
+    assert!(
+        content.contains("[dns]"),
+        "config should have [dns] section"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

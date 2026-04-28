@@ -187,7 +187,11 @@ impl Checkpoint {
     pub fn add_pending(&mut self, pending: PendingDomain) {
         // Only add if not already completed or pending
         if !self.completed_domains.contains(&pending.domain) {
-            if !self.pending_domains.iter().any(|p| p.domain == pending.domain) {
+            if !self
+                .pending_domains
+                .iter()
+                .any(|p| p.domain == pending.domain)
+            {
                 self.pending_domains.push(pending);
             }
         }
@@ -239,7 +243,9 @@ impl std::fmt::Display for CheckpointSummary {
             self.pending_count,
             self.results_count,
             self.depth_reached,
-            self.max_depth.map(|d| d.to_string()).unwrap_or("unlimited".to_string())
+            self.max_depth
+                .map(|d| d.to_string())
+                .unwrap_or("unlimited".to_string())
         )
     }
 }
@@ -302,7 +308,10 @@ mod tests {
 
         assert_eq!(checkpoint.version, CHECKPOINT_VERSION);
         assert_eq!(checkpoint.root_domain, "example.com");
-        assert_eq!(checkpoint.root_organization, Some("Example Inc".to_string()));
+        assert_eq!(
+            checkpoint.root_organization,
+            Some("Example Inc".to_string())
+        );
         assert_eq!(checkpoint.max_depth, Some(3));
         assert_eq!(checkpoint.current_depth_reached, 0);
         assert!(checkpoint.completed_domains.is_empty());
@@ -351,7 +360,10 @@ mod tests {
         assert!(loaded.completed_domains.contains("example.com"));
         assert_eq!(loaded.pending_domains.len(), 1);
         assert_eq!(loaded.pending_domains[0].domain, "vendor1.com");
-        assert_eq!(loaded.discovered_vendors.get("vendor1.com"), Some(&"Vendor One".to_string()));
+        assert_eq!(
+            loaded.discovered_vendors.get("vendor1.com"),
+            Some(&"Vendor One".to_string())
+        );
         assert_eq!(loaded.results_count, 42);
         assert_eq!(loaded.results_file, "/tmp/test-results.jsonl.zst");
     }
@@ -361,12 +373,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let output_dir = temp_dir.path();
 
-        let checkpoint = Checkpoint::new(
-            "example.com".to_string(),
-            None,
-            None,
-            "abc123".to_string(),
-        );
+        let checkpoint =
+            Checkpoint::new("example.com".to_string(), None, None, "abc123".to_string());
 
         checkpoint.save(output_dir).unwrap();
         assert!(Checkpoint::exists(output_dir));
@@ -396,12 +404,8 @@ mod tests {
 
     #[test]
     fn test_mark_completed_removes_from_pending() {
-        let mut checkpoint = Checkpoint::new(
-            "example.com".to_string(),
-            None,
-            None,
-            "abc123".to_string(),
-        );
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, None, "abc123".to_string());
 
         // Add pending domain
         checkpoint.add_pending(PendingDomain {
@@ -423,12 +427,8 @@ mod tests {
 
     #[test]
     fn test_add_pending_deduplication() {
-        let mut checkpoint = Checkpoint::new(
-            "example.com".to_string(),
-            None,
-            None,
-            "abc123".to_string(),
-        );
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, None, "abc123".to_string());
 
         let pending = PendingDomain {
             domain: "vendor.com".to_string(),
@@ -515,12 +515,8 @@ mod tests {
 
     #[test]
     fn test_pop_pending() {
-        let mut checkpoint = Checkpoint::new(
-            "example.com".to_string(),
-            None,
-            None,
-            "abc123".to_string(),
-        );
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, None, "abc123".to_string());
 
         checkpoint.add_pending(PendingDomain {
             domain: "vendor1.com".to_string(),

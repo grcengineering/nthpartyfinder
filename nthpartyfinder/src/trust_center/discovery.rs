@@ -10,9 +10,9 @@ use std::time::Duration;
 use tracing::debug;
 
 use super::{
-    CandidateStrategy, DiscoveryMetadata, DiscoveryMethod, EndpointConfig,
-    ResponseMapping, StrategyType, TrustCenterStrategy,
-    find_entity_arrays, score_subprocessor_array, detect_field_mapping,
+    detect_field_mapping, find_entity_arrays, score_subprocessor_array, CandidateStrategy,
+    DiscoveryMetadata, DiscoveryMethod, EndpointConfig, ResponseMapping, StrategyType,
+    TrustCenterStrategy,
 };
 
 /// Collected network response during page load.
@@ -30,15 +30,15 @@ struct InterceptedResponse {
 /// Check if HTML content looks like a JavaScript SPA that needs special handling.
 pub fn is_likely_spa(html: &str) -> bool {
     // Strip HTML tags to get approximate text content length
-    let text_len = html.chars()
-        .fold((0usize, false), |(count, in_tag), ch| {
-            match ch {
-                '<' => (count, true),
-                '>' => (count, false),
-                _ if !in_tag => (count + 1, false),
-                _ => (count, in_tag),
-            }
-        }).0;
+    let text_len = html
+        .chars()
+        .fold((0usize, false), |(count, in_tag), ch| match ch {
+            '<' => (count, true),
+            '>' => (count, false),
+            _ if !in_tag => (count + 1, false),
+            _ => (count, in_tag),
+        })
+        .0;
 
     let html_len = html.len();
     if html_len == 0 {
@@ -78,15 +78,18 @@ pub fn is_likely_spa(html: &str) -> bool {
     if let Some(body_start) = html_lower.find("<body") {
         if let Some(body_tag_end) = html_lower[body_start..].find('>') {
             let body_content_start = body_start + body_tag_end + 1;
-            let body_content = if let Some(body_end) = html_lower[body_content_start..].find("</body") {
-                &html_lower[body_content_start..body_content_start + body_end]
-            } else {
-                &html_lower[body_content_start..]
-            };
+            let body_content =
+                if let Some(body_end) = html_lower[body_content_start..].find("</body") {
+                    &html_lower[body_content_start..body_content_start + body_end]
+                } else {
+                    &html_lower[body_content_start..]
+                };
 
             // Check if body has any visible content elements (not just script/noscript)
-            let visible_tags = ["<div", "<p", "<table", "<section", "<article", "<main",
-                                "<h1", "<h2", "<h3", "<span", "<ul", "<ol", "<form"];
+            let visible_tags = [
+                "<div", "<p", "<table", "<section", "<article", "<main", "<h1", "<h2", "<h3",
+                "<span", "<ul", "<ol", "<form",
+            ];
             let has_visible_content = visible_tags.iter().any(|tag| body_content.contains(tag));
 
             if !has_visible_content && body_content.contains("<script") {
@@ -123,9 +126,16 @@ pub async fn discover_strategy(
     }
 
     // If HTML patterns found strong candidates, use them (no need for browser)
-    if let Some(best) = all_candidates.iter().max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal)) {
+    if let Some(best) = all_candidates.iter().max_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
         if best.score >= 0.7 {
-            debug!("Strong candidate found via HTML patterns (score: {:.2}), skipping browser probes", best.score);
+            debug!(
+                "Strong candidate found via HTML patterns (score: {:.2}), skipping browser probes",
+                best.score
+            );
             return Ok(Some(best.strategy.clone()));
         }
     }
@@ -141,11 +151,18 @@ pub async fn discover_strategy(
     }
 
     // Select the best candidate
-    all_candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    all_candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     if let Some(best) = all_candidates.into_iter().next() {
         if best.score >= 0.4 {
-            debug!("Selected strategy with score {:.2}, {} items", best.score, best.item_count);
+            debug!(
+                "Selected strategy with score {:.2}, {} items",
+                best.score, best.item_count
+            );
             return Ok(Some(best.strategy));
         }
         debug!("Best candidate score {:.2} below threshold 0.4", best.score);
@@ -164,12 +181,15 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
     let handle = tokio::task::spawn_blocking(move || -> Result<Vec<InterceptedResponse>> {
         let guard = crate::browser_pool::create_browser()?;
 
-        let tab = guard.browser.new_tab()
+        let tab = guard
+            .browser
+            .new_tab()
             .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
         // Register response handler to capture JSON API responses.
         // Handler signature: (ResponseReceivedEventParams, &dyn Fn() -> Result<GetResponseBodyReturnObject>)
-        tab.register_response_handling("trust_center_discovery",
+        tab.register_response_handling(
+            "trust_center_discovery",
             Box::new(move |event_params, fetch_body| {
                 let resp = &event_params.response;
                 let mime = &resp.mime_type;
@@ -199,8 +219,9 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
                         }
                     }
                 }
-            })
-        ).map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
+            }),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
 
         // Navigate and wait for page + API calls to complete
         tab.navigate_to(&url_owned)
@@ -218,7 +239,8 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
         Ok(collected)
     });
 
-    let collected_responses = handle.await
+    let collected_responses = handle
+        .await
         .map_err(|e| anyhow::anyhow!("Blocking task panicked: {}", e))??;
 
     debug!("Intercepted {} JSON responses", collected_responses.len());
@@ -393,16 +415,31 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 
     // Iterate through all products to find subprocessor list items
     for (product_id, product_data) in products_map {
-        let slug = product_data.get("slug").and_then(|v| v.as_str()).unwrap_or(product_id);
-        let product_name = product_data.get("name").and_then(|v| v.as_str()).unwrap_or(slug);
-        let show = product_data.get("show").and_then(|v| v.as_bool()).unwrap_or(true);
+        let slug = product_data
+            .get("slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or(product_id);
+        let product_name = product_data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(slug);
+        let show = product_data
+            .get("show")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         if !show {
-            debug!("SafeBase: skipping hidden product '{}' (slug: {})", product_name, slug);
+            debug!(
+                "SafeBase: skipping hidden product '{}' (slug: {})",
+                product_name, slug
+            );
             continue;
         }
 
-        debug!("SafeBase: scanning product '{}' (id: {}, slug: {})", product_name, product_id, slug);
+        debug!(
+            "SafeBase: scanning product '{}' (id: {}, slug: {})",
+            product_name, product_id, slug
+        );
 
         // Look for subprocessor items in raw.spData.items
         let items = match super::navigate_json_path(product_data, "raw.spData.items") {
@@ -423,7 +460,10 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 
             // Verify entries look like subprocessor data (have company.name or name)
             let has_company = list_entries.iter().take(5).any(|entry| {
-                entry.get("company").and_then(|c| c.get("name")).and_then(|n| n.as_str())
+                entry
+                    .get("company")
+                    .and_then(|c| c.get("name"))
+                    .and_then(|n| n.as_str())
                     .map_or(false, |s| !s.is_empty())
             });
 
@@ -431,8 +471,12 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
                 continue;
             }
 
-            debug!("SafeBase: found {} subprocessor entries in product '{}', item {}",
-                   list_entries.len(), product_name, item_uid);
+            debug!(
+                "SafeBase: found {} subprocessor entries in product '{}', item {}",
+                list_entries.len(),
+                product_name,
+                item_uid
+            );
 
             // Build the full data path for this subprocessor list
             let data_path = format!(
@@ -510,11 +554,17 @@ fn probe_conveyor(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let subprocessor_count = count_conveyor_subprocessors(html);
 
     if subprocessor_count < 3 {
-        debug!("Conveyor: found {} subprocessors, below threshold of 3", subprocessor_count);
+        debug!(
+            "Conveyor: found {} subprocessors, below threshold of 3",
+            subprocessor_count
+        );
         return;
     }
 
-    debug!("Conveyor: found {} subprocessors, slug={:?}", subprocessor_count, slug);
+    debug!(
+        "Conveyor: found {} subprocessors, slug={:?}",
+        subprocessor_count, slug
+    );
 
     let score = 0.95;
     let api_url = match &slug {
@@ -543,10 +593,7 @@ fn probe_conveyor(html: &str, candidates: &mut Vec<CandidateStrategy>) {
                 url_field: Some("website".to_string()),
                 purpose_field: Some("description".to_string()),
                 location_field: Some("data_locations".to_string()),
-                evidence_fields: vec![
-                    "name".to_string(),
-                    "description".to_string(),
-                ],
+                evidence_fields: vec!["name".to_string(), "description".to_string()],
             },
             discovery_metadata: DiscoveryMetadata::new(
                 DiscoveryMethod::HtmlPatternScan,
@@ -562,20 +609,21 @@ fn probe_conveyor(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 /// Extract the Conveyor slug from window.CANONICAL_ASSET assignment.
 fn extract_conveyor_slug(html: &str) -> Option<String> {
     let json = extract_js_object_assignment(html, "CANONICAL_ASSET")?;
-    json.get("slug").and_then(|v| v.as_str()).map(|s| s.to_string())
+    json.get("slug")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Count the number of subprocessors in a Conveyor VENDOR_REPORT.
 fn count_conveyor_subprocessors(html: &str) -> usize {
     let json = extract_js_object_assignment(html, "VENDOR_REPORT");
     match json {
-        Some(j) => {
-            j.get("_embedded")
-                .and_then(|e| e.get("subprocessors"))
-                .and_then(|s| s.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0)
-        }
+        Some(j) => j
+            .get("_embedded")
+            .and_then(|e| e.get("subprocessors"))
+            .and_then(|s| s.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0),
         None => 0,
     }
 }
@@ -610,9 +658,15 @@ fn extract_js_object_assignment(html: &str, var_name: &str) -> Option<serde_json
             continue;
         }
         match ch {
-            '\\' if in_string => { escape_next = true; }
-            '"' => { in_string = !in_string; }
-            '{' if !in_string => { depth += 1; }
+            '\\' if in_string => {
+                escape_next = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
+                depth += 1;
+            }
             '}' if !in_string => {
                 depth -= 1;
                 if depth == 0 {
@@ -765,9 +819,13 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
                             let b64_str = b64_match.as_str();
 
                             use base64::Engine;
-                            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64_str) {
+                            if let Ok(decoded) =
+                                base64::engine::general_purpose::STANDARD.decode(b64_str)
+                            {
                                 if let Ok(json_str) = String::from_utf8(decoded) {
-                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&json_str)
+                                    {
                                         let arrays = find_entity_arrays(&json, "");
                                         for (path, items) in &arrays {
                                             let score = score_subprocessor_array(items, path);
@@ -907,7 +965,8 @@ fn extract_graphql_operation(url: &str) -> Option<String> {
 /// For example: `https://trust.vanta.com/acme/subprocessors` -> `Some("acme")`
 fn extract_slug_from_url(url: &str) -> Option<String> {
     if let Ok(parsed) = url::Url::parse(url) {
-        let segments: Vec<&str> = parsed.path_segments()
+        let segments: Vec<&str> = parsed
+            .path_segments()
             .map(|s| s.collect())
             .unwrap_or_default();
 
@@ -915,7 +974,15 @@ fn extract_slug_from_url(url: &str) -> Option<String> {
         if segments.len() >= 2 {
             let first = segments[0];
             // Skip if it's a common non-slug path
-            let non_slugs = ["api", "graphql", "trust", "security", "legal", "privacy", "subprocessors"];
+            let non_slugs = [
+                "api",
+                "graphql",
+                "trust",
+                "security",
+                "legal",
+                "privacy",
+                "subprocessors",
+            ];
             if !non_slugs.contains(&first) && !first.is_empty() {
                 return Some(first.to_string());
             }
@@ -948,9 +1015,14 @@ mod tests {
 
     #[test]
     fn test_extract_slug_from_url() {
-        assert_eq!(extract_slug_from_url("https://trust.vanta.com/acme/subprocessors"),
-                   Some("acme".to_string()));
-        assert_eq!(extract_slug_from_url("https://trust.vanta.com/subprocessors"), None);
+        assert_eq!(
+            extract_slug_from_url("https://trust.vanta.com/acme/subprocessors"),
+            Some("acme".to_string())
+        );
+        assert_eq!(
+            extract_slug_from_url("https://trust.vanta.com/subprocessors"),
+            None
+        );
     }
 
     #[test]
@@ -998,16 +1070,35 @@ mod tests {
         let mut candidates = Vec::new();
         probe_safebase(html, &mut candidates);
 
-        assert_eq!(candidates.len(), 1, "Should find exactly one subprocessor list");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Should find exactly one subprocessor list"
+        );
         let candidate = &candidates[0];
         assert_eq!(candidate.item_count, 4);
-        assert!(candidate.score >= 0.9, "SafeBase probe should have high confidence");
+        assert!(
+            candidate.score >= 0.9,
+            "SafeBase probe should have high confidence"
+        );
 
         // Verify field mapping
-        assert_eq!(candidate.strategy.response_mapping.name_field, "company.name");
-        assert_eq!(candidate.strategy.response_mapping.url_field, Some("company.domain".to_string()));
-        assert_eq!(candidate.strategy.response_mapping.purpose_field, Some("purpose".to_string()));
-        assert_eq!(candidate.strategy.response_mapping.location_field, Some("location".to_string()));
+        assert_eq!(
+            candidate.strategy.response_mapping.name_field,
+            "company.name"
+        );
+        assert_eq!(
+            candidate.strategy.response_mapping.url_field,
+            Some("company.domain".to_string())
+        );
+        assert_eq!(
+            candidate.strategy.response_mapping.purpose_field,
+            Some("purpose".to_string())
+        );
+        assert_eq!(
+            candidate.strategy.response_mapping.location_field,
+            Some("location".to_string())
+        );
 
         // Verify slug extraction
         assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
@@ -1057,7 +1148,11 @@ mod tests {
         probe_safebase(html, &mut candidates);
 
         // Should find 2 products (not the hidden one)
-        assert_eq!(candidates.len(), 2, "Should find subprocessors from 2 visible products");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "Should find subprocessors from 2 visible products"
+        );
         assert_eq!(candidates[0].item_count, 3);
         assert_eq!(candidates[1].item_count, 3);
     }
@@ -1074,7 +1169,10 @@ mod tests {
 
         let mut candidates = Vec::new();
         probe_safebase(html, &mut candidates);
-        assert!(candidates.is_empty(), "Should not detect SafeBase on non-SafeBase pages");
+        assert!(
+            candidates.is_empty(),
+            "Should not detect SafeBase on non-SafeBase pages"
+        );
     }
 
     #[test]
@@ -1100,7 +1198,10 @@ mod tests {
 
         let mut candidates = Vec::new();
         probe_safebase(html, &mut candidates);
-        assert!(candidates.is_empty(), "Should not detect entries without company.name as subprocessors");
+        assert!(
+            candidates.is_empty(),
+            "Should not detect entries without company.name as subprocessors"
+        );
     }
 
     #[test]
@@ -1127,7 +1228,10 @@ mod tests {
         assert_eq!(candidates.len(), 1, "Should find one Conveyor trust center");
         let candidate = &candidates[0];
         assert_eq!(candidate.item_count, 4);
-        assert!(candidate.score >= 0.9, "Conveyor probe should have high confidence");
+        assert!(
+            candidate.score >= 0.9,
+            "Conveyor probe should have high confidence"
+        );
 
         // Verify slug extraction
         assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
@@ -1151,7 +1255,10 @@ mod tests {
 
         let mut candidates = Vec::new();
         probe_conveyor(html, &mut candidates);
-        assert!(candidates.is_empty(), "Should not detect Conveyor on non-Conveyor pages");
+        assert!(
+            candidates.is_empty(),
+            "Should not detect Conveyor on non-Conveyor pages"
+        );
     }
 
     #[test]
@@ -1173,9 +1280,16 @@ mod tests {
         let mut candidates = Vec::new();
         probe_conveyor(html, &mut candidates);
 
-        assert_eq!(candidates.len(), 1, "Should detect Conveyor even without slug");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Should detect Conveyor even without slug"
+        );
         assert_eq!(candidates[0].strategy.endpoint.slug, None);
-        assert!(candidates[0].strategy.endpoint.url.is_empty(), "URL should be empty without slug");
+        assert!(
+            candidates[0].strategy.endpoint.url.is_empty(),
+            "URL should be empty without slug"
+        );
     }
 
     #[test]
@@ -1192,12 +1306,16 @@ mod tests {
 
         let mut candidates = Vec::new();
         probe_conveyor(html, &mut candidates);
-        assert!(candidates.is_empty(), "Should skip Conveyor with < 3 subprocessors");
+        assert!(
+            candidates.is_empty(),
+            "Should skip Conveyor with < 3 subprocessors"
+        );
     }
 
     #[test]
     fn test_extract_conveyor_slug() {
-        let html = r#"window.CANONICAL_ASSET = {"id":"abc","slug":"conveyor","name":"Conveyor Inc."};"#;
+        let html =
+            r#"window.CANONICAL_ASSET = {"id":"abc","slug":"conveyor","name":"Conveyor Inc."};"#;
         assert_eq!(extract_conveyor_slug(html), Some("conveyor".to_string()));
 
         let html_no_slug = r#"window.APP_CONFIG = {"key":"value"};"#;

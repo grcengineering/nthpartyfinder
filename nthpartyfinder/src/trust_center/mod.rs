@@ -238,7 +238,10 @@ pub struct DetectedFieldMapping {
 /// Navigate a dot-separated path through a JSON value.
 /// Example: `navigate_json_path(json, "data.trust.subprocessors")`
 /// navigates `json["data"]["trust"]["subprocessors"]`.
-pub fn navigate_json_path<'a>(json: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+pub fn navigate_json_path<'a>(
+    json: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
     if path.is_empty() {
         return Some(json);
     }
@@ -256,7 +259,10 @@ pub fn get_nested_str<'a>(json: &'a serde_json::Value, field_path: &str) -> Opti
 
 /// Recursively search a JSON value for arrays of objects that could be
 /// subprocessor lists. Returns all arrays found with their dot-notation paths.
-pub fn find_entity_arrays(json: &serde_json::Value, current_path: &str) -> Vec<(String, Vec<serde_json::Value>)> {
+pub fn find_entity_arrays(
+    json: &serde_json::Value,
+    current_path: &str,
+) -> Vec<(String, Vec<serde_json::Value>)> {
     let mut results = Vec::new();
 
     match json {
@@ -302,7 +308,14 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
 
     // Score based on path containing relevant keywords
     let path_lower = path.to_lowercase();
-    let path_keywords = ["subprocessor", "vendor", "processor", "provider", "supplier", "partner"];
+    let path_keywords = [
+        "subprocessor",
+        "vendor",
+        "processor",
+        "provider",
+        "supplier",
+        "partner",
+    ];
     for keyword in &path_keywords {
         if path_lower.contains(keyword) {
             score += 0.25;
@@ -314,13 +327,37 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
     let sample_size = std::cmp::min(items.len(), 5);
     let sample = &items[..sample_size];
 
-    let name_fields = ["name", "companyName", "company_name", "vendor_name", "vendorName",
-                        "organization", "entity", "entityName", "entity_name",
-                        "company.name"]; // SafeBase: nested company object
-    let url_fields = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url",
-                       "company.domain"]; // SafeBase: nested company object
-    let purpose_fields = ["purpose", "service", "description", "category", "type",
-                          "serviceDescription", "service_description"];
+    let name_fields = [
+        "name",
+        "companyName",
+        "company_name",
+        "vendor_name",
+        "vendorName",
+        "organization",
+        "entity",
+        "entityName",
+        "entity_name",
+        "company.name",
+    ]; // SafeBase: nested company object
+    let url_fields = [
+        "url",
+        "website",
+        "domain",
+        "link",
+        "href",
+        "websiteUrl",
+        "website_url",
+        "company.domain",
+    ]; // SafeBase: nested company object
+    let purpose_fields = [
+        "purpose",
+        "service",
+        "description",
+        "category",
+        "type",
+        "serviceDescription",
+        "service_description",
+    ];
     let location_fields = ["location", "country", "region", "geography"];
 
     /// Check if a field path (possibly dot-separated) resolves to a non-empty string.
@@ -328,23 +365,31 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
         get_nested_str(item, field_path).map_or(false, |s| !s.is_empty())
     }
 
-    let has_name_field = sample.iter().any(|item| {
-        name_fields.iter().any(|f| has_field_value(item, f))
-    });
-    let has_url_field = sample.iter().any(|item| {
-        url_fields.iter().any(|f| has_field_value(item, f))
-    });
-    let has_purpose_field = sample.iter().any(|item| {
-        purpose_fields.iter().any(|f| has_field_value(item, f))
-    });
-    let has_location_field = sample.iter().any(|item| {
-        location_fields.iter().any(|f| has_field_value(item, f))
-    });
+    let has_name_field = sample
+        .iter()
+        .any(|item| name_fields.iter().any(|f| has_field_value(item, f)));
+    let has_url_field = sample
+        .iter()
+        .any(|item| url_fields.iter().any(|f| has_field_value(item, f)));
+    let has_purpose_field = sample
+        .iter()
+        .any(|item| purpose_fields.iter().any(|f| has_field_value(item, f)));
+    let has_location_field = sample
+        .iter()
+        .any(|item| location_fields.iter().any(|f| has_field_value(item, f)));
 
-    if has_name_field { score += 0.25; }
-    if has_url_field { score += 0.15; }
-    if has_purpose_field { score += 0.05; }
-    if has_location_field { score += 0.05; }
+    if has_name_field {
+        score += 0.25;
+    }
+    if has_url_field {
+        score += 0.15;
+    }
+    if has_purpose_field {
+        score += 0.05;
+    }
+    if has_location_field {
+        score += 0.05;
+    }
 
     score.min(1.0)
 }
@@ -354,18 +399,43 @@ pub fn score_subprocessor_array(items: &[serde_json::Value], path: &str) -> f32 
 pub fn detect_field_mapping(items: &[serde_json::Value]) -> DetectedFieldMapping {
     let sample = if items.len() > 5 { &items[..5] } else { items };
 
-    let name_candidates = ["name", "companyName", "company_name", "vendor_name", "vendorName",
-                            "organization", "entity", "entityName", "entity_name",
-                            "company.name"]; // SafeBase
-    let url_candidates = ["url", "website", "domain", "link", "href", "websiteUrl", "website_url",
-                           "company.domain"]; // SafeBase
-    let purpose_candidates = ["purpose", "service", "description", "category", "type",
-                               "serviceDescription", "service_description"];
+    let name_candidates = [
+        "name",
+        "companyName",
+        "company_name",
+        "vendor_name",
+        "vendorName",
+        "organization",
+        "entity",
+        "entityName",
+        "entity_name",
+        "company.name",
+    ]; // SafeBase
+    let url_candidates = [
+        "url",
+        "website",
+        "domain",
+        "link",
+        "href",
+        "websiteUrl",
+        "website_url",
+        "company.domain",
+    ]; // SafeBase
+    let purpose_candidates = [
+        "purpose",
+        "service",
+        "description",
+        "category",
+        "type",
+        "serviceDescription",
+        "service_description",
+    ];
     let location_candidates = ["location", "country", "region", "geography"];
 
     let find_field = |candidates: &[&str]| -> Option<String> {
         for field in candidates {
-            let match_count = sample.iter()
+            let match_count = sample
+                .iter()
                 .filter(|item| get_nested_str(item, field).map_or(false, |s| !s.is_empty()))
                 .count();
             if match_count as f64 / sample.len() as f64 > 0.5 {
@@ -400,7 +470,11 @@ mod tests {
 
         let score = score_subprocessor_array(&items, "items.listEntries");
         // Should score >= 0.4 thanks to nested company.name detection
-        assert!(score >= 0.4, "Score {:.2} should be >= 0.4 for SafeBase-style entries", score);
+        assert!(
+            score >= 0.4,
+            "Score {:.2} should be >= 0.4 for SafeBase-style entries",
+            score
+        );
     }
 
     #[test]
@@ -412,8 +486,16 @@ mod tests {
         ];
 
         let mapping = detect_field_mapping(&items);
-        assert_eq!(mapping.name_field, Some("company.name".to_string()), "Should detect nested company.name");
-        assert_eq!(mapping.url_field, Some("company.domain".to_string()), "Should detect nested company.domain");
+        assert_eq!(
+            mapping.name_field,
+            Some("company.name".to_string()),
+            "Should detect nested company.name"
+        );
+        assert_eq!(
+            mapping.url_field,
+            Some("company.domain".to_string()),
+            "Should detect nested company.domain"
+        );
         assert_eq!(mapping.purpose_field, Some("purpose".to_string()));
         assert_eq!(mapping.location_field, Some("location".to_string()));
     }

@@ -7,8 +7,8 @@
 //! - JavaScript function presence
 //! - Pagination and export functionality
 
-use nthpartyfinder::vendor::{VendorRelationship, RecordType};
 use nthpartyfinder::export::export_html;
+use nthpartyfinder::vendor::{RecordType, VendorRelationship};
 use std::fs;
 use tempfile::tempdir;
 
@@ -177,7 +177,8 @@ fn test_no_excessive_whitespace_in_spf_table() {
     if let Some(spf_start) = html_content.find(r#"id="spf-table""#) {
         if let Some(tbody_start) = html_content[spf_start..].find("<tbody>") {
             if let Some(tbody_end) = html_content[spf_start + tbody_start..].find("</tbody>") {
-                let tbody_content = &html_content[spf_start + tbody_start..spf_start + tbody_start + tbody_end];
+                let tbody_content =
+                    &html_content[spf_start + tbody_start..spf_start + tbody_start + tbody_end];
 
                 // Count consecutive empty lines (more than 3 consecutive newlines is excessive)
                 let excessive_whitespace = tbody_content.contains("\n\n\n\n\n");
@@ -205,7 +206,8 @@ fn test_no_excessive_whitespace_in_verification_table() {
     if let Some(start) = html_content.find(r#"id="verification-table""#) {
         if let Some(tbody_start) = html_content[start..].find("<tbody>") {
             if let Some(tbody_end) = html_content[start + tbody_start..].find("</tbody>") {
-                let tbody_content = &html_content[start + tbody_start..start + tbody_start + tbody_end];
+                let tbody_content =
+                    &html_content[start + tbody_start..start + tbody_start + tbody_end];
 
                 let excessive_whitespace = tbody_content.contains("\n\n\n\n\n");
                 assert!(
@@ -566,8 +568,8 @@ fn test_no_global_tooltip_css_class_collision() {
     // The template should NOT have a global .tooltip CSS rule (renamed to .hover-tooltip)
     // Look for the specific pattern that would cause the collision:
     // a CSS rule starting with ".tooltip {" that sets opacity: 0
-    let has_global_tooltip_rule = html_content.contains(".tooltip {")
-        && html_content.contains("opacity: 0");
+    let has_global_tooltip_rule =
+        html_content.contains(".tooltip {") && html_content.contains("opacity: 0");
     assert!(
         !has_global_tooltip_rule,
         "Template must not have a global .tooltip CSS rule with opacity: 0 — \

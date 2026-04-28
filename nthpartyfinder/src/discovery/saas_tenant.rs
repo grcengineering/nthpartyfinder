@@ -5,14 +5,14 @@
 //! - Legacy saas_platforms.json file - fallback
 
 use anyhow::Result;
+use futures::{stream, StreamExt};
+use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use futures::{stream, StreamExt};
-use reqwest::Client;
 use tracing::{debug, info};
 
 use crate::logger::AnalysisLogger;
@@ -107,7 +107,8 @@ impl SaasTenantDiscovery {
         for (vendor_id, tenant) in tenants {
             // Get vendor info for the vendor_domain
             let vendor_domain = if let Some(vendor) = vendor_registry::get() {
-                vendor.get_vendor(&vendor_id)
+                vendor
+                    .get_vendor(&vendor_id)
                     .map(|v| v.primary_domain.clone())
                     .unwrap_or_else(|| format!("{}.com", vendor_id))
             } else {
@@ -136,7 +137,10 @@ impl SaasTenantDiscovery {
             });
         }
 
-        info!("Loaded {} SaaS platforms from VendorRegistry", self.platforms.len());
+        info!(
+            "Loaded {} SaaS platforms from VendorRegistry",
+            self.platforms.len()
+        );
     }
 
     /// Load platforms from VendorRegistry first, then fallback to file if empty
@@ -155,14 +159,20 @@ impl SaasTenantDiscovery {
         self.probe_with_logger(target_domain, None).await
     }
 
-    pub async fn probe_with_logger(&self, target_domain: &str, logger: Option<&AnalysisLogger>) -> Result<Vec<TenantProbeResult>> {
+    pub async fn probe_with_logger(
+        &self,
+        target_domain: &str,
+        logger: Option<&AnalysisLogger>,
+    ) -> Result<Vec<TenantProbeResult>> {
         let tenant_names = generate_tenant_names(target_domain);
         debug!("Generated tenant name candidates: {:?}", tenant_names);
 
         // Phase 1: Baseline canary probes — one per unique pattern
         // Detects wildcard platforms that return identical responses for any tenant
         let mut baselines: HashMap<String, BaselineResponse> = HashMap::new();
-        let unique_patterns: Vec<String> = self.platforms.iter()
+        let unique_patterns: Vec<String> = self
+            .platforms
+            .iter()
             .flat_map(|p| p.tenant_patterns.iter().cloned())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -171,29 +181,42 @@ impl SaasTenantDiscovery {
         if let Some(log) = logger {
             log.show_sub_progress(&format!(
                 "Probing SaaS platforms for {} (baselining {} patterns)",
-                target_domain, unique_patterns.len()
-            )).await;
+                target_domain,
+                unique_patterns.len()
+            ))
+            .await;
         }
 
-        let baseline_results: Vec<(String, Option<BaselineResponse>)> = stream::iter(unique_patterns)
-            .map(|pattern| {
-                let client = self.client.clone();
-                async move {
-                    let baseline = probe_baseline(&client, &pattern).await;
-                    (pattern, baseline)
-                }
-            })
-            .buffer_unordered(self.concurrency)
-            .collect()
-            .await;
+        let baseline_results: Vec<(String, Option<BaselineResponse>)> =
+            stream::iter(unique_patterns)
+                .map(|pattern| {
+                    let client = self.client.clone();
+                    async move {
+                        let baseline = probe_baseline(&client, &pattern).await;
+                        (pattern, baseline)
+                    }
+                })
+                .buffer_unordered(self.concurrency)
+                .collect()
+                .await;
 
         for (pattern, baseline) in baseline_results {
             if let Some(b) = baseline {
-                debug!("Baseline established for pattern {}: HTTP {} | {} bytes", pattern, b.status_code, b.body_length);
+                debug!(
+                    "Baseline established for pattern {}: HTTP {} | {} bytes",
+                    pattern, b.status_code, b.body_length
+                );
                 baselines.insert(pattern, b);
             }
         }
-        debug!("Established {} baselines from {} patterns", baselines.len(), self.platforms.iter().flat_map(|p| &p.tenant_patterns).count());
+        debug!(
+            "Established {} baselines from {} patterns",
+            baselines.len(),
+            self.platforms
+                .iter()
+                .flat_map(|p| &p.tenant_patterns)
+                .count()
+        );
 
         // Phase 2: Real tenant probes with baseline comparison
         let mut probe_tasks = Vec::new();
@@ -220,7 +243,8 @@ impl SaasTenantDiscovery {
             log.show_sub_progress(&format!(
                 "Probing SaaS platforms for {} (0/{} probes across {} platforms)",
                 target_domain, total_probes, platform_count
-            )).await;
+            ))
+            .await;
         }
 
         let baselines_ref = &baselines;
@@ -236,14 +260,20 @@ impl SaasTenantDiscovery {
                 let target_ref = &target_domain_owned;
                 async move {
                     let (status, evidence) = probe_url_with_baseline(
-                        &client, &url, &detection, &vendor_domain, baseline.as_ref()
-                    ).await;
+                        &client,
+                        &url,
+                        &detection,
+                        &vendor_domain,
+                        baseline.as_ref(),
+                    )
+                    .await;
                     let done = completed_ref.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(ref log) = logger_clone {
                         log.show_sub_progress(&format!(
                             "Probing SaaS platforms for {} ({}/{} probes: {})",
                             target_ref, done, total_probes, name
-                        )).await;
+                        ))
+                        .await;
                     }
                     TenantProbeResult {
                         platform_name: name,
@@ -265,11 +295,15 @@ impl SaasTenantDiscovery {
         // Deduplicate by vendor_domain - multiple patterns for the same vendor
         // can produce duplicate entries (R002 fix). Keep first (highest confidence) match.
         let mut seen_vendors = std::collections::HashSet::new();
-        let deduped_results: Vec<TenantProbeResult> = results.into_iter()
+        let deduped_results: Vec<TenantProbeResult> = results
+            .into_iter()
             .filter(|r| seen_vendors.insert(r.vendor_domain.clone()))
             .collect();
 
-        debug!("Found {} unique likely/confirmed tenants (after dedup)", deduped_results.len());
+        debug!(
+            "Found {} unique likely/confirmed tenants (after dedup)",
+            deduped_results.len()
+        );
         Ok(deduped_results)
     }
 }
@@ -319,7 +353,10 @@ async fn probe_url_with_baseline(
                     "HTTP {} | Redirected to {} (vendor main site)",
                     status_code, final_url
                 );
-                debug!("Tenant URL {} redirected to main site {}, marking as NotFound", url, final_url);
+                debug!(
+                    "Tenant URL {} redirected to main site {}, marking as NotFound",
+                    url, final_url
+                );
                 return (TenantStatus::NotFound, evidence);
             }
 
@@ -327,7 +364,9 @@ async fn probe_url_with_baseline(
             let final_host = extract_host_from_url(&final_url).unwrap_or_default();
             let vendor_bare = vendor_domain.to_lowercase();
             let final_stripped = final_host.strip_prefix("www.").unwrap_or(&final_host);
-            if final_stripped == vendor_bare && final_host != extract_host_from_url(url).unwrap_or_default() {
+            if final_stripped == vendor_bare
+                && final_host != extract_host_from_url(url).unwrap_or_default()
+            {
                 let evidence = format!(
                     "HTTP {} | Resolved to vendor main site {} (wildcard DNS)",
                     status_code, final_url
@@ -351,7 +390,8 @@ async fn probe_url_with_baseline(
                         }
                     }
 
-                    let (status, matched) = analyze_response_with_evidence(status_code, &body, detection);
+                    let (status, matched) =
+                        analyze_response_with_evidence(status_code, &body, detection);
                     let redirect_info = if was_redirected {
                         format!(" | Redirected to {}", final_url)
                     } else {
@@ -362,7 +402,10 @@ async fn probe_url_with_baseline(
                     } else {
                         format!(" | Matched: [{}]", matched.join(", "))
                     };
-                    let evidence = format!("HTTP {}{} | {:?}{}", status_code, redirect_info, status, match_info);
+                    let evidence = format!(
+                        "HTTP {}{} | {:?}{}",
+                        status_code, redirect_info, status, match_info
+                    );
                     (status, evidence)
                 }
                 Err(e) => {
@@ -436,9 +479,7 @@ fn was_redirected_to_main_site(original_url: &str, final_url: &str) -> bool {
     }
 
     // Known cross-domain redirects (e.g., duosecurity.com -> duo.com)
-    let known_redirects = [
-        ("duosecurity.com", "duo.com"),
-    ];
+    let known_redirects = [("duosecurity.com", "duo.com")];
     for (from_domain, to_domain) in known_redirects {
         if original_core == from_domain && final_core == to_domain {
             return true;
@@ -496,7 +537,9 @@ pub fn analyze_response(status_code: u16, body: &str, detection: &DetectionConfi
 
     // Check for success indicators
     if status_code == 200 {
-        let has_success = detection.success_indicators.iter()
+        let has_success = detection
+            .success_indicators
+            .iter()
             .any(|ind| body_lower.contains(&ind.to_lowercase()));
 
         if has_success {
@@ -516,18 +559,27 @@ pub fn analyze_response(status_code: u16, body: &str, detection: &DetectionConfi
 }
 
 /// Analyze HTTP response and return matched indicator names for evidence
-fn analyze_response_with_evidence(status_code: u16, body: &str, detection: &DetectionConfig) -> (TenantStatus, Vec<String>) {
+fn analyze_response_with_evidence(
+    status_code: u16,
+    body: &str,
+    detection: &DetectionConfig,
+) -> (TenantStatus, Vec<String>) {
     let body_lower = body.to_lowercase();
 
     // Check for failure indicators first
     for indicator in &detection.failure_indicators {
         if body_lower.contains(&indicator.to_lowercase()) {
-            return (TenantStatus::NotFound, vec![format!("failure:{}", indicator)]);
+            return (
+                TenantStatus::NotFound,
+                vec![format!("failure:{}", indicator)],
+            );
         }
     }
 
     if status_code == 200 {
-        let matched: Vec<String> = detection.success_indicators.iter()
+        let matched: Vec<String> = detection
+            .success_indicators
+            .iter()
             .filter(|ind| body_lower.contains(&ind.to_lowercase()))
             .map(|ind| ind.clone())
             .collect();
@@ -540,9 +592,15 @@ fn analyze_response_with_evidence(status_code: u16, body: &str, detection: &Dete
             (TenantStatus::Unknown, vec![])
         }
     } else if status_code == 404 || status_code >= 400 {
-        (TenantStatus::NotFound, vec![format!("http_status:{}", status_code)])
+        (
+            TenantStatus::NotFound,
+            vec![format!("http_status:{}", status_code)],
+        )
     } else {
-        (TenantStatus::Unknown, vec![format!("http_status:{}", status_code)])
+        (
+            TenantStatus::Unknown,
+            vec![format!("http_status:{}", status_code)],
+        )
     }
 }
 
@@ -797,7 +855,12 @@ mod tests {
             body_length: body.len(),
             final_url: "https://account.box.com/login".to_string(),
         };
-        assert!(matches_baseline(200, body, "https://account.box.com/login", &baseline));
+        assert!(matches_baseline(
+            200,
+            body,
+            "https://account.box.com/login",
+            &baseline
+        ));
     }
 
     #[test]
@@ -812,7 +875,12 @@ mod tests {
             final_url: "https://app.example.com/login".to_string(),
         };
         // Hash won't match, but length is within tolerance
-        assert!(matches_baseline(200, &real_body, "https://app.example.com/other", &baseline));
+        assert!(matches_baseline(
+            200,
+            &real_body,
+            "https://app.example.com/other",
+            &baseline
+        ));
     }
 
     #[test]
@@ -826,7 +894,12 @@ mod tests {
             body_length: canary_body.len(),
             final_url: "https://app.example.com/login".to_string(),
         };
-        assert!(!matches_baseline(200, &real_body, "https://app.example.com/dashboard", &baseline));
+        assert!(!matches_baseline(
+            200,
+            &real_body,
+            "https://app.example.com/dashboard",
+            &baseline
+        ));
     }
 
     #[test]
@@ -839,7 +912,12 @@ mod tests {
             final_url: "https://account.box.com/login".to_string(),
         };
         // Different body but same final redirect URL
-        assert!(matches_baseline(200, "different content entirely", "https://account.box.com/login", &baseline));
+        assert!(matches_baseline(
+            200,
+            "different content entirely",
+            "https://account.box.com/login",
+            &baseline
+        ));
     }
 
     #[test]
@@ -853,7 +931,12 @@ mod tests {
             body_length: canary_body.len(),
             final_url: "https://klaviyo.okta.com/404".to_string(),
         };
-        assert!(!matches_baseline(200, real_body, "https://klaviyo.okta.com/login", &baseline));
+        assert!(!matches_baseline(
+            200,
+            real_body,
+            "https://klaviyo.okta.com/login",
+            &baseline
+        ));
     }
 
     #[test]
@@ -864,7 +947,10 @@ mod tests {
 
     #[test]
     fn test_compute_body_hash_different_content() {
-        assert_ne!(compute_body_hash("content A"), compute_body_hash("content B"));
+        assert_ne!(
+            compute_body_hash("content A"),
+            compute_body_hash("content B")
+        );
     }
 
     #[test]
@@ -877,6 +963,11 @@ mod tests {
             final_url: "https://example.com/a".to_string(),
         };
         // Status 200 vs baseline 302, same length, different hash, different URL
-        assert!(!matches_baseline(200, &"x".repeat(100), "https://example.com/b", &baseline));
+        assert!(!matches_baseline(
+            200,
+            &"x".repeat(100),
+            "https://example.com/b",
+            &baseline
+        ));
     }
 }

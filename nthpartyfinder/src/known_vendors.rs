@@ -10,7 +10,7 @@
 //! Lookup priority: Local overrides → VendorRegistry → Remote database → Base database
 
 use crate::vendor_registry;
-use anyhow::{Result, anyhow, Context};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -29,7 +29,10 @@ fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
     let cwd_config = PathBuf::from("./config");
     if cwd_config.exists() && cwd_config.is_dir() {
-        debug!("Found config directory at: {:?}", cwd_config.canonicalize().unwrap_or(cwd_config.clone()));
+        debug!(
+            "Found config directory at: {:?}",
+            cwd_config.canonicalize().unwrap_or(cwd_config.clone())
+        );
         return Some(cwd_config);
     }
 
@@ -39,7 +42,10 @@ fn find_config_dir() -> Option<PathBuf> {
             // Check config next to executable
             let exe_config = exe_dir.join("config");
             if exe_config.exists() && exe_config.is_dir() {
-                debug!("Found config directory next to executable: {:?}", exe_config);
+                debug!(
+                    "Found config directory next to executable: {:?}",
+                    exe_config
+                );
                 return Some(exe_config);
             }
 
@@ -47,7 +53,10 @@ fn find_config_dir() -> Option<PathBuf> {
             if let Some(parent) = exe_dir.parent() {
                 let parent_config = parent.join("config");
                 if parent_config.exists() && parent_config.is_dir() {
-                    debug!("Found config directory at parent of executable: {:?}", parent_config);
+                    debug!(
+                        "Found config directory at parent of executable: {:?}",
+                        parent_config
+                    );
                     return Some(parent_config);
                 }
 
@@ -55,7 +64,10 @@ fn find_config_dir() -> Option<PathBuf> {
                 if let Some(grandparent) = parent.parent() {
                     let grandparent_config = grandparent.join("config");
                     if grandparent_config.exists() && grandparent_config.is_dir() {
-                        debug!("Found config directory at grandparent of executable: {:?}", grandparent_config);
+                        debug!(
+                            "Found config directory at grandparent of executable: {:?}",
+                            grandparent_config
+                        );
                         return Some(grandparent_config);
                     }
                 }
@@ -216,7 +228,10 @@ impl KnownVendors {
             serde_json::from_str(&content)
                 .with_context(|| format!("Failed to parse known vendors from {:?}", base_path))?
         } else {
-            debug!("Known vendors database not found at {:?}, using empty database", base_path);
+            debug!(
+                "Known vendors database not found at {:?}, using empty database",
+                base_path
+            );
             KnownVendorsDatabase::default()
         };
 
@@ -229,10 +244,12 @@ impl KnownVendors {
 
         // Load local overrides (optional)
         let local_overrides = if overrides_path.exists() {
-            let content = fs::read_to_string(overrides_path)
-                .with_context(|| format!("Failed to read local overrides from {:?}", overrides_path))?;
-            let db: LocalOverridesDatabase = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse local overrides from {:?}", overrides_path))?;
+            let content = fs::read_to_string(overrides_path).with_context(|| {
+                format!("Failed to read local overrides from {:?}", overrides_path)
+            })?;
+            let db: LocalOverridesDatabase = serde_json::from_str(&content).with_context(|| {
+                format!("Failed to parse local overrides from {:?}", overrides_path)
+            })?;
             info!("Loaded {} local vendor overrides", db.overrides.len());
             db
         } else {
@@ -256,7 +273,10 @@ impl KnownVendors {
         // 1. Check local overrides first (highest priority)
         if let Ok(overrides) = self.local_overrides.read() {
             if let Some(override_entry) = overrides.overrides.get(&domain_lower) {
-                debug!("Found {} in local overrides: {}", domain, override_entry.organization);
+                debug!(
+                    "Found {} in local overrides: {}",
+                    domain, override_entry.organization
+                );
                 return Some(KnownVendorResult {
                     organization: override_entry.organization.clone(),
                     source: KnownVendorSource::LocalOverride,
@@ -301,7 +321,10 @@ impl KnownVendors {
             // Try local overrides for base domain
             if let Ok(overrides) = self.local_overrides.read() {
                 if let Some(override_entry) = overrides.overrides.get(&base_domain) {
-                    debug!("Found base domain {} in local overrides: {}", base_domain, override_entry.organization);
+                    debug!(
+                        "Found base domain {} in local overrides: {}",
+                        base_domain, override_entry.organization
+                    );
                     return Some(KnownVendorResult {
                         organization: override_entry.organization.clone(),
                         source: KnownVendorSource::LocalOverride,
@@ -311,7 +334,10 @@ impl KnownVendors {
 
             // Try VendorRegistry for base domain
             if let Some(org) = vendor_registry::lookup_organization(&base_domain) {
-                debug!("Found base domain {} in VendorRegistry: {}", base_domain, org);
+                debug!(
+                    "Found base domain {} in VendorRegistry: {}",
+                    base_domain, org
+                );
                 return Some(KnownVendorResult {
                     organization: org,
                     source: KnownVendorSource::VendorRegistry,
@@ -322,7 +348,10 @@ impl KnownVendors {
             if let Ok(remote_guard) = self.remote.read() {
                 if let Some(ref remote) = *remote_guard {
                     if let Some(org) = remote.vendors.get(&base_domain) {
-                        debug!("Found base domain {} in remote database: {}", base_domain, org);
+                        debug!(
+                            "Found base domain {} in remote database: {}",
+                            base_domain, org
+                        );
                         return Some(KnownVendorResult {
                             organization: org.clone(),
                             source: KnownVendorSource::Remote,
@@ -333,7 +362,10 @@ impl KnownVendors {
 
             // Try base database for base domain
             if let Some(org) = self.base.vendors.get(&base_domain) {
-                debug!("Found base domain {} in base database: {}", base_domain, org);
+                debug!(
+                    "Found base domain {} in base database: {}",
+                    base_domain, org
+                );
                 return Some(KnownVendorResult {
                     organization: org.clone(),
                     source: KnownVendorSource::Base,
@@ -356,9 +388,13 @@ impl KnownVendors {
 
         // Update in-memory
         {
-            let mut overrides = self.local_overrides.write()
+            let mut overrides = self
+                .local_overrides
+                .write()
                 .map_err(|_| anyhow!("Failed to acquire write lock on overrides"))?;
-            overrides.overrides.insert(domain_lower.clone(), override_entry);
+            overrides
+                .overrides
+                .insert(domain_lower.clone(), override_entry);
             overrides.updated = chrono::Utc::now().format("%Y-%m-%d").to_string();
             overrides.version = "1.0.0".to_string();
         }
@@ -372,7 +408,9 @@ impl KnownVendors {
 
     /// Save local overrides to disk
     fn save_overrides(&self) -> Result<()> {
-        let overrides = self.local_overrides.read()
+        let overrides = self
+            .local_overrides
+            .read()
             .map_err(|_| anyhow!("Failed to acquire read lock on overrides"))?;
 
         // Create parent directory if needed
@@ -383,7 +421,11 @@ impl KnownVendors {
         let content = serde_json::to_string_pretty(&*overrides)?;
         fs::write(&self.overrides_path, content)?;
 
-        debug!("Saved {} local overrides to {:?}", overrides.overrides.len(), self.overrides_path);
+        debug!(
+            "Saved {} local overrides to {:?}",
+            overrides.overrides.len(),
+            self.overrides_path
+        );
         Ok(())
     }
 
@@ -397,7 +439,8 @@ impl KnownVendors {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .header("Accept", "application/json")
             .send()
             .await
@@ -419,14 +462,14 @@ impl KnownVendors {
 
         info!(
             "Synced {} vendors from GitHub (version {}, updated {})",
-            vendor_count,
-            remote_db.version,
-            remote_db.updated
+            vendor_count, remote_db.version, remote_db.updated
         );
 
         // Update in-memory remote database
         {
-            let mut remote = self.remote.write()
+            let mut remote = self
+                .remote
+                .write()
                 .map_err(|_| anyhow!("Failed to acquire write lock on remote database"))?;
             *remote = Some(remote_db);
         }
@@ -438,11 +481,15 @@ impl KnownVendors {
     pub fn stats(&self) -> KnownVendorStats {
         let base_count = self.base.vendors.len();
 
-        let remote_count = self.remote.read()
+        let remote_count = self
+            .remote
+            .read()
             .map(|r| r.as_ref().map(|db| db.vendors.len()).unwrap_or(0))
             .unwrap_or(0);
 
-        let override_count = self.local_overrides.read()
+        let override_count = self
+            .local_overrides
+            .read()
             .map(|o| o.overrides.len())
             .unwrap_or(0);
 
@@ -513,8 +560,10 @@ fn extract_base_domain(domain: &str) -> String {
     } else {
         // Handle common TLDs like .co.uk, .com.au, etc.
         let last_two = format!("{}.{}", parts[parts.len() - 2], parts[parts.len() - 1]);
-        let compound_tlds = ["co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr",
-                            "com.br", "com.mx", "com.cn", "org.uk", "net.au"];
+        let compound_tlds = [
+            "co.uk", "co.au", "com.au", "co.nz", "co.jp", "co.kr", "com.br", "com.mx", "com.cn",
+            "org.uk", "net.au",
+        ];
 
         if compound_tlds.contains(&last_two.as_str()) && parts.len() > 2 {
             format!("{}.{}", parts[parts.len() - 3], last_two)
@@ -531,11 +580,15 @@ static KNOWN_VENDORS: std::sync::OnceLock<KnownVendors> = std::sync::OnceLock::n
 pub fn init() -> Result<()> {
     let kv = KnownVendors::load()?;
     let stats = kv.stats();
-    KNOWN_VENDORS.set(kv)
+    KNOWN_VENDORS
+        .set(kv)
         .map_err(|_| anyhow!("Known vendors already initialized"))?;
 
     if stats.base_count > 0 {
-        info!("Known vendors database initialized: {} vendors loaded", stats.base_count);
+        info!(
+            "Known vendors database initialized: {} vendors loaded",
+            stats.base_count
+        );
     } else {
         warn!("Known vendors database is empty - organization lookups will fall back to WHOIS/domain inference");
     }
@@ -575,8 +628,17 @@ mod tests {
     #[test]
     fn test_known_vendor_source_display() {
         assert_eq!(KnownVendorSource::Base.to_string(), "known_vendors");
-        assert_eq!(KnownVendorSource::Remote.to_string(), "known_vendors_remote");
-        assert_eq!(KnownVendorSource::LocalOverride.to_string(), "local_override");
-        assert_eq!(KnownVendorSource::VendorRegistry.to_string(), "vendor_registry");
+        assert_eq!(
+            KnownVendorSource::Remote.to_string(),
+            "known_vendors_remote"
+        );
+        assert_eq!(
+            KnownVendorSource::LocalOverride.to_string(),
+            "local_override"
+        );
+        assert_eq!(
+            KnownVendorSource::VendorRegistry.to_string(),
+            "vendor_registry"
+        );
     }
 }

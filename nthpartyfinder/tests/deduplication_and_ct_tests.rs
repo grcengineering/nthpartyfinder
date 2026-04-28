@@ -5,9 +5,9 @@
 //! 2. Exact duplicates (same domain + record_type + raw_record) are still deduplicated
 //! 3. CT log discovery works correctly
 
+use nthpartyfinder::discovery::CtLogDiscovery;
 use nthpartyfinder::dns;
 use nthpartyfinder::vendor::RecordType;
-use nthpartyfinder::discovery::CtLogDiscovery;
 use std::time::Duration;
 
 // ============================================================================
@@ -26,7 +26,10 @@ fn test_same_vendor_different_sources_appears_multiple_times() {
 
     // google.com appears in both SPF and verification records
     // With the fix, both should be reported (different record types + different raw records)
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
 
     // Deduplication is now by (domain, record_type, raw_record) tuple
     // So same domain from different sources should appear multiple times
@@ -41,11 +44,13 @@ fn test_same_vendor_different_sources_appears_multiple_times() {
     let source_types: Vec<_> = google_domains.iter().map(|d| &d.source_type).collect();
     assert!(
         source_types.contains(&&RecordType::DnsTxtSpf),
-        "Should have SPF source. Found: {:?}", source_types
+        "Should have SPF source. Found: {:?}",
+        source_types
     );
     assert!(
         source_types.contains(&&RecordType::DnsTxtVerification),
-        "Should have verification source. Found: {:?}", source_types
+        "Should have verification source. Found: {:?}",
+        source_types
     );
 }
 
@@ -55,12 +60,15 @@ fn test_exact_duplicate_records_still_deduplicated() {
     // are still deduplicated. This prevents reporting the same record twice.
     let records = vec![
         "v=spf1 include:_spf.google.com ~all".to_string(),
-        "v=spf1 include:_spf.google.com ~all".to_string(),  // Exact duplicate record
+        "v=spf1 include:_spf.google.com ~all".to_string(), // Exact duplicate record
     ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Should only appear once since it's the exact same (domain, record_type, raw_record)
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
     assert_eq!(
         google_domains.len(),
         1,
@@ -80,7 +88,10 @@ fn test_same_domain_same_type_different_raw_records() {
 
     // Both records are SPF, but have different raw_record values
     // Each raw record produces google.com, so we should have 2 entries
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
     assert_eq!(
         google_domains.len(),
         2,
@@ -89,12 +100,17 @@ fn test_same_domain_same_type_different_raw_records() {
     );
 
     // Verify both are SPF type
-    assert!(google_domains.iter().all(|d| d.source_type == RecordType::DnsTxtSpf));
+    assert!(google_domains
+        .iter()
+        .all(|d| d.source_type == RecordType::DnsTxtSpf));
 
     // Verify different raw records
     let raw_records: Vec<_> = google_domains.iter().map(|d| &d.raw_record).collect();
     assert_eq!(raw_records.len(), 2);
-    assert_ne!(raw_records[0], raw_records[1], "Raw records should be different");
+    assert_ne!(
+        raw_records[0], raw_records[1],
+        "Raw records should be different"
+    );
 }
 
 #[test]
@@ -107,7 +123,10 @@ fn test_vendor_from_spf_dmarc_and_verification() {
     ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
 
     // Should appear 3 times - once for each source type
     assert_eq!(
@@ -119,9 +138,18 @@ fn test_vendor_from_spf_dmarc_and_verification() {
 
     // Verify we have all three source types
     let source_types: Vec<_> = google_domains.iter().map(|d| &d.source_type).collect();
-    assert!(source_types.contains(&&RecordType::DnsTxtSpf), "Should have SPF");
-    assert!(source_types.contains(&&RecordType::DnsTxtDmarc), "Should have DMARC");
-    assert!(source_types.contains(&&RecordType::DnsTxtVerification), "Should have Verification");
+    assert!(
+        source_types.contains(&&RecordType::DnsTxtSpf),
+        "Should have SPF"
+    );
+    assert!(
+        source_types.contains(&&RecordType::DnsTxtDmarc),
+        "Should have DMARC"
+    );
+    assert!(
+        source_types.contains(&&RecordType::DnsTxtVerification),
+        "Should have Verification"
+    );
 }
 
 #[test]
@@ -135,7 +163,10 @@ fn test_within_same_spf_record_still_deduplicated() {
 
     // All references resolve to google.com, but they're from the same raw_record
     // So they should be deduplicated to 1
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
     assert_eq!(
         google_domains.len(),
         1,
@@ -170,16 +201,40 @@ fn test_ct_log_discovery_infrastructure_filtering() {
 // Helper function to test infrastructure domain filtering
 fn is_infrastructure(domain: &str) -> bool {
     let infrastructure_domains = [
-        "cloudflare.com", "cloudflare.net", "cloudfront.net",
-        "akamai.com", "akamaiedge.net", "fastly.net", "fastly.com",
-        "edgekey.net", "edgesuite.net", "amazonaws.com", "azure.com",
-        "azurewebsites.net", "azureedge.net", "googleusercontent.com",
-        "googlesyndication.com", "gstatic.com", "letsencrypt.org",
-        "digicert.com", "comodo.com", "godaddy.com", "rapidssl.com",
-        "geotrust.com", "thawte.com", "entrust.net", "globalsign.com",
-        "sectigo.com", "localhost", "local", "test", "example.com",
+        "cloudflare.com",
+        "cloudflare.net",
+        "cloudfront.net",
+        "akamai.com",
+        "akamaiedge.net",
+        "fastly.net",
+        "fastly.com",
+        "edgekey.net",
+        "edgesuite.net",
+        "amazonaws.com",
+        "azure.com",
+        "azurewebsites.net",
+        "azureedge.net",
+        "googleusercontent.com",
+        "googlesyndication.com",
+        "gstatic.com",
+        "letsencrypt.org",
+        "digicert.com",
+        "comodo.com",
+        "godaddy.com",
+        "rapidssl.com",
+        "geotrust.com",
+        "thawte.com",
+        "entrust.net",
+        "globalsign.com",
+        "sectigo.com",
+        "localhost",
+        "local",
+        "test",
+        "example.com",
     ];
-    infrastructure_domains.iter().any(|&infra| domain.ends_with(infra) || domain == infra)
+    infrastructure_domains
+        .iter()
+        .any(|&infra| domain.ends_with(infra) || domain == infra)
 }
 
 #[test]
@@ -206,13 +261,19 @@ async fn test_ct_log_discovery_real_domain() {
         Ok(vendors) => {
             // Google should have some CT log entries with third-party domains
             // (or at least not error out)
-            println!("Found {} vendors from CT logs for google.com", vendors.len());
+            println!(
+                "Found {} vendors from CT logs for google.com",
+                vendors.len()
+            );
 
             // Verify result structure if any vendors found
             for vendor in &vendors {
                 assert!(!vendor.domain.is_empty(), "Domain should not be empty");
                 assert!(!vendor.source.is_empty(), "Source should not be empty");
-                assert!(!vendor.certificate_info.is_empty(), "Certificate info should not be empty");
+                assert!(
+                    !vendor.certificate_info.is_empty(),
+                    "Certificate info should not be empty"
+                );
             }
         }
         Err(e) => {
@@ -227,12 +288,18 @@ async fn test_ct_log_discovery_nonexistent_domain() {
     // Test behavior with a domain that has no CT log entries
     let discovery = CtLogDiscovery::new(Duration::from_secs(30));
 
-    let result = discovery.discover("this-domain-definitely-does-not-exist-xyz123.com").await;
+    let result = discovery
+        .discover("this-domain-definitely-does-not-exist-xyz123.com")
+        .await;
 
     match result {
         Ok(vendors) => {
             // Should return empty list for nonexistent domain
-            assert_eq!(vendors.len(), 0, "Nonexistent domain should have no CT log entries");
+            assert_eq!(
+                vendors.len(),
+                0,
+                "Nonexistent domain should have no CT log entries"
+            );
         }
         Err(e) => {
             // API error is acceptable
@@ -255,8 +322,8 @@ fn test_subprocessor_record_type_survives_preprocess_dedup() {
     // Simulate the pre-processing dedup from main.rs lines 1305-1318.
     // DNS TXT records come BEFORE subprocessor results in all_vendor_domains.
     // The dedup must prefer HttpSubprocessor over DNS-based record types.
-    use std::collections::HashMap;
     use nthpartyfinder::domain_utils;
+    use std::collections::HashMap;
 
     let all_vendor_domains: Vec<dns::VendorDomain> = vec![
         // DNS TXT records (added first in the pipeline)
@@ -352,7 +419,10 @@ fn test_subprocessor_record_type_survives_preprocess_dedup() {
         let base = domain_utils::extract_base_domain(&vd.domain);
         if let Some(&existing_idx) = seen_domains.get(&base) {
             if matches!(vd.source_type, RecordType::HttpSubprocessor)
-                && !matches!(deduped[existing_idx].source_type, RecordType::HttpSubprocessor)
+                && !matches!(
+                    deduped[existing_idx].source_type,
+                    RecordType::HttpSubprocessor
+                )
             {
                 deduped[existing_idx] = vd;
             }
@@ -364,41 +434,66 @@ fn test_subprocessor_record_type_survives_preprocess_dedup() {
 
     // Total unique base domains: 10 (anthropic, dropbox, microsoft, openai, zendesk,
     // mailgun, google, ada, chronosphere, snowflake)
-    assert_eq!(deduped.len(), 10, "Should have 10 unique vendor domains after dedup");
+    assert_eq!(
+        deduped.len(),
+        10,
+        "Should have 10 unique vendor domains after dedup"
+    );
 
     // All 6 overlapping vendors MUST be HttpSubprocessor (the core regression check)
-    let overlapping_domains = ["anthropic.com", "dropbox.com", "microsoft.com",
-                               "openai.com", "zendesk.com", "mailgun.com"];
+    let overlapping_domains = [
+        "anthropic.com",
+        "dropbox.com",
+        "microsoft.com",
+        "openai.com",
+        "zendesk.com",
+        "mailgun.com",
+    ];
     for domain in &overlapping_domains {
-        let entry = deduped.iter().find(|vd| vd.domain == *domain)
+        let entry = deduped
+            .iter()
+            .find(|vd| vd.domain == *domain)
             .unwrap_or_else(|| panic!("Missing domain: {}", domain));
         assert_eq!(
             entry.source_type,
             RecordType::HttpSubprocessor,
             "Domain {} should have HttpSubprocessor record type, got {:?}",
-            domain, entry.source_type
+            domain,
+            entry.source_type
         );
     }
 
     // Subprocessor-only entries should remain HttpSubprocessor
     for domain in &["ada.cx", "chronosphere.io", "snowflake.com"] {
-        let entry = deduped.iter().find(|vd| vd.domain == *domain)
+        let entry = deduped
+            .iter()
+            .find(|vd| vd.domain == *domain)
             .unwrap_or_else(|| panic!("Missing domain: {}", domain));
-        assert_eq!(entry.source_type, RecordType::HttpSubprocessor,
-            "Subprocessor-only domain {} should remain HttpSubprocessor", domain);
+        assert_eq!(
+            entry.source_type,
+            RecordType::HttpSubprocessor,
+            "Subprocessor-only domain {} should remain HttpSubprocessor",
+            domain
+        );
     }
 
     // google.com (DNS-only, no subprocessor overlap) should keep its DNS type
     let google = deduped.iter().find(|vd| vd.domain == "google.com").unwrap();
-    assert_eq!(google.source_type, RecordType::DnsTxtVerification,
-        "DNS-only domain should keep its original record type");
+    assert_eq!(
+        google.source_type,
+        RecordType::DnsTxtVerification,
+        "DNS-only domain should keep its original record type"
+    );
 
     // Count total HttpSubprocessor entries
-    let subprocessor_count = deduped.iter()
+    let subprocessor_count = deduped
+        .iter()
         .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
         .count();
-    assert_eq!(subprocessor_count, 9,
-        "Should have 9 HttpSubprocessor entries (6 overlapping + 3 subprocessor-only)");
+    assert_eq!(
+        subprocessor_count, 9,
+        "Should have 9 HttpSubprocessor entries (6 overlapping + 3 subprocessor-only)"
+    );
 }
 
 #[test]
@@ -459,18 +554,34 @@ fn test_postprocess_dedup_preserves_subprocessor_record_type() {
     }
 
     // With type-aware dedup, different source types are SEPARATE rows
-    assert_eq!(deduped.len(), 2, "Different source types should produce separate rows");
+    assert_eq!(
+        deduped.len(),
+        2,
+        "Different source types should produce separate rows"
+    );
 
     // Find each row by record type
-    let verification_row = deduped.iter().find(|r| r.nth_party_record_type == RecordType::DnsTxtVerification)
+    let verification_row = deduped
+        .iter()
+        .find(|r| r.nth_party_record_type == RecordType::DnsTxtVerification)
         .expect("Should have a DnsTxtVerification row");
-    let subprocessor_row = deduped.iter().find(|r| r.nth_party_record_type == RecordType::HttpSubprocessor)
+    let subprocessor_row = deduped
+        .iter()
+        .find(|r| r.nth_party_record_type == RecordType::HttpSubprocessor)
         .expect("Should have an HttpSubprocessor row");
 
-    assert!(verification_row.evidence.contains("anthropic-domain-verification"),
-        "Verification row should have DNS evidence");
-    assert!(subprocessor_row.evidence.contains("Found on subprocessor page"),
-        "Subprocessor row should have subprocessor evidence");
+    assert!(
+        verification_row
+            .evidence
+            .contains("anthropic-domain-verification"),
+        "Verification row should have DNS evidence"
+    );
+    assert!(
+        subprocessor_row
+            .evidence
+            .contains("Found on subprocessor page"),
+        "Subprocessor row should have subprocessor evidence"
+    );
 }
 
 #[test]
@@ -584,32 +695,69 @@ fn test_postprocess_dedup_spf_preserved_alongside_verification() {
     }
 
     // Google: 3 separate rows (SPF, Verification, SaaS Tenant)
-    let google_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "google.com").collect();
-    assert_eq!(google_rows.len(), 3,
+    let google_rows: Vec<_> = deduped
+        .iter()
+        .filter(|r| r.nth_party_domain == "google.com")
+        .collect();
+    assert_eq!(
+        google_rows.len(),
+        3,
         "Google should have 3 separate rows (SPF + Verification + SaaS Tenant), got {}",
-        google_rows.len());
-    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
-        "Google must have an SPF row");
-    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtVerification),
-        "Google must have a Verification row");
-    assert!(google_rows.iter().any(|r| r.nth_party_record_type == RecordType::SaasTenantProbe),
-        "Google must have a SaaS Tenant row");
+        google_rows.len()
+    );
+    assert!(
+        google_rows
+            .iter()
+            .any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
+        "Google must have an SPF row"
+    );
+    assert!(
+        google_rows
+            .iter()
+            .any(|r| r.nth_party_record_type == RecordType::DnsTxtVerification),
+        "Google must have a Verification row"
+    );
+    assert!(
+        google_rows
+            .iter()
+            .any(|r| r.nth_party_record_type == RecordType::SaasTenantProbe),
+        "Google must have a SaaS Tenant row"
+    );
 
     // Zendesk: 2 separate rows (SPF, SaaS Tenant)
-    let zendesk_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "zendesk.com").collect();
-    assert_eq!(zendesk_rows.len(), 2,
+    let zendesk_rows: Vec<_> = deduped
+        .iter()
+        .filter(|r| r.nth_party_domain == "zendesk.com")
+        .collect();
+    assert_eq!(
+        zendesk_rows.len(),
+        2,
         "Zendesk should have 2 separate rows (SPF + SaaS Tenant), got {}",
-        zendesk_rows.len());
-    assert!(zendesk_rows.iter().any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
-        "Zendesk must have an SPF row");
+        zendesk_rows.len()
+    );
+    assert!(
+        zendesk_rows
+            .iter()
+            .any(|r| r.nth_party_record_type == RecordType::DnsTxtSpf),
+        "Zendesk must have an SPF row"
+    );
 
     // Salesforce: 1 row (SPF only)
-    let salesforce_rows: Vec<_> = deduped.iter().filter(|r| r.nth_party_domain == "salesforce.com").collect();
-    assert_eq!(salesforce_rows.len(), 1,
+    let salesforce_rows: Vec<_> = deduped
+        .iter()
+        .filter(|r| r.nth_party_domain == "salesforce.com")
+        .collect();
+    assert_eq!(
+        salesforce_rows.len(),
+        1,
         "Salesforce should have 1 row (SPF only), got {}",
-        salesforce_rows.len());
-    assert_eq!(salesforce_rows[0].nth_party_record_type, RecordType::DnsTxtSpf,
-        "Salesforce row must be SPF");
+        salesforce_rows.len()
+    );
+    assert_eq!(
+        salesforce_rows[0].nth_party_record_type,
+        RecordType::DnsTxtSpf,
+        "Salesforce row must be SPF"
+    );
 
     // Total: 6 rows (3 google + 2 zendesk + 1 salesforce)
     assert_eq!(deduped.len(), 6, "Total should be 6 rows");
@@ -671,8 +819,14 @@ fn test_postprocess_dedup_merges_evidence_within_same_source_type() {
 
     // Same source type → merged into 1 row with combined evidence
     assert_eq!(deduped.len(), 1, "Same source type should merge into 1 row");
-    assert!(deduped[0].evidence.contains("_spf.google.com"), "Should contain first SPF evidence");
-    assert!(deduped[0].evidence.contains("mail.google.com"), "Should contain second SPF evidence");
+    assert!(
+        deduped[0].evidence.contains("_spf.google.com"),
+        "Should contain first SPF evidence"
+    );
+    assert!(
+        deduped[0].evidence.contains("mail.google.com"),
+        "Should contain second SPF evidence"
+    );
 }
 
 #[test]
@@ -680,17 +834,35 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
     // End-to-end regression test simulating the exact Klaviyo scenario:
     // 24 subprocessors extracted, 6 overlap with DNS TXT records.
     // All 24 must survive the pre-processing dedup as HttpSubprocessor.
-    use std::collections::HashMap;
     use nthpartyfinder::domain_utils;
+    use std::collections::HashMap;
 
     // The 24 subprocessors from Klaviyo's subprocessor page
     let subprocessor_domains = vec![
-        "ada.cx", "aws.amazon.com", "anthropic.com", "chronosphere.io",
-        "cloudflare.com", "concentrix.com", "dropbox.com", "ectusa.net",
-        "fivetran.com", "sentry.io", "glean.com", "infobip.com",
-        "loom.com", "mailgun.com", "meta.com", "microsoft.com",
-        "openai.com", "sendgrid.com", "sendsafely.com", "snowflake.com",
-        "splunk.com", "statsig.com", "twilio.com", "zendesk.com",
+        "ada.cx",
+        "aws.amazon.com",
+        "anthropic.com",
+        "chronosphere.io",
+        "cloudflare.com",
+        "concentrix.com",
+        "dropbox.com",
+        "ectusa.net",
+        "fivetran.com",
+        "sentry.io",
+        "glean.com",
+        "infobip.com",
+        "loom.com",
+        "mailgun.com",
+        "meta.com",
+        "microsoft.com",
+        "openai.com",
+        "sendgrid.com",
+        "sendsafely.com",
+        "snowflake.com",
+        "splunk.com",
+        "statsig.com",
+        "twilio.com",
+        "zendesk.com",
     ];
 
     // The 6 that overlap with DNS TXT records
@@ -745,7 +917,10 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
         let base = domain_utils::extract_base_domain(&vd.domain);
         if let Some(&existing_idx) = seen_domains.get(&base) {
             if matches!(vd.source_type, RecordType::HttpSubprocessor)
-                && !matches!(deduped[existing_idx].source_type, RecordType::HttpSubprocessor)
+                && !matches!(
+                    deduped[existing_idx].source_type,
+                    RecordType::HttpSubprocessor
+                )
             {
                 deduped[existing_idx] = vd;
             }
@@ -756,14 +931,16 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
     }
 
     // Count how many HttpSubprocessor entries survived
-    let subprocessor_count = deduped.iter()
+    let subprocessor_count = deduped
+        .iter()
         .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
         .count();
 
     // THE KEY ASSERTION: All 24 subprocessors must be present as HttpSubprocessor
     // (not 18, which was the bug)
     // Note: aws.amazon.com dedupes to amazon.com base domain, so we count unique bases
-    let subprocessor_bases: std::collections::HashSet<String> = deduped.iter()
+    let subprocessor_bases: std::collections::HashSet<String> = deduped
+        .iter()
         .filter(|vd| matches!(vd.source_type, RecordType::HttpSubprocessor))
         .map(|vd| domain_utils::extract_base_domain(&vd.domain))
         .collect();
@@ -772,18 +949,24 @@ fn test_klaviyo_scenario_24_subprocessors_preserved() {
         "Expected at least 23 unique subprocessor base domains (24 domains, \
          aws.amazon.com shares base with amazon.com), got {}. \
          Subprocessor domains found: {:?}",
-        subprocessor_bases.len(), subprocessor_bases
+        subprocessor_bases.len(),
+        subprocessor_bases
     );
 
     // Verify the 6 overlapping domains specifically
     for (domain, _) in &dns_overlap_domains {
         let base = domain_utils::extract_base_domain(domain);
-        let entry = deduped.iter().find(|vd| domain_utils::extract_base_domain(&vd.domain) == base)
+        let entry = deduped
+            .iter()
+            .find(|vd| domain_utils::extract_base_domain(&vd.domain) == base)
             .unwrap_or_else(|| panic!("Missing domain: {}", domain));
         assert_eq!(
-            entry.source_type, RecordType::HttpSubprocessor,
+            entry.source_type,
+            RecordType::HttpSubprocessor,
             "Overlapping domain {} (base: {}) must be HttpSubprocessor after dedup, got {:?}",
-            domain, base, entry.source_type
+            domain,
+            base,
+            entry.source_type
         );
     }
 }
@@ -818,12 +1001,24 @@ fn test_full_extraction_preserves_all_sources() {
 
     let google_count = domains.iter().filter(|d| d.domain == "google.com").count();
     let mailgun_count = domains.iter().filter(|d| d.domain == "mailgun.org").count();
-    let proofpoint_count = domains.iter().filter(|d| d.domain == "proofpoint.com").count();
-    let facebook_count = domains.iter().filter(|d| d.domain == "facebook.com").count();
-    let microsoft_count = domains.iter().filter(|d| d.domain == "microsoft.com").count();
+    let proofpoint_count = domains
+        .iter()
+        .filter(|d| d.domain == "proofpoint.com")
+        .count();
+    let facebook_count = domains
+        .iter()
+        .filter(|d| d.domain == "facebook.com")
+        .count();
+    let microsoft_count = domains
+        .iter()
+        .filter(|d| d.domain == "microsoft.com")
+        .count();
 
     // Google appears in SPF and verification
-    assert_eq!(google_count, 2, "Google should appear twice (SPF + verification)");
+    assert_eq!(
+        google_count, 2,
+        "Google should appear twice (SPF + verification)"
+    );
 
     // Others appear once each
     assert_eq!(mailgun_count, 1, "Mailgun should appear once");

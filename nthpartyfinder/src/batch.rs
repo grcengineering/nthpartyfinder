@@ -7,11 +7,11 @@
 //! - Individual and combined output options
 //! - Error resilience (continue processing if individual domains fail)
 
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::fs;
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 
 /// Represents a domain entry from a batch input file
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,7 +93,12 @@ pub enum InputFormat {
 impl InputFormat {
     /// Detect format from file extension
     pub fn from_path(path: &Path) -> Option<Self> {
-        match path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref()
+        {
             Some("csv") => Some(Self::Csv),
             Some("json") => Some(Self::Json),
             _ => None,
@@ -103,8 +108,10 @@ impl InputFormat {
 
 /// Parse domain list from a file (auto-detects format from extension)
 pub fn parse_domain_file(path: &Path) -> Result<Vec<DomainEntry>> {
-    let format = InputFormat::from_path(path)
-        .context(format!("Cannot determine input format from file extension. Expected .csv or .json: {}", path.display()))?;
+    let format = InputFormat::from_path(path).context(format!(
+        "Cannot determine input format from file extension. Expected .csv or .json: {}",
+        path.display()
+    ))?;
 
     let content = fs::read_to_string(path)
         .context(format!("Failed to read input file: {}", path.display()))?;
@@ -139,19 +146,23 @@ pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
             .flexible(true)
             .from_reader(content.as_bytes());
 
-        let headers = reader.headers()
+        let headers = reader
+            .headers()
             .context("Failed to read CSV headers")?
             .clone();
 
         // Find column indices
-        let domain_idx = headers.iter().position(|h| h.to_lowercase() == "domain")
+        let domain_idx = headers
+            .iter()
+            .position(|h| h.to_lowercase() == "domain")
             .context("CSV must have a 'domain' column when using headers")?;
         let label_idx = headers.iter().position(|h| h.to_lowercase() == "label");
 
         for result in reader.records() {
             let record = result.context("Failed to parse CSV record")?;
 
-            let domain = record.get(domain_idx)
+            let domain = record
+                .get(domain_idx)
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
 
@@ -198,8 +209,8 @@ pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
 /// 2. Array of objects with "domain" field: [{"domain": "example.com"}, {"domain": "test.org"}]
 /// 3. Object with "domains" array: {"domains": ["example.com", "test.org"]}
 pub fn parse_json_domains(content: &str) -> Result<Vec<DomainEntry>> {
-    let value: serde_json::Value = serde_json::from_str(content)
-        .context("Failed to parse JSON content")?;
+    let value: serde_json::Value =
+        serde_json::from_str(content).context("Failed to parse JSON content")?;
 
     // Try to extract domains from various JSON structures
     let entries = match &value {
@@ -244,12 +255,16 @@ fn parse_json_array(arr: &[serde_json::Value]) -> Result<Vec<DomainEntry>> {
                 if let Some(serde_json::Value::String(domain)) = obj.get("domain") {
                     let domain = domain.trim();
                     if !domain.is_empty() && is_valid_domain(domain) {
-                        let label = obj.get("label")
+                        let label = obj
+                            .get("label")
                             .and_then(|v| v.as_str())
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty());
 
-                        entries.push(DomainEntry { domain: domain.to_string(), label });
+                        entries.push(DomainEntry {
+                            domain: domain.to_string(),
+                            label,
+                        });
                     }
                 }
             }
@@ -276,8 +291,11 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Must not start or end with dot or hyphen
-    if domain.starts_with('.') || domain.ends_with('.')
-        || domain.starts_with('-') || domain.ends_with('-') {
+    if domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.starts_with('-')
+        || domain.ends_with('-')
+    {
         return false;
     }
 
@@ -287,7 +305,9 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Check for valid characters
-    domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    domain
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 /// Generate a unique output filename for a domain
@@ -298,11 +318,13 @@ pub fn domain_output_filename(domain: &str, format: &str) -> String {
 
 /// Export batch summary to JSON file
 pub fn export_batch_summary(summary: &BatchSummary, output_path: &Path) -> Result<()> {
-    let json = serde_json::to_string_pretty(summary)
-        .context("Failed to serialize batch summary")?;
+    let json =
+        serde_json::to_string_pretty(summary).context("Failed to serialize batch summary")?;
 
-    fs::write(output_path, json)
-        .context(format!("Failed to write batch summary to: {}", output_path.display()))?;
+    fs::write(output_path, json).context(format!(
+        "Failed to write batch summary to: {}",
+        output_path.display()
+    ))?;
 
     Ok(())
 }
@@ -327,7 +349,11 @@ pub fn finalize_batch_summary(summary: &mut BatchSummary) {
     summary.total_domains = summary.domain_results.len();
     summary.successful = summary.domain_results.iter().filter(|r| r.success).count();
     summary.failed = summary.domain_results.iter().filter(|r| !r.success).count();
-    summary.total_relationships = summary.domain_results.iter().map(|r| r.relationship_count).sum();
+    summary.total_relationships = summary
+        .domain_results
+        .iter()
+        .map(|r| r.relationship_count)
+        .sum();
 }
 
 #[cfg(test)]
@@ -506,10 +532,22 @@ mod tests {
 
     #[test]
     fn test_input_format_detection() {
-        assert_eq!(InputFormat::from_path(Path::new("domains.csv")), Some(InputFormat::Csv));
-        assert_eq!(InputFormat::from_path(Path::new("domains.CSV")), Some(InputFormat::Csv));
-        assert_eq!(InputFormat::from_path(Path::new("domains.json")), Some(InputFormat::Json));
-        assert_eq!(InputFormat::from_path(Path::new("domains.JSON")), Some(InputFormat::Json));
+        assert_eq!(
+            InputFormat::from_path(Path::new("domains.csv")),
+            Some(InputFormat::Csv)
+        );
+        assert_eq!(
+            InputFormat::from_path(Path::new("domains.CSV")),
+            Some(InputFormat::Csv)
+        );
+        assert_eq!(
+            InputFormat::from_path(Path::new("domains.json")),
+            Some(InputFormat::Json)
+        );
+        assert_eq!(
+            InputFormat::from_path(Path::new("domains.JSON")),
+            Some(InputFormat::Json)
+        );
         assert_eq!(InputFormat::from_path(Path::new("domains.txt")), None);
         assert_eq!(InputFormat::from_path(Path::new("domains")), None);
     }

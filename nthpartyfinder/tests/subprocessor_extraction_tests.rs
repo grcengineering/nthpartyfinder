@@ -1,4 +1,4 @@
-use nthpartyfinder::subprocessor::{SubprocessorAnalyzer, ExtractionPatterns};
+use nthpartyfinder::subprocessor::{ExtractionPatterns, SubprocessorAnalyzer};
 use nthpartyfinder::vendor::RecordType;
 use scraper::Html;
 
@@ -6,7 +6,7 @@ use scraper::Html;
 #[tokio::test]
 async fn test_organization_name_extraction_from_table() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Test HTML with a typical subprocessor table containing organization names
     let html_content = r#"
     <html>
@@ -51,41 +51,61 @@ async fn test_organization_name_extraction_from_table() {
         </body>
     </html>
     "#;
-    
+
     let document = Html::parse_document(html_content);
-    let result = analyzer.extract_from_tables(&document, html_content, "https://example.com/subprocessors");
-    
+    let result =
+        analyzer.extract_from_tables(&document, html_content, "https://example.com/subprocessors");
+
     assert!(result.is_ok(), "Table extraction should succeed");
     let vendors = result.unwrap();
-    
+
     // Should extract domains from organization names
-    assert!(vendors.len() >= 3, "Should extract at least 3 vendor domains, found: {}", vendors.len());
-    
+    assert!(
+        vendors.len() >= 3,
+        "Should extract at least 3 vendor domains, found: {}",
+        vendors.len()
+    );
+
     // Check for expected domains extracted from organization names
     let domains: Vec<String> = vendors.iter().map(|v| v.domain.clone()).collect();
-    
+
     // These should be extracted based on organization name patterns
-    assert!(domains.contains(&"stripe.com".to_string()), 
-            "Should extract stripe.com from 'Stripe Inc.', found domains: {:?}", domains);
-    assert!(domains.contains(&"sentry.io".to_string()), 
-            "Should extract sentry.io from explicit domain in parentheses, found domains: {:?}", domains);
-    assert!(domains.contains(&"sendgrid.com".to_string()) || domains.contains(&"twilio.com".to_string()), 
-            "Should extract domain from SendGrid/Twilio organization, found domains: {:?}", domains);
-    
+    assert!(
+        domains.contains(&"stripe.com".to_string()),
+        "Should extract stripe.com from 'Stripe Inc.', found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"sentry.io".to_string()),
+        "Should extract sentry.io from explicit domain in parentheses, found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"sendgrid.com".to_string())
+            || domains.contains(&"twilio.com".to_string()),
+        "Should extract domain from SendGrid/Twilio organization, found domains: {:?}",
+        domains
+    );
+
     // Verify source type is correct
     for vendor in &vendors {
-        assert_eq!(vendor.source_type, RecordType::HttpSubprocessor, 
-                  "All extracted vendors should have HttpSubprocessor source type");
-        assert!(!vendor.raw_record.is_empty(), 
-                "Raw record should contain evidence of extraction");
+        assert_eq!(
+            vendor.source_type,
+            RecordType::HttpSubprocessor,
+            "All extracted vendors should have HttpSubprocessor source type"
+        );
+        assert!(
+            !vendor.raw_record.is_empty(),
+            "Raw record should contain evidence of extraction"
+        );
     }
 }
 
 /// Test organization name extraction from list structures
-#[tokio::test] 
+#[tokio::test]
 async fn test_organization_name_extraction_from_lists() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     let html_content = r#"
     <html>
         <body>
@@ -110,73 +130,117 @@ async fn test_organization_name_extraction_from_lists() {
         </body>
     </html>
     "#;
-    
+
     let document = Html::parse_document(html_content);
-    let result = analyzer.extract_from_lists(&document, html_content, "https://example.com/vendors");
-    
+    let result =
+        analyzer.extract_from_lists(&document, html_content, "https://example.com/vendors");
+
     assert!(result.is_ok(), "List extraction should succeed");
     let vendors = result.unwrap();
-    
-    assert!(vendors.len() >= 4, "Should extract at least 4 vendor domains, found: {}", vendors.len());
-    
+
+    assert!(
+        vendors.len() >= 4,
+        "Should extract at least 4 vendor domains, found: {}",
+        vendors.len()
+    );
+
     let domains: Vec<String> = vendors.iter().map(|v| v.domain.clone()).collect();
-    
+
     // Test various organization name to domain mappings
-    assert!(domains.contains(&"github.com".to_string()), 
-            "Should extract github.com from 'GitHub, Inc.', found domains: {:?}", domains);
-    assert!(domains.contains(&"slack.com".to_string()), 
-            "Should extract slack.com from 'Slack Technologies, Inc.', found domains: {:?}", domains);
-    assert!(domains.contains(&"atlassian.com".to_string()), 
-            "Should extract atlassian.com from explicit domain, found domains: {:?}", domains);
-    assert!(domains.contains(&"datadog.com".to_string()) || domains.contains(&"datadoghq.com".to_string()), 
-            "Should extract datadog domain from 'Datadog, Inc.', found domains: {:?}", domains);
-    
+    assert!(
+        domains.contains(&"github.com".to_string()),
+        "Should extract github.com from 'GitHub, Inc.', found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"slack.com".to_string()),
+        "Should extract slack.com from 'Slack Technologies, Inc.', found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"atlassian.com".to_string()),
+        "Should extract atlassian.com from explicit domain, found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"datadog.com".to_string())
+            || domains.contains(&"datadoghq.com".to_string()),
+        "Should extract datadog domain from 'Datadog, Inc.', found domains: {:?}",
+        domains
+    );
+
     // Check for advanced extractions
-    assert!(domains.contains(&"microsoft.com".to_string()) || domains.contains(&"azure.microsoft.com".to_string()), 
-            "Should extract Microsoft domain, found domains: {:?}", domains);
-    assert!(domains.contains(&"mailgun.com".to_string()) || domains.contains(&"mailgun.org".to_string()), 
-            "Should extract Mailgun domain, found domains: {:?}", domains);
+    assert!(
+        domains.contains(&"microsoft.com".to_string())
+            || domains.contains(&"azure.microsoft.com".to_string()),
+        "Should extract Microsoft domain, found domains: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"mailgun.com".to_string())
+            || domains.contains(&"mailgun.org".to_string()),
+        "Should extract Mailgun domain, found domains: {:?}",
+        domains
+    );
 }
 
 /// Test organization name extraction with various naming patterns
 #[tokio::test]
 async fn test_organization_name_patterns() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Test individual organization name to domain extraction through text processing
     let test_cases = vec![
         // Standard company names with context
-        ("Partner: Stripe Inc. provides payment processing", Some("stripe.com")),
-        ("Services from Google LLC for analytics", Some("google.com")),  
-        ("Microsoft Corporation handles our cloud needs", Some("microsoft.com")),
-        
+        (
+            "Partner: Stripe Inc. provides payment processing",
+            Some("stripe.com"),
+        ),
+        ("Services from Google LLC for analytics", Some("google.com")),
+        (
+            "Microsoft Corporation handles our cloud needs",
+            Some("microsoft.com"),
+        ),
         // Names with explicit domains in parentheses
-        ("Sentry (sentry.io) handles error monitoring", Some("sentry.io")),
-        ("Atlassian Corporation (atlassian.com) for project management", Some("atlassian.com")),
-        ("Twilio Inc. (twilio.com) for communications", Some("twilio.com")),
-        
+        (
+            "Sentry (sentry.io) handles error monitoring",
+            Some("sentry.io"),
+        ),
+        (
+            "Atlassian Corporation (atlassian.com) for project management",
+            Some("atlassian.com"),
+        ),
+        (
+            "Twilio Inc. (twilio.com) for communications",
+            Some("twilio.com"),
+        ),
         // Complex names that might extract domains
         ("Slack Technologies, Inc. at slack.com", Some("slack.com")),
         ("Zoom Video Communications via zoom.us", Some("zoom.us")),
         ("Adobe Systems at adobe.com", Some("adobe.com")),
-        
         // Names that should be handled gracefully
-        ("Internal Team", None), // Generic name
+        ("Internal Team", None),    // Generic name
         ("Various Partners", None), // Non-specific
-        ("", None), // Empty
+        ("", None),                 // Empty
     ];
-    
+
     for (text_with_org, expected_domain) in test_cases {
         let result = analyzer.extract_domain_from_text(text_with_org);
-        
+
         match expected_domain {
             Some(expected) => {
                 if let Some(extracted) = result {
-                    assert_eq!(extracted, expected, 
-                              "Expected '{}' from text '{}', but got '{}'", expected, text_with_org, extracted);
+                    assert_eq!(
+                        extracted, expected,
+                        "Expected '{}' from text '{}', but got '{}'",
+                        expected, text_with_org, extracted
+                    );
                 } else {
                     // Some extractions might not work, which is acceptable for this test
-                    println!("Note: Could not extract '{}' from text: '{}'", expected, text_with_org);
+                    println!(
+                        "Note: Could not extract '{}' from text: '{}'",
+                        expected, text_with_org
+                    );
                 }
             }
             None => {
@@ -191,7 +255,7 @@ async fn test_organization_name_patterns() {
 #[tokio::test]
 async fn test_realistic_subprocessor_page_structure() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     let html_content = r#"
     <html>
         <head>
@@ -247,53 +311,70 @@ async fn test_realistic_subprocessor_page_structure() {
         </body>
     </html>
     "#;
-    
+
     let document = Html::parse_document(html_content);
-    
+
     // Test both table and list extraction
-    let table_result = analyzer.extract_from_tables(&document, html_content, "https://example.com/subprocessors");
-    let list_result = analyzer.extract_from_lists(&document, html_content, "https://example.com/subprocessors");
-    
+    let table_result =
+        analyzer.extract_from_tables(&document, html_content, "https://example.com/subprocessors");
+    let list_result =
+        analyzer.extract_from_lists(&document, html_content, "https://example.com/subprocessors");
+
     assert!(table_result.is_ok(), "Table extraction should succeed");
     assert!(list_result.is_ok(), "List extraction should succeed");
-    
+
     let table_vendors = table_result.unwrap();
     let list_vendors = list_result.unwrap();
-    
+
     // Combine all extracted vendors
     let mut all_vendors = table_vendors;
     all_vendors.extend(list_vendors);
-    
-    assert!(all_vendors.len() >= 5, "Should extract at least 5 vendors from realistic page, found: {}", all_vendors.len());
-    
+
+    assert!(
+        all_vendors.len() >= 5,
+        "Should extract at least 5 vendors from realistic page, found: {}",
+        all_vendors.len()
+    );
+
     let domains: Vec<String> = all_vendors.iter().map(|v| v.domain.clone()).collect();
-    
+
     // Expected extractions from various sections
     let expected_domains = vec![
-        "aws.amazon.com", "amazon.com", // AWS variations
-        "google.com", "cloud.google.com", // Google variations  
-        "intercom.com", "intercom.io", // Intercom
+        "aws.amazon.com",
+        "amazon.com", // AWS variations
+        "google.com",
+        "cloud.google.com", // Google variations
+        "intercom.com",
+        "intercom.io", // Intercom
         "zendesk.com",
-        "mailgun.com", "mailgun.org", // Mailgun variations
-        "mixpanel.com", 
+        "mailgun.com",
+        "mailgun.org", // Mailgun variations
+        "mixpanel.com",
         "sentry.io",
-        "newrelic.com"
+        "newrelic.com",
     ];
-    
+
     let mut found_count = 0;
     for expected in &expected_domains {
         if domains.contains(&expected.to_string()) {
             found_count += 1;
         }
     }
-    
-    assert!(found_count >= 4, "Should find at least 4 expected domains from {:?}, found domains: {:?}", 
-            expected_domains, domains);
-    
+
+    assert!(
+        found_count >= 4,
+        "Should find at least 4 expected domains from {:?}, found domains: {:?}",
+        expected_domains,
+        domains
+    );
+
     // Verify all have proper source types and evidence
     for vendor in &all_vendors {
         assert_eq!(vendor.source_type, RecordType::HttpSubprocessor);
-        assert!(!vendor.raw_record.is_empty(), "Should have extraction evidence");
+        assert!(
+            !vendor.raw_record.is_empty(),
+            "Should have extraction evidence"
+        );
         assert!(!vendor.domain.is_empty(), "Domain should not be empty");
         assert!(vendor.domain.contains("."), "Domain should contain a dot");
     }
@@ -303,7 +384,7 @@ async fn test_realistic_subprocessor_page_structure() {
 #[tokio::test]
 async fn test_organization_extraction_edge_cases() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     let problematic_html = r#"
     <html>
         <body>
@@ -328,44 +409,72 @@ async fn test_organization_extraction_edge_cases() {
         </body>
     </html>
     "#;
-    
+
     let document = Html::parse_document(problematic_html);
-    
+
     // Should not panic or crash with problematic content
-    let table_result = analyzer.extract_from_tables(&document, problematic_html, "https://test.com");
+    let table_result =
+        analyzer.extract_from_tables(&document, problematic_html, "https://test.com");
     let list_result = analyzer.extract_from_lists(&document, problematic_html, "https://test.com");
-    
-    assert!(table_result.is_ok(), "Should handle problematic table content gracefully");
-    assert!(list_result.is_ok(), "Should handle problematic list content gracefully");
-    
+
+    assert!(
+        table_result.is_ok(),
+        "Should handle problematic table content gracefully"
+    );
+    assert!(
+        list_result.is_ok(),
+        "Should handle problematic list content gracefully"
+    );
+
     let table_vendors = table_result.unwrap();
     let list_vendors = list_result.unwrap();
-    
+
     // Should extract valid entries and filter out invalid ones
     let all_vendors: Vec<_> = table_vendors.into_iter().chain(list_vendors).collect();
-    
+
     // Verify all extracted domains are valid
     for vendor in &all_vendors {
-        assert!(vendor.domain.len() > 3, "Domain should be reasonable length: '{}'", vendor.domain);
-        assert!(vendor.domain.contains("."), "Domain should contain a dot: '{}'", vendor.domain);
-        assert!(!vendor.domain.starts_with("."), "Domain should not start with dot: '{}'", vendor.domain);
-        assert!(!vendor.domain.ends_with("."), "Domain should not end with dot: '{}'", vendor.domain);
+        assert!(
+            vendor.domain.len() > 3,
+            "Domain should be reasonable length: '{}'",
+            vendor.domain
+        );
+        assert!(
+            vendor.domain.contains("."),
+            "Domain should contain a dot: '{}'",
+            vendor.domain
+        );
+        assert!(
+            !vendor.domain.starts_with("."),
+            "Domain should not start with dot: '{}'",
+            vendor.domain
+        );
+        assert!(
+            !vendor.domain.ends_with("."),
+            "Domain should not end with dot: '{}'",
+            vendor.domain
+        );
     }
-    
+
     // Should find at least Microsoft if extraction works properly
     let domains: Vec<String> = all_vendors.iter().map(|v| v.domain.clone()).collect();
     // Microsoft should be extractable from "Microsoft Corporation"
     if !domains.is_empty() {
-        assert!(domains.iter().any(|d| d.contains("microsoft") || d == "microsoft.com"), 
-               "Should extract microsoft.com if any domains were found: {:?}", domains);
+        assert!(
+            domains
+                .iter()
+                .any(|d| d.contains("microsoft") || d == "microsoft.com"),
+            "Should extract microsoft.com if any domains were found: {:?}",
+            domains
+        );
     }
 }
 
 /// Test extraction patterns and caching behavior
-#[tokio::test] 
+#[tokio::test]
 async fn test_extraction_patterns_functionality() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Test with custom extraction patterns
     let patterns = ExtractionPatterns {
         entity_column_selectors: vec![
@@ -377,10 +486,7 @@ async fn test_extraction_patterns_functionality() {
             "vendor name".to_string(),
             "organization".to_string(),
         ],
-        table_selectors: vec![
-            "table.vendors".to_string(),
-            ".processor-table".to_string(),
-        ],
+        table_selectors: vec!["table.vendors".to_string(), ".processor-table".to_string()],
         list_selectors: vec![
             "ul.vendor-list".to_string(),
             ".processor-list li".to_string(),
@@ -397,7 +503,7 @@ async fn test_extraction_patterns_functionality() {
         custom_extraction_rules: None,
         is_domain_specific: false,
     };
-    
+
     let html_with_custom_structure = r#"
     <html>
         <body>
@@ -414,25 +520,44 @@ async fn test_extraction_patterns_functionality() {
         </body>
     </html>
     "#;
-    
+
     let document = Html::parse_document(html_with_custom_structure);
-    let result = analyzer.extract_from_tables_with_patterns(&document, html_with_custom_structure, "https://test.com", &patterns);
-    
-    assert!(result.is_ok(), "Extraction with custom patterns should succeed");
+    let result = analyzer.extract_from_tables_with_patterns(
+        &document,
+        html_with_custom_structure,
+        "https://test.com",
+        &patterns,
+    );
+
+    assert!(
+        result.is_ok(),
+        "Extraction with custom patterns should succeed"
+    );
     let (vendors, metadata) = result.unwrap();
-    
+
     // Should extract some vendors using custom patterns
-    assert!(vendors.len() >= 1, "Should extract at least one vendor using custom patterns, found: {}", vendors.len());
-    
+    assert!(
+        vendors.len() >= 1,
+        "Should extract at least one vendor using custom patterns, found: {}",
+        vendors.len()
+    );
+
     let domains: Vec<String> = vendors.iter().map(|v| v.domain.clone()).collect();
     println!("Extracted domains with custom patterns: {:?}", domains);
-    
+
     // Check that we get domains from the explicit patterns
-    let contains_expected = domains.iter().any(|d| 
-        d.contains("stripe.com") || d.contains("github.com") || d.contains("customvendor.io") || d.contains("serviceprovider.com")
+    let contains_expected = domains.iter().any(|d| {
+        d.contains("stripe.com")
+            || d.contains("github.com")
+            || d.contains("customvendor.io")
+            || d.contains("serviceprovider.com")
+    });
+    assert!(
+        contains_expected,
+        "Should extract at least one expected domain, found: {:?}",
+        domains
     );
-    assert!(contains_expected, "Should extract at least one expected domain, found: {:?}", domains);
-    
+
     // Test metadata extraction
     assert!(metadata.is_some(), "Should return extraction metadata");
     let metadata = metadata.unwrap();
@@ -443,37 +568,61 @@ async fn test_extraction_patterns_functionality() {
 #[tokio::test]
 async fn test_extraction_performance() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Generate large HTML document with many vendors
-    let mut html_content = String::from(r#"<html><body><table><tr><th>Entity</th><th>Service</th></tr>"#);
-    
+    let mut html_content =
+        String::from(r#"<html><body><table><tr><th>Entity</th><th>Service</th></tr>"#);
+
     let vendors = vec![
-        "Stripe Inc.", "Google LLC", "Microsoft Corp.", "Amazon Inc.", "Apple Inc.",
-        "Facebook Inc.", "Salesforce Inc.", "Adobe Inc.", "Oracle Corp.", "IBM Corp."
+        "Stripe Inc.",
+        "Google LLC",
+        "Microsoft Corp.",
+        "Amazon Inc.",
+        "Apple Inc.",
+        "Facebook Inc.",
+        "Salesforce Inc.",
+        "Adobe Inc.",
+        "Oracle Corp.",
+        "IBM Corp.",
     ];
-    
+
     // Create 50 rows (5 repetitions of 10 vendors)
     for i in 0..50 {
         let vendor = vendors[i % vendors.len()];
-        html_content.push_str(&format!(r#"<tr><td>{}</td><td>Service {}</td></tr>"#, vendor, i));
+        html_content.push_str(&format!(
+            r#"<tr><td>{}</td><td>Service {}</td></tr>"#,
+            vendor, i
+        ));
     }
-    
+
     html_content.push_str("</table></body></html>");
-    
+
     let document = Html::parse_document(&html_content);
-    
+
     let start_time = std::time::Instant::now();
     let result = analyzer.extract_from_tables(&document, &html_content, "https://perf-test.com");
     let elapsed = start_time.elapsed();
-    
+
     assert!(result.is_ok(), "Large document extraction should succeed");
-    assert!(elapsed.as_millis() < 1000, "Extraction should complete within 1 second, took: {}ms", elapsed.as_millis());
-    
+    assert!(
+        elapsed.as_millis() < 1000,
+        "Extraction should complete within 1 second, took: {}ms",
+        elapsed.as_millis()
+    );
+
     let vendors = result.unwrap();
     // Note: The extraction might not find many vendors if the HTML structure doesn't match expected patterns
     // This is acceptable as long as it doesn't crash and completes quickly
-    assert!(vendors.len() <= 50, "Should not exceed reasonable extraction count, found: {}", vendors.len());
-    println!("Performance test extracted {} vendors in {}ms", vendors.len(), elapsed.as_millis());
+    assert!(
+        vendors.len() <= 50,
+        "Should not exceed reasonable extraction count, found: {}",
+        vendors.len()
+    );
+    println!(
+        "Performance test extracted {} vendors in {}ms",
+        vendors.len(),
+        elapsed.as_millis()
+    );
 }
 
 /// Test that custom rules matching prefers earliest-position match for ambiguous org names.
@@ -481,9 +630,7 @@ async fn test_extraction_performance() {
 /// are valid mapping keys — the primary entity (Loom) appears first and should win.
 #[tokio::test]
 async fn test_custom_rules_earliest_position_matching() {
-    use nthpartyfinder::subprocessor::{
-        CustomExtractionRules, DirectSelector, SpecialHandling,
-    };
+    use nthpartyfinder::subprocessor::{CustomExtractionRules, DirectSelector, SpecialHandling};
     use std::collections::HashMap;
 
     let analyzer = SubprocessorAnalyzer::new().await;
@@ -492,7 +639,10 @@ async fn test_custom_rules_earliest_position_matching() {
     let mut custom_mappings = HashMap::new();
     custom_mappings.insert("loom".to_string(), "loom.com".to_string());
     custom_mappings.insert("atlassian".to_string(), "atlassian.com".to_string());
-    custom_mappings.insert("mailgun technologies".to_string(), "mailgun.com".to_string());
+    custom_mappings.insert(
+        "mailgun technologies".to_string(),
+        "mailgun.com".to_string(),
+    );
     custom_mappings.insert("sinch email".to_string(), "sinch.com".to_string());
     custom_mappings.insert("functional software".to_string(), "sentry.io".to_string());
     custom_mappings.insert("sentry".to_string(), "sentry.io".to_string());
@@ -525,14 +675,27 @@ async fn test_custom_rules_earliest_position_matching() {
 
     let document = scraper::Html::parse_document(html_content);
     let result = analyzer.extract_with_custom_rules(
-        &document, html_content, "https://test.com/subprocessors", &custom_rules, "test.com",
+        &document,
+        html_content,
+        "https://test.com/subprocessors",
+        &custom_rules,
+        "test.com",
     );
 
     assert!(result.is_ok(), "Custom rules extraction should succeed");
     let extraction = result.unwrap();
-    let domains: Vec<String> = extraction.subprocessors.iter().map(|v| v.domain.clone()).collect();
+    let domains: Vec<String> = extraction
+        .subprocessors
+        .iter()
+        .map(|v| v.domain.clone())
+        .collect();
 
-    assert_eq!(domains.len(), 3, "Should extract exactly 3 vendors, found: {:?}", domains);
+    assert_eq!(
+        domains.len(),
+        3,
+        "Should extract exactly 3 vendors, found: {:?}",
+        domains
+    );
 
     // "Loom, Inc. (Atlassian)" -> "loom" at position 0 beats "atlassian" at position ~12
     assert!(
@@ -603,7 +766,7 @@ async fn test_custom_regex_matches_across_html_element_boundaries() {
             skip_generic_methods: true,
             custom_org_to_domain_mapping: Some(custom_mappings),
             exclusion_patterns: vec![
-                r"^(?i:Vanta|Core Product|Infrastructure|Application)$".to_string(),
+                r"^(?i:Vanta|Core Product|Infrastructure|Application)$".to_string()
             ],
         }),
     };
@@ -645,12 +808,20 @@ async fn test_custom_regex_matches_across_html_element_boundaries() {
 
     let document = scraper::Html::parse_document(html_content);
     let result = analyzer.extract_with_custom_rules(
-        &document, html_content, "https://trust.vanta.com/subprocessors", &custom_rules, "vanta.com",
+        &document,
+        html_content,
+        "https://trust.vanta.com/subprocessors",
+        &custom_rules,
+        "vanta.com",
     );
 
     assert!(result.is_ok(), "Custom rules extraction should succeed");
     let extraction = result.unwrap();
-    let domains: Vec<String> = extraction.subprocessors.iter().map(|v| v.domain.clone()).collect();
+    let domains: Vec<String> = extraction
+        .subprocessors
+        .iter()
+        .map(|v| v.domain.clone())
+        .collect();
 
     // The key assertion: company names should be found even though they're in separate DOM elements.
     // Without the plain text extraction fix, only "OpenAI, LLC" (matching the Inc/LLC pattern in raw HTML) would be found.
@@ -712,7 +883,10 @@ fn test_spa_detection_body_with_only_scripts() {
     </body>
     </html>"#;
 
-    assert!(is_likely_spa(spa_html), "Should detect body-only-scripts SPA pattern");
+    assert!(
+        is_likely_spa(spa_html),
+        "Should detect body-only-scripts SPA pattern"
+    );
 
     // Normal page with actual content should NOT be detected as SPA
     let normal_html = r#"<!DOCTYPE html>
@@ -729,5 +903,8 @@ fn test_spa_detection_body_with_only_scripts() {
     </body>
     </html>"#;
 
-    assert!(!is_likely_spa(normal_html), "Normal HTML with content should NOT be detected as SPA");
+    assert!(
+        !is_likely_spa(normal_html),
+        "Normal HTML with content should NOT be detected as SPA"
+    );
 }

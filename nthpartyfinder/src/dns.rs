@@ -1,38 +1,33 @@
-use hickory_resolver::{TokioAsyncResolver, config::*};
-use hickory_resolver::config::LookupIpStrategy;
-use regex::Regex;
-use once_cell::sync::Lazy;
+use crate::config::AppConfig;
+use crate::domain_utils;
+use crate::rate_limit::RateLimitContext;
+use crate::vendor::RecordType;
 use anyhow::Result;
-use tracing::{debug, warn, info};
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use hickory_resolver::config::LookupIpStrategy;
+use hickory_resolver::{config::*, TokioAsyncResolver};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use reqwest;
 use serde_json::Value;
-use crate::vendor::RecordType;
-use crate::domain_utils;
-use crate::config::AppConfig;
-use crate::rate_limit::RateLimitContext;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::{debug, info, warn};
 
 // Compile regex patterns once at startup for performance (fixes B020)
-static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?").unwrap()
-});
+static MACRO_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?").unwrap());
 
-static DOMAIN_VERIFICATION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"([a-zA-Z0-9]+)(?:-domain)?-verification=").unwrap()
-});
+static DOMAIN_VERIFICATION_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([a-zA-Z0-9]+)(?:-domain)?-verification=").unwrap());
 
-static VERIFICATION_PREFIX_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"verification-([a-zA-Z0-9]+)=").unwrap()
-});
+static VERIFICATION_PREFIX_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"verification-([a-zA-Z0-9]+)=").unwrap());
 
-static SITE_VERIFICATION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"([a-zA-Z0-9]+)-site-verification=").unwrap()
-});
+static SITE_VERIFICATION_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([a-zA-Z0-9]+)-site-verification=").unwrap());
 
-static PROVIDER_VERIFY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"([A-Z0-9]+)_verify_").unwrap()
-});
+static PROVIDER_VERIFY_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"([A-Z0-9]+)_verify_").unwrap());
 
 // M016: Underscores are intentionally allowed at the start of labels to support
 // SPF/DMARC/DKIM underscore-prefixed subdomains (e.g., _spf.google.com, _dmarc.domain.com,
@@ -42,46 +37,34 @@ static DOMAIN_VALIDATION_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 // DMARC mailto: extraction regex (fixes B020)
-static MAILTO_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap()
-});
+static MAILTO_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap());
 
 // SP_TAG_REGEX removed - sp= contains policy values, not domains (C001 fix)
 
 // Pre-compiled SPF mechanism regexes to avoid recompilation in loops (H001 fix)
-static SPF_INCLUDE_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"include:\s*([^\s]+)").unwrap()
-});
-static SPF_REDIRECT_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"redirect=\s*([^\s]+)").unwrap()
-});
-static SPF_A_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"a:\s*([^\s]+)").unwrap()
-});
-static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"mx:\s*([^\s]+)").unwrap()
-});
-static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"exists:\s*([^\s]+)").unwrap()
-});
+static SPF_INCLUDE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"include:\s*([^\s]+)").unwrap());
+static SPF_REDIRECT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"redirect=\s*([^\s]+)").unwrap());
+static SPF_A_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"a:\s*([^\s]+)").unwrap());
+static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"mx:\s*([^\s]+)").unwrap());
+static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"exists:\s*([^\s]+)").unwrap());
 // M003: ptr: mechanism contains a domain (unlike ip4:/ip6: which contain IP addresses)
-static SPF_PTR_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"ptr:\s*([^\s]+)").unwrap()
-});
+static SPF_PTR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"ptr:\s*([^\s]+)").unwrap());
 
 // Pre-compiled DKIM pattern regexes (H002 fix)
-static DKIM_P_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"p=([A-Za-z0-9+/=]+)").unwrap()
-});
-static DKIM_H_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"h=([^;]+)").unwrap()
-});
-static DKIM_S_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"s=([^;]+)").unwrap()
-});
+static DKIM_P_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"p=([A-Za-z0-9+/=]+)").unwrap());
+static DKIM_H_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"h=([^;]+)").unwrap());
+static DKIM_S_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"s=([^;]+)").unwrap());
 
 pub trait LogFailure {
-    fn log_failure(&self, source_domain: &str, record_type: &str, raw_record: &str, extracted_service: Option<&str>, failure_reason: &str);
+    fn log_failure(
+        &self,
+        source_domain: &str,
+        record_type: &str,
+        raw_record: &str,
+        extracted_service: Option<&str>,
+        failure_reason: &str,
+    );
 }
 
 /// DNS over HTTPS server configuration (runtime loaded from config)
@@ -112,7 +95,10 @@ pub struct DnsServerPool {
 impl DnsServerPool {
     /// Create a new DNS server pool from configuration
     pub fn from_config(config: &AppConfig) -> Self {
-        let doh_servers: Vec<DohServerConfig> = config.dns.doh_servers.iter()
+        let doh_servers: Vec<DohServerConfig> = config
+            .dns
+            .doh_servers
+            .iter()
             .map(|s| DohServerConfig {
                 url: s.url.clone(),
                 name: s.name.clone(),
@@ -120,7 +106,10 @@ impl DnsServerPool {
             })
             .collect();
 
-        let dns_servers: Vec<DnsServerConfig> = config.dns.dns_servers.iter()
+        let dns_servers: Vec<DnsServerConfig> = config
+            .dns
+            .dns_servers
+            .iter()
             .map(|s| DnsServerConfig {
                 address: s.address.clone(),
                 name: s.name.clone(),
@@ -129,7 +118,9 @@ impl DnsServerPool {
             .collect();
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.http.request_timeout_secs))
+            .timeout(std::time::Duration::from_secs(
+                config.http.request_timeout_secs,
+            ))
             .user_agent(&config.http.user_agent)
             .build()
             .expect("Failed to create HTTP client for DoH");
@@ -146,17 +137,49 @@ impl DnsServerPool {
     /// Create a new DNS server pool with embedded defaults (for backwards compatibility)
     pub fn new() -> Self {
         let doh_servers = vec![
-            DohServerConfig { url: "https://cloudflare-dns.com/dns-query".to_string(), name: "Cloudflare DoH".to_string(), timeout_secs: 3 },
-            DohServerConfig { url: "https://dns.google/dns-query".to_string(), name: "Google DoH".to_string(), timeout_secs: 3 },
-            DohServerConfig { url: "https://dns.quad9.net/dns-query".to_string(), name: "Quad9 DoH".to_string(), timeout_secs: 4 },
-            DohServerConfig { url: "https://doh.opendns.com/dns-query".to_string(), name: "OpenDNS DoH".to_string(), timeout_secs: 4 },
+            DohServerConfig {
+                url: "https://cloudflare-dns.com/dns-query".to_string(),
+                name: "Cloudflare DoH".to_string(),
+                timeout_secs: 3,
+            },
+            DohServerConfig {
+                url: "https://dns.google/dns-query".to_string(),
+                name: "Google DoH".to_string(),
+                timeout_secs: 3,
+            },
+            DohServerConfig {
+                url: "https://dns.quad9.net/dns-query".to_string(),
+                name: "Quad9 DoH".to_string(),
+                timeout_secs: 4,
+            },
+            DohServerConfig {
+                url: "https://doh.opendns.com/dns-query".to_string(),
+                name: "OpenDNS DoH".to_string(),
+                timeout_secs: 4,
+            },
         ];
 
         let dns_servers = vec![
-            DnsServerConfig { address: "1.1.1.1:53".to_string(), name: "Cloudflare".to_string(), timeout_secs: 2 },
-            DnsServerConfig { address: "8.8.8.8:53".to_string(), name: "Google".to_string(), timeout_secs: 2 },
-            DnsServerConfig { address: "9.9.9.9:53".to_string(), name: "Quad9".to_string(), timeout_secs: 3 },
-            DnsServerConfig { address: "208.67.222.222:53".to_string(), name: "OpenDNS".to_string(), timeout_secs: 3 },
+            DnsServerConfig {
+                address: "1.1.1.1:53".to_string(),
+                name: "Cloudflare".to_string(),
+                timeout_secs: 2,
+            },
+            DnsServerConfig {
+                address: "8.8.8.8:53".to_string(),
+                name: "Google".to_string(),
+                timeout_secs: 2,
+            },
+            DnsServerConfig {
+                address: "9.9.9.9:53".to_string(),
+                name: "Quad9".to_string(),
+                timeout_secs: 3,
+            },
+            DnsServerConfig {
+                address: "208.67.222.222:53".to_string(),
+                name: "OpenDNS".to_string(),
+                timeout_secs: 3,
+            },
         ];
 
         let client = reqwest::Client::builder()
@@ -200,13 +223,11 @@ impl DnsServerPool {
             .collect();
 
         // Provide minimal DNS fallback servers for tests (won't be used if DoH succeeds)
-        let dns_servers = vec![
-            DnsServerConfig {
-                address: "127.0.0.1:53".to_string(),
-                name: "Test DNS Fallback".to_string(),
-                timeout_secs: 2,
-            },
-        ];
+        let dns_servers = vec![DnsServerConfig {
+            address: "127.0.0.1:53".to_string(),
+            name: "Test DNS Fallback".to_string(),
+            timeout_secs: 2,
+        }];
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -230,24 +251,22 @@ impl DnsServerPool {
         let index = self.current_doh_index.fetch_add(1, Ordering::Relaxed) % self.doh_servers.len();
         &self.doh_servers[index]
     }
-    
+
     /// Get the next DNS server in rotation (for fallback)
     fn next_dns_server(&self) -> &DnsServerConfig {
         let index = self.current_dns_index.fetch_add(1, Ordering::Relaxed) % self.dns_servers.len();
         &self.dns_servers[index]
     }
-    
+
     /// Perform DNS over HTTPS lookup for TXT records
     async fn doh_txt_lookup(&self, domain: &str, server: &DohServerConfig) -> Result<Vec<String>> {
         debug!("DoH lookup for {} using {}", domain, server.name);
-        
+
         // Create DNS query in wire format
-        let query_params = [
-            ("name", domain),
-            ("type", "TXT"),
-        ];
-        
-        let response = self.client
+        let query_params = [("name", domain), ("type", "TXT")];
+
+        let response = self
+            .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
@@ -256,12 +275,13 @@ impl DnsServerPool {
             .await?
             .json::<Value>()
             .await?;
-        
+
         let mut records = Vec::new();
-        
+
         if let Some(answers) = response["Answer"].as_array() {
             for answer in answers {
-                if answer["type"].as_u64() == Some(16) { // TXT record type
+                if answer["type"].as_u64() == Some(16) {
+                    // TXT record type
                     if let Some(data) = answer["data"].as_str() {
                         // Remove quotes and handle escaped characters
                         let cleaned = unescape_dns_txt(data.trim_matches('"'));
@@ -270,21 +290,28 @@ impl DnsServerPool {
                 }
             }
         }
-        
-        debug!("DoH found {} TXT records for {} via {}", records.len(), domain, server.name);
+
+        debug!(
+            "DoH found {} TXT records for {} via {}",
+            records.len(),
+            domain,
+            server.name
+        );
         Ok(records)
     }
 
     /// Perform DNS over HTTPS lookup for CNAME records
-    async fn doh_cname_lookup(&self, domain: &str, server: &DohServerConfig) -> Result<Vec<String>> {
+    async fn doh_cname_lookup(
+        &self,
+        domain: &str,
+        server: &DohServerConfig,
+    ) -> Result<Vec<String>> {
         debug!("DoH CNAME lookup for {} using {}", domain, server.name);
 
-        let query_params = [
-            ("name", domain),
-            ("type", "CNAME"),
-        ];
+        let query_params = [("name", domain), ("type", "CNAME")];
 
-        let response = self.client
+        let response = self
+            .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
@@ -298,7 +325,8 @@ impl DnsServerPool {
 
         if let Some(answers) = response["Answer"].as_array() {
             for answer in answers {
-                if answer["type"].as_u64() == Some(5) { // CNAME record type
+                if answer["type"].as_u64() == Some(5) {
+                    // CNAME record type
                     if let Some(data) = answer["data"].as_str() {
                         // Remove trailing dot from CNAME targets
                         let cleaned = data.trim_end_matches('.').to_string();
@@ -308,21 +336,39 @@ impl DnsServerPool {
             }
         }
 
-        debug!("DoH found {} CNAME records for {} via {}", records.len(), domain, server.name);
+        debug!(
+            "DoH found {} CNAME records for {} via {}",
+            records.len(),
+            domain,
+            server.name
+        );
         Ok(records)
     }
 
     /// Create a traditional DNS resolver for the given server config (C002 fix: returns Result)
-    fn create_dns_resolver(&self, server: &DnsServerConfig, use_tcp: bool) -> Result<TokioAsyncResolver> {
+    fn create_dns_resolver(
+        &self,
+        server: &DnsServerConfig,
+        use_tcp: bool,
+    ) -> Result<TokioAsyncResolver> {
         let mut config = ResolverConfig::new();
 
-        let socket_addr = server.address.parse()
-            .map_err(|e| anyhow::anyhow!("Invalid DNS server address '{}' for server '{}': {}",
-                server.address, server.name, e))?;
+        let socket_addr = server.address.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid DNS server address '{}' for server '{}': {}",
+                server.address,
+                server.name,
+                e
+            )
+        })?;
 
         config.add_name_server(NameServerConfig {
             socket_addr,
-            protocol: if use_tcp { Protocol::Tcp } else { Protocol::Udp },
+            protocol: if use_tcp {
+                Protocol::Tcp
+            } else {
+                Protocol::Udp
+            },
             tls_dns_name: None,
             trust_negative_responses: true,
             bind_addr: None,
@@ -346,11 +392,12 @@ impl DnsServerPool {
     /// Uses DoH as primary with a single attempt, then falls back to traditional DNS.
     /// Runs TXT and CNAME lookups concurrently via tokio::join!.
     pub async fn get_txt_and_cname_fast(&self, domain: &str) -> (Vec<String>, Vec<String>) {
-        let (txt_result, cname_result) = tokio::join!(
-            self.fast_txt_lookup(domain),
-            self.fast_cname_lookup(domain),
-        );
-        (txt_result.unwrap_or_default(), cname_result.unwrap_or_default())
+        let (txt_result, cname_result) =
+            tokio::join!(self.fast_txt_lookup(domain), self.fast_cname_lookup(domain),);
+        (
+            txt_result.unwrap_or_default(),
+            cname_result.unwrap_or_default(),
+        )
     }
 
     /// Fast TXT lookup: try one DoH server, then one DNS server. Short timeouts.
@@ -359,8 +406,10 @@ impl DnsServerPool {
         let doh_server = self.next_doh_server();
         match tokio::time::timeout(
             std::time::Duration::from_millis(2000),
-            self.doh_txt_lookup(domain, doh_server)
-        ).await {
+            self.doh_txt_lookup(domain, doh_server),
+        )
+        .await
+        {
             Ok(Ok(records)) if !records.is_empty() => return Ok(records),
             _ => {}
         }
@@ -371,12 +420,13 @@ impl DnsServerPool {
             Ok(resolver) => {
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(2000),
-                    resolver.txt_lookup(domain)
-                ).await {
+                    resolver.txt_lookup(domain),
+                )
+                .await
+                {
                     Ok(Ok(txt_lookup)) => {
-                        let records: Vec<String> = txt_lookup.iter()
-                            .map(|r| r.to_string())
-                            .collect();
+                        let records: Vec<String> =
+                            txt_lookup.iter().map(|r| r.to_string()).collect();
                         return Ok(records);
                     }
                     _ => {}
@@ -393,8 +443,10 @@ impl DnsServerPool {
         let doh_server = self.next_doh_server();
         match tokio::time::timeout(
             std::time::Duration::from_millis(2000),
-            self.doh_cname_lookup(domain, doh_server)
-        ).await {
+            self.doh_cname_lookup(domain, doh_server),
+        )
+        .await
+        {
             Ok(Ok(records)) if !records.is_empty() => return Ok(records),
             _ => {}
         }
@@ -405,11 +457,14 @@ impl DnsServerPool {
             Ok(resolver) => {
                 match tokio::time::timeout(
                     std::time::Duration::from_millis(2000),
-                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME)
-                ).await {
+                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
+                )
+                .await
+                {
                     Ok(Ok(lookup)) => {
                         use hickory_resolver::proto::rr::RData;
-                        let records: Vec<String> = lookup.record_iter()
+                        let records: Vec<String> = lookup
+                            .record_iter()
                             .filter_map(|r| {
                                 if let Some(RData::CNAME(ref cname)) = r.data() {
                                     Some(cname.to_string().trim_end_matches('.').to_string())
@@ -434,7 +489,10 @@ pub async fn get_txt_records(domain: &str) -> Result<Vec<String>> {
     get_txt_records_with_pool(domain, &DnsServerPool::new()).await
 }
 
-pub async fn get_txt_records_with_pool(domain: &str, dns_pool: &DnsServerPool) -> Result<Vec<String>> {
+pub async fn get_txt_records_with_pool(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+) -> Result<Vec<String>> {
     get_txt_records_with_rate_limit(domain, dns_pool, None).await
 }
 
@@ -478,7 +536,11 @@ pub async fn get_txt_records_with_rate_limit(
         match resolver.txt_lookup(domain).await {
             Ok(txt_lookup) => {
                 let records: Vec<String> = txt_lookup.iter().map(|r| r.to_string()).collect();
-                if records.is_empty() { None } else { Some(records) }
+                if records.is_empty() {
+                    None
+                } else {
+                    Some(records)
+                }
             }
             Err(_) => None,
         }
@@ -533,9 +595,13 @@ pub async fn get_txt_records_with_rate_limit(
     debug!("DNS race failed for {}, trying system resolver", domain);
     match try_system_dns_resolver(domain).await {
         Ok(records) => {
-            debug!("Found {} TXT records for {} via system resolver", records.len(), domain);
+            debug!(
+                "Found {} TXT records for {} via system resolver",
+                records.len(),
+                domain
+            );
             Ok(records)
-        },
+        }
         Err(e) => {
             warn!("All DNS resolution failed for {} — returning empty results to continue analysis. Last error: {}", domain, e);
             Ok(vec![])
@@ -547,16 +613,16 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
     let resolver = TokioAsyncResolver::tokio_from_system_conf()?;
 
     let txt_lookup = resolver.txt_lookup(domain).await?;
-    let records: Vec<String> = txt_lookup
-        .iter()
-        .map(|record| record.to_string())
-        .collect();
+    let records: Vec<String> = txt_lookup.iter().map(|record| record.to_string()).collect();
 
     Ok(records)
 }
 
 /// Get CNAME records for a domain using the DNS pool
-pub async fn get_cname_records_with_pool(domain: &str, dns_pool: &DnsServerPool) -> Result<Vec<String>> {
+pub async fn get_cname_records_with_pool(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+) -> Result<Vec<String>> {
     get_cname_records_with_rate_limit(domain, dns_pool, None).await
 }
 
@@ -578,12 +644,19 @@ pub async fn get_cname_records_with_rate_limit(
     let doh_server = dns_pool.next_doh_server();
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        dns_pool.doh_cname_lookup(domain, doh_server)
-    ).await {
+        dns_pool.doh_cname_lookup(domain, doh_server),
+    )
+    .await
+    {
         Ok(Ok(records)) if !records.is_empty() => {
-            debug!("DoH successful: Found {} CNAME records for {} via {}", records.len(), domain, doh_server.name);
+            debug!(
+                "DoH successful: Found {} CNAME records for {} via {}",
+                records.len(),
+                domain,
+                doh_server.name
+            );
             return Ok(records);
-        },
+        }
         _ => {}
     }
 
@@ -603,7 +676,11 @@ pub fn extract_vendor_domains_with_source(txt_records: &[String]) -> Vec<VendorD
     extract_vendor_domains_with_source_and_logger(txt_records, None, "")
 }
 
-pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], logger: Option<&dyn LogFailure>, source_domain: &str) -> Vec<VendorDomain> {
+pub fn extract_vendor_domains_with_source_and_logger(
+    txt_records: &[String],
+    logger: Option<&dyn LogFailure>,
+    source_domain: &str,
+) -> Vec<VendorDomain> {
     let mut vendor_domains = Vec::new();
     // Deduplicate by (domain, record_type, raw_record) to allow same vendor from different sources
     // but prevent exact duplicates (same domain + same record type + same raw record)
@@ -618,7 +695,9 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
         let mut record_matched = false;
 
         // Extract vendor domains based on record patterns
-        if let Some(domains) = extract_from_spf_record(&record_clean, logger, source_domain, &record) {
+        if let Some(domains) =
+            extract_from_spf_record(&record_clean, logger, source_domain, &record)
+        {
             record_matched = true;
             for domain_info in domains {
                 let key = (
@@ -632,7 +711,9 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
             }
         }
 
-        if let Some(domains) = extract_from_dkim_record(&record_clean, logger, source_domain, &record) {
+        if let Some(domains) =
+            extract_from_dkim_record(&record_clean, logger, source_domain, &record)
+        {
             record_matched = true;
             for domain_info in domains {
                 let key = (
@@ -646,7 +727,9 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
             }
         }
 
-        if let Some(domains) = extract_from_dmarc_record(&record_clean, logger, source_domain, &record) {
+        if let Some(domains) =
+            extract_from_dmarc_record(&record_clean, logger, source_domain, &record)
+        {
             record_matched = true;
             for domain_info in domains {
                 let key = (
@@ -660,7 +743,9 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
             }
         }
 
-        if let Some(domains) = extract_from_verification_record(&record_clean, logger, source_domain, &record) {
+        if let Some(domains) =
+            extract_from_verification_record(&record_clean, logger, source_domain, &record)
+        {
             record_matched = true;
             for domain_info in domains {
                 let key = (
@@ -679,7 +764,13 @@ pub fn extract_vendor_domains_with_source_and_logger(txt_records: &[String], log
             if let Some(logger) = logger {
                 // Skip very short records (likely not vendor verification records)
                 if record_clean.len() > 5 {
-                    logger.log_failure(source_domain, "UNMATCHED_TXT", &record, None, "No pattern matched this TXT record");
+                    logger.log_failure(
+                        source_domain,
+                        "UNMATCHED_TXT",
+                        &record,
+                        None,
+                        "No pattern matched this TXT record",
+                    );
                 }
             }
         }
@@ -713,7 +804,12 @@ fn strip_spf_macros(domain: &str) -> String {
     MACRO_REGEX.replace_all(domain, "").to_string()
 }
 
-fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn extract_from_spf_record(
+    record: &str,
+    logger: Option<&dyn LogFailure>,
+    source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     // Case-insensitive check (fixes DNS-001 - RFC compliance)
     let record_lower = record.to_lowercase();
     if !record_lower.starts_with("v=spf1") {
@@ -729,7 +825,11 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
     // from a single record, so the 10-lookup limit is not enforced here. A future recursive
     // SPF resolver would need to track and enforce this limit.
     let spf_regexes: &[&Lazy<Regex>] = &[
-        &SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX, &SPF_A_REGEX, &SPF_MX_REGEX, &SPF_EXISTS_REGEX,
+        &SPF_INCLUDE_REGEX,
+        &SPF_REDIRECT_REGEX,
+        &SPF_A_REGEX,
+        &SPF_MX_REGEX,
+        &SPF_EXISTS_REGEX,
         &SPF_PTR_REGEX,
     ];
 
@@ -751,13 +851,23 @@ fn extract_from_spf_record(record: &str, logger: Option<&dyn LogFailure>, source
                         raw_record: raw_record.to_string(),
                     });
                 } else if let Some(logger) = logger {
-                    logger.log_failure(source_domain, "SPF", raw_record, Some(raw_domain), "Invalid domain format");
+                    logger.log_failure(
+                        source_domain,
+                        "SPF",
+                        raw_record,
+                        Some(raw_domain),
+                        "Invalid domain format",
+                    );
                 }
             }
         }
     }
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
 /// Recursively resolve SPF include chains to discover nested mail sender domains.
@@ -790,7 +900,10 @@ pub async fn resolve_spf_includes_recursive(
     // Iteratively resolve include targets (BFS to stay within lookup limit)
     while let Some(target) = to_resolve.pop() {
         if lookup_count >= MAX_SPF_LOOKUPS {
-            debug!("SPF recursive resolution hit {}-lookup limit for {}", MAX_SPF_LOOKUPS, source_domain);
+            debug!(
+                "SPF recursive resolution hit {}-lookup limit for {}",
+                MAX_SPF_LOOKUPS, source_domain
+            );
             break;
         }
         lookup_count += 1;
@@ -805,9 +918,9 @@ pub async fn resolve_spf_includes_recursive(
                     }
 
                     // Extract vendor domains from this nested SPF record
-                    if let Some(domains) = extract_from_spf_record(
-                        &record_clean, None, source_domain, record,
-                    ) {
+                    if let Some(domains) =
+                        extract_from_spf_record(&record_clean, None, source_domain, record)
+                    {
                         all_domains.extend(domains);
                     }
 
@@ -824,7 +937,9 @@ pub async fn resolve_spf_includes_recursive(
     if !all_domains.is_empty() {
         debug!(
             "SPF recursive resolution for {} found {} additional vendor domains across {} lookups",
-            source_domain, all_domains.len(), lookup_count
+            source_domain,
+            all_domains.len(),
+            lookup_count
         );
     }
 
@@ -835,10 +950,12 @@ pub async fn resolve_spf_includes_recursive(
 /// Note: `exists:` targets are NOT included here because they are macro-expanded IP-check
 /// mechanisms, not SPF delegation. Domain extraction from `exists:` is already handled by
 /// `extract_from_spf_record`.
-fn collect_spf_targets(record_lower: &str, to_resolve: &mut Vec<String>, visited: &mut HashSet<String>) {
-    let target_regexes: &[&Lazy<Regex>] = &[
-        &SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX,
-    ];
+fn collect_spf_targets(
+    record_lower: &str,
+    to_resolve: &mut Vec<String>,
+    visited: &mut HashSet<String>,
+) {
+    let target_regexes: &[&Lazy<Regex>] = &[&SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX];
     for re in target_regexes {
         for cap in re.captures_iter(record_lower) {
             if let Some(m) = cap.get(1) {
@@ -853,7 +970,12 @@ fn collect_spf_targets(record_lower: &str, to_resolve: &mut Vec<String>, visited
     }
 }
 
-fn extract_from_dkim_record(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn extract_from_dkim_record(
+    record: &str,
+    _logger: Option<&dyn LogFailure>,
+    _source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     if !record.contains("k=rsa") && !record.contains("k=ed25519") {
         return None;
     }
@@ -880,10 +1002,19 @@ fn extract_from_dkim_record(record: &str, _logger: Option<&dyn LogFailure>, _sou
         }
     }
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
-fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn extract_from_dmarc_record(
+    record: &str,
+    logger: Option<&dyn LogFailure>,
+    source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     // Case-insensitive check (fixes DNS-001 - RFC compliance)
     if !record.to_lowercase().starts_with("v=dmarc1") {
         return None;
@@ -901,7 +1032,8 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
         if let Some(tag_pos) = record_lower.find(*tag) {
             let value_start = tag_pos + tag.len();
             // Find end of value (next semicolon or end of string) - search lowercase copy
-            let value_end = record_lower[value_start..].find(';')
+            let value_end = record_lower[value_start..]
+                .find(';')
                 .map(|p| value_start + p)
                 .unwrap_or(record_lower.len());
             let tag_value = &record_lower[value_start..value_end];
@@ -918,7 +1050,13 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
                             raw_record: raw_record.to_string(),
                         });
                     } else if let Some(logger) = logger {
-                        logger.log_failure(source_domain, "DMARC", raw_record, Some(tag), "Invalid domain format");
+                        logger.log_failure(
+                            source_domain,
+                            "DMARC",
+                            raw_record,
+                            Some(tag),
+                            "Invalid domain format",
+                        );
                     }
                 }
             }
@@ -928,78 +1066,223 @@ fn extract_from_dmarc_record(record: &str, logger: Option<&dyn LogFailure>, sour
     // Note: sp= tag contains policy values ("none", "quarantine", "reject"), not domains.
     // Removed dead code that attempted to extract domains from sp= (C001 fix).
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
-fn extract_from_verification_record(record: &str, logger: Option<&dyn LogFailure>, source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn extract_from_verification_record(
+    record: &str,
+    logger: Option<&dyn LogFailure>,
+    source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     let mut domains = Vec::new();
 
     // First, try comprehensive static provider mappings
-    if let Some(static_domains) = try_static_verification_patterns(record, logger, source_domain, raw_record) {
+    if let Some(static_domains) =
+        try_static_verification_patterns(record, logger, source_domain, raw_record)
+    {
         domains.extend(static_domains);
     }
 
     // Then try dynamic pattern matching for unknown verification records
-    if let Some(dynamic_domains) = try_dynamic_verification_patterns(record, logger, source_domain, raw_record) {
+    if let Some(dynamic_domains) =
+        try_dynamic_verification_patterns(record, logger, source_domain, raw_record)
+    {
         domains.extend(dynamic_domains);
     }
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
-fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn try_static_verification_patterns(
+    record: &str,
+    _logger: Option<&dyn LogFailure>,
+    _source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     // Comprehensive static provider mappings based on research
     let verification_patterns = vec![
         // Common verification patterns
-        (r"google-site-verification=", "google.com", RecordType::DnsTxtVerification),
-        (r"facebook-domain-verification=", "facebook.com", RecordType::DnsTxtVerification),
+        (
+            r"google-site-verification=",
+            "google.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"facebook-domain-verification=",
+            "facebook.com",
+            RecordType::DnsTxtVerification,
+        ),
         (r"MS=", "microsoft.com", RecordType::DnsTxtVerification),
-        (r"apple-domain-verification=", "apple.com", RecordType::DnsTxtVerification),
-        (r"adobe-idp-site-verification=", "adobe.com", RecordType::DnsTxtVerification),
-        (r"stripe-verification=", "stripe.com", RecordType::DnsTxtVerification),
+        (
+            r"apple-domain-verification=",
+            "apple.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"adobe-idp-site-verification=",
+            "adobe.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"stripe-verification=",
+            "stripe.com",
+            RecordType::DnsTxtVerification,
+        ),
         (r"docusign=", "docusign.com", RecordType::DnsTxtVerification),
-        (r"globalsign-domain-verification=", "globalsign.com", RecordType::DnsTxtVerification),
-        (r"dropbox-domain-verification=", "dropbox.com", RecordType::DnsTxtVerification),
-        
+        (
+            r"globalsign-domain-verification=",
+            "globalsign.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"dropbox-domain-verification=",
+            "dropbox.com",
+            RecordType::DnsTxtVerification,
+        ),
         // Extended patterns from research and klaviyo analysis
         (r"ZOOM_verify_", "zoom.us", RecordType::DnsTxtVerification),
-        (r"atlassian-domain-verification=", "atlassian.com", RecordType::DnsTxtVerification),
-        (r"browserstack-domain-verification=", "browserstack.com", RecordType::DnsTxtVerification),
-        (r"canva-site-verification=", "canva.com", RecordType::DnsTxtVerification),
-        (r"cursor-domain-verification", "cursor.com", RecordType::DnsTxtVerification),
-        (r"datadome-domain-verify=", "datadome.co", RecordType::DnsTxtVerification),
-        (r"drift-domain-verification=", "drift.com", RecordType::DnsTxtVerification),
-        (r"hubspot-domain-verification=", "hubspot.com", RecordType::DnsTxtVerification),
-        (r"klaviyo-site-verification=", "klaviyo.com", RecordType::DnsTxtVerification),
-        (r"notion-domain-verification=", "notion.so", RecordType::DnsTxtVerification),
-        (r"onetrust-domain-verification=", "onetrust.com", RecordType::DnsTxtVerification),
-        (r"openai-domain-verification=", "openai.com", RecordType::DnsTxtVerification),
-        (r"postman-domain-verification=", "postman.com", RecordType::DnsTxtVerification),
-        (r"slack-domain-verification=", "slack.com", RecordType::DnsTxtVerification),
-        (r"teamviewer-sso-verification=", "teamviewer.com", RecordType::DnsTxtVerification),
-        (r"wework-site-verification=", "wework.com", RecordType::DnsTxtVerification),
-        (r"heroku-domain-verification=", "heroku.com", RecordType::DnsTxtVerification),
-        (r"jamf-site-verification=", "jamf.com", RecordType::DnsTxtVerification),
-
+        (
+            r"atlassian-domain-verification=",
+            "atlassian.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"browserstack-domain-verification=",
+            "browserstack.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"canva-site-verification=",
+            "canva.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"cursor-domain-verification",
+            "cursor.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"datadome-domain-verify=",
+            "datadome.co",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"drift-domain-verification=",
+            "drift.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"hubspot-domain-verification=",
+            "hubspot.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"klaviyo-site-verification=",
+            "klaviyo.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"notion-domain-verification=",
+            "notion.so",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"onetrust-domain-verification=",
+            "onetrust.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"openai-domain-verification=",
+            "openai.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"postman-domain-verification=",
+            "postman.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"slack-domain-verification=",
+            "slack.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"teamviewer-sso-verification=",
+            "teamviewer.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"wework-site-verification=",
+            "wework.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"heroku-domain-verification=",
+            "heroku.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"jamf-site-verification=",
+            "jamf.com",
+            RecordType::DnsTxtVerification,
+        ),
         // Additional patterns found in klaviyo.com analysis
-        (r"anthropic-domain-verification", "anthropic.com", RecordType::DnsTxtVerification),
-        (r"jetbrains-domain-verification=", "jetbrains.com", RecordType::DnsTxtVerification),
-        (r"gc-ai-domain-verification", "gc-ai.com", RecordType::DnsTxtVerification), // Unverified vendor - kept for completeness
-
+        (
+            r"anthropic-domain-verification",
+            "anthropic.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"jetbrains-domain-verification=",
+            "jetbrains.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"gc-ai-domain-verification",
+            "gc-ai.com",
+            RecordType::DnsTxtVerification,
+        ), // Unverified vendor - kept for completeness
         // Special mappings discovered from research
         (r"intacct-esk=", "sage.com", RecordType::DnsTxtVerification), // Sage Intacct
         (r"mgverify=", "mailgun.com", RecordType::DnsTxtVerification), // Mailgun verification
         // L002: neat.co is correct — Neat's actual domain is neat.co (not .com)
-        (r"neat-pulse-domain-verification", "neat.co", RecordType::DnsTxtVerification),
-        
+        (
+            r"neat-pulse-domain-verification",
+            "neat.co",
+            RecordType::DnsTxtVerification,
+        ),
         // Pattern variations
-        (r"webex-domain-verification=", "webex.com", RecordType::DnsTxtVerification),
-        (r"zoom-domain-verification=", "zoom.us", RecordType::DnsTxtVerification),
-        (r"have-i-been-pwned-verification=", "haveibeenpwned.com", RecordType::DnsTxtVerification),
-        
+        (
+            r"webex-domain-verification=",
+            "webex.com",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"zoom-domain-verification=",
+            "zoom.us",
+            RecordType::DnsTxtVerification,
+        ),
+        (
+            r"have-i-been-pwned-verification=",
+            "haveibeenpwned.com",
+            RecordType::DnsTxtVerification,
+        ),
         // L001: Whimsical uses angle bracket format in TXT records — this is an actual
         // record format observed in the wild (e.g., klaviyo.com DNS), not a parsing error.
-        (r"<whimsical=", "whimsical.com", RecordType::DnsTxtVerification),
+        (
+            r"<whimsical=",
+            "whimsical.com",
+            RecordType::DnsTxtVerification,
+        ),
     ];
 
     let mut domains = Vec::new();
@@ -1015,10 +1298,19 @@ fn try_static_verification_patterns(record: &str, _logger: Option<&dyn LogFailur
         }
     }
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
-fn try_dynamic_verification_patterns(record: &str, _logger: Option<&dyn LogFailure>, _source_domain: &str, raw_record: &str) -> Option<Vec<VendorDomain>> {
+fn try_dynamic_verification_patterns(
+    record: &str,
+    _logger: Option<&dyn LogFailure>,
+    _source_domain: &str,
+    raw_record: &str,
+) -> Option<Vec<VendorDomain>> {
     let mut domains = Vec::new();
 
     // Dynamic pattern 1: "*-verification=" or "*-domain-verification="
@@ -1084,7 +1376,11 @@ fn try_dynamic_verification_patterns(record: &str, _logger: Option<&dyn LogFailu
     // Dynamic pattern 5: "letters=" (preceded by letters, like EU5VQe53KTDQgPby023o4w)
     // This is more challenging as it requires heuristic analysis - skip for now to avoid false positives
 
-    if domains.is_empty() { None } else { Some(domains) }
+    if domains.is_empty() {
+        None
+    } else {
+        Some(domains)
+    }
 }
 
 fn infer_provider_domain(provider_name: &str) -> Option<String> {
@@ -1133,7 +1429,6 @@ fn infer_provider_domain(provider_name: &str) -> Option<String> {
         ("segment", "segment.com"),
         ("sentry", "sentry.io"),
         ("pagerduty", "pagerduty.com"),
-
         // Common generic mappings
         ("aws", "amazon.com"),
         ("gcp", "google.com"),
@@ -1154,10 +1449,8 @@ fn infer_provider_domain(provider_name: &str) -> Option<String> {
         // Only do this for well-formed provider names to avoid false positives
         match provider_name {
             // Known cases where .com works
-            "sendgrid" | "mailchimp" | "constantcontact" | "pardot" |
-            "marketo" | "hubspot" | "intercom" | "freshdesk" | "typeform" => {
-                Some(format!("{}.com", provider_name))
-            },
+            "sendgrid" | "mailchimp" | "constantcontact" | "pardot" | "marketo" | "hubspot"
+            | "intercom" | "freshdesk" | "typeform" => Some(format!("{}.com", provider_name)),
             _ => None,
         }
     } else {
@@ -1177,5 +1470,8 @@ fn is_valid_domain(domain: &str) -> bool {
     }
 
     // Check overall length and that it contains at least one dot
-    DOMAIN_VALIDATION_REGEX.is_match(domain) && domain.contains('.') && domain.len() <= 253 && domain.len() >= 4
+    DOMAIN_VALIDATION_REGEX.is_match(domain)
+        && domain.contains('.')
+        && domain.len() <= 253
+        && domain.len() >= 4
 }

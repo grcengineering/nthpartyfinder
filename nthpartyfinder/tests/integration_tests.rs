@@ -1,5 +1,5 @@
 use nthpartyfinder::dns;
-use nthpartyfinder::vendor::{VendorRelationship, RecordType};
+use nthpartyfinder::vendor::{RecordType, VendorRelationship};
 
 #[tokio::test]
 async fn test_extract_vendor_domains_from_spf() {
@@ -7,8 +7,9 @@ async fn test_extract_vendor_domains_from_spf() {
         "v=spf1 include:google.com include:mailgun.org ~all".to_string(),
         "v=spf1 include:mcsv.net ?all".to_string(),
     ];
-    
-    let vendor_domains = dns::extract_vendor_domains_with_source_and_logger(&txt_records, None, "test.com");
+
+    let vendor_domains =
+        dns::extract_vendor_domains_with_source_and_logger(&txt_records, None, "test.com");
 
     // Check that the vendor domains were found
     let domains: Vec<String> = vendor_domains.iter().map(|v| v.domain.clone()).collect();
@@ -31,7 +32,7 @@ fn test_vendor_relationship_creation() {
         "Root Corp".to_string(),
         "evidence".to_string(),
     );
-    
+
     assert_eq!(relationship.nth_party_domain, "vendor.com");
     assert_eq!(relationship.nth_party_organization, "Vendor Inc.");
     assert_eq!(relationship.nth_party_layer, 1);
@@ -52,7 +53,7 @@ fn test_layer_descriptions() {
         "Root".to_string(),
         "evidence".to_string(),
     );
-    
+
     let relationship3 = VendorRelationship::new(
         "test.com".to_string(),
         "Test".to_string(),
@@ -65,7 +66,7 @@ fn test_layer_descriptions() {
         "Root".to_string(),
         "evidence".to_string(),
     );
-    
+
     let relationship5 = VendorRelationship::new(
         "test.com".to_string(),
         "Test".to_string(),
@@ -78,7 +79,7 @@ fn test_layer_descriptions() {
         "Root".to_string(),
         "evidence".to_string(),
     );
-    
+
     assert_eq!(relationship1.layer_description(), "1st party");
     assert_eq!(relationship3.layer_description(), "3rd party");
     assert_eq!(relationship5.layer_description(), "5th party");

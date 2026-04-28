@@ -1,34 +1,44 @@
-use nthpartyfinder::subprocessor::{SubprocessorAnalyzer, extract_vendor_domains_from_subprocessors, is_valid_tld, is_valid_org_name};
+use nthpartyfinder::subprocessor::{
+    extract_vendor_domains_from_subprocessors, is_valid_org_name, is_valid_tld,
+    SubprocessorAnalyzer,
+};
 
 #[tokio::test]
 async fn test_subprocessor_url_generation() {
     let analyzer = SubprocessorAnalyzer::new().await;
     let urls = analyzer.generate_subprocessor_urls("testdomain.com");
-    
+
     // Should generate 25+ URLs based on common patterns
-    assert!(urls.len() >= 25, "Should generate at least 25 URLs, got {}", urls.len());
-    
+    assert!(
+        urls.len() >= 25,
+        "Should generate at least 25 URLs, got {}",
+        urls.len()
+    );
+
     // Test specific patterns exist
     let expected_patterns = vec![
         "https://testdomain.com/subprocessors",
-        "https://www.testdomain.com/subprocessors", 
+        "https://www.testdomain.com/subprocessors",
         "https://testdomain.com/legal/subprocessors",
         "https://testdomain.com/privacy/subprocessors",
         "https://testdomain.com/trust/subprocessors",
         "https://testdomain.com/gdpr/subprocessors",
         "https://testdomain.com/vendors",
     ];
-    
+
     for pattern in expected_patterns {
-        assert!(urls.contains(&pattern.to_string()), 
-                "Missing expected URL pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing expected URL pattern: {}",
+            pattern
+        );
     }
 }
 
 #[tokio::test]
 async fn test_domain_validation() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Valid domains
     let valid_domains = vec![
         "google.com",
@@ -37,45 +47,54 @@ async fn test_domain_validation() {
         "cdn.assets.vendor.com",
         "valid-domain123.net",
     ];
-    
+
     for domain in valid_domains {
-        assert!(analyzer.is_valid_vendor_domain(domain), 
-                "Should be valid: {}", domain);
+        assert!(
+            analyzer.is_valid_vendor_domain(domain),
+            "Should be valid: {}",
+            domain
+        );
     }
-    
+
     // Invalid domains
     let invalid_domains = vec![
-        "example.com",    // Placeholder
-        "localhost",      // Local
-        "test.com",       // Placeholder  
-        "a",              // Too short
-        "nodot",          // No dot
+        "example.com", // Placeholder
+        "localhost",   // Local
+        "test.com",    // Placeholder
+        "a",           // Too short
+        "nodot",       // No dot
     ];
-    
+
     for domain in invalid_domains {
-        assert!(!analyzer.is_valid_vendor_domain(domain), 
-                "Should be invalid: {}", domain);
+        assert!(
+            !analyzer.is_valid_vendor_domain(domain),
+            "Should be invalid: {}",
+            domain
+        );
     }
 }
 
 #[tokio::test]
 async fn test_vendor_content_detection() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Should match vendor content
     let vendor_texts = vec![
         "Acme Inc. provides analytics services via acme.com",
-        "XYZ Technologies LLC hosts our data at xyz-tech.io", 
+        "XYZ Technologies LLC hosts our data at xyz-tech.io",
         "Payment processing by Stripe Corporation at stripe.com",
         "Email services company sends via mailsender.net",
         "Cloud hosting platform available at cloudhost.org",
     ];
-    
+
     for text in vendor_texts {
-        assert!(analyzer.looks_like_vendor_content(text), 
-                "Should detect vendor content: '{}'", text);
+        assert!(
+            analyzer.looks_like_vendor_content(text),
+            "Should detect vendor content: '{}'",
+            text
+        );
     }
-    
+
     // Should not match non-vendor content
     let non_vendor_texts = vec![
         "This is just regular text without indicators",
@@ -83,26 +102,35 @@ async fn test_vendor_content_detection() {
         "Contact us for more information about pricing",
         "Follow us on social media platforms",
     ];
-    
+
     for text in non_vendor_texts {
-        assert!(!analyzer.looks_like_vendor_content(text), 
-                "Should not detect vendor content: '{}'", text);
+        assert!(
+            !analyzer.looks_like_vendor_content(text),
+            "Should not detect vendor content: '{}'",
+            text
+        );
     }
 }
 
 #[tokio::test]
 async fn test_domain_extraction_valid_domains() {
     let analyzer = SubprocessorAnalyzer::new().await;
-    
+
     // Test valid domains that should pass both extraction and validation
     let test_cases = vec![
-        ("Visit our partner at stripe.com for more info", Some("stripe.com")),
+        (
+            "Visit our partner at stripe.com for more info",
+            Some("stripe.com"),
+        ),
         ("Contact support@sendgrid.io for help", Some("sendgrid.io")),
-        ("Check out analytics-provider.net", Some("analytics-provider.net")),
+        (
+            "Check out analytics-provider.net",
+            Some("analytics-provider.net"),
+        ),
         ("Our payment processor is paypal.com", Some("paypal.com")),
         ("Email services by mailgun.org", Some("mailgun.org")),
     ];
-    
+
     for (text, expected) in test_cases {
         let result = analyzer.extract_domain_from_text(text);
         if let Some(ref expected_domain) = expected {
@@ -121,8 +149,8 @@ async fn test_domain_extraction_filters_placeholders() {
 
     // Test that placeholder domains are filtered out
     let test_cases = vec![
-        "Visit example.com for testing",  // Should be filtered as placeholder
-        "Email us at test@localhost",     // localhost should be filtered
+        "Visit example.com for testing", // Should be filtered as placeholder
+        "Email us at test@localhost",    // localhost should be filtered
         "Our site is yoursite.com",      // Generic placeholder
         "Contact domain.com support",    // Generic placeholder
     ];
@@ -130,8 +158,12 @@ async fn test_domain_extraction_filters_placeholders() {
     for text in test_cases {
         let result = analyzer.extract_domain_from_text(text);
         if let Some(domain) = result {
-            assert!(!analyzer.is_valid_vendor_domain(&domain),
-                    "Should have filtered out placeholder domain '{}' from text: '{}'", domain, text);
+            assert!(
+                !analyzer.is_valid_vendor_domain(&domain),
+                "Should have filtered out placeholder domain '{}' from text: '{}'",
+                domain,
+                text
+            );
         }
     }
 }
@@ -156,8 +188,11 @@ async fn test_url_generation_includes_new_security_patterns() {
     ];
 
     for pattern in security_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing security pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing security pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -177,8 +212,11 @@ async fn test_url_generation_includes_legal_variations() {
     ];
 
     for pattern in legal_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing legal pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing legal pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -198,8 +236,11 @@ async fn test_url_generation_includes_data_processing_patterns() {
     ];
 
     for pattern in data_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing data processing pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing data processing pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -219,8 +260,11 @@ async fn test_url_generation_includes_third_party_patterns() {
     ];
 
     for pattern in third_party_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing third-party pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing third-party pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -238,8 +282,11 @@ async fn test_url_generation_includes_html_suffixes() {
     ];
 
     for pattern in html_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing HTML suffix pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing HTML suffix pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -256,8 +303,11 @@ async fn test_url_generation_includes_domain_specific_patterns() {
     ];
 
     for pattern in domain_specific_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing domain-specific pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing domain-specific pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -273,8 +323,11 @@ async fn test_url_generation_includes_data_sub_processors_pattern() {
     ];
 
     for pattern in data_sub_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing data-sub-processors pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing data-sub-processors pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -291,8 +344,11 @@ async fn test_url_generation_trailing_slash_variations() {
     ];
 
     for pattern in trailing_slash_patterns {
-        assert!(urls.contains(&pattern.to_string()),
-                "Missing trailing slash pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing trailing slash pattern: {}",
+            pattern
+        );
     }
 }
 
@@ -302,8 +358,10 @@ async fn test_url_generation_trust_subdomain_pattern() {
     let urls = analyzer.generate_subprocessor_urls("cursor.com");
 
     // Trust subdomain pattern (e.g., trust.cursor.com)
-    assert!(urls.contains(&"https://trust.cursor.com/subprocessors".to_string()),
-            "Missing trust subdomain pattern: https://trust.cursor.com/subprocessors");
+    assert!(
+        urls.contains(&"https://trust.cursor.com/subprocessors".to_string()),
+        "Missing trust subdomain pattern: https://trust.cursor.com/subprocessors"
+    );
 }
 
 #[tokio::test]
@@ -318,20 +376,34 @@ async fn test_url_generation_prioritizes_successful_patterns() {
     // - /legal/service-providers
 
     // Find the index of known successful patterns
-    let legal_subprocessors_idx = urls.iter().position(|u| u == "https://testcompany.com/legal/subprocessors");
-    let root_subprocessors_idx = urls.iter().position(|u| u == "https://testcompany.com/subprocessors");
+    let legal_subprocessors_idx = urls
+        .iter()
+        .position(|u| u == "https://testcompany.com/legal/subprocessors");
+    let root_subprocessors_idx = urls
+        .iter()
+        .position(|u| u == "https://testcompany.com/subprocessors");
 
     // Both should exist
-    assert!(legal_subprocessors_idx.is_some(), "Missing /legal/subprocessors pattern");
-    assert!(root_subprocessors_idx.is_some(), "Missing /subprocessors pattern");
+    assert!(
+        legal_subprocessors_idx.is_some(),
+        "Missing /legal/subprocessors pattern"
+    );
+    assert!(
+        root_subprocessors_idx.is_some(),
+        "Missing /subprocessors pattern"
+    );
 
     // They should be in the first 15 URLs (high priority)
-    assert!(legal_subprocessors_idx.unwrap() < 15,
-            "/legal/subprocessors should be in first 15 URLs, but was at index {}",
-            legal_subprocessors_idx.unwrap());
-    assert!(root_subprocessors_idx.unwrap() < 15,
-            "/subprocessors should be in first 15 URLs, but was at index {}",
-            root_subprocessors_idx.unwrap());
+    assert!(
+        legal_subprocessors_idx.unwrap() < 15,
+        "/legal/subprocessors should be in first 15 URLs, but was at index {}",
+        legal_subprocessors_idx.unwrap()
+    );
+    assert!(
+        root_subprocessors_idx.unwrap() < 15,
+        "/subprocessors should be in first 15 URLs, but was at index {}",
+        root_subprocessors_idx.unwrap()
+    );
 }
 
 #[tokio::test]
@@ -341,8 +413,11 @@ async fn test_url_generation_count_increased() {
 
     // With all the new patterns, we should generate significantly more URLs
     // Previous was ~70, new should be ~100+
-    assert!(urls.len() >= 80,
-            "Should generate at least 80 URLs for comprehensive coverage, got {}", urls.len());
+    assert!(
+        urls.len() >= 80,
+        "Should generate at least 80 URLs for comprehensive coverage, got {}",
+        urls.len()
+    );
 }
 
 #[tokio::test]
@@ -352,17 +427,27 @@ async fn test_trust_subdomain_url_generation() {
     // When domain IS a trust subdomain, should NOT generate trust.trust.{domain} URLs
     let urls = analyzer.generate_subprocessor_urls("trust.vanta.com");
     let has_double_trust = urls.iter().any(|u| u.contains("trust.trust."));
-    assert!(!has_double_trust,
-            "Should NOT generate double-trust URLs, but found: {:?}",
-            urls.iter().filter(|u| u.contains("trust.trust.")).collect::<Vec<_>>());
+    assert!(
+        !has_double_trust,
+        "Should NOT generate double-trust URLs, but found: {:?}",
+        urls.iter()
+            .filter(|u| u.contains("trust.trust."))
+            .collect::<Vec<_>>()
+    );
 
     // Should have the correct URL as one of the first entries
-    assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"),
-            "Should include https://trust.vanta.com/subprocessors in URL list");
+    assert!(
+        urls.iter()
+            .any(|u| u == "https://trust.vanta.com/subprocessors"),
+        "Should include https://trust.vanta.com/subprocessors in URL list"
+    );
 
     // First URL should be the trust center's own subprocessor page
-    assert!(urls[0] == "https://trust.vanta.com/subprocessors",
-            "First URL should be the trust subdomain's subprocessor page, got: {}", urls[0]);
+    assert!(
+        urls[0] == "https://trust.vanta.com/subprocessors",
+        "First URL should be the trust subdomain's subprocessor page, got: {}",
+        urls[0]
+    );
 }
 
 #[tokio::test]
@@ -371,12 +456,18 @@ async fn test_vanta_com_still_generates_correct_urls() {
     let urls = analyzer.generate_subprocessor_urls("vanta.com");
 
     // vanta.com should still get the hardcoded trust.vanta.com URL
-    assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"),
-            "vanta.com should include trust.vanta.com/subprocessors");
+    assert!(
+        urls.iter()
+            .any(|u| u == "https://trust.vanta.com/subprocessors"),
+        "vanta.com should include trust.vanta.com/subprocessors"
+    );
 
     // Should also include trust.vanta.com pattern from generic trust subdomain patterns
-    assert!(urls.iter().any(|u| u.starts_with("https://trust.vanta.com")),
-            "vanta.com should include trust.vanta.com patterns");
+    assert!(
+        urls.iter()
+            .any(|u| u.starts_with("https://trust.vanta.com")),
+        "vanta.com should include trust.vanta.com patterns"
+    );
 }
 
 #[test]
@@ -422,16 +513,31 @@ async fn test_vanta_graphql_from_html() {
 
     let analyzer = SubprocessorAnalyzer::new().await;
     let results = analyzer.try_vanta_graphql_from_html(vanta_html).await;
-    assert!(results.is_some(), "Vanta GraphQL strategy should return results for Vanta trust center HTML");
+    assert!(
+        results.is_some(),
+        "Vanta GraphQL strategy should return results for Vanta trust center HTML"
+    );
     let results = results.unwrap();
-    assert!(results.len() > 10, "Should find at least 10 Vanta subprocessors, found {}", results.len());
+    assert!(
+        results.len() > 10,
+        "Should find at least 10 Vanta subprocessors, found {}",
+        results.len()
+    );
 
     // Verify no false positives like _org:encrypt_data
     for r in &results {
         if r.domain.starts_with("_org:") {
             let org_name = r.domain.strip_prefix("_org:").unwrap();
-            assert!(!org_name.contains("encrypt"), "Should not have false positive org: {}", r.domain);
-            assert!(!org_name.contains("penetration"), "Should not have false positive org: {}", r.domain);
+            assert!(
+                !org_name.contains("encrypt"),
+                "Should not have false positive org: {}",
+                r.domain
+            );
+            assert!(
+                !org_name.contains("penetration"),
+                "Should not have false positive org: {}",
+                r.domain
+            );
         } else {
             // Domain results should not have fake TLDs
             if let Some(tld) = r.domain.rsplit('.').next() {
@@ -442,7 +548,11 @@ async fn test_vanta_graphql_from_html() {
 
     // Verify we get well-known Vanta subprocessors
     let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
-    assert!(domains.iter().any(|d| d.contains("amazon")), "Should find AWS: {:?}", domains);
+    assert!(
+        domains.iter().any(|d| d.contains("amazon")),
+        "Should find AWS: {:?}",
+        domains
+    );
 }
 
 #[test]
@@ -461,15 +571,23 @@ fn test_org_name_validation() {
     ));
 
     // Invalid: contains location/country markers
-    assert!(!is_valid_org_name("Factor Authentication United States United States xAI"));
+    assert!(!is_valid_org_name(
+        "Factor Authentication United States United States xAI"
+    ));
     assert!(!is_valid_org_name("Some Company United Kingdom Processing"));
 
     // Invalid: contains table header phrases
-    assert!(!is_valid_org_name("Third Party Subprocessors Name of Subprocessor Description of Processing"));
-    assert!(!is_valid_org_name("Location of Processing Corporate Location GitHub"));
+    assert!(!is_valid_org_name(
+        "Third Party Subprocessors Name of Subprocessor Description of Processing"
+    ));
+    assert!(!is_valid_org_name(
+        "Location of Processing Corporate Location GitHub"
+    ));
 
     // Invalid: too many words
-    assert!(!is_valid_org_name("This Is Way Too Many Words For A Real Organization Name To Have In Practice"));
+    assert!(!is_valid_org_name(
+        "This Is Way Too Many Words For A Real Organization Name To Have In Practice"
+    ));
 
     // Invalid: too short
     assert!(!is_valid_org_name("AB"));
@@ -484,20 +602,24 @@ fn test_org_name_validation() {
     // The regex fix prevents it from being extracted in the first place — the old
     // greedy regex matched "...America, Inc." from mid-table-row, but the fixed
     // regex with [a-zA-Z ]{2,50} won't cross row boundaries.
-    assert!(is_valid_org_name("America, Inc."), "Structurally valid org name format");
+    assert!(
+        is_valid_org_name("America, Inc."),
+        "Structurally valid org name format"
+    );
 }
 
 #[test]
 fn test_org_regex_prevents_table_row_gobbling() {
     // The fixed regex should NOT match across table row boundaries
-    let fixed_regex = regex::Regex::new(
-        r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))"
-    ).unwrap();
+    let fixed_regex =
+        regex::Regex::new(r"(?:^|[\s>])([A-Z][a-zA-Z ]{2,50}(?:,?\s*(?:Inc|LLC|Corp|Ltd)\.?))")
+            .unwrap();
 
     // Simulated plain text from github.com subprocessor page (table rows joined by spaces)
     let table_text = "AI Inference and AI Services United States United States Anthropic PBC AI Inference and AI Services United States United States Cloudflare Content delivery service United States United States Elasticsearch, Inc.";
 
-    let matches: Vec<&str> = fixed_regex.captures_iter(table_text)
+    let matches: Vec<&str> = fixed_regex
+        .captures_iter(table_text)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim()))
         .collect();
 
@@ -507,8 +629,10 @@ fn test_org_regex_prevents_table_row_gobbling() {
     }
 
     // Should extract individual company names, not concatenated rows
-    let good_text = "GitHub, Inc. provides hosting services. Amazon Web Services, Inc. provides cloud.";
-    let good_matches: Vec<&str> = fixed_regex.captures_iter(good_text)
+    let good_text =
+        "GitHub, Inc. provides hosting services. Amazon Web Services, Inc. provides cloud.";
+    let good_matches: Vec<&str> = fixed_regex
+        .captures_iter(good_text)
         .filter_map(|c| c.get(1).map(|m| m.as_str().trim()))
         .collect();
 

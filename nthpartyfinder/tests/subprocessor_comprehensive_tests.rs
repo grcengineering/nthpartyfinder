@@ -9,8 +9,7 @@
 ///
 /// Created: 2026-01-01
 /// Purpose: Discovery and validation of subprocessor module behavior
-
-use nthpartyfinder::subprocessor::{SubprocessorAnalyzer, SubprocessorCache, ExtractionPatterns};
+use nthpartyfinder::subprocessor::{ExtractionPatterns, SubprocessorAnalyzer, SubprocessorCache};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -35,7 +34,10 @@ async fn test_cache_hit_returns_cached_url() {
 
     // Should return the cached URL
     if let Some(url) = cached_url {
-        assert!(url.contains("klaviyo.com"), "Cached URL should contain domain name");
+        assert!(
+            url.contains("klaviyo.com"),
+            "Cached URL should contain domain name"
+        );
         assert!(url.starts_with("https://"), "Cached URL should use HTTPS");
         println!("✓ Cache hit for klaviyo.com: {}", url);
     } else {
@@ -48,7 +50,9 @@ async fn test_cache_miss_returns_none() {
     let cache = SubprocessorCache::load().await;
 
     // Test with a domain that definitely doesn't exist in cache
-    let cached_url = cache.get_cached_subprocessor_url("nonexistent-domain-12345.com").await;
+    let cached_url = cache
+        .get_cached_subprocessor_url("nonexistent-domain-12345.com")
+        .await;
 
     // Should return None
     assert!(cached_url.is_none(), "Cache miss should return None");
@@ -68,7 +72,11 @@ async fn test_cache_stores_and_retrieves_url() {
     // Retrieve the URL
     let retrieved_url = cache.get_cached_subprocessor_url(test_domain).await;
     assert!(retrieved_url.is_some(), "Should retrieve cached URL");
-    assert_eq!(retrieved_url.unwrap(), test_url, "Retrieved URL should match stored URL");
+    assert_eq!(
+        retrieved_url.unwrap(),
+        test_url,
+        "Retrieved URL should match stored URL"
+    );
 
     // Clean up
     let _ = cache.clear_domain_cache(test_domain).await;
@@ -83,14 +91,19 @@ async fn test_cache_preserves_extraction_patterns() {
     let patterns = cache.get_extraction_patterns("klaviyo.com").await;
 
     // Should return patterns (either cached or minimal bootstrap)
-    assert!(!patterns.entity_column_selectors.is_empty() ||
-            !patterns.table_selectors.is_empty() ||
-            patterns.custom_extraction_rules.is_some(),
-            "Should return some extraction patterns");
+    assert!(
+        !patterns.entity_column_selectors.is_empty()
+            || !patterns.table_selectors.is_empty()
+            || patterns.custom_extraction_rules.is_some(),
+        "Should return some extraction patterns"
+    );
 
     println!("✓ Extraction patterns retrieved successfully");
     println!("  - Domain-specific: {}", patterns.is_domain_specific);
-    println!("  - Has custom rules: {}", patterns.custom_extraction_rules.is_some());
+    println!(
+        "  - Has custom rules: {}",
+        patterns.custom_extraction_rules.is_some()
+    );
 }
 
 #[tokio::test]
@@ -101,7 +114,10 @@ async fn test_cache_version_check() {
     if let Some(entry) = cache.get_cached_entry("klaviyo.com").await {
         // Should have current cache version
         assert_eq!(entry.cache_version, 2, "Cache should use version 2");
-        assert!(entry.last_successful_access > 0, "Should have access timestamp");
+        assert!(
+            entry.last_successful_access > 0,
+            "Should have access timestamp"
+        );
         println!("✓ Cache version validation works");
         println!("  - Version: {}", entry.cache_version);
         println!("  - Last access: {}", entry.last_successful_access);
@@ -117,17 +133,26 @@ async fn test_cache_clear_domain() {
     let test_url = "https://test-clear-domain.com/subprocessors";
 
     // Create a cache entry
-    cache.cache_working_url(test_domain, test_url).await.unwrap();
+    cache
+        .cache_working_url(test_domain, test_url)
+        .await
+        .unwrap();
 
     // Verify it exists
-    assert!(cache.get_cached_subprocessor_url(test_domain).await.is_some());
+    assert!(cache
+        .get_cached_subprocessor_url(test_domain)
+        .await
+        .is_some());
 
     // Clear it
     let cleared = cache.clear_domain_cache(test_domain).await.unwrap();
     assert!(cleared, "Should return true when cache entry was cleared");
 
     // Verify it's gone
-    assert!(cache.get_cached_subprocessor_url(test_domain).await.is_none());
+    assert!(cache
+        .get_cached_subprocessor_url(test_domain)
+        .await
+        .is_none());
 
     println!("✓ Cache domain clearing works correctly");
 }
@@ -143,7 +168,11 @@ async fn test_url_generation_coverage() {
     let urls = analyzer.generate_subprocessor_urls("example.com");
 
     // Should generate a substantial number of URLs
-    assert!(urls.len() >= 50, "Should generate at least 50 URLs, got {}", urls.len());
+    assert!(
+        urls.len() >= 50,
+        "Should generate at least 50 URLs, got {}",
+        urls.len()
+    );
     println!("✓ Generated {} URLs for example.com", urls.len());
 
     // Check for key patterns
@@ -156,7 +185,11 @@ async fn test_url_generation_coverage() {
     ];
 
     for pattern in patterns_to_check {
-        assert!(urls.contains(&pattern.to_string()), "Missing expected pattern: {}", pattern);
+        assert!(
+            urls.contains(&pattern.to_string()),
+            "Missing expected pattern: {}",
+            pattern
+        );
     }
 
     println!("✓ All key URL patterns present");
@@ -170,7 +203,11 @@ async fn test_url_generation_https_only() {
 
     // All URLs should be HTTPS
     for url in &urls {
-        assert!(url.starts_with("https://"), "All URLs should use HTTPS: {}", url);
+        assert!(
+            url.starts_with("https://"),
+            "All URLs should use HTTPS: {}",
+            url
+        );
     }
 
     println!("✓ All {} generated URLs use HTTPS", urls.len());
@@ -182,12 +219,20 @@ async fn test_url_generation_domain_specific() {
 
     // Test domain-specific URL patterns
     let google_urls = analyzer.generate_subprocessor_urls("google.com");
-    assert!(google_urls.iter().any(|url| url.contains("workspace.google.com")),
-            "Should generate Google Workspace specific URL");
+    assert!(
+        google_urls
+            .iter()
+            .any(|url| url.contains("workspace.google.com")),
+        "Should generate Google Workspace specific URL"
+    );
 
     let microsoft_urls = analyzer.generate_subprocessor_urls("microsoft.com");
-    assert!(microsoft_urls.iter().any(|url| url.contains("go.microsoft.com")),
-            "Should generate Microsoft redirect URL");
+    assert!(
+        microsoft_urls
+            .iter()
+            .any(|url| url.contains("go.microsoft.com")),
+        "Should generate Microsoft redirect URL"
+    );
 
     println!("✓ Domain-specific URL patterns generated correctly");
 }
@@ -225,15 +270,20 @@ async fn test_css_selector_parsing_performance() {
     }
 
     let uncached_duration = start.elapsed();
-    let uncached_per_parse = uncached_duration.as_micros() / (iterations * selector_strings.len() as u128);
+    let uncached_per_parse =
+        uncached_duration.as_micros() / (iterations * selector_strings.len() as u128);
 
     println!("✓ CSS Selector parsing performance:");
-    println!("  - Total time for {} iterations: {:?}", iterations, uncached_duration);
+    println!(
+        "  - Total time for {} iterations: {:?}",
+        iterations, uncached_duration
+    );
     println!("  - Per-parse: {} μs", uncached_per_parse);
     println!("  - Selectors tested: {}", selector_strings.len());
 
     // Measure cached parsing (optimal implementation)
-    let cached_selectors: Vec<_> = selector_strings.iter()
+    let cached_selectors: Vec<_> = selector_strings
+        .iter()
         .filter_map(|s| Selector::parse(s).ok())
         .collect();
 
@@ -246,12 +296,18 @@ async fn test_css_selector_parsing_performance() {
     let cached_duration = start.elapsed();
 
     println!("  - Cached access time: {:?}", cached_duration);
-    println!("  - Speedup factor: {:.1}x", uncached_duration.as_secs_f64() / cached_duration.as_secs_f64());
+    println!(
+        "  - Speedup factor: {:.1}x",
+        uncached_duration.as_secs_f64() / cached_duration.as_secs_f64()
+    );
 
     // This test documents the performance issue, not validates performance
     // The speedup should be significant (100x+)
     // Note: In release mode, per-parse time may round to 0 μs, so check total duration instead
-    assert!(uncached_duration.as_nanos() > 0, "Should measure some parsing time");
+    assert!(
+        uncached_duration.as_nanos() > 0,
+        "Should measure some parsing time"
+    );
 }
 
 #[tokio::test]
@@ -264,10 +320,17 @@ async fn test_url_generation_performance() {
 
     println!("✓ URL generation performance:");
     println!("  - Generated {} URLs in {:?}", urls.len(), duration);
-    println!("  - Per-URL: {} μs", duration.as_micros() / urls.len() as u128);
+    println!(
+        "  - Per-URL: {} μs",
+        duration.as_micros() / urls.len() as u128
+    );
 
     // Should be very fast (< 1ms)
-    assert!(duration.as_millis() < 10, "URL generation should be fast, took: {:?}", duration);
+    assert!(
+        duration.as_millis() < 10,
+        "URL generation should be fast, took: {:?}",
+        duration
+    );
 }
 
 #[tokio::test]
@@ -299,8 +362,10 @@ async fn test_cached_domain_stripe() {
 
     if let Some(url) = cache.get_cached_subprocessor_url("stripe.com").await {
         assert!(url.contains("stripe.com"), "URL should contain domain");
-        assert!(url.contains("legal") || url.contains("service-providers") || url.contains("trust"),
-                "URL should be legal/subprocessor/trust related");
+        assert!(
+            url.contains("legal") || url.contains("service-providers") || url.contains("trust"),
+            "URL should be legal/subprocessor/trust related"
+        );
         println!("✓ stripe.com cache: {}", url);
     } else {
         println!("⚠ stripe.com not cached - expected for new installations");
@@ -337,11 +402,25 @@ async fn test_all_cached_domains_validity() {
     let cache = SubprocessorCache::load().await;
 
     let cached_domains = vec![
-        "klaviyo.com", "stripe.com", "atlassian.com", "sentry.io",
-        "apple.com", "browserstack.com", "docusign.com", "dropbox.com",
-        "heroku.com", "google.com", "microsoft.com", "drift.com",
-        "jamf.com", "hubspot.com", "postman.com", "chronosphere.io",
-        "concentrix.com", "sparkpost.com", "statsig.com",
+        "klaviyo.com",
+        "stripe.com",
+        "atlassian.com",
+        "sentry.io",
+        "apple.com",
+        "browserstack.com",
+        "docusign.com",
+        "dropbox.com",
+        "heroku.com",
+        "google.com",
+        "microsoft.com",
+        "drift.com",
+        "jamf.com",
+        "hubspot.com",
+        "postman.com",
+        "chronosphere.io",
+        "concentrix.com",
+        "sparkpost.com",
+        "statsig.com",
     ];
 
     let mut found = 0;
@@ -350,7 +429,12 @@ async fn test_all_cached_domains_validity() {
     for domain in &cached_domains {
         if let Some(url) = cache.get_cached_subprocessor_url(domain).await {
             // Just verify it's a valid HTTPS URL
-            assert!(url.starts_with("https://"), "URL should be HTTPS for domain {}: {}", domain, url);
+            assert!(
+                url.starts_with("https://"),
+                "URL should be HTTPS for domain {}: {}",
+                domain,
+                url
+            );
             // Note: Some domains use subdomains or redirects, so we don't strictly validate URL contains domain
             found += 1;
         } else {
@@ -398,14 +482,19 @@ async fn test_invalid_url_handling() {
     let analyzer = SubprocessorAnalyzer::new().await;
 
     // This should fail gracefully
-    let result = analyzer.scrape_subprocessor_page(
-        "https://this-domain-absolutely-does-not-exist-12345.com/test",
-        None,
-        "test.com"
-    ).await;
+    let result = analyzer
+        .scrape_subprocessor_page(
+            "https://this-domain-absolutely-does-not-exist-12345.com/test",
+            None,
+            "test.com",
+        )
+        .await;
 
     // Should return error, not panic
-    assert!(result.is_err(), "Should return error for non-existent domain");
+    assert!(
+        result.is_err(),
+        "Should return error for non-existent domain"
+    );
     println!("✓ Handles non-existent domains gracefully");
 }
 
@@ -414,11 +503,13 @@ async fn test_http_timeout_handling() {
     let analyzer = SubprocessorAnalyzer::new().await;
 
     // Use a URL that will timeout (example.com with very slow response)
-    let result = analyzer.scrape_subprocessor_page(
-        "https://httpbin.org/delay/40", // Will timeout (30s client timeout)
-        None,
-        "test.com"
-    ).await;
+    let result = analyzer
+        .scrape_subprocessor_page(
+            "https://httpbin.org/delay/40", // Will timeout (30s client timeout)
+            None,
+            "test.com",
+        )
+        .await;
 
     // Should timeout and return error
     assert!(result.is_err(), "Should timeout and return error");
@@ -438,18 +529,36 @@ async fn test_extraction_patterns_custom_rules() {
 
     if let Some(custom_rules) = patterns.custom_extraction_rules {
         println!("✓ Custom extraction rules found:");
-        println!("  - Direct selectors: {}", custom_rules.direct_selectors.len());
-        println!("  - Regex patterns: {}", custom_rules.custom_regex_patterns.len());
+        println!(
+            "  - Direct selectors: {}",
+            custom_rules.direct_selectors.len()
+        );
+        println!(
+            "  - Regex patterns: {}",
+            custom_rules.custom_regex_patterns.len()
+        );
 
         if let Some(special) = custom_rules.special_handling {
             println!("  - Skip generic methods: {}", special.skip_generic_methods);
-            println!("  - Custom mappings: {}", special.custom_org_to_domain_mapping.as_ref().map(|m| m.len()).unwrap_or(0));
-            println!("  - Exclusion patterns: {}", special.exclusion_patterns.len());
+            println!(
+                "  - Custom mappings: {}",
+                special
+                    .custom_org_to_domain_mapping
+                    .as_ref()
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            );
+            println!(
+                "  - Exclusion patterns: {}",
+                special.exclusion_patterns.len()
+            );
         }
 
-        assert!(!custom_rules.direct_selectors.is_empty() ||
-                !custom_rules.custom_regex_patterns.is_empty(),
-                "Should have some custom rules");
+        assert!(
+            !custom_rules.direct_selectors.is_empty()
+                || !custom_rules.custom_regex_patterns.is_empty(),
+            "Should have some custom rules"
+        );
     } else {
         println!("⚠ No custom rules found for klaviyo.com - may not be cached yet");
     }
@@ -468,7 +577,10 @@ async fn test_analyzer_creation() {
     println!("✓ Analyzer created successfully in {:?}", duration);
 
     // Should create quickly
-    assert!(duration.as_millis() < 1000, "Analyzer creation should be fast");
+    assert!(
+        duration.as_millis() < 1000,
+        "Analyzer creation should be fast"
+    );
 
     // Test that cache is functional
     let cache = analyzer.get_cache();
@@ -529,7 +641,10 @@ async fn test_end_to_end_cache_workflow() {
 
     // 3. Store URL
     let cache_guard = cache.read().await;
-    cache_guard.cache_working_url(test_domain, test_url).await.unwrap();
+    cache_guard
+        .cache_working_url(test_domain, test_url)
+        .await
+        .unwrap();
     println!("  Step 3: Stored URL in cache");
     drop(cache_guard);
 
@@ -612,22 +727,51 @@ async fn test_cache_path_isolation_between_domains() {
     let path_c = cache.get_cache_file_path("gamma.io");
 
     // Each domain MUST produce a unique cache path
-    assert_ne!(path_a, path_b, "Different domains must have different cache paths");
-    assert_ne!(path_a, path_c, "Different domains must have different cache paths");
-    assert_ne!(path_b, path_c, "Different domains must have different cache paths");
+    assert_ne!(
+        path_a, path_b,
+        "Different domains must have different cache paths"
+    );
+    assert_ne!(
+        path_a, path_c,
+        "Different domains must have different cache paths"
+    );
+    assert_ne!(
+        path_b, path_c,
+        "Different domains must have different cache paths"
+    );
 
     // No domain should resolve to _invalid_domain_.json
     let _invalid = cache.get_cache_file_path("_invalid_domain_");
-    assert_ne!(path_a.file_name(), Some(std::ffi::OsStr::new("_invalid_domain_.json")),
-        "Valid domain must not resolve to _invalid_domain_.json");
-    assert_ne!(path_b.file_name(), Some(std::ffi::OsStr::new("_invalid_domain_.json")),
-        "Valid domain must not resolve to _invalid_domain_.json");
+    assert_ne!(
+        path_a.file_name(),
+        Some(std::ffi::OsStr::new("_invalid_domain_.json")),
+        "Valid domain must not resolve to _invalid_domain_.json"
+    );
+    assert_ne!(
+        path_b.file_name(),
+        Some(std::ffi::OsStr::new("_invalid_domain_.json")),
+        "Valid domain must not resolve to _invalid_domain_.json"
+    );
 
     // Filenames should contain the sanitized domain
-    assert!(path_a.file_name().unwrap().to_str().unwrap().contains("alpha.com"),
-        "Cache path should contain domain name");
-    assert!(path_b.file_name().unwrap().to_str().unwrap().contains("beta.com"),
-        "Cache path should contain domain name");
+    assert!(
+        path_a
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("alpha.com"),
+        "Cache path should contain domain name"
+    );
+    assert!(
+        path_b
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("beta.com"),
+        "Cache path should contain domain name"
+    );
 
     println!("✓ Cache paths are properly isolated between domains");
     println!("  alpha.com -> {:?}", path_a);
@@ -646,12 +790,17 @@ async fn test_cache_path_traversal_prevention() {
 
     // Path traversal attempt should NOT escape the cache directory
     let cache_dir = std::path::PathBuf::from("cache");
-    assert!(path_traversal.starts_with(&cache_dir),
-        "Path traversal attempt must stay within cache dir: {:?}", path_traversal);
+    assert!(
+        path_traversal.starts_with(&cache_dir),
+        "Path traversal attempt must stay within cache dir: {:?}",
+        path_traversal
+    );
 
     // Must not produce the same path as a normal domain
-    assert_ne!(path_traversal, normal,
-        "Path traversal domain must not collide with normal domain");
+    assert_ne!(
+        path_traversal, normal,
+        "Path traversal domain must not collide with normal domain"
+    );
 
     println!("✓ Path traversal attempts are properly sanitized");
     println!("  ../../../etc/passwd -> {:?}", path_traversal);
@@ -691,7 +840,10 @@ fn test_utf8_truncation_does_not_panic() {
     let result = safe_truncate(&text_with_smart_quote, 200);
     assert!(result.ends_with("..."));
     assert!(result.len() <= 203); // 200 max + "..."
-    println!("✓ Smart quote at boundary: truncated safely to {} bytes", result.len());
+    println!(
+        "✓ Smart quote at boundary: truncated safely to {} bytes",
+        result.len()
+    );
 
     // Case 2: All ASCII — should truncate at exactly byte 200
     let ascii_text = "B".repeat(250);
@@ -731,13 +883,21 @@ fn test_utf8_truncation_does_not_panic() {
 fn test_ner_false_positive_language_codes_rejected() {
     // ISO 639-1 language codes that NER misidentifies as organizations
     // (found on internationalized Microsoft/Salesforce pages)
-    let language_codes = ["ar", "cs", "da", "de", "es", "fi", "fr", "he", "hu",
-                          "id", "it", "ja", "ko", "ms", "nl", "pl", "ru", "sv", "th", "tr"];
+    let language_codes = [
+        "ar", "cs", "da", "de", "es", "fi", "fr", "he", "hu", "id", "it", "ja", "ko", "ms", "nl",
+        "pl", "ru", "sv", "th", "tr",
+    ];
     for code in &language_codes {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(code),
-            "Language code '{}' should be rejected as NER false positive", code);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(code),
+            "Language code '{}' should be rejected as NER false positive",
+            code
+        );
     }
-    println!("✓ All {} ISO 639-1 language codes rejected", language_codes.len());
+    println!(
+        "✓ All {} ISO 639-1 language codes rejected",
+        language_codes.len()
+    );
 }
 
 #[test]
@@ -745,8 +905,11 @@ fn test_ner_false_positive_locale_identifiers_rejected() {
     // Locale identifiers from internationalized pages
     let locales = ["en-us", "zh-hans", "zh-hant", "pt-br", "nb-no"];
     for locale in &locales {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(locale),
-            "Locale '{}' should be rejected as NER false positive", locale);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(locale),
+            "Locale '{}' should be rejected as NER false positive",
+            locale
+        );
     }
     println!("✓ All {} locale identifiers rejected", locales.len());
 }
@@ -754,15 +917,29 @@ fn test_ner_false_positive_locale_identifiers_rejected() {
 #[test]
 fn test_ner_false_positive_snake_case_field_names_rejected() {
     // Snake_case identifiers from security questionnaire fields
-    let field_names = ["soc2_report", "penetration_testing", "encrypt_data",
-                       "enter_into_dpa", "sso_mfa", "live_status_page",
-                       "public_privacy_policy", "self_serve_security_docs",
-                       "bug_bounty_resp_disclosure", "integration_docs"];
+    let field_names = [
+        "soc2_report",
+        "penetration_testing",
+        "encrypt_data",
+        "enter_into_dpa",
+        "sso_mfa",
+        "live_status_page",
+        "public_privacy_policy",
+        "self_serve_security_docs",
+        "bug_bounty_resp_disclosure",
+        "integration_docs",
+    ];
     for field in &field_names {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(field),
-            "Snake_case field '{}' should be rejected as NER false positive", field);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(field),
+            "Snake_case field '{}' should be rejected as NER false positive",
+            field
+        );
     }
-    println!("✓ All {} snake_case field names rejected", field_names.len());
+    println!(
+        "✓ All {} snake_case field names rejected",
+        field_names.len()
+    );
 }
 
 #[test]
@@ -770,8 +947,11 @@ fn test_ner_false_positive_short_strings_rejected() {
     // Very short strings that can't be real organization names
     let short_strings = ["A", "B", "N", "ab", "xy"];
     for s in &short_strings {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(s),
-            "Short string '{}' should be rejected as NER false positive", s);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(s),
+            "Short string '{}' should be rejected as NER false positive",
+            s
+        );
     }
     println!("✓ All {} short strings rejected", short_strings.len());
 }
@@ -779,12 +959,26 @@ fn test_ner_false_positive_short_strings_rejected() {
 #[test]
 fn test_ner_false_positive_real_orgs_accepted() {
     // Real organization names that should NOT be rejected
-    let real_orgs = ["Google", "Microsoft", "Salesforce", "Amazon Web Services",
-                     "Cloudflare", "Stripe", "Ada Support", "Chronosphere",
-                     "Proofpoint", "ServiceNow", "Freshworks", "Red Sift"];
+    let real_orgs = [
+        "Google",
+        "Microsoft",
+        "Salesforce",
+        "Amazon Web Services",
+        "Cloudflare",
+        "Stripe",
+        "Ada Support",
+        "Chronosphere",
+        "Proofpoint",
+        "ServiceNow",
+        "Freshworks",
+        "Red Sift",
+    ];
     for org in &real_orgs {
-        assert!(!nthpartyfinder::subprocessor::is_ner_false_positive(org),
-            "Real organization '{}' should NOT be rejected", org);
+        assert!(
+            !nthpartyfinder::subprocessor::is_ner_false_positive(org),
+            "Real organization '{}' should NOT be rejected",
+            org
+        );
     }
     println!("✓ All {} real organization names accepted", real_orgs.len());
 }
@@ -793,35 +987,75 @@ fn test_ner_false_positive_real_orgs_accepted() {
 fn test_ner_false_positive_standards_and_certifications_rejected() {
     // BUG-003/010: Standards and certifications should be rejected as NER false positives
     let standards = [
-        "ISO", "IEC", "ISO/IEC 27001", "ISO 27001", "SOC 2", "SOC2",
-        "PCI-DSS", "PCI DSS", "GDPR", "HIPAA", "NIST", "NIST 800-53",
-        "FedRAMP", "CCPA", "FERPA", "OWASP", "AICPA", "SSAE 18",
-        "CSA STAR", "CIS", "COBIT", "ITIL", "CMMC", "FISMA",
+        "ISO",
+        "IEC",
+        "ISO/IEC 27001",
+        "ISO 27001",
+        "SOC 2",
+        "SOC2",
+        "PCI-DSS",
+        "PCI DSS",
+        "GDPR",
+        "HIPAA",
+        "NIST",
+        "NIST 800-53",
+        "FedRAMP",
+        "CCPA",
+        "FERPA",
+        "OWASP",
+        "AICPA",
+        "SSAE 18",
+        "CSA STAR",
+        "CIS",
+        "COBIT",
+        "ITIL",
+        "CMMC",
+        "FISMA",
     ];
     for s in &standards {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(s),
-            "Standard/certification '{}' should be rejected as NER false positive", s);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(s),
+            "Standard/certification '{}' should be rejected as NER false positive",
+            s
+        );
     }
-    println!("✓ All {} standards/certifications rejected", standards.len());
+    println!(
+        "✓ All {} standards/certifications rejected",
+        standards.len()
+    );
 }
 
 #[test]
 fn test_ner_false_positive_non_vendor_orgs_rejected() {
     // BUG-003/010: Non-vendor organizations (charities, government, standards bodies)
     let non_vendors = [
-        "The Salvation Army", "Salvation Army", "Red Cross",
-        "United Nations", "World Health Organization",
-        "Federal Trade Commission", "FTC",
-        "Department of Defense", "DoD",
-        "European Commission", "IEEE", "IETF", "W3C",
+        "The Salvation Army",
+        "Salvation Army",
+        "Red Cross",
+        "United Nations",
+        "World Health Organization",
+        "Federal Trade Commission",
+        "FTC",
+        "Department of Defense",
+        "DoD",
+        "European Commission",
+        "IEEE",
+        "IETF",
+        "W3C",
         "International Organization for Standardization",
         "National Institute of Standards and Technology",
     ];
     for org in &non_vendors {
-        assert!(nthpartyfinder::subprocessor::is_ner_false_positive(org),
-            "Non-vendor org '{}' should be rejected as NER false positive", org);
+        assert!(
+            nthpartyfinder::subprocessor::is_ner_false_positive(org),
+            "Non-vendor org '{}' should be rejected as NER false positive",
+            org
+        );
     }
-    println!("✓ All {} non-vendor organizations rejected", non_vendors.len());
+    println!(
+        "✓ All {} non-vendor organizations rejected",
+        non_vendors.len()
+    );
 }
 
 #[tokio::test]
@@ -830,16 +1064,21 @@ async fn test_garbage_single_char_domains_rejected() {
     // from Apple's subprocessor PDF text artifacts
     let analyzer = SubprocessorAnalyzer::new().await;
     let garbage_domains = [
-        "b.mz", "e.zz", "n.ik", "j.os", "f.ff", "v.rr", "d.ed", "c.ib",
-        "j.ai", "j.xa", "k.ai", "k.mv", "l.cr", "p.pk", "w.gf", "g.yc",
-        "f.ed", "d.lr", "d.qd", "v.szd", "t.gcs", "t.nzx", "s.kuj",
-        "i.lsg", "y.dks", "z.hum", "a.ehsi", "xp.fh", "ic.xw", "ie.kpm",
+        "b.mz", "e.zz", "n.ik", "j.os", "f.ff", "v.rr", "d.ed", "c.ib", "j.ai", "j.xa", "k.ai",
+        "k.mv", "l.cr", "p.pk", "w.gf", "g.yc", "f.ed", "d.lr", "d.qd", "v.szd", "t.gcs", "t.nzx",
+        "s.kuj", "i.lsg", "y.dks", "z.hum", "a.ehsi", "xp.fh", "ic.xw", "ie.kpm",
     ];
     for domain in &garbage_domains {
-        assert!(!analyzer.is_valid_vendor_domain(domain),
-            "Garbage domain '{}' should be rejected by is_valid_vendor_domain", domain);
+        assert!(
+            !analyzer.is_valid_vendor_domain(domain),
+            "Garbage domain '{}' should be rejected by is_valid_vendor_domain",
+            domain
+        );
     }
-    println!("✓ All {} garbage single/two-char domains rejected", garbage_domains.len());
+    println!(
+        "✓ All {} garbage single/two-char domains rejected",
+        garbage_domains.len()
+    );
 }
 
 #[tokio::test]
@@ -850,13 +1089,25 @@ async fn test_valid_short_domains_accepted() {
     // But 3-char names like aws.com, ibm.com, box.com MUST pass.
     let analyzer = SubprocessorAnalyzer::new().await;
     let valid_domains = [
-        "aws.com", "ibm.com", "box.com", "duo.com", "ada.cx",
-        "google.com", "stripe.com", "zoom.us", "redis.io", "elastic.co",
-        "cloudflare.com", "datadoghq.com",
+        "aws.com",
+        "ibm.com",
+        "box.com",
+        "duo.com",
+        "ada.cx",
+        "google.com",
+        "stripe.com",
+        "zoom.us",
+        "redis.io",
+        "elastic.co",
+        "cloudflare.com",
+        "datadoghq.com",
     ];
     for domain in &valid_domains {
-        assert!(analyzer.is_valid_vendor_domain(domain),
-            "Valid domain '{}' should be accepted by is_valid_vendor_domain", domain);
+        assert!(
+            analyzer.is_valid_vendor_domain(domain),
+            "Valid domain '{}' should be accepted by is_valid_vendor_domain",
+            domain
+        );
     }
     println!("✓ All {} valid domains accepted", valid_domains.len());
 }
@@ -865,13 +1116,25 @@ async fn test_valid_short_domains_accepted() {
 async fn test_placeholder_domains_rejected() {
     // Placeholder text that gets converted to .com domains
     let analyzer = SubprocessorAnalyzer::new().await;
-    let placeholder_domains = ["n/a.com", "none.com", "na.com",
-                                "example.com", "test.com", "domain.com"];
+    let placeholder_domains = [
+        "n/a.com",
+        "none.com",
+        "na.com",
+        "example.com",
+        "test.com",
+        "domain.com",
+    ];
     for domain in &placeholder_domains {
-        assert!(!analyzer.is_valid_vendor_domain(domain),
-            "Placeholder domain '{}' should be rejected", domain);
+        assert!(
+            !analyzer.is_valid_vendor_domain(domain),
+            "Placeholder domain '{}' should be rejected",
+            domain
+        );
     }
-    println!("✓ All {} placeholder domains rejected", placeholder_domains.len());
+    println!(
+        "✓ All {} placeholder domains rejected",
+        placeholder_domains.len()
+    );
 }
 
 // ============================================================================
@@ -897,7 +1160,8 @@ fn test_ner_chunking_utf8_boundary_safety() {
                 safe_end -= 1;
             }
             let actual_end = if safe_end < text.len() {
-                text[start..safe_end].rfind(char::is_whitespace)
+                text[start..safe_end]
+                    .rfind(char::is_whitespace)
                     .map(|pos| start + pos + 1)
                     .unwrap_or(safe_end)
             } else {
@@ -912,7 +1176,11 @@ fn test_ner_chunking_utf8_boundary_safety() {
                 continue;
             }
             result.push(text[start..final_end].to_string());
-            let overlap_start = if final_end > start + overlap { final_end - overlap } else { final_end };
+            let overlap_start = if final_end > start + overlap {
+                final_end - overlap
+            } else {
+                final_end
+            };
             let mut safe_overlap = overlap_start;
             while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
                 safe_overlap -= 1;
@@ -938,18 +1206,27 @@ fn test_ner_chunking_utf8_boundary_safety() {
     assert!(!chunks.is_empty(), "Should produce at least one chunk");
     for (i, chunk) in chunks.iter().enumerate() {
         // Verify every chunk is valid UTF-8 (would panic if not)
-        assert!(chunk.is_char_boundary(chunk.len()),
-            "Chunk {} end is not on char boundary", i);
+        assert!(
+            chunk.is_char_boundary(chunk.len()),
+            "Chunk {} end is not on char boundary",
+            i
+        );
     }
-    println!("✓ Smart quote at chunk boundary: {} chunks produced safely", chunks.len());
+    println!(
+        "✓ Smart quote at chunk boundary: {} chunks produced safely",
+        chunks.len()
+    );
 
     // Case 2: Japanese text (3 bytes per char) — every 3rd byte is a boundary
     let japanese = "日本語テストデータ処理中".repeat(200); // ~6600 bytes
     let chunks = safe_chunk(&japanese, 3000, 500);
     assert!(chunks.len() >= 2, "Should produce multiple chunks");
     for (i, chunk) in chunks.iter().enumerate() {
-        assert!(chunk.is_char_boundary(chunk.len()),
-            "Japanese chunk {} end is not on char boundary", i);
+        assert!(
+            chunk.is_char_boundary(chunk.len()),
+            "Japanese chunk {} end is not on char boundary",
+            i
+        );
     }
     println!("✓ Japanese text: {} chunks produced safely", chunks.len());
 
@@ -958,8 +1235,11 @@ fn test_ner_chunking_utf8_boundary_safety() {
     let chunks = safe_chunk(&emoji, 3000, 500);
     assert!(!chunks.is_empty());
     for (i, chunk) in chunks.iter().enumerate() {
-        assert!(chunk.is_char_boundary(chunk.len()),
-            "Emoji chunk {} end is not on char boundary", i);
+        assert!(
+            chunk.is_char_boundary(chunk.len()),
+            "Emoji chunk {} end is not on char boundary",
+            i
+        );
     }
     println!("✓ Emoji text: {} chunks produced safely", chunks.len());
 
@@ -977,8 +1257,14 @@ fn test_ner_chunking_utf8_boundary_safety() {
     let chunks = safe_chunk(&crash_text, 3000, 500);
     assert!(chunks.len() >= 2);
     for (i, chunk) in chunks.iter().enumerate() {
-        assert!(chunk.is_char_boundary(chunk.len()),
-            "Crash scenario chunk {} end is not on char boundary", i);
+        assert!(
+            chunk.is_char_boundary(chunk.len()),
+            "Crash scenario chunk {} end is not on char boundary",
+            i
+        );
     }
-    println!("✓ Real crash scenario: {} chunks produced safely", chunks.len());
+    println!(
+        "✓ Real crash scenario: {} chunks produced safely",
+        chunks.len()
+    );
 }

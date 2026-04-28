@@ -28,8 +28,12 @@ impl ResultSink {
     /// Create a new ResultSink writing to a zstd-compressed JSONL file.
     /// The file is created in the given directory with a PID-stamped name.
     pub fn new(output_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(output_dir)
-            .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+        std::fs::create_dir_all(output_dir).with_context(|| {
+            format!(
+                "Failed to create output directory: {}",
+                output_dir.display()
+            )
+        })?;
 
         let pid = std::process::id();
         let filename = format!("nthpartyfinder-results-{}.jsonl.zst", pid);
@@ -52,8 +56,9 @@ impl ResultSink {
     /// Create a ResultSink at a specific path (for testing or explicit path control).
     pub fn with_path(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
         }
 
         let file = File::create(path)
@@ -72,8 +77,8 @@ impl ResultSink {
 
     /// Append a single VendorRelationship to the sink.
     pub fn append_one(&mut self, result: &VendorRelationship) -> Result<()> {
-        let json = serde_json::to_string(result)
-            .context("Failed to serialize VendorRelationship")?;
+        let json =
+            serde_json::to_string(result).context("Failed to serialize VendorRelationship")?;
         self.writer.write_all(json.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.count += 1;
@@ -96,7 +101,9 @@ impl ResultSink {
 
     /// Flush the zstd encoder to ensure data is written to disk.
     pub fn flush(&mut self) -> Result<()> {
-        self.writer.flush().context("Failed to flush zstd encoder")?;
+        self.writer
+            .flush()
+            .context("Failed to flush zstd encoder")?;
         self.unflushed = 0;
         Ok(())
     }
@@ -108,7 +115,8 @@ impl ResultSink {
         self.flush()?;
 
         // Finalize the zstd stream (writes the end-of-frame marker)
-        self.writer.finish()
+        self.writer
+            .finish()
             .context("Failed to finalize zstd stream")?;
 
         // Read back all results
@@ -120,8 +128,8 @@ impl ResultSink {
     pub fn read_results(path: &Path) -> Result<Vec<VendorRelationship>> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open result file: {}", path.display()))?;
-        let decoder = zstd::stream::read::Decoder::new(file)
-            .context("Failed to create zstd decoder")?;
+        let decoder =
+            zstd::stream::read::Decoder::new(file).context("Failed to create zstd decoder")?;
         let reader = BufReader::new(decoder);
 
         let mut results = Vec::new();
@@ -138,8 +146,12 @@ impl ResultSink {
                         Err(e) => {
                             errors += 1;
                             if errors <= 3 {
-                                eprintln!("Warning: Skipping corrupt line {} in {}: {}",
-                                    line_num + 1, path.display(), e);
+                                eprintln!(
+                                    "Warning: Skipping corrupt line {} in {}: {}",
+                                    line_num + 1,
+                                    path.display(),
+                                    e
+                                );
                             }
                         }
                     }
@@ -152,7 +164,11 @@ impl ResultSink {
         }
 
         if errors > 3 {
-            eprintln!("Warning: {} total corrupt lines skipped in {}", errors, path.display());
+            eprintln!(
+                "Warning: {} total corrupt lines skipped in {}",
+                errors,
+                path.display()
+            );
         }
 
         Ok(results)
@@ -199,7 +215,11 @@ impl ResultSink {
                         // Check if this PID is still running
                         if !is_process_running(pid) {
                             if let Err(e) = std::fs::remove_file(entry.path()) {
-                                eprintln!("Warning: Failed to clean up orphaned file {}: {}", entry.path().display(), e);
+                                eprintln!(
+                                    "Warning: Failed to clean up orphaned file {}: {}",
+                                    entry.path().display(),
+                                    e
+                                );
                             } else {
                                 cleaned += 1;
                             }
@@ -305,7 +325,8 @@ mod tests {
 
         // Write exactly FLUSH_INTERVAL records
         for i in 0..FLUSH_INTERVAL {
-            sink.append_one(&make_test_result(&format!("v{}.com", i), 1)).unwrap();
+            sink.append_one(&make_test_result(&format!("v{}.com", i), 1))
+                .unwrap();
         }
         // After FLUSH_INTERVAL, unflushed should be 0 (auto-flushed)
         assert_eq!(sink.unflushed, 0);

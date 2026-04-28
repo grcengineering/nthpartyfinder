@@ -1,4 +1,4 @@
-use nthpartyfinder::dns::{self, VendorDomain, DnsServerPool};
+use nthpartyfinder::dns::{self, DnsServerPool, VendorDomain};
 use nthpartyfinder::vendor::RecordType;
 
 // ============================================================================
@@ -18,7 +18,7 @@ fn test_spf_basic_include() {
 #[test]
 fn test_spf_multiple_includes() {
     let records = vec![
-        "v=spf1 include:_spf.google.com include:mailgun.org include:sendgrid.net ~all".to_string()
+        "v=spf1 include:_spf.google.com include:mailgun.org include:sendgrid.net ~all".to_string(),
     ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
@@ -101,7 +101,9 @@ fn test_spf_macro_with_modifiers() {
 #[test]
 fn test_spf_with_ip4_and_ip6() {
     // SPF records with IP addresses should not extract domains from IPs
-    let records = vec!["v=spf1 ip4:192.168.1.0/24 ip6:2001:db8::/32 include:_spf.google.com ~all".to_string()];
+    let records = vec![
+        "v=spf1 ip4:192.168.1.0/24 ip6:2001:db8::/32 include:_spf.google.com ~all".to_string(),
+    ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Should only extract google.com, not IPs
@@ -111,9 +113,8 @@ fn test_spf_with_ip4_and_ip6() {
 
 #[test]
 fn test_spf_all_mechanisms_together() {
-    let records = vec![
-        "v=spf1 a mx include:_spf.google.com redirect=_spf.mailgun.org -all".to_string()
-    ];
+    let records =
+        vec!["v=spf1 a mx include:_spf.google.com redirect=_spf.mailgun.org -all".to_string()];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Should extract google.com and mailgun.org
@@ -151,9 +152,7 @@ fn test_spf_malformed_no_version() {
 #[test]
 fn test_spf_whitespace_variations() {
     // Test various whitespace patterns
-    let records = vec![
-        "v=spf1  include:_spf.google.com   include:mailgun.org  ~all".to_string()
-    ];
+    let records = vec!["v=spf1  include:_spf.google.com   include:mailgun.org  ~all".to_string()];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     assert_eq!(domains.len(), 2);
@@ -176,7 +175,7 @@ fn test_dmarc_basic_rua() {
 #[test]
 fn test_dmarc_multiple_rua() {
     let records = vec![
-        "v=DMARC1; p=reject; rua=mailto:dmarc@example.com,mailto:reports@vendor.com".to_string()
+        "v=DMARC1; p=reject; rua=mailto:dmarc@example.com,mailto:reports@vendor.com".to_string(),
     ];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
@@ -410,9 +409,7 @@ fn test_invalid_domain_label_too_long() {
 
 #[test]
 fn test_deduplication_same_domain() {
-    let records = vec![
-        "v=spf1 include:_spf.google.com include:mail.google.com ~all".to_string()
-    ];
+    let records = vec!["v=spf1 include:_spf.google.com include:mail.google.com ~all".to_string()];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
 
     // Both should resolve to google.com, but should only appear once
@@ -431,7 +428,10 @@ fn test_deduplication_multiple_records() {
     // google.com appears in both SPF and verification
     // Deduplication is by (domain, record_type, raw_record) tuple
     // So same vendor from different sources should appear multiple times
-    let google_domains: Vec<_> = domains.iter().filter(|d| d.domain == "google.com").collect();
+    let google_domains: Vec<_> = domains
+        .iter()
+        .filter(|d| d.domain == "google.com")
+        .collect();
 
     // Should appear twice: once for SPF, once for verification
     assert_eq!(google_domains.len(), 2);
@@ -620,8 +620,12 @@ fn test_regex_compilation_performance() {
 #[test]
 fn test_large_spf_record() {
     // Test with a very large SPF record (edge case)
-    let large_spf = format!("v=spf1 {} ~all",
-        (0..100).map(|i| format!("include:domain{}.com", i)).collect::<Vec<_>>().join(" ")
+    let large_spf = format!(
+        "v=spf1 {} ~all",
+        (0..100)
+            .map(|i| format!("include:domain{}.com", i))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
     let records = vec![large_spf];
     let domains = dns::extract_vendor_domains_with_source_and_logger(&records, None, "test.com");
@@ -711,8 +715,16 @@ fn test_spf_nested_exists_extracts_domain() {
     let results = dns::extract_vendor_domains_with_source(&records);
 
     let domains: Vec<&str> = results.iter().map(|d| d.domain.as_str()).collect();
-    assert!(domains.contains(&"salesforce.com"), "Should extract salesforce.com from exists: mechanism, got: {:?}", domains);
-    assert!(domains.contains(&"easydmarc.pro"), "Should extract easydmarc.pro from include: mechanism, got: {:?}", domains);
+    assert!(
+        domains.contains(&"salesforce.com"),
+        "Should extract salesforce.com from exists: mechanism, got: {:?}",
+        domains
+    );
+    assert!(
+        domains.contains(&"easydmarc.pro"),
+        "Should extract easydmarc.pro from include: mechanism, got: {:?}",
+        domains
+    );
 }
 
 #[tokio::test]
@@ -721,7 +733,10 @@ async fn test_spf_recursive_with_empty_records() {
     let pool = DnsServerPool::new();
     let records = vec!["some-non-spf-record=value".to_string()];
     let results = dns::resolve_spf_includes_recursive(&records, &pool, "example.com").await;
-    assert!(results.is_empty(), "Non-SPF records should yield no recursive results");
+    assert!(
+        results.is_empty(),
+        "Non-SPF records should yield no recursive results"
+    );
 }
 
 #[tokio::test]
@@ -730,5 +745,8 @@ async fn test_spf_recursive_with_no_includes() {
     let pool = DnsServerPool::new();
     let records = vec!["v=spf1 ip4:1.2.3.0/24 ip4:5.6.7.0/24 ~all".to_string()];
     let results = dns::resolve_spf_includes_recursive(&records, &pool, "example.com").await;
-    assert!(results.is_empty(), "SPF with only ip4 ranges should yield no recursive targets");
+    assert!(
+        results.is_empty(),
+        "SPF with only ip4 ranges should yield no recursive targets"
+    );
 }

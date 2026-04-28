@@ -84,12 +84,18 @@ pub fn create_browser() -> anyhow::Result<BrowserGuard> {
         || std::path::Path::new("/.dockerenv").exists();
 
     // Try to find Chrome binary: check env var, then well-known paths
-    let chrome_path: Option<std::path::PathBuf> = std::env::var("CHROME_PATH").ok()
+    let chrome_path: Option<std::path::PathBuf> = std::env::var("CHROME_PATH")
+        .ok()
         .map(std::path::PathBuf::from)
         .or_else(|| {
             // WSL: Windows Chrome installation
-            let wsl_path = std::path::Path::new("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe");
-            if wsl_path.exists() { Some(wsl_path.to_path_buf()) } else { None }
+            let wsl_path =
+                std::path::Path::new("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe");
+            if wsl_path.exists() {
+                Some(wsl_path.to_path_buf())
+            } else {
+                None
+            }
         });
 
     // Assign a unique debug port per browser instance to avoid port conflicts.
@@ -130,10 +136,8 @@ pub fn create_browser() -> anyhow::Result<BrowserGuard> {
             headless_chrome::Browser::new(options)
                 .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
         }
-        (false, None) => {
-            headless_chrome::Browser::default()
-                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
-        }
+        (false, None) => headless_chrome::Browser::default()
+            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?,
     };
 
     Ok(BrowserGuard {

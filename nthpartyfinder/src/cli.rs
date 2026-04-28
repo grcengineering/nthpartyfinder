@@ -3,8 +3,11 @@ use dirs;
 
 #[derive(Parser, Debug)]
 #[command(name = "nthpartyfinder")]
-#[command(about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods")]
-#[command(long_about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods.\n\n\
+#[command(
+    about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods"
+)]
+#[command(
+    long_about = "Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods.\n\n\
 Discovery methods:\n  \
 DNS (always on)      SPF/DMARC/DKIM/MX/NS/CNAME/verification TXT records\n  \
 Subprocessor         Scrapes vendor/subprocessor pages linked from trust centers\n  \
@@ -13,7 +16,8 @@ SaaS Tenant          Probes for SaaS tenant subdomains (e.g., company.slack.com)
 Subfinder            Subdomain enumeration via CNAME discovery\n  \
 CT Logs              Certificate Transparency log analysis\n\n\
 Non-DNS methods are controlled by config or --enable/--disable flags.\n\
-Use --dns-only to disable all non-DNS discovery methods.")]
+Use --dns-only to disable all non-DNS discovery methods."
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -175,7 +179,6 @@ pub struct Cli {
     pub dns_only: bool,
 
     // ============ Batch Analysis Options ============
-
     /// Path to CSV or JSON file containing multiple domains to analyze
     /// CSV: One domain per line, or column named "domain" (with optional "label" column)
     /// JSON: Array of domain strings, or array of objects with "domain" field
@@ -344,7 +347,12 @@ impl Args {
         // Domain validation only applies when not using --init and not in batch mode
         if !self.init && !self.is_batch_mode() {
             match &self.domain {
-                None => return Err("Domain is required (use --domain or --input-file for batch mode)".to_string()),
+                None => {
+                    return Err(
+                        "Domain is required (use --domain or --input-file for batch mode)"
+                            .to_string(),
+                    )
+                }
                 Some(d) if d.is_empty() => return Err("Domain cannot be empty".to_string()),
                 _ => {}
             }
@@ -356,7 +364,9 @@ impl Args {
                 return Err("Batch parallel must be greater than 0".to_string());
             }
             if self.batch_parallel > 20 {
-                return Err("Batch parallel cannot exceed 20 to avoid overwhelming systems".to_string());
+                return Err(
+                    "Batch parallel cannot exceed 20 to avoid overwhelming systems".to_string(),
+                );
             }
         }
 
@@ -375,7 +385,9 @@ impl Args {
         }
 
         if self.parallel_jobs > 100 {
-            return Err("Parallel jobs cannot exceed 100 to avoid overwhelming DNS servers".to_string());
+            return Err(
+                "Parallel jobs cannot exceed 100 to avoid overwhelming DNS servers".to_string(),
+            );
         }
 
         Ok(())
@@ -399,7 +411,10 @@ impl Args {
 
     pub fn get_domain_output_dir(&self) -> Result<String, String> {
         let base_dir = self.get_output_dir()?;
-        let domain = self.domain.as_ref().ok_or("Domain is required for output directory")?;
+        let domain = self
+            .domain
+            .as_ref()
+            .ok_or("Domain is required for output directory")?;
         let domain_clean = domain.replace(".", "_").replace(":", "_");
         let reports_dir = std::path::Path::new(&base_dir)
             .join("reports")

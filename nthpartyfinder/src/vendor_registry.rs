@@ -10,13 +10,32 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum DomainType { Primary, Service, Api, Cdn, Acquired, Alias, Email }
+pub enum DomainType {
+    Primary,
+    Service,
+    Api,
+    Cdn,
+    Acquired,
+    Alias,
+    Email,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskCategory {
-    Platform, Infrastructure, Tracking, Advertising, Security, Payment,
-    Communication, Storage, Development, Monitoring, Media, Support, Analytics
+    Platform,
+    Infrastructure,
+    Tracking,
+    Advertising,
+    Security,
+    Payment,
+    Communication,
+    Storage,
+    Development,
+    Monitoring,
+    Media,
+    Support,
+    Analytics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,14 +119,19 @@ impl VendorRegistry {
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let path = entry.path();
-                if path.extension().map_or(true, |e| e != "json") { return None; }
-                if path.file_name().map_or(false, |n| n == "_schema.json") { return None; }
+                if path.extension().map_or(true, |e| e != "json") {
+                    return None;
+                }
+                if path.file_name().map_or(false, |n| n == "_schema.json") {
+                    return None;
+                }
                 Some(path)
             })
             .collect();
 
         // Read and parse all files in parallel using rayon
-        let parsed_configs: Vec<Result<VendorConfig>> = json_files.par_iter()
+        let parsed_configs: Vec<Result<VendorConfig>> = json_files
+            .par_iter()
             .map(|path| {
                 let content = std::fs::read_to_string(path)
                     .with_context(|| format!("Failed to read: {:?}", path))?;
@@ -124,19 +148,29 @@ impl VendorRegistry {
                     let vendor_id = config.id.clone();
                     let config = Arc::new(config);
                     for domain in config.domains.keys() {
-                        registry.domain_to_vendor.insert(domain.to_lowercase(), vendor_id.clone());
+                        registry
+                            .domain_to_vendor
+                            .insert(domain.to_lowercase(), vendor_id.clone());
                     }
                     let primary = config.primary_domain.to_lowercase();
                     if !registry.domain_to_vendor.contains_key(&primary) {
                         registry.domain_to_vendor.insert(primary, vendor_id.clone());
                     }
                     for alias in &config.provider_aliases {
-                        registry.alias_to_vendor.insert(alias.to_lowercase(), vendor_id.clone());
+                        registry
+                            .alias_to_vendor
+                            .insert(alias.to_lowercase(), vendor_id.clone());
                     }
                     for pattern in &config.verification_patterns {
-                        registry.verification_patterns.push((pattern.clone(), vendor_id.clone()));
+                        registry
+                            .verification_patterns
+                            .push((pattern.clone(), vendor_id.clone()));
                     }
-                    debug!("Loaded vendor: {} with {} domains", config.id, config.domains.len());
+                    debug!(
+                        "Loaded vendor: {} with {} domains",
+                        config.id,
+                        config.domains.len()
+                    );
                     registry.vendors.insert(vendor_id, config);
                 }
                 Err(e) => warn!("Failed to load vendor: {}", e),
@@ -147,25 +181,28 @@ impl VendorRegistry {
     }
 
     fn load_vendor_file(&mut self, path: &Path) -> Result<Arc<VendorConfig>> {
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read: {:?}", path))?;
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("Failed to read: {:?}", path))?;
         let config: VendorConfig = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse: {:?}", path))?;
         let vendor_id = config.id.clone();
         let config = Arc::new(config);
 
         for domain in config.domains.keys() {
-            self.domain_to_vendor.insert(domain.to_lowercase(), vendor_id.clone());
+            self.domain_to_vendor
+                .insert(domain.to_lowercase(), vendor_id.clone());
         }
         let primary = config.primary_domain.to_lowercase();
         if !self.domain_to_vendor.contains_key(&primary) {
             self.domain_to_vendor.insert(primary, vendor_id.clone());
         }
         for alias in &config.provider_aliases {
-            self.alias_to_vendor.insert(alias.to_lowercase(), vendor_id.clone());
+            self.alias_to_vendor
+                .insert(alias.to_lowercase(), vendor_id.clone());
         }
         for pattern in &config.verification_patterns {
-            self.verification_patterns.push((pattern.clone(), vendor_id.clone()));
+            self.verification_patterns
+                .push((pattern.clone(), vendor_id.clone()));
         }
         self.vendors.insert(vendor_id, config.clone());
         Ok(config)
@@ -178,7 +215,7 @@ impl VendorRegistry {
         }
         let parts: Vec<&str> = d.split('.').collect();
         if parts.len() > 2 {
-            let base = parts[parts.len()-2..].join(".");
+            let base = parts[parts.len() - 2..].join(".");
             if let Some(id) = self.domain_to_vendor.get(&base) {
                 return self.vendors.get(id).cloned();
             }
@@ -187,7 +224,8 @@ impl VendorRegistry {
     }
 
     pub fn get_vendor_by_alias(&self, alias: &str) -> Option<Arc<VendorConfig>> {
-        self.alias_to_vendor.get(&alias.to_lowercase())
+        self.alias_to_vendor
+            .get(&alias.to_lowercase())
             .and_then(|id| self.vendors.get(id).cloned())
     }
 
@@ -196,7 +234,8 @@ impl VendorRegistry {
     }
 
     pub fn get_organization(&self, domain: &str) -> Option<String> {
-        self.get_vendor_by_domain(domain).map(|v| v.organization.clone())
+        self.get_vendor_by_domain(domain)
+            .map(|v| v.organization.clone())
     }
 
     pub fn find_vendor_by_verification(&self, txt: &str) -> Option<Arc<VendorConfig>> {
@@ -223,8 +262,12 @@ impl VendorRegistry {
         self.domain_to_vendor.contains_key(&domain.to_lowercase())
     }
 
-    pub fn vendor_count(&self) -> usize { self.vendors.len() }
-    pub fn domain_count(&self) -> usize { self.domain_to_vendor.len() }
+    pub fn vendor_count(&self) -> usize {
+        self.vendors.len()
+    }
+    pub fn domain_count(&self) -> usize {
+        self.domain_to_vendor.len()
+    }
 
     pub fn get_all_domain_mappings(&self) -> HashMap<String, String> {
         let mut m = HashMap::new();
@@ -238,7 +281,9 @@ impl VendorRegistry {
 }
 
 impl Default for VendorRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ============================================================================
@@ -256,7 +301,10 @@ fn find_config_dir() -> Option<PathBuf> {
     let cwd_config = PathBuf::from("./config");
     if cwd_config.exists() && cwd_config.is_dir() {
         if cwd_config.join("vendors").exists() {
-            debug!("Found config directory at: {:?}", cwd_config.canonicalize().unwrap_or(cwd_config.clone()));
+            debug!(
+                "Found config directory at: {:?}",
+                cwd_config.canonicalize().unwrap_or(cwd_config.clone())
+            );
             return Some(cwd_config);
         }
     }
@@ -266,7 +314,10 @@ fn find_config_dir() -> Option<PathBuf> {
         if let Some(exe_dir) = exe_path.parent() {
             let exe_config = exe_dir.join("config");
             if exe_config.exists() && exe_config.join("vendors").exists() {
-                debug!("Found config directory next to executable: {:?}", exe_config);
+                debug!(
+                    "Found config directory next to executable: {:?}",
+                    exe_config
+                );
                 return Some(exe_config);
             }
             if let Some(parent) = exe_dir.parent() {
@@ -309,11 +360,15 @@ pub fn init() -> Result<()> {
     let vendor_count = registry.vendor_count();
     let domain_count = registry.domain_count();
 
-    VENDOR_REGISTRY.set(registry)
+    VENDOR_REGISTRY
+        .set(registry)
         .map_err(|_| anyhow::anyhow!("Vendor registry already initialized"))?;
 
     if vendor_count > 0 {
-        info!("Vendor registry initialized: {} vendors, {} domains", vendor_count, domain_count);
+        info!(
+            "Vendor registry initialized: {} vendors, {} domains",
+            vendor_count, domain_count
+        );
     }
 
     Ok(())

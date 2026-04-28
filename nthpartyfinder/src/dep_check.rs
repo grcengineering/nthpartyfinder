@@ -383,7 +383,9 @@ pub fn download_onnx_runtime_interactive() -> Result<PathBuf, String> {
     eprint!("Download ONNX Runtime now? [Y/n] ");
 
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).map_err(|e| e.to_string())?;
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| e.to_string())?;
     let input = input.trim().to_lowercase();
 
     if !input.is_empty() && input != "y" && input != "yes" {
@@ -415,7 +417,10 @@ pub fn download_onnx_runtime_interactive() -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to run curl: {}", e))?;
 
     if !status.success() {
-        return Err(format!("Download failed. Try manually: curl -fSL -o onnxruntime.tgz {}", download_url));
+        return Err(format!(
+            "Download failed. Try manually: curl -fSL -o onnxruntime.tgz {}",
+            download_url
+        ));
     }
 
     eprintln!("  Extracting...");
@@ -475,12 +480,16 @@ pub fn download_onnx_runtime_interactive() -> Result<PathBuf, String> {
                 let abs_path = path.canonicalize().unwrap_or(path.clone());
                 std::env::set_var("ORT_DYLIB_PATH", &abs_path);
                 eprintln!("  ✅ ONNX Runtime installed at: {}", abs_path.display());
-                eprintln!("  Add to shell profile: export ORT_DYLIB_PATH={}", abs_path.display());
+                eprintln!(
+                    "  Add to shell profile: export ORT_DYLIB_PATH={}",
+                    abs_path.display()
+                );
                 Ok(abs_path)
             }
             None => Err(format!(
                 "Downloaded but could not find {} in {}. Check the directory manually.",
-                lib_name, ort_dir.display()
+                lib_name,
+                ort_dir.display()
             )),
         }
     }

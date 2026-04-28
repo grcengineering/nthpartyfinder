@@ -9,7 +9,7 @@
 //!
 //! This provides a reliable fallback when WHOIS data is unavailable or protected.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use regex::Regex;
 use scraper::{Html, Selector};
@@ -84,22 +84,31 @@ pub async fn fetch_page_content(domain: &str) -> Result<String> {
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
-    let response = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            debug!("Failed to fetch {}: {}", url, e);
-            // Try HTTP fallback
-            let http_url = format!("http://{}", domain);
-            client.get(&http_url).send().await
-                .map_err(|e2| anyhow!("Failed to fetch {}: HTTPS: {}, HTTP: {}", domain, e, e2))?
-        }
-    };
+    let response =
+        match client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                debug!("Failed to fetch {}: {}", url, e);
+                // Try HTTP fallback
+                let http_url = format!("http://{}", domain);
+                client.get(&http_url).send().await.map_err(|e2| {
+                    anyhow!("Failed to fetch {}: HTTPS: {}, HTTP: {}", domain, e, e2)
+                })?
+            }
+        };
 
     if !response.status().is_success() {
-        return Err(anyhow!("Non-success status {} for {}", response.status(), url));
+        return Err(anyhow!(
+            "Non-success status {} for {}",
+            response.status(),
+            url
+        ));
     }
 
-    response.text().await.map_err(|e| anyhow!("Failed to read response body: {}", e))
+    response
+        .text()
+        .await
+        .map_err(|e| anyhow!("Failed to read response body: {}", e))
 }
 
 /// Extract organization name from a domain's website
@@ -132,11 +141,16 @@ pub async fn extract_organization_with_fallback(
         match fetch_page_content(domain).await {
             Ok(html_content) => {
                 if let Ok(Some(result)) = extract_organization_from_html(&html_content, domain) {
-                    debug!("HTTP fetch succeeded for {}: {} ({})",
-                           domain, result.organization, result.source);
+                    debug!(
+                        "HTTP fetch succeeded for {}: {} ({})",
+                        domain, result.organization, result.source
+                    );
                     return Ok(Some(result));
                 }
-                debug!("HTTP fetch returned no structured data for {} - likely SPA", domain);
+                debug!(
+                    "HTTP fetch returned no structured data for {} - likely SPA",
+                    domain
+                );
             }
             Err(e) => {
                 debug!("HTTP fetch failed for {}: {}", domain, e);
@@ -149,11 +163,16 @@ pub async fn extract_organization_with_fallback(
     match fetch_page_with_headless(domain) {
         Ok(html_content) => {
             if let Ok(Some(result)) = extract_organization_from_html(&html_content, domain) {
-                info!("Headless browser succeeded for {}: {} ({})",
-                      domain, result.organization, result.source);
+                info!(
+                    "Headless browser succeeded for {}: {} ({})",
+                    domain, result.organization, result.source
+                );
                 return Ok(Some(result));
             }
-            debug!("Headless browser returned no structured data for {}", domain);
+            debug!(
+                "Headless browser returned no structured data for {}",
+                domain
+            );
         }
         Err(e) => {
             debug!("Headless browser failed for {}: {}", domain, e);
@@ -169,7 +188,9 @@ fn fetch_page_with_headless(domain: &str) -> Result<String> {
 
     let guard = crate::browser_pool::create_browser()?;
 
-    let tab = guard.browser.new_tab()
+    let tab = guard
+        .browser
+        .new_tab()
         .map_err(|e| anyhow!("Failed to create browser tab: {}", e))?;
 
     tab.navigate_to(&url)
@@ -181,7 +202,8 @@ fn fetch_page_with_headless(domain: &str) -> Result<String> {
     // Wait for JavaScript to render - SPAs often need more time
     std::thread::sleep(Duration::from_millis(3000));
 
-    let html_content = tab.get_content()
+    let html_content = tab
+        .get_content()
         .map_err(|e| anyhow!("Failed to get page content for {}: {}", url, e))?;
 
     Ok(html_content)
@@ -266,8 +288,16 @@ fn extract_from_schema_org(document: &Html) -> Option<WebOrgResult> {
 fn extract_org_from_schema_data(data: &SchemaOrgData) -> Option<String> {
     // Check if this is an Organization type
     if let Some(ref schema_type) = data.schema_type {
-        let org_types = ["Organization", "Corporation", "LocalBusiness", "Company",
-                        "Brand", "NGO", "GovernmentOrganization", "EducationalOrganization"];
+        let org_types = [
+            "Organization",
+            "Corporation",
+            "LocalBusiness",
+            "Company",
+            "Brand",
+            "NGO",
+            "GovernmentOrganization",
+            "EducationalOrganization",
+        ];
 
         if org_types.iter().any(|t| schema_type.contains(t)) {
             // Prefer legal name, fall back to name
@@ -327,7 +357,9 @@ fn extract_from_opengraph(document: &Html) -> Option<WebOrgResult> {
         let handle = twitter_site.trim_start_matches('@');
         if handle.len() > 2 && !handle.contains(' ') {
             // Convert handle to title case as potential org name
-            let org_name = handle.chars().next()
+            let org_name = handle
+                .chars()
+                .next()
                 .map(|c| c.to_uppercase().collect::<String>() + &handle[1..])
                 .unwrap_or_else(|| handle.to_string());
 
@@ -394,7 +426,11 @@ fn extract_from_meta_tags(document: &Html) -> Option<WebOrgResult> {
 /// Extract organization from title tag
 fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
     let selector = Selector::parse("title").ok()?;
-    let title = document.select(&selector).next()?.text().collect::<String>();
+    let title = document
+        .select(&selector)
+        .next()?
+        .text()
+        .collect::<String>();
     let title = title.trim();
 
     if title.is_empty() || title.len() < 3 {
@@ -512,7 +548,8 @@ fn extract_from_copyright(document: &Html, html: &str) -> Option<WebOrgResult> {
 /// Get meta tag content by property attribute
 fn get_meta_property(document: &Html, property: &str) -> Option<String> {
     let selector = Selector::parse(&format!(r#"meta[property="{}"]"#, property)).ok()?;
-    document.select(&selector)
+    document
+        .select(&selector)
         .next()
         .and_then(|el| el.value().attr("content"))
         .map(|s| s.to_string())
@@ -521,7 +558,8 @@ fn get_meta_property(document: &Html, property: &str) -> Option<String> {
 /// Get meta tag content by name attribute
 fn get_meta_name(document: &Html, name: &str) -> Option<String> {
     let selector = Selector::parse(&format!(r#"meta[name="{}"]"#, name)).ok()?;
-    document.select(&selector)
+    document
+        .select(&selector)
         .next()
         .and_then(|el| el.value().attr("content"))
         .map(|s| s.to_string())
@@ -542,7 +580,12 @@ fn is_valid_org_name(name: &str) -> bool {
     }
 
     // Must start with alphanumeric
-    if !name.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+    if !name
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric())
+        .unwrap_or(false)
+    {
         return false;
     }
 
@@ -553,10 +596,29 @@ fn is_valid_org_name(name: &str) -> bool {
 
     // Reject common non-org strings (including SPA placeholders)
     let invalid_names = [
-        "home", "welcome", "about", "contact", "login", "sign in", "sign up",
-        "register", "dashboard", "admin", "404", "error", "page not found",
-        "undefined", "null", "none", "n/a", "test", "example",
-        "loading", "loading...", "please wait", "redirecting",
+        "home",
+        "welcome",
+        "about",
+        "contact",
+        "login",
+        "sign in",
+        "sign up",
+        "register",
+        "dashboard",
+        "admin",
+        "404",
+        "error",
+        "page not found",
+        "undefined",
+        "null",
+        "none",
+        "n/a",
+        "test",
+        "example",
+        "loading",
+        "loading...",
+        "please wait",
+        "redirecting",
     ];
 
     let name_lower = name.to_lowercase();
@@ -570,10 +632,30 @@ fn is_valid_org_name(name: &str) -> bool {
 /// Check if a string looks like a page name rather than an org name
 fn looks_like_page_name(name: &str) -> bool {
     let page_indicators = [
-        "Home", "Welcome", "About", "Contact", "Login", "Sign", "Register",
-        "Dashboard", "Settings", "Profile", "Account", "Blog", "News",
-        "Products", "Services", "Pricing", "Support", "Help", "FAQ",
-        "Privacy", "Terms", "Legal", "Careers", "Jobs",
+        "Home",
+        "Welcome",
+        "About",
+        "Contact",
+        "Login",
+        "Sign",
+        "Register",
+        "Dashboard",
+        "Settings",
+        "Profile",
+        "Account",
+        "Blog",
+        "News",
+        "Products",
+        "Services",
+        "Pricing",
+        "Support",
+        "Help",
+        "FAQ",
+        "Privacy",
+        "Terms",
+        "Legal",
+        "Careers",
+        "Jobs",
     ];
 
     page_indicators.iter().any(|ind| name.contains(ind))
@@ -581,7 +663,8 @@ fn looks_like_page_name(name: &str) -> bool {
 
 /// Clean up organization name
 fn clean_org_name(name: &str) -> String {
-    let cleaned = name.trim()
+    let cleaned = name
+        .trim()
         .replace('\n', " ")
         .replace('\r', " ")
         .replace('\t', " ")
@@ -590,10 +673,14 @@ fn clean_org_name(name: &str) -> String {
         .join(" ");
 
     // Remove trailing period if it's not part of an abbreviation
-    if cleaned.ends_with('.') && !cleaned.ends_with("Inc.") && !cleaned.ends_with("Ltd.")
-        && !cleaned.ends_with("Corp.") && !cleaned.ends_with("Co.") && !cleaned.ends_with("LLC.")
+    if cleaned.ends_with('.')
+        && !cleaned.ends_with("Inc.")
+        && !cleaned.ends_with("Ltd.")
+        && !cleaned.ends_with("Corp.")
+        && !cleaned.ends_with("Co.")
+        && !cleaned.ends_with("LLC.")
     {
-        cleaned[..cleaned.len()-1].to_string()
+        cleaned[..cleaned.len() - 1].to_string()
     } else {
         cleaned
     }
@@ -641,7 +728,10 @@ mod tests {
 
         let result = extract_organization_from_html(spa_html, "example.com").unwrap();
         // SPA shell has no structured data - should return None
-        assert!(result.is_none(), "SPA shell should return None, triggering headless fallback");
+        assert!(
+            result.is_none(),
+            "SPA shell should return None, triggering headless fallback"
+        );
     }
 
     #[test]

@@ -34,7 +34,9 @@ pub async fn list_cached_domains() -> Result<()> {
             if let Some(domain) = path.file_stem().and_then(|s| s.to_str()) {
                 // Try to read the cache entry to get details
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
+                    if let Ok(cache_entry) =
+                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                    {
                         domains.push((
                             domain.to_string(),
                             cache_entry.last_successful_access,
@@ -97,7 +99,10 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
             println!("{}", "=".repeat(60));
             println!();
             println!("Working URL: {}", entry.working_subprocessor_url);
-            println!("Last Accessed: {}", format_timestamp(entry.last_successful_access));
+            println!(
+                "Last Accessed: {}",
+                format_timestamp(entry.last_successful_access)
+            );
             println!("Cache Version: {}", entry.cache_version);
             println!();
 
@@ -115,7 +120,10 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                     println!("  Context Patterns: {:?}", patterns.context_patterns);
                 }
                 if !patterns.entity_header_patterns.is_empty() {
-                    println!("  Entity Header Patterns: {:?}", patterns.entity_header_patterns);
+                    println!(
+                        "  Entity Header Patterns: {:?}",
+                        patterns.entity_header_patterns
+                    );
                 }
                 if let Some(ref rules) = patterns.custom_extraction_rules {
                     println!("  Custom Extraction Rules:");
@@ -123,11 +131,15 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                         println!("    Direct Selectors: {:?}", rules.direct_selectors);
                     }
                     if !rules.custom_regex_patterns.is_empty() {
-                        println!("    Custom Regex Patterns: {} patterns", rules.custom_regex_patterns.len());
+                        println!(
+                            "    Custom Regex Patterns: {} patterns",
+                            rules.custom_regex_patterns.len()
+                        );
                         for pattern in &rules.custom_regex_patterns {
-                            println!("      - {} (capture group: {})",
-                                &pattern.description,
-                                pattern.capture_group);
+                            println!(
+                                "      - {} (capture group: {})",
+                                &pattern.description, pattern.capture_group
+                            );
                         }
                     }
                     if let Some(ref handling) = rules.special_handling {
@@ -135,7 +147,10 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                             println!("    Skip Generic Methods: true");
                         }
                         if !handling.exclusion_patterns.is_empty() {
-                            println!("    Exclusion Patterns: {} patterns", handling.exclusion_patterns.len());
+                            println!(
+                                "    Exclusion Patterns: {} patterns",
+                                handling.exclusion_patterns.len()
+                            );
                         }
                     }
                 }
@@ -144,21 +159,33 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
 
             if let Some(ref metadata) = entry.extraction_metadata {
                 println!("Extraction Metadata:");
-                println!("  Successful Extractions: {}", metadata.successful_extractions);
+                println!(
+                    "  Successful Extractions: {}",
+                    metadata.successful_extractions
+                );
                 if let Some(col_idx) = metadata.successful_entity_column_index {
                     println!("  Entity Column Index: {}", col_idx);
                 }
                 if let Some(ref pattern) = metadata.successful_header_pattern {
                     println!("  Successful Header Pattern: {}", pattern);
                 }
-                println!("  Last Extraction Time: {}", format_timestamp(metadata.last_extraction_time));
+                println!(
+                    "  Last Extraction Time: {}",
+                    format_timestamp(metadata.last_extraction_time)
+                );
 
                 if let Some(ref adaptive) = metadata.adaptive_patterns {
                     println!("  Adaptive Patterns:");
                     println!("    Confidence Score: {:.2}", adaptive.confidence_score);
                     println!("    Validation Count: {}", adaptive.validation_count);
-                    println!("    Discovery Time: {}", format_timestamp(adaptive.discovery_timestamp));
-                    println!("    Discovered Selectors: {} selectors", adaptive.discovered_selectors.len());
+                    println!(
+                        "    Discovery Time: {}",
+                        format_timestamp(adaptive.discovery_timestamp)
+                    );
+                    println!(
+                        "    Discovered Selectors: {} selectors",
+                        adaptive.discovered_selectors.len()
+                    );
                 }
             }
 
@@ -300,9 +327,12 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
                 }
 
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
+                    if let Ok(cache_entry) =
+                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                    {
                         if !cache_entry.working_subprocessor_url.is_empty() {
-                            urls_to_validate.push((domain.to_string(), cache_entry.working_subprocessor_url));
+                            urls_to_validate
+                                .push((domain.to_string(), cache_entry.working_subprocessor_url));
                         }
                     }
                 }
@@ -419,11 +449,13 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
         };
 
         if verbose {
-            println!("{:<12} {:<40} {} ({}ms)",
+            println!(
+                "{:<12} {:<40} {} ({}ms)",
                 status_indicator,
                 result.domain,
                 result.url,
-                result.response_time_ms.unwrap_or(0));
+                result.response_time_ms.unwrap_or(0)
+            );
 
             if let Some(ref err) = result.error_message {
                 println!("             Error: {}", err);
@@ -512,9 +544,18 @@ mod tests {
         assert_eq!(format!("{}", ValidationStatus::Ok), "OK");
         assert_eq!(format!("{}", ValidationStatus::NotFound), "Not Found (404)");
         assert_eq!(format!("{}", ValidationStatus::Timeout), "Timeout");
-        assert_eq!(format!("{}", ValidationStatus::NetworkError), "Network Error");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(500)), "Server Error (500)");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(503)), "Server Error (503)");
+        assert_eq!(
+            format!("{}", ValidationStatus::NetworkError),
+            "Network Error"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(500)),
+            "Server Error (500)"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(503)),
+            "Server Error (503)"
+        );
     }
 
     #[test]

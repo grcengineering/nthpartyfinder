@@ -7,23 +7,23 @@
 //! environment variable or place onnxruntime.dll next to the executable.
 
 #[cfg(feature = "embedded-ner")]
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 #[cfg(feature = "embedded-ner")]
-use tracing::{debug, info};
+use gliner::model::input::text::TextInput;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::params::Parameters;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::pipeline::span::SpanMode;
+#[cfg(feature = "embedded-ner")]
+use gliner::model::GLiNER;
+#[cfg(feature = "embedded-ner")]
+use orp::params::RuntimeParameters;
 #[cfg(feature = "embedded-ner")]
 use std::io::Write;
 #[cfg(feature = "embedded-ner")]
 use std::sync::OnceLock;
 #[cfg(feature = "embedded-ner")]
-use gliner::model::GLiNER;
-#[cfg(feature = "embedded-ner")]
-use gliner::model::pipeline::span::SpanMode;
-#[cfg(feature = "embedded-ner")]
-use gliner::model::params::Parameters;
-#[cfg(feature = "embedded-ner")]
-use gliner::model::input::text::TextInput;
-#[cfg(feature = "embedded-ner")]
-use orp::params::RuntimeParameters;
+use tracing::{debug, info};
 
 /// Model bytes embedded at compile time
 #[cfg(feature = "embedded-ner")]
@@ -73,12 +73,17 @@ impl NerOrganizationExtractor {
 
         // Try to find onnxruntime.dll in common locations
         // IMPORTANT: Use absolute paths to avoid loading wrong system DLLs
-        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let cwd = std::env::current_dir().ok();
 
         // For Rust projects, exe is typically in target/release/ or target/debug/
         // So project root is 2 directories up from the executable
-        let project_root_from_exe = exe_dir.as_ref().and_then(|d| d.parent()).and_then(|d| d.parent());
+        let project_root_from_exe = exe_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .and_then(|d| d.parent());
 
         let search_paths = vec![
             // Next to executable (absolute path)
@@ -90,7 +95,8 @@ impl NerOrganizationExtractor {
             // Current working directory (absolute path)
             cwd.as_ref().map(|d| d.join("onnxruntime.dll")),
             // Project's onnxruntime directory relative to cwd
-            cwd.as_ref().map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
+            cwd.as_ref()
+                .map(|d| d.join("onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll")),
             // User's local app data
             dirs::data_local_dir().map(|d| d.join("onnxruntime").join("onnxruntime.dll")),
         ];
@@ -131,16 +137,23 @@ impl NerOrganizationExtractor {
             "libonnxruntime.so"
         };
 
-        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let cwd = std::env::current_dir().ok();
-        let project_root_from_exe = exe_dir.as_ref().and_then(|d| d.parent()).and_then(|d| d.parent());
+        let project_root_from_exe = exe_dir
+            .as_ref()
+            .and_then(|d| d.parent())
+            .and_then(|d| d.parent());
 
         let search_paths = vec![
             exe_dir.as_ref().map(|d| d.join(lib_name)),
             project_root_from_exe.map(|d| d.join(lib_name)),
-            project_root_from_exe.map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
+            project_root_from_exe
+                .map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
             cwd.as_ref().map(|d| d.join(lib_name)),
-            cwd.as_ref().map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
+            cwd.as_ref()
+                .map(|d| d.join("onnxruntime-linux-x64-1.20.1/lib").join(lib_name)),
         ];
 
         for path_opt in search_paths {
@@ -161,7 +174,8 @@ impl NerOrganizationExtractor {
              1. Place {} next to the executable or in the working directory\n\
              2. Or set ORT_DYLIB_PATH to point to {}\n\
              3. Or install onnxruntime system-wide",
-            lib_name, lib_name
+            lib_name,
+            lib_name
         ))
     }
 
@@ -190,9 +204,14 @@ impl NerOrganizationExtractor {
         let model = GLiNER::<SpanMode>::new(
             Parameters::default(),
             RuntimeParameters::default(),
-            tokenizer_path.to_str().ok_or_else(|| anyhow!("Invalid tokenizer path"))?,
-            model_path.to_str().ok_or_else(|| anyhow!("Invalid model path"))?,
-        ).map_err(|e| anyhow!("Failed to initialize GLiNER model: {}", e))?;
+            tokenizer_path
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid tokenizer path"))?,
+            model_path
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid model path"))?,
+        )
+        .map_err(|e| anyhow!("Failed to initialize GLiNER model: {}", e))?;
 
         info!("NER model initialized successfully");
 
@@ -228,13 +247,13 @@ impl NerOrganizationExtractor {
 
         // Create input for organization entity extraction
         // Include "product" and "brand" to catch SaaS sites that use company names as products
-        let input = TextInput::from_str(
-            &[text],
-            &["organization", "company", "product", "brand"],
-        ).map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+        let input = TextInput::from_str(&[text], &["organization", "company", "product", "brand"])
+            .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
 
         // Run inference
-        let output = self.model.inference(input)
+        let output = self
+            .model
+            .inference(input)
             .map_err(|e| anyhow!("NER inference failed: {}", e))?;
 
         // Find the highest confidence organization entity
@@ -244,11 +263,16 @@ impl NerOrganizationExtractor {
             for span in spans {
                 let entity_type = span.class().to_lowercase();
                 // Accept organization, company, product, and brand entity types
-                if entity_type == "organization" || entity_type == "company"
-                    || entity_type == "product" || entity_type == "brand" {
+                if entity_type == "organization"
+                    || entity_type == "company"
+                    || entity_type == "product"
+                    || entity_type == "brand"
+                {
                     let confidence = span.probability();
                     if confidence >= self.min_confidence {
-                        if best_match.is_none() || confidence > best_match.as_ref().unwrap().confidence {
+                        if best_match.is_none()
+                            || confidence > best_match.as_ref().unwrap().confidence
+                        {
                             let org_name = span.text().trim().to_string();
                             if !org_name.is_empty() {
                                 best_match = Some(NerOrgResult {
@@ -263,20 +287,32 @@ impl NerOrganizationExtractor {
         }
 
         if let Some(ref result) = best_match {
-            debug!("NER extracted organization: {} (confidence: {:.2})",
-                   result.organization, result.confidence);
+            debug!(
+                "NER extracted organization: {} (confidence: {:.2})",
+                result.organization, result.confidence
+            );
         }
 
         Ok(best_match)
     }
 
     /// Extract organization from domain and optional page content
-    pub fn extract_from_domain(&self, domain: &str, page_content: Option<&str>) -> Result<Option<NerOrgResult>> {
-        debug!("NER: Attempting to extract organization from domain: {}", domain);
+    pub fn extract_from_domain(
+        &self,
+        domain: &str,
+        page_content: Option<&str>,
+    ) -> Result<Option<NerOrgResult>> {
+        debug!(
+            "NER: Attempting to extract organization from domain: {}",
+            domain
+        );
 
         // Build context text for NER
         let text = if let Some(content) = page_content {
-            debug!("NER: Using page content ({} chars) for extraction", content.len());
+            debug!(
+                "NER: Using page content ({} chars) for extraction",
+                content.len()
+            );
             format!("Website: {}. {}", domain, content)
         } else {
             debug!("NER: No page content available, using domain only");
@@ -286,8 +322,10 @@ impl NerOrganizationExtractor {
         let result = self.extract_organization(&text);
 
         if let Ok(Some(ref org_result)) = result {
-            debug!("NER: Successfully extracted '{}' (confidence: {:.2})",
-                   org_result.organization, org_result.confidence);
+            debug!(
+                "NER: Successfully extracted '{}' (confidence: {:.2})",
+                org_result.organization, org_result.confidence
+            );
         } else {
             debug!("NER: No organization extracted for {}", domain);
         }
@@ -300,7 +338,11 @@ impl NerOrganizationExtractor {
     /// Unlike `extract_organization()` which returns only the single best match,
     /// this returns all detected organizations, deduplicated by normalized name
     /// (keeping the highest confidence for each).
-    pub fn extract_all_organizations(&self, text: &str, min_confidence: Option<f32>) -> Result<Vec<NerOrgResult>> {
+    pub fn extract_all_organizations(
+        &self,
+        text: &str,
+        min_confidence: Option<f32>,
+    ) -> Result<Vec<NerOrgResult>> {
         let threshold = min_confidence.unwrap_or(self.min_confidence);
 
         // GLiNER truncates at ~4000 chars, so chunk long text
@@ -321,7 +363,8 @@ impl NerOrganizationExtractor {
                 }
                 // Try to break at a whitespace boundary within the safe range
                 let actual_end = if safe_end < text.len() {
-                    text[start..safe_end].rfind(char::is_whitespace)
+                    text[start..safe_end]
+                        .rfind(char::is_whitespace)
                         .map(|pos| start + pos + 1)
                         .unwrap_or(safe_end)
                 } else {
@@ -339,7 +382,11 @@ impl NerOrganizationExtractor {
                 }
                 result.push(&text[start..final_end]);
                 // 500 byte overlap — ensure overlap start is on a char boundary
-                let overlap_start = if final_end > start + 500 { final_end - 500 } else { final_end };
+                let overlap_start = if final_end > start + 500 {
+                    final_end - 500
+                } else {
+                    final_end
+                };
                 let mut safe_overlap = overlap_start;
                 while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
                     safe_overlap -= 1;
@@ -355,15 +402,16 @@ impl NerOrganizationExtractor {
             result
         };
 
-        let mut all_orgs: std::collections::HashMap<String, NerOrgResult> = std::collections::HashMap::new();
+        let mut all_orgs: std::collections::HashMap<String, NerOrgResult> =
+            std::collections::HashMap::new();
 
         for chunk in &chunks {
-            let input = TextInput::from_str(
-                &[*chunk],
-                &["organization", "company"],
-            ).map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+            let input = TextInput::from_str(&[*chunk], &["organization", "company"])
+                .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
 
-            let output = self.model.inference(input)
+            let output = self
+                .model
+                .inference(input)
                 .map_err(|e| anyhow!("NER inference failed: {}", e))?;
 
             for spans in &output.spans {
@@ -377,10 +425,13 @@ impl NerOrganizationExtractor {
                                 let key = org_name.to_lowercase();
                                 let existing = all_orgs.get(&key);
                                 if existing.is_none() || existing.unwrap().confidence < confidence {
-                                    all_orgs.insert(key, NerOrgResult {
-                                        organization: org_name,
-                                        confidence,
-                                    });
+                                    all_orgs.insert(
+                                        key,
+                                        NerOrgResult {
+                                            organization: org_name,
+                                            confidence,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -390,9 +441,17 @@ impl NerOrganizationExtractor {
         }
 
         let mut results: Vec<NerOrgResult> = all_orgs.into_values().collect();
-        results.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        debug!("NER extracted {} organizations from {} chars of text", results.len(), text.len());
+        debug!(
+            "NER extracted {} organizations from {} chars of text",
+            results.len(),
+            text.len()
+        );
         Ok(results)
     }
 }
@@ -411,7 +470,8 @@ pub fn init() -> anyhow::Result<()> {
 #[cfg(feature = "embedded-ner")]
 pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
     let extractor = NerOrganizationExtractor::with_min_confidence(min_confidence)?;
-    NER_EXTRACTOR.set(extractor)
+    NER_EXTRACTOR
+        .set(extractor)
         .map_err(|_| anyhow::anyhow!("NER extractor already initialized"))?;
     Ok(())
 }
@@ -430,7 +490,10 @@ pub fn get() -> Option<&'static NerOrganizationExtractor> {
 
 /// Extract organization using the global NER extractor
 #[cfg(feature = "embedded-ner")]
-pub fn extract_organization(domain: &str, page_content: Option<&str>) -> anyhow::Result<Option<NerOrgResult>> {
+pub fn extract_organization(
+    domain: &str,
+    page_content: Option<&str>,
+) -> anyhow::Result<Option<NerOrgResult>> {
     match NER_EXTRACTOR.get() {
         Some(extractor) => extractor.extract_from_domain(domain, page_content),
         None => Ok(None),
@@ -440,7 +503,10 @@ pub fn extract_organization(domain: &str, page_content: Option<&str>) -> anyhow:
 /// Extract all organizations from text using the global NER extractor.
 /// Returns all detected organizations above min_confidence threshold.
 #[cfg(feature = "embedded-ner")]
-pub fn extract_all_organizations(text: &str, min_confidence: Option<f32>) -> anyhow::Result<Vec<NerOrgResult>> {
+pub fn extract_all_organizations(
+    text: &str,
+    min_confidence: Option<f32>,
+) -> anyhow::Result<Vec<NerOrgResult>> {
     match NER_EXTRACTOR.get() {
         Some(extractor) => extractor.extract_all_organizations(text, min_confidence),
         None => Ok(Vec::new()),
@@ -471,13 +537,19 @@ pub fn is_available() -> bool {
 
 /// Stub: Extract organization (always returns None when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-pub fn extract_organization(_domain: &str, _page_content: Option<&str>) -> anyhow::Result<Option<NerOrgResult>> {
+pub fn extract_organization(
+    _domain: &str,
+    _page_content: Option<&str>,
+) -> anyhow::Result<Option<NerOrgResult>> {
     Ok(None)
 }
 
 /// Stub: Extract all organizations (always returns empty when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-pub fn extract_all_organizations(_text: &str, _min_confidence: Option<f32>) -> anyhow::Result<Vec<NerOrgResult>> {
+pub fn extract_all_organizations(
+    _text: &str,
+    _min_confidence: Option<f32>,
+) -> anyhow::Result<Vec<NerOrgResult>> {
     Ok(Vec::new())
 }
 
@@ -508,14 +580,14 @@ mod tests {
     #[test]
     fn test_ner_extraction_accuracy() {
         // Initialize NER if not already done - catch panics from ONNX runtime loading
-        let init_result = std::panic::catch_unwind(|| {
-            init_with_config(0.5)
-        });
+        let init_result = std::panic::catch_unwind(|| init_with_config(0.5));
 
         // Handle panic or error from init
         match init_result {
             Err(_) => {
-                println!("NER initialization panicked (likely missing ONNX runtime DLL), skipping test");
+                println!(
+                    "NER initialization panicked (likely missing ONNX runtime DLL), skipping test"
+                );
                 return;
             }
             Ok(Err(e)) => {
@@ -532,11 +604,17 @@ mod tests {
 
         let test_cases = vec![
             // (input text, expected org or None if no extraction expected)
-            ("Microsoft Corporation provides cloud services", Some("Microsoft")),
+            (
+                "Microsoft Corporation provides cloud services",
+                Some("Microsoft"),
+            ),
             ("Google LLC is a technology company", Some("Google")),
             ("Amazon Web Services powers the cloud", Some("Amazon")),
             ("Stripe Inc. processes payments worldwide", Some("Stripe")),
-            ("The website klaviyo.com belongs to Klaviyo", Some("Klaviyo")),
+            (
+                "The website klaviyo.com belongs to Klaviyo",
+                Some("Klaviyo"),
+            ),
             ("Salesforce CRM is enterprise software", Some("Salesforce")),
             ("Adobe Inc. makes creative software", Some("Adobe")),
             ("random words without company names", None),
@@ -567,7 +645,10 @@ mod tests {
                             println!("  ⚠️  DIFFERENT - Expected {}, got {}", exp, extracted);
                         }
                     } else {
-                        println!("  ⚠️  UNEXPECTED - Expected no extraction, got {}", extracted);
+                        println!(
+                            "  ⚠️  UNEXPECTED - Expected no extraction, got {}",
+                            extracted
+                        );
                     }
                 }
                 Ok(None) => {

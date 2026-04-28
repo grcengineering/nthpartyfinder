@@ -4,10 +4,10 @@
 //! third-party domains from certificate Subject Alternative Names (SANs).
 
 use anyhow::Result;
+use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
-use reqwest::Client;
 use tracing::{debug, info, warn};
 
 use crate::domain_utils;
@@ -112,7 +112,10 @@ impl CtLogDiscovery {
                             ),
                         });
 
-                        debug!("Found vendor {} from CT log certificate {}", san_base, cert_id);
+                        debug!(
+                            "Found vendor {} from CT log certificate {}",
+                            san_base, cert_id
+                        );
                     }
                 }
             }
@@ -141,7 +144,11 @@ impl CtLogDiscovery {
             }
         }
 
-        info!("CT log discovery found {} unique vendor domains for {}", results.len(), domain);
+        info!(
+            "CT log discovery found {} unique vendor domains for {}",
+            results.len(),
+            domain
+        );
         Ok(results)
     }
 
@@ -155,14 +162,14 @@ impl CtLogDiscovery {
 
         debug!("Querying crt.sh: {}", url);
 
-        let response = self.client
-            .get(&url)
-            .timeout(self.timeout)
-            .send()
-            .await?;
+        let response = self.client.get(&url).timeout(self.timeout).send().await?;
 
         if !response.status().is_success() {
-            warn!("crt.sh returned status {} for {}", response.status(), domain);
+            warn!(
+                "crt.sh returned status {} for {}",
+                response.status(),
+                domain
+            );
             return Ok(Vec::new());
         }
 
@@ -228,7 +235,9 @@ impl CtLogDiscovery {
             "example.com",
         ];
 
-        infrastructure_domains.iter().any(|&infra| domain.ends_with(infra) || domain == infra)
+        infrastructure_domains
+            .iter()
+            .any(|&infra| domain.ends_with(infra) || domain == infra)
     }
 }
 
@@ -239,7 +248,9 @@ mod tests {
     #[test]
     fn test_is_infrastructure_domain() {
         assert!(CtLogDiscovery::is_infrastructure_domain("cloudflare.com"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("sub.cloudflare.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "sub.cloudflare.com"
+        ));
         assert!(CtLogDiscovery::is_infrastructure_domain("amazonaws.com"));
         assert!(!CtLogDiscovery::is_infrastructure_domain("klaviyo.com"));
         assert!(!CtLogDiscovery::is_infrastructure_domain("google.com"));

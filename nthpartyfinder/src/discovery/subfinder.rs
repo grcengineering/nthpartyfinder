@@ -1,13 +1,13 @@
 //! Subdomain discovery using Project Discovery's subfinder tool.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::io::{BufReader, AsyncBufReadExt};
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 /// Latest subfinder version to download
 const SUBFINDER_VERSION: &str = "2.11.0";
@@ -58,7 +58,10 @@ struct SubfinderJsonLine {
 
 impl SubfinderDiscovery {
     pub fn new(binary_path: PathBuf, timeout: Duration) -> Self {
-        Self { binary_path, timeout }
+        Self {
+            binary_path,
+            timeout,
+        }
     }
 
     pub fn is_available(&self) -> bool {
@@ -87,18 +90,25 @@ impl SubfinderDiscovery {
 
     /// Get the path to the bundled subfinder binary in the app's data directory
     pub fn get_bundled_binary_path() -> Option<PathBuf> {
-        let binary_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+        let binary_name = if cfg!(windows) {
+            "subfinder.exe"
+        } else {
+            "subfinder"
+        };
 
         // Use platform-appropriate data directory
         #[cfg(windows)]
         {
-            std::env::var("LOCALAPPDATA").ok()
-                .map(|p| PathBuf::from(p).join("nthpartyfinder").join("bin").join(binary_name))
+            std::env::var("LOCALAPPDATA").ok().map(|p| {
+                PathBuf::from(p)
+                    .join("nthpartyfinder")
+                    .join("bin")
+                    .join(binary_name)
+            })
         }
         #[cfg(not(windows))]
         {
-            dirs::data_local_dir()
-                .map(|p| p.join("nthpartyfinder").join("bin").join(binary_name))
+            dirs::data_local_dir().map(|p| p.join("nthpartyfinder").join("bin").join(binary_name))
         }
     }
 
@@ -135,14 +145,18 @@ impl SubfinderDiscovery {
         let install_path = Self::get_bundled_binary_path()
             .ok_or_else(|| anyhow!("Could not determine installation path"))?;
 
-        let install_dir = install_path.parent()
+        let install_dir = install_path
+            .parent()
             .ok_or_else(|| anyhow!("Invalid installation path"))?;
 
         // Create the installation directory
         std::fs::create_dir_all(install_dir)
             .map_err(|e| anyhow!("Failed to create installation directory: {}", e))?;
 
-        info!("Downloading subfinder v{} from GitHub...", SUBFINDER_VERSION);
+        info!(
+            "Downloading subfinder v{} from GitHub...",
+            SUBFINDER_VERSION
+        );
         debug!("Download URL: {}", download_url);
 
         // Download the zip file
@@ -151,16 +165,21 @@ impl SubfinderDiscovery {
             .build()
             .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
 
-        let response = client.get(&download_url)
+        let response = client
+            .get(&download_url)
             .send()
             .await
             .map_err(|e| anyhow!("Failed to download subfinder: {}", e))?;
 
         if !response.status().is_success() {
-            return Err(anyhow!("Download failed with status: {}", response.status()));
+            return Err(anyhow!(
+                "Download failed with status: {}",
+                response.status()
+            ));
         }
 
-        let bytes = response.bytes()
+        let bytes = response
+            .bytes()
             .await
             .map_err(|e| anyhow!("Failed to read download response: {}", e))?;
 
@@ -172,11 +191,16 @@ impl SubfinderDiscovery {
             .map_err(|e| anyhow!("Failed to open zip archive: {}", e))?;
 
         // Find and extract the subfinder binary
-        let binary_name = if cfg!(windows) { "subfinder.exe" } else { "subfinder" };
+        let binary_name = if cfg!(windows) {
+            "subfinder.exe"
+        } else {
+            "subfinder"
+        };
         let mut found = false;
 
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)
+            let mut file = archive
+                .by_index(i)
                 .map_err(|e| anyhow!("Failed to read zip entry: {}", e))?;
 
             let name = file.name().to_string();
@@ -202,7 +226,9 @@ impl SubfinderDiscovery {
         }
 
         if !found {
-            return Err(anyhow!("Could not find subfinder binary in downloaded archive"));
+            return Err(anyhow!(
+                "Could not find subfinder binary in downloaded archive"
+            ));
         }
 
         info!("Subfinder installed to: {}", install_path.display());
@@ -213,7 +239,13 @@ impl SubfinderDiscovery {
     pub fn with_bundled_or_path(custom_path: Option<PathBuf>, timeout: Duration) -> Self {
         let binary_path = custom_path
             .or_else(|| Self::get_bundled_binary_path().filter(|p| p.exists()))
-            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "subfinder.exe" } else { "subfinder" }));
+            .unwrap_or_else(|| {
+                PathBuf::from(if cfg!(windows) {
+                    "subfinder.exe"
+                } else {
+                    "subfinder"
+                })
+            });
 
         Self::new(binary_path, timeout)
     }
@@ -224,15 +256,20 @@ impl SubfinderDiscovery {
         let arch = std::env::consts::ARCH;
 
         let mut instructions = String::new();
-        instructions.push_str("\n╔══════════════════════════════════════════════════════════════════╗\n");
-        instructions.push_str("║           Subfinder Installation Required                        ║\n");
-        instructions.push_str("╚══════════════════════════════════════════════════════════════════╝\n\n");
+        instructions
+            .push_str("\n╔══════════════════════════════════════════════════════════════════╗\n");
+        instructions
+            .push_str("║           Subfinder Installation Required                        ║\n");
+        instructions
+            .push_str("╚══════════════════════════════════════════════════════════════════╝\n\n");
         instructions.push_str("Subfinder is a subdomain discovery tool by Project Discovery.\n");
         instructions.push_str("Install it using one of these methods:\n\n");
 
         // Go install (cross-platform)
         instructions.push_str("📦 Using Go (recommended if Go is installed):\n");
-        instructions.push_str("   go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\n\n");
+        instructions.push_str(
+            "   go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest\n\n",
+        );
 
         // Platform-specific instructions
         match os {
@@ -252,7 +289,13 @@ impl SubfinderDiscovery {
                 instructions.push_str("📦 Using Homebrew (macOS):\n");
                 instructions.push_str("   brew install subfinder\n\n");
                 instructions.push_str("📦 Direct Download (macOS):\n");
-                let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
+                let download_arch = if arch == "x86_64" {
+                    "amd64"
+                } else if arch == "aarch64" {
+                    "arm64"
+                } else {
+                    arch
+                };
                 instructions.push_str(&format!(
                     "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_darwin_{}.zip\n\n",
                     SUBFINDER_VERSION, download_arch
@@ -262,7 +305,13 @@ impl SubfinderDiscovery {
                 instructions.push_str("📦 Using apt (Debian/Ubuntu with ProjectDiscovery repo):\n");
                 instructions.push_str("   sudo apt install subfinder\n\n");
                 instructions.push_str("📦 Direct Download (Linux):\n");
-                let download_arch = if arch == "x86_64" { "amd64" } else if arch == "aarch64" { "arm64" } else { arch };
+                let download_arch = if arch == "x86_64" {
+                    "amd64"
+                } else if arch == "aarch64" {
+                    "arm64"
+                } else {
+                    arch
+                };
                 instructions.push_str(&format!(
                     "   https://github.com/projectdiscovery/subfinder/releases/latest\n   Download: subfinder_{}_linux_{}.zip\n\n",
                     SUBFINDER_VERSION, download_arch
@@ -270,12 +319,16 @@ impl SubfinderDiscovery {
             }
             _ => {
                 instructions.push_str("📦 Direct Download:\n");
-                instructions.push_str("   https://github.com/projectdiscovery/subfinder/releases/latest\n\n");
+                instructions.push_str(
+                    "   https://github.com/projectdiscovery/subfinder/releases/latest\n\n",
+                );
             }
         }
 
-        instructions.push_str("🔗 Project Homepage: https://github.com/projectdiscovery/subfinder\n");
-        instructions.push_str("📚 Documentation: https://docs.projectdiscovery.io/tools/subfinder\n\n");
+        instructions
+            .push_str("🔗 Project Homepage: https://github.com/projectdiscovery/subfinder\n");
+        instructions
+            .push_str("📚 Documentation: https://docs.projectdiscovery.io/tools/subfinder\n\n");
         instructions.push_str("After installation, ensure subfinder is in your PATH or specify\n");
         instructions.push_str("the path using --subfinder-path <path>\n");
 
@@ -300,7 +353,11 @@ impl SubfinderDiscovery {
         info!("Installing subfinder via 'go install'...");
 
         let output = tokio::process::Command::new("go")
-            .args(["install", "-v", "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"])
+            .args([
+                "install",
+                "-v",
+                "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+            ])
             .output()
             .await
             .map_err(|e| anyhow!("Failed to run go install: {}", e))?;
@@ -425,7 +482,11 @@ impl SubfinderDiscovery {
             }
         };
 
-        debug!("Running subfinder ({}) for domain: {}", binary_path.display(), domain);
+        debug!(
+            "Running subfinder ({}) for domain: {}",
+            binary_path.display(),
+            domain
+        );
 
         let mut child = Command::new(&binary_path)
             .args(["-d", domain, "-silent", "-json"])
@@ -434,7 +495,9 @@ impl SubfinderDiscovery {
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn subfinder: {}", e))?;
 
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .ok_or_else(|| anyhow!("Failed to capture subfinder stdout"))?;
 
         let mut reader = BufReader::new(stdout).lines();
@@ -458,10 +521,17 @@ impl SubfinderDiscovery {
 
         match tokio::time::timeout(self.timeout, read_future).await {
             Ok(_) => {
-                debug!("Subfinder found {} subdomains for {}", results.len(), domain);
+                debug!(
+                    "Subfinder found {} subdomains for {}",
+                    results.len(),
+                    domain
+                );
             }
             Err(_) => {
-                warn!("Subfinder timed out for {}, returning partial results", domain);
+                warn!(
+                    "Subfinder timed out for {}, returning partial results",
+                    domain
+                );
                 let _ = child.kill().await;
             }
         }
@@ -474,9 +544,7 @@ impl SubfinderDiscovery {
 pub fn parse_subfinder_output(output: &str) -> Vec<SubdomainResult> {
     output
         .lines()
-        .filter_map(|line| {
-            serde_json::from_str::<SubfinderJsonLine>(line).ok()
-        })
+        .filter_map(|line| serde_json::from_str::<SubfinderJsonLine>(line).ok())
         .map(|parsed| SubdomainResult {
             subdomain: parsed.host,
             source: parsed.source,

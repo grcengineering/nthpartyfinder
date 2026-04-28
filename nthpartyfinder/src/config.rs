@@ -3,13 +3,13 @@
 //! All configuration is loaded from `./config/nthpartyfinder.toml`.
 //! No hardcoded defaults exist in source code - all defaults are in the config template.
 
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
-use regex::Regex;
 
 /// Configuration file path relative to working directory
 pub const CONFIG_PATH: &str = "./config/nthpartyfinder.toml";
@@ -133,12 +133,24 @@ pub struct RateLimitConfig {
     pub backoff_max_delay_ms: u64,
 }
 
-fn default_dns_queries_per_second() -> u32 { 50 }
-fn default_http_requests_per_second() -> u32 { 10 }
-fn default_whois_queries_per_second() -> u32 { 2 }
-fn default_max_retries() -> u32 { 3 }
-fn default_backoff_base_delay_ms() -> u64 { 1000 }
-fn default_backoff_max_delay_ms() -> u64 { 30000 }
+fn default_dns_queries_per_second() -> u32 {
+    50
+}
+fn default_http_requests_per_second() -> u32 {
+    10
+}
+fn default_whois_queries_per_second() -> u32 {
+    2
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_backoff_base_delay_ms() -> u64 {
+    1000
+}
+fn default_backoff_max_delay_ms() -> u64 {
+    30000
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -162,9 +174,7 @@ impl RateLimitConfig {
         }
 
         let delay_ms = match self.backoff_strategy {
-            BackoffStrategy::Linear => {
-                self.backoff_base_delay_ms * (attempt as u64)
-            }
+            BackoffStrategy::Linear => self.backoff_base_delay_ms * (attempt as u64),
             BackoffStrategy::Exponential => {
                 // 2^(attempt-1) * base_delay, capped at max
                 let multiplier = 2u64.saturating_pow(attempt.saturating_sub(1));
@@ -226,7 +236,11 @@ impl AnalysisConfig {
         }
         let idx = (depth - 1).min(self.vendor_limits_per_depth.len().saturating_sub(1));
         let limit = self.vendor_limits_per_depth.get(idx).copied().unwrap_or(5);
-        if limit == 0 { None } else { Some(limit) }
+        if limit == 0 {
+            None
+        } else {
+            Some(limit)
+        }
     }
 }
 
@@ -289,7 +303,9 @@ pub struct DiscoveryConfig {
     pub whois_concurrency: usize,
 }
 
-fn default_whois_concurrency() -> usize { 5 }
+fn default_whois_concurrency() -> usize {
+    5
+}
 
 fn default_subprocessor_enabled() -> bool {
     true
@@ -480,12 +496,30 @@ impl AppConfig {
         }
 
         // Validate regex patterns compile
-        self.validate_regex("patterns.regex.spf_macro_strip", &self.patterns.regex.spf_macro_strip)?;
-        self.validate_regex("patterns.regex.domain_verification", &self.patterns.regex.domain_verification)?;
-        self.validate_regex("patterns.regex.verification_prefix", &self.patterns.regex.verification_prefix)?;
-        self.validate_regex("patterns.regex.site_verification", &self.patterns.regex.site_verification)?;
-        self.validate_regex("patterns.regex.provider_verify", &self.patterns.regex.provider_verify)?;
-        self.validate_regex("patterns.regex.domain_validation", &self.patterns.regex.domain_validation)?;
+        self.validate_regex(
+            "patterns.regex.spf_macro_strip",
+            &self.patterns.regex.spf_macro_strip,
+        )?;
+        self.validate_regex(
+            "patterns.regex.domain_verification",
+            &self.patterns.regex.domain_verification,
+        )?;
+        self.validate_regex(
+            "patterns.regex.verification_prefix",
+            &self.patterns.regex.verification_prefix,
+        )?;
+        self.validate_regex(
+            "patterns.regex.site_verification",
+            &self.patterns.regex.site_verification,
+        )?;
+        self.validate_regex(
+            "patterns.regex.provider_verify",
+            &self.patterns.regex.provider_verify,
+        )?;
+        self.validate_regex(
+            "patterns.regex.domain_validation",
+            &self.patterns.regex.domain_validation,
+        )?;
 
         // Validate verification patterns are valid regex
         for (pattern, _domain) in &self.patterns.verification {
@@ -498,14 +532,20 @@ impl AppConfig {
                 field: "analysis.concurrency_per_depth".to_string(),
             });
         }
-        if self.analysis.strategy == AnalysisStrategy::Limits && self.analysis.vendor_limits_per_depth.is_empty() {
+        if self.analysis.strategy == AnalysisStrategy::Limits
+            && self.analysis.vendor_limits_per_depth.is_empty()
+        {
             return Err(ConfigError::EmptyRequired {
-                field: "analysis.vendor_limits_per_depth (required when strategy = 'limits')".to_string(),
+                field: "analysis.vendor_limits_per_depth (required when strategy = 'limits')"
+                    .to_string(),
             });
         }
-        if self.analysis.strategy == AnalysisStrategy::Budget && self.analysis.total_vendor_budget == 0 {
+        if self.analysis.strategy == AnalysisStrategy::Budget
+            && self.analysis.total_vendor_budget == 0
+        {
             return Err(ConfigError::EmptyRequired {
-                field: "analysis.total_vendor_budget (required when strategy = 'budget')".to_string(),
+                field: "analysis.total_vendor_budget (required when strategy = 'budget')"
+                    .to_string(),
             });
         }
 
@@ -571,7 +611,11 @@ mod tests {
     #[test]
     fn test_default_config_parses() {
         let config: Result<AppConfig, _> = toml::from_str(DEFAULT_CONFIG);
-        assert!(config.is_ok(), "Default config should parse: {:?}", config.err());
+        assert!(
+            config.is_ok(),
+            "Default config should parse: {:?}",
+            config.err()
+        );
     }
 
     #[test]
@@ -630,11 +674,20 @@ tenant_probe_concurrency = 30
         let config: AppConfig = toml::from_str(config_str).expect("Config should parse");
 
         // Verify discovery config values
-        assert!(!config.discovery.subprocessor_enabled, "subprocessor_enabled should be false");
-        assert!(config.discovery.subdomain_enabled, "subdomain_enabled should be true");
+        assert!(
+            !config.discovery.subprocessor_enabled,
+            "subprocessor_enabled should be false"
+        );
+        assert!(
+            config.discovery.subdomain_enabled,
+            "subdomain_enabled should be true"
+        );
         assert_eq!(config.discovery.subfinder_path, "/usr/local/bin/subfinder");
         assert_eq!(config.discovery.subfinder_timeout_secs, 600);
-        assert!(config.discovery.saas_tenant_enabled, "saas_tenant_enabled should be true");
+        assert!(
+            config.discovery.saas_tenant_enabled,
+            "saas_tenant_enabled should be true"
+        );
         assert_eq!(config.discovery.tenant_probe_timeout_secs, 15);
         assert_eq!(config.discovery.tenant_probe_concurrency, 30);
     }
@@ -678,15 +731,37 @@ vendor_limits_per_depth = [0, 20, 10, 5]
 total_vendor_budget = 200
 "#;
 
-        let config: AppConfig = toml::from_str(config_str).expect("Config should parse without discovery section");
+        let config: AppConfig =
+            toml::from_str(config_str).expect("Config should parse without discovery section");
 
         // Verify default values
-        assert!(config.discovery.subprocessor_enabled, "subprocessor_enabled should default to true");
-        assert!(!config.discovery.subdomain_enabled, "subdomain_enabled should default to false");
-        assert_eq!(config.discovery.subfinder_path, "subfinder", "subfinder_path should default to 'subfinder'");
-        assert_eq!(config.discovery.subfinder_timeout_secs, 300, "subfinder_timeout_secs should default to 300");
-        assert!(!config.discovery.saas_tenant_enabled, "saas_tenant_enabled should default to false");
-        assert_eq!(config.discovery.tenant_probe_timeout_secs, 10, "tenant_probe_timeout_secs should default to 10");
-        assert_eq!(config.discovery.tenant_probe_concurrency, 20, "tenant_probe_concurrency should default to 20");
+        assert!(
+            config.discovery.subprocessor_enabled,
+            "subprocessor_enabled should default to true"
+        );
+        assert!(
+            !config.discovery.subdomain_enabled,
+            "subdomain_enabled should default to false"
+        );
+        assert_eq!(
+            config.discovery.subfinder_path, "subfinder",
+            "subfinder_path should default to 'subfinder'"
+        );
+        assert_eq!(
+            config.discovery.subfinder_timeout_secs, 300,
+            "subfinder_timeout_secs should default to 300"
+        );
+        assert!(
+            !config.discovery.saas_tenant_enabled,
+            "saas_tenant_enabled should default to false"
+        );
+        assert_eq!(
+            config.discovery.tenant_probe_timeout_secs, 10,
+            "tenant_probe_timeout_secs should default to 10"
+        );
+        assert_eq!(
+            config.discovery.tenant_probe_concurrency, 20,
+            "tenant_probe_concurrency should default to 20"
+        );
     }
 }

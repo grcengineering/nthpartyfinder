@@ -1,10 +1,10 @@
+use crate::dns::LogFailure;
+use chrono::Utc;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
-use chrono::Utc;
 use tracing::warn;
-use crate::dns::LogFailure;
 
 /// Logger for verification records that couldn't be properly inferred to valid domains
 pub struct VerificationFailureLogger {
@@ -19,7 +19,11 @@ impl VerificationFailureLogger {
         let file_path = if enabled {
             let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
             Path::new(output_dir)
-                .join(format!("verification_failures_{}_{}.csv", domain.replace(".", "_"), timestamp))
+                .join(format!(
+                    "verification_failures_{}_{}.csv",
+                    domain.replace(".", "_"),
+                    timestamp
+                ))
                 .to_string_lossy()
                 .to_string()
         } else {
@@ -47,7 +51,10 @@ impl VerificationFailureLogger {
             .open(&self.file_path)?;
 
         let mut file_writer = file;
-        writeln!(file_writer, "Timestamp,Source Domain,Record Type,Raw Record,Extracted Service,Failure Reason")?;
+        writeln!(
+            file_writer,
+            "Timestamp,Source Domain,Record Type,Raw Record,Extracted Service,Failure Reason"
+        )?;
 
         *writer_guard = Some(file_writer);
         Ok(())
@@ -68,7 +75,7 @@ impl VerificationFailureLogger {
 
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
         let service_str = extracted_service.unwrap_or("N/A");
-        
+
         // Escape CSV fields that contain commas, quotes, or newlines
         let log_line = format!(
             "{},{},{},\"{}\",{},\"{}\"\n",
@@ -77,7 +84,7 @@ impl VerificationFailureLogger {
             record_type,
             raw_record.replace("\"", "\"\""), // Escape quotes by doubling them
             service_str,
-            failure_reason.replace("\"", "\"\"")  // Escape quotes by doubling them
+            failure_reason.replace("\"", "\"\"") // Escape quotes by doubling them
         );
 
         // Try to write to file with non-blocking approach
@@ -91,7 +98,6 @@ impl VerificationFailureLogger {
         }
         // If lock is contended, skip logging to avoid blocking parallel operations
     }
-
 
     /// Close the log file
     pub fn close(&self) {
@@ -117,8 +123,21 @@ impl VerificationFailureLogger {
 }
 
 impl LogFailure for VerificationFailureLogger {
-    fn log_failure(&self, source_domain: &str, record_type: &str, raw_record: &str, extracted_service: Option<&str>, failure_reason: &str) {
-        self.log_failure(source_domain, record_type, raw_record, extracted_service, failure_reason);
+    fn log_failure(
+        &self,
+        source_domain: &str,
+        record_type: &str,
+        raw_record: &str,
+        extracted_service: Option<&str>,
+        failure_reason: &str,
+    ) {
+        self.log_failure(
+            source_domain,
+            record_type,
+            raw_record,
+            extracted_service,
+            failure_reason,
+        );
     }
 }
 

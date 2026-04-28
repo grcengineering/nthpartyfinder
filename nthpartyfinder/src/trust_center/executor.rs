@@ -9,8 +9,8 @@ use scraper::{Html, Selector};
 use tracing::debug;
 
 use super::{
-    EndpointConfig, ResponseMapping, StrategyType, TrustCenterStrategy,
-    get_nested_str, navigate_json_path,
+    get_nested_str, navigate_json_path, EndpointConfig, ResponseMapping, StrategyType,
+    TrustCenterStrategy,
 };
 use crate::subprocessor::SubprocessorDomain;
 use crate::vendor::RecordType;
@@ -27,16 +27,41 @@ pub async fn execute_strategy(
 ) -> Result<Vec<SubprocessorDomain>> {
     let endpoint_url = resolve_slug(&strategy.endpoint.url, strategy.endpoint.slug.as_deref());
 
-    debug!("Executing trust center strategy for {}: {:?}", source_domain, strategy.strategy_type);
+    debug!(
+        "Executing trust center strategy for {}: {:?}",
+        source_domain, strategy.strategy_type
+    );
 
     let json = match &strategy.strategy_type {
-        StrategyType::GraphqlApi { query_template, variables, operation_name } => {
-            execute_graphql(client, &endpoint_url, query_template, variables, operation_name.as_deref(),
-                            strategy.endpoint.slug.as_deref()).await?
+        StrategyType::GraphqlApi {
+            query_template,
+            variables,
+            operation_name,
+        } => {
+            execute_graphql(
+                client,
+                &endpoint_url,
+                query_template,
+                variables,
+                operation_name.as_deref(),
+                strategy.endpoint.slug.as_deref(),
+            )
+            .await?
         }
-        StrategyType::RestApi { method, body_template, headers } => {
-            execute_rest(client, &endpoint_url, method, body_template.as_deref(), headers,
-                         strategy.endpoint.slug.as_deref()).await?
+        StrategyType::RestApi {
+            method,
+            body_template,
+            headers,
+        } => {
+            execute_rest(
+                client,
+                &endpoint_url,
+                method,
+                body_template.as_deref(),
+                headers,
+                strategy.endpoint.slug.as_deref(),
+            )
+            .await?
         }
         StrategyType::EmbeddedBase64Json { locator_pattern } => {
             let html = require_html(html_content, &strategy.endpoint)?;
@@ -46,7 +71,10 @@ pub async fn execute_strategy(
             let html = require_html(html_content, &strategy.endpoint)?;
             extract_embedded_js_object(&html, locator_pattern)?
         }
-        StrategyType::HydrationData { script_selector, data_path } => {
+        StrategyType::HydrationData {
+            script_selector,
+            data_path,
+        } => {
             let html = require_html(html_content, &strategy.endpoint)?;
             extract_hydration_data(&html, script_selector, data_path)?
         }
@@ -74,9 +102,7 @@ async fn execute_graphql(
         .iter()
         .map(|(k, v)| {
             let resolved = match v {
-                serde_json::Value::String(s) => {
-                    serde_json::Value::String(resolve_slug(s, slug))
-                }
+                serde_json::Value::String(s) => serde_json::Value::String(resolve_slug(s, slug)),
                 other => other.clone(),
             };
             (k.clone(), resolved)
@@ -92,7 +118,10 @@ async fn execute_graphql(
         body["operationName"] = serde_json::Value::String(op_name.to_string());
     }
 
-    debug!("GraphQL request to {}: operation={:?}", endpoint_url, operation_name);
+    debug!(
+        "GraphQL request to {}: operation={:?}",
+        endpoint_url, operation_name
+    );
 
     let response = client
         .post(endpoint_url)
@@ -103,7 +132,10 @@ async fn execute_graphql(
         .await?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("GraphQL request failed: HTTP {}", response.status()));
+        return Err(anyhow::anyhow!(
+            "GraphQL request failed: HTTP {}",
+            response.status()
+        ));
     }
 
     let json: serde_json::Value = response.json().await?;
@@ -112,7 +144,8 @@ async fn execute_graphql(
     if let Some(errors) = json.get("errors") {
         if let Some(arr) = errors.as_array() {
             if !arr.is_empty() {
-                let msg = arr.first()
+                let msg = arr
+                    .first()
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown GraphQL error");
@@ -139,7 +172,9 @@ async fn execute_rest(
             let mut req = client.post(endpoint_url);
             if let Some(body) = body_template {
                 let resolved = resolve_slug(body, slug);
-                req = req.body(resolved).header("Content-Type", "application/json");
+                req = req
+                    .body(resolved)
+                    .header("Content-Type", "application/json");
             }
             req
         }
@@ -154,28 +189,37 @@ async fn execute_rest(
     let response = request.send().await?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("REST request failed: HTTP {}", response.status()));
+        return Err(anyhow::anyhow!(
+            "REST request failed: HTTP {}",
+            response.status()
+        ));
     }
 
     Ok(response.json().await?)
 }
 
 fn extract_embedded_base64(html: &str, locator_pattern: &str) -> Result<serde_json::Value> {
-    debug!("Extracting embedded base64 JSON with pattern: {}", locator_pattern);
+    debug!(
+        "Extracting embedded base64 JSON with pattern: {}",
+        locator_pattern
+    );
 
     let regex = fancy_regex::Regex::new(locator_pattern)
         .map_err(|e| anyhow::anyhow!("Invalid base64 locator pattern: {}", e))?;
 
-    let captures = regex.captures(html)
+    let captures = regex
+        .captures(html)
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("Base64 pattern not found in HTML"))?;
 
-    let b64_str = captures.get(1)
+    let b64_str = captures
+        .get(1)
         .ok_or_else(|| anyhow::anyhow!("No capture group in base64 pattern"))?
         .as_str();
 
     use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(b64_str)
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64_str)
         .map_err(|e| anyhow::anyhow!("Base64 decode failed: {}", e))?;
 
     let json_str = String::from_utf8(decoded)
@@ -186,16 +230,21 @@ fn extract_embedded_base64(html: &str, locator_pattern: &str) -> Result<serde_js
 }
 
 fn extract_embedded_js_object(html: &str, locator_pattern: &str) -> Result<serde_json::Value> {
-    debug!("Extracting embedded JS object with pattern: {}", locator_pattern);
+    debug!(
+        "Extracting embedded JS object with pattern: {}",
+        locator_pattern
+    );
 
     let regex = fancy_regex::Regex::new(locator_pattern)
         .map_err(|e| anyhow::anyhow!("Invalid JS object locator pattern: {}", e))?;
 
-    let captures = regex.captures(html)
+    let captures = regex
+        .captures(html)
         .map_err(|e| anyhow::anyhow!("Regex error: {}", e))?
         .ok_or_else(|| anyhow::anyhow!("JS object pattern not found in HTML"))?;
 
-    let json_str = captures.get(1)
+    let json_str = captures
+        .get(1)
         .ok_or_else(|| anyhow::anyhow!("No capture group in JS object pattern"))?
         .as_str();
 
@@ -208,13 +257,17 @@ fn extract_hydration_data(
     script_selector: &str,
     data_path: &str,
 ) -> Result<serde_json::Value> {
-    debug!("Extracting hydration data: selector={}, path={}", script_selector, data_path);
+    debug!(
+        "Extracting hydration data: selector={}, path={}",
+        script_selector, data_path
+    );
 
     let document = Html::parse_document(html);
     let selector = Selector::parse(script_selector)
         .map_err(|_| anyhow::anyhow!("Invalid CSS selector: {}", script_selector))?;
 
-    let script_element = document.select(&selector)
+    let script_element = document
+        .select(&selector)
         .next()
         .ok_or_else(|| anyhow::anyhow!("Script element not found: {}", script_selector))?;
 
@@ -241,28 +294,41 @@ fn extract_subprocessors_from_json(
     source_domain: &str,
 ) -> Result<Vec<SubprocessorDomain>> {
     // Navigate to the subprocessors array
-    let target = navigate_json_path(json, &mapping.subprocessors_path)
-        .ok_or_else(|| anyhow::anyhow!(
-            "Path '{}' not found in response JSON", mapping.subprocessors_path
-        ))?;
+    let target = navigate_json_path(json, &mapping.subprocessors_path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Path '{}' not found in response JSON",
+            mapping.subprocessors_path
+        )
+    })?;
 
-    let items = target.as_array()
-        .ok_or_else(|| anyhow::anyhow!(
+    let items = target.as_array().ok_or_else(|| {
+        anyhow::anyhow!(
             "Path '{}' is not an array (got {:?})",
             mapping.subprocessors_path,
             target
-        ))?;
+        )
+    })?;
 
-    debug!("Found {} items at path '{}'", items.len(), mapping.subprocessors_path);
+    debug!(
+        "Found {} items at path '{}'",
+        items.len(),
+        mapping.subprocessors_path
+    );
 
     // Check for Conveyor-style relational model: items have canonical_asset_id
     // and the root JSON has _embedded.canonical_assets for name/website resolution.
     let canonical_assets = build_canonical_asset_lookup(json);
     let use_canonical_assets = !canonical_assets.is_empty()
-        && items.first().and_then(|i| i.get("canonical_asset_id")).is_some();
+        && items
+            .first()
+            .and_then(|i| i.get("canonical_asset_id"))
+            .is_some();
 
     if use_canonical_assets {
-        debug!("Using canonical asset resolution ({} assets available)", canonical_assets.len());
+        debug!(
+            "Using canonical asset resolution ({} assets available)",
+            canonical_assets.len()
+        );
     }
 
     let mut vendors = Vec::new();
@@ -272,9 +338,10 @@ fn extract_subprocessors_from_json(
             resolve_canonical_asset(item, &canonical_assets, mapping)
         } else {
             // Standard extraction: name and URL from the item directly
-            let name = get_nested_str(item, &mapping.name_field)
-                .map(|n| n.trim().to_string());
-            let domain = mapping.url_field.as_ref()
+            let name = get_nested_str(item, &mapping.name_field).map(|n| n.trim().to_string());
+            let domain = mapping
+                .url_field
+                .as_ref()
                 .and_then(|url_field| get_nested_str(item, url_field))
                 .and_then(|url_text| extract_domain_from_url_text(url_text));
             (name, domain, None)
@@ -287,9 +354,7 @@ fn extract_subprocessors_from_json(
 
         // If no domain from URL, the caller's pipeline will handle org-to-domain resolution.
         // Store the org name as the domain for now (prefixed to indicate it needs resolution).
-        let domain = domain.unwrap_or_else(|| {
-            format!("_org:{}", name)
-        });
+        let domain = domain.unwrap_or_else(|| format!("_org:{}", name));
 
         // Build evidence string from configured fields
         let evidence = if let Some(extra) = extra_evidence {
@@ -297,7 +362,9 @@ fn extract_subprocessors_from_json(
         } else if mapping.evidence_fields.is_empty() {
             name.clone()
         } else {
-            mapping.evidence_fields.iter()
+            mapping
+                .evidence_fields
+                .iter()
                 .filter_map(|f| get_nested_str(item, f))
                 .collect::<Vec<_>>()
                 .join(" | ")
@@ -310,7 +377,11 @@ fn extract_subprocessors_from_json(
         });
     }
 
-    debug!("Extracted {} subprocessor records for {}", vendors.len(), source_domain);
+    debug!(
+        "Extracted {} subprocessor records for {}",
+        vendors.len(),
+        source_domain
+    );
     Ok(vendors)
 }
 
@@ -322,7 +393,9 @@ struct CanonicalAsset {
 
 /// Build a lookup table from _embedded.canonical_assets (Conveyor-style).
 /// Maps canonical_asset_id → {name, website}.
-fn build_canonical_asset_lookup(json: &serde_json::Value) -> std::collections::HashMap<String, CanonicalAsset> {
+fn build_canonical_asset_lookup(
+    json: &serde_json::Value,
+) -> std::collections::HashMap<String, CanonicalAsset> {
     let mut lookup = std::collections::HashMap::new();
 
     let assets = json
@@ -336,11 +409,17 @@ fn build_canonical_asset_lookup(json: &serde_json::Value) -> std::collections::H
                 asset.get("id").and_then(|v| v.as_str()),
                 asset.get("name").and_then(|v| v.as_str()),
             ) {
-                let website = asset.get("website").and_then(|v| v.as_str()).map(|s| s.to_string());
-                lookup.insert(id.to_string(), CanonicalAsset {
-                    name: name.to_string(),
-                    website,
-                });
+                let website = asset
+                    .get("website")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                lookup.insert(
+                    id.to_string(),
+                    CanonicalAsset {
+                        name: name.to_string(),
+                        website,
+                    },
+                );
             }
         }
     }
@@ -365,7 +444,10 @@ fn resolve_canonical_asset(
         .and_then(|url| extract_domain_from_url_text(url));
 
     // Build evidence: name + description from the subprocessor item
-    let description = get_nested_str(item, mapping.purpose_field.as_deref().unwrap_or("description"));
+    let description = get_nested_str(
+        item,
+        mapping.purpose_field.as_deref().unwrap_or("description"),
+    );
     let evidence = match (&name, description) {
         (Some(n), Some(d)) => Some(format!("{} | {}", n, d)),
         (Some(n), None) => Some(n.clone()),
@@ -410,8 +492,10 @@ fn extract_domain_from_url_text(text: &str) -> Option<String> {
 
     // Last resort: check if the text itself looks like a domain
     let text_lower = text.to_lowercase();
-    if text_lower.contains('.') && !text_lower.contains(' ')
-        && text_lower.len() > 3 && text_lower.len() < 100
+    if text_lower.contains('.')
+        && !text_lower.contains(' ')
+        && text_lower.len() > 3
+        && text_lower.len() < 100
     {
         return Some(text_lower.trim_start_matches("www.").to_string());
     }
@@ -433,9 +517,13 @@ fn require_html<'a>(html_content: Option<&'a str>, endpoint: &EndpointConfig) ->
         Some(content) => Ok(content.to_string()),
         None => {
             if endpoint.requires_browser {
-                Err(anyhow::anyhow!("Strategy requires browser-rendered HTML but none was provided"))
+                Err(anyhow::anyhow!(
+                    "Strategy requires browser-rendered HTML but none was provided"
+                ))
             } else {
-                Err(anyhow::anyhow!("No HTML content provided for embedded data extraction"))
+                Err(anyhow::anyhow!(
+                    "No HTML content provided for embedded data extraction"
+                ))
             }
         }
     }
@@ -447,20 +535,36 @@ mod tests {
 
     #[test]
     fn test_extract_domain_from_url_text() {
-        assert_eq!(extract_domain_from_url_text("https://aws.amazon.com"), Some("aws.amazon.com".to_string()));
-        assert_eq!(extract_domain_from_url_text("https://www.cloudflare.com/"), Some("cloudflare.com".to_string()));
-        assert_eq!(extract_domain_from_url_text("cloudflare.com"), Some("cloudflare.com".to_string()));
-        assert_eq!(extract_domain_from_url_text("https://cloud.mongodb.com/"), Some("cloud.mongodb.com".to_string()));
+        assert_eq!(
+            extract_domain_from_url_text("https://aws.amazon.com"),
+            Some("aws.amazon.com".to_string())
+        );
+        assert_eq!(
+            extract_domain_from_url_text("https://www.cloudflare.com/"),
+            Some("cloudflare.com".to_string())
+        );
+        assert_eq!(
+            extract_domain_from_url_text("cloudflare.com"),
+            Some("cloudflare.com".to_string())
+        );
+        assert_eq!(
+            extract_domain_from_url_text("https://cloud.mongodb.com/"),
+            Some("cloud.mongodb.com".to_string())
+        );
         assert_eq!(extract_domain_from_url_text(""), None);
         assert_eq!(extract_domain_from_url_text("just a name"), None);
     }
 
     #[test]
     fn test_resolve_slug() {
-        assert_eq!(resolve_slug("https://api.com/{{slug}}/data", Some("acme")),
-                   "https://api.com/acme/data");
-        assert_eq!(resolve_slug("https://api.com/data", None),
-                   "https://api.com/data");
+        assert_eq!(
+            resolve_slug("https://api.com/{{slug}}/data", Some("acme")),
+            "https://api.com/acme/data"
+        );
+        assert_eq!(
+            resolve_slug("https://api.com/data", None),
+            "https://api.com/data"
+        );
     }
 
     #[test]
@@ -569,14 +673,24 @@ mod tests {
 
         let result = extract_subprocessors_from_json(&json, &mapping, "conveyor.com").unwrap();
         // Should extract 3 vendors (4th has missing canonical_asset_id)
-        assert_eq!(result.len(), 3, "Should extract 3 vendors (skip unresolvable canonical_asset_id)");
+        assert_eq!(
+            result.len(),
+            3,
+            "Should extract 3 vendors (skip unresolvable canonical_asset_id)"
+        );
         assert_eq!(result[0].domain, "aws.amazon.com");
         assert_eq!(result[1].domain, "cloudflare.com");
         assert_eq!(result[2].domain, "datadoghq.com");
 
         // Verify evidence includes resolved name + description
-        assert!(result[0].raw_record.contains("AWS"), "Evidence should contain resolved name");
-        assert!(result[0].raw_record.contains("Cloud Infrastructure"), "Evidence should contain description");
+        assert!(
+            result[0].raw_record.contains("AWS"),
+            "Evidence should contain resolved name"
+        );
+        assert!(
+            result[0].raw_record.contains("Cloud Infrastructure"),
+            "Evidence should contain description"
+        );
     }
 
     #[test]
@@ -594,7 +708,10 @@ mod tests {
         let lookup = build_canonical_asset_lookup(&json);
         assert_eq!(lookup.len(), 3);
         assert_eq!(lookup.get("ca1").unwrap().name, "AWS");
-        assert_eq!(lookup.get("ca1").unwrap().website, Some("https://aws.amazon.com".to_string()));
+        assert_eq!(
+            lookup.get("ca1").unwrap().website,
+            Some("https://aws.amazon.com".to_string())
+        );
         assert_eq!(lookup.get("ca3").unwrap().name, "NoWebsite");
         assert_eq!(lookup.get("ca3").unwrap().website, None);
     }
@@ -603,6 +720,9 @@ mod tests {
     fn test_build_canonical_asset_lookup_no_assets() {
         let json = serde_json::json!({"data": [{"name": "test"}]});
         let lookup = build_canonical_asset_lookup(&json);
-        assert!(lookup.is_empty(), "Should return empty map when no canonical_assets");
+        assert!(
+            lookup.is_empty(),
+            "Should return empty map when no canonical_assets"
+        );
     }
 }

@@ -10,8 +10,8 @@
 //!
 //! Also provides fuzzy matching for similar names using edit distance.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::debug;
 
 /// Corporate suffixes to remove during normalization.
@@ -127,7 +127,6 @@ impl OrgNormalizer {
             ("intc", "Intel"),
             ("csco", "Cisco"),
             ("adbe", "Adobe"),
-
             // Common abbreviations
             ("aws", "Amazon Web Services"),
             ("gcp", "Google Cloud Platform"),
@@ -138,7 +137,6 @@ impl OrgNormalizer {
             ("hpe", "Hewlett Packard Enterprise"),
             ("dell emc", "Dell Technologies"),
             ("vmware", "VMware"),
-
             // Brand variations
             ("google llc", "Google"),
             ("google inc", "Google"),
@@ -158,13 +156,11 @@ impl OrgNormalizer {
             ("facebook inc", "Meta Platforms"),
             ("facebook, inc.", "Meta Platforms"),
             ("meta platforms, inc.", "Meta Platforms"),
-
             // Cloud services
             ("amazon web services, inc.", "Amazon Web Services"),
             ("amazon web services inc", "Amazon Web Services"),
             ("google cloud", "Google Cloud Platform"),
             ("microsoft azure", "Microsoft Azure"),
-
             // Common misspellings
             ("mircosoft", "Microsoft"),
             ("miscrosoft", "Microsoft"),
@@ -188,7 +184,9 @@ impl OrgNormalizer {
 
         // Add custom aliases (lowercase keys)
         for (alias, canonical) in &config.aliases {
-            normalizer.aliases.insert(alias.to_lowercase(), canonical.clone());
+            normalizer
+                .aliases
+                .insert(alias.to_lowercase(), canonical.clone());
         }
 
         normalizer
@@ -214,7 +212,8 @@ impl OrgNormalizer {
 
     /// Add a custom alias mapping.
     pub fn add_alias(&mut self, alias: &str, canonical: &str) {
-        self.aliases.insert(alias.to_lowercase(), canonical.to_string());
+        self.aliases
+            .insert(alias.to_lowercase(), canonical.to_string());
     }
 
     /// Normalize an organization name by:
@@ -266,7 +265,10 @@ impl OrgNormalizer {
         // Check aliases again after normalization
         let lower_result = result.to_lowercase();
         if let Some(canonical) = self.aliases.get(&lower_result) {
-            debug!("Normalized '{}' to '{}' via alias (post-processing)", name, canonical);
+            debug!(
+                "Normalized '{}' to '{}' via alias (post-processing)",
+                name, canonical
+            );
             return canonical.clone();
         }
 
@@ -316,7 +318,11 @@ impl OrgNormalizer {
 
     /// Find the best matching canonical name for a given name.
     /// Returns the canonical name and similarity score if above threshold.
-    pub fn find_best_match<'a>(&self, name: &str, candidates: &'a [String]) -> Option<(&'a String, f64)> {
+    pub fn find_best_match<'a>(
+        &self,
+        name: &str,
+        candidates: &'a [String],
+    ) -> Option<(&'a String, f64)> {
         let normalized = self.normalize(name);
 
         let mut best_match: Option<(&String, f64)> = None;
@@ -380,8 +386,8 @@ impl OrgNormalizer {
 /// Only strips if the name ends with a known TLD suffix preceded by a dot.
 fn strip_domain_suffix(name: &str) -> String {
     let domain_suffixes = [
-        ".com", ".io", ".net", ".org", ".co", ".us", ".ai", ".dev",
-        ".app", ".tech", ".cloud", ".so", ".ly", ".me", ".to",
+        ".com", ".io", ".net", ".org", ".co", ".us", ".ai", ".dev", ".app", ".tech", ".cloud",
+        ".so", ".ly", ".me", ".to",
     ];
 
     let lower = name.to_lowercase();
@@ -418,9 +424,7 @@ fn remove_the_prefix(name: &str) -> String {
 /// Normalize ampersand variations: "&" -> "and", "& " -> "and ", etc.
 fn normalize_ampersand(name: &str) -> String {
     // Replace various ampersand patterns with " and "
-    let result = name
-        .replace(" & ", " and ")
-        .replace("&", " and ");
+    let result = name.replace(" & ", " and ").replace("&", " and ");
 
     // Clean up any double spaces introduced
     normalize_whitespace(&result)
@@ -477,9 +481,7 @@ fn normalize_punctuation(name: &str) -> String {
 
 /// Normalize whitespace: collapse multiple spaces, trim.
 fn normalize_whitespace(name: &str) -> String {
-    name.split_whitespace()
-        .collect::<Vec<&str>>()
-        .join(" ")
+    name.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// Convert string to title case (capitalize first letter of each word).
@@ -488,14 +490,19 @@ fn normalize_whitespace(name: &str) -> String {
 /// L011 fix: Common English prepositions/articles stay lowercase when not the first word.
 fn to_title_case(name: &str) -> String {
     // Known acronyms that should be preserved regardless of length
-    let known_acronyms = ["IBM", "AT", "AWS", "GCP", "USA", "UK", "EU", "AI", "IT", "HR", "PR", "QA", "HP"];
+    let known_acronyms = [
+        "IBM", "AT", "AWS", "GCP", "USA", "UK", "EU", "AI", "IT", "HR", "PR", "QA", "HP",
+    ];
 
     // L011 fix: common prepositions/articles/conjunctions that should stay lowercase
     // in title case (except when they're the first word)
-    let lowercase_words = ["of", "and", "the", "in", "for", "on", "at", "to", "by", "or", "an", "a"];
+    let lowercase_words = [
+        "of", "and", "the", "in", "for", "on", "at", "to", "by", "or", "an", "a",
+    ];
 
     let words: Vec<&str> = name.split_whitespace().collect();
-    words.iter()
+    words
+        .iter()
         .enumerate()
         .map(|(i, word)| {
             let chars: Vec<char> = word.chars().collect();
@@ -516,7 +523,11 @@ fn to_title_case(name: &str) -> String {
             }
 
             // L011: lowercase prepositions/articles when not the first word
-            if i > 0 && lowercase_words.iter().any(|lw| lw.eq_ignore_ascii_case(word)) {
+            if i > 0
+                && lowercase_words
+                    .iter()
+                    .any(|lw| lw.eq_ignore_ascii_case(word))
+            {
                 return word.to_lowercase();
             }
 
@@ -821,8 +832,13 @@ mod tests {
     #[test]
     fn test_custom_aliases() {
         let mut config = OrgAliasConfig::default();
-        config.aliases.insert("acme".to_string(), "Acme Corporation".to_string());
-        config.aliases.insert("widgetco".to_string(), "Widget Company International".to_string());
+        config
+            .aliases
+            .insert("acme".to_string(), "Acme Corporation".to_string());
+        config.aliases.insert(
+            "widgetco".to_string(),
+            "Widget Company International".to_string(),
+        );
 
         let n = OrgNormalizer::with_config(&config);
 
@@ -992,10 +1008,7 @@ mod tests {
     fn test_find_best_match_no_match() {
         let n = normalizer();
 
-        let candidates = vec![
-            "Google".to_string(),
-            "Microsoft".to_string(),
-        ];
+        let candidates = vec!["Google".to_string(), "Microsoft".to_string()];
 
         let result = n.find_best_match("Completely Different Company", &candidates);
         assert!(result.is_none());
@@ -1077,12 +1090,17 @@ mod tests {
     #[test]
     fn test_org_alias_config_serde() {
         let mut config = OrgAliasConfig::default();
-        config.aliases.insert("test".to_string(), "Test Company".to_string());
+        config
+            .aliases
+            .insert("test".to_string(), "Test Company".to_string());
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: OrgAliasConfig = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.aliases.get("test"), Some(&"Test Company".to_string()));
+        assert_eq!(
+            parsed.aliases.get("test"),
+            Some(&"Test Company".to_string())
+        );
     }
 
     #[test]
@@ -1090,7 +1108,9 @@ mod tests {
         use crate::config::OrganizationConfig;
 
         let mut app_config = OrganizationConfig::default();
-        app_config.aliases.insert("myalias".to_string(), "My Company".to_string());
+        app_config
+            .aliases
+            .insert("myalias".to_string(), "My Company".to_string());
         app_config.similarity_threshold = 0.9;
 
         let normalizer = OrgNormalizer::from_app_config(&app_config);
