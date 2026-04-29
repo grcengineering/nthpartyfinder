@@ -1,11 +1,50 @@
 [advisories]
+# ─── Advisory Triage (GRC-138, 2026-04-29) ───────────────────────────────────
+#
+# Methodology: cargo audit + cargo deny against RustSec advisory-db (1060
+# advisories). cargo update + dependency upgrades applied first to resolve
+# what we can. Remaining items documented below with risk acceptance.
+#
+# RESOLVED by this commit:
+#   RUSTSEC-2026-0097 (rand)          — fixed by cargo update (0.8.5→0.8.6, 0.9.2→0.9.4)
+#   RUSTSEC-2025-0057 (fxhash)        — fixed by upgrading scraper 0.18→0.26
+#   RUSTSEC-2025-0134 (rustls-pemfile) — fixed by upgrading reqwest 0.11→0.12
+#
+# REMAINING (3 items, all transitive — no upstream fix available):
+# ──────────────────────────────────────────────────────────────────────────────
 ignore = [
-    "RUSTSEC-2026-0097",
-    "RUSTSEC-2024-0421",
-    "RUSTSEC-2025-0057",
-    "RUSTSEC-2025-0119",
-    "RUSTSEC-2024-0436",
-    "RUSTSEC-2025-0134",
+    # RISK ACCEPTANCE: RUSTSEC-2024-0421 (idna 0.5.0 — Punycode validation)
+    # Type: vulnerability (privilege escalation via malformed Punycode labels)
+    # Impact: idna 0.5.0 is transitive via whois-rs 1.6.1 → validators 0.25.3.
+    #   Used only for WHOIS lookups on domains we already validated via DNS
+    #   resolution. Domains reaching the WHOIS path have already passed our
+    #   URL parser and DNS resolver, limiting exposure to crafted Punycode.
+    # Root cause: whois-rs 1.6.1 (latest) pins validators 0.25.3 which uses
+    #   idna 0.5.0. No newer whois-rs release available.
+    # Mitigation: input domains are pre-validated before WHOIS lookup.
+    # Review: re-evaluate when whois-rs releases > 1.6.1.
+    # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
+    { id = "RUSTSEC-2024-0421", reason = "transitive via whois-rs 1.6.1 (latest); domains pre-validated before WHOIS lookup limits exposure" },
+
+    # RISK ACCEPTANCE: RUSTSEC-2025-0119 (number_prefix 0.4.0 — unmaintained)
+    # Type: unmaintained (informational warning, not a vulnerability)
+    # Impact: transitive via indicatif 0.17.11 → tokenizers/hf-hub. Used only
+    #   for progress bar display formatting. No security surface.
+    # Root cause: indicatif uses number_prefix for human-readable byte counts.
+    #   No alternative available in indicatif's dependency tree.
+    # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
+    { id = "RUSTSEC-2025-0119", reason = "transitive via indicatif; progress bar formatting only, no security surface" },
+
+    # RISK ACCEPTANCE: RUSTSEC-2024-0436 (paste 1.0.15 — unmaintained)
+    # Type: unmaintained (informational warning, not a vulnerability)
+    # Impact: compile-time proc-macro only. Generates code at build time,
+    #   ships no runtime code in the binary. Zero production attack surface.
+    # Root cause: transitive via tokenizers 0.21.4 and macro_rules_attribute.
+    #   Cannot eliminate without replacing the tokenizer dependency.
+    # Mitigation: paste v1.0.15 by dtolnay is functionally complete with 14k+
+    #   reverse dependents. No CVEs filed against paste.
+    # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
+    { id = "RUSTSEC-2024-0436", reason = "compile-time proc-macro only, no runtime attack surface; functionally complete, no known CVEs" },
 ]
 
 [licenses]
