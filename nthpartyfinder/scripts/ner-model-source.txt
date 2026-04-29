@@ -1,0 +1,12 @@
+Model: onnx-community/gliner_small-v2.1
+Source: https://huggingface.co/onnx-community/gliner_small-v2.1
+Pinned commit: 8142fb00740ccea973e64b1272949ff48653df5e
+
+SHA-256 checksums:
+  c76c90920547fd937aaf505e7f2de5ec73168bf1c25abbb55a298104cb061400  onnx/model_int8.onnx
+  677203884d026e721115cf0daccf70ec4239545a13d6619e3e66d7151e0c9ce3  tokenizer.json
+  8aece71b73ca0fbd6dd121ad755deb736e7757d053ced523c2e4959ff446d3f5  config.json
+
+To update: download new files, recompute checksums with `shasum -a 256`,
+and update this file plus download-model.sh, download-model.ps1, and
+.github/workflows/docker.yml.
