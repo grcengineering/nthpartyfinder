@@ -879,4 +879,452 @@ mod tests {
         assert_eq!(result.organization, "Example Corp.");
         assert_eq!(result.source, WebOrgSource::Copyright);
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- WebOrgSource Display ---
+
+    #[test]
+    fn test_web_org_source_display() {
+        assert_eq!(format!("{}", WebOrgSource::SchemaOrg), "schema_org");
+        assert_eq!(format!("{}", WebOrgSource::OpenGraph), "opengraph");
+        assert_eq!(format!("{}", WebOrgSource::MetaTag), "meta_tag");
+        assert_eq!(format!("{}", WebOrgSource::TitleTag), "title_tag");
+        assert_eq!(format!("{}", WebOrgSource::Copyright), "copyright");
+        assert_eq!(format!("{}", WebOrgSource::Manifest), "manifest");
+    }
+
+    // --- is_valid_org_name edge cases ---
+
+    #[test]
+    fn test_is_valid_org_name_too_long() {
+        let long_name = "A".repeat(101);
+        assert!(!is_valid_org_name(&long_name));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_starts_non_alphanumeric() {
+        assert!(!is_valid_org_name("@Handle"));
+        assert!(!is_valid_org_name("#Tag"));
+        assert!(!is_valid_org_name("!Bang"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_just_numbers() {
+        assert!(!is_valid_org_name("123456"));
+        assert!(!is_valid_org_name("42 42"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_invalid_strings() {
+        let invalid = [
+            "undefined", "null", "none", "n/a", "test", "example",
+            "loading", "loading...", "please wait", "redirecting",
+            "dashboard", "admin", "404", "error", "page not found",
+        ];
+        for name in invalid {
+            assert!(!is_valid_org_name(name), "Should reject: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_is_valid_org_name_valid() {
+        assert!(is_valid_org_name("Anthropic"));
+        // "A" is 1 char, below the 2-char minimum
+        assert!(!is_valid_org_name("A"));
+        assert!(is_valid_org_name("OK"));
+    }
+
+    // --- looks_like_page_name ---
+
+    #[test]
+    fn test_looks_like_page_name_all_indicators() {
+        let indicators = [
+            "Login Page", "Sign Up", "Register Now", "Dashboard View",
+            "Settings Panel", "Profile Edit", "Account Info", "Blog Post",
+            "News Article", "Products List", "Services Overview", "Pricing Plans",
+            "Support Center", "Help Docs", "FAQ Section", "Privacy Policy",
+            "Terms of Service", "Legal Notice", "Careers Page", "Jobs Board",
+        ];
+        for name in indicators {
+            assert!(looks_like_page_name(name), "Should be page name: {}", name);
+        }
+    }
+
+    #[test]
+    fn test_looks_like_page_name_false() {
+        assert!(!looks_like_page_name("Anthropic PBC"));
+        assert!(!looks_like_page_name("Google LLC"));
+        assert!(!looks_like_page_name("Stripe Inc."));
+    }
+
+    // --- clean_org_name edge cases ---
+
+    #[test]
+    fn test_clean_org_name_trailing_period() {
+        // Regular period (not abbreviation) gets removed
+        assert_eq!(clean_org_name("My Company."), "My Company");
+    }
+
+    #[test]
+    fn test_clean_org_name_preserves_abbreviations() {
+        assert_eq!(clean_org_name("Acme Inc."), "Acme Inc.");
+        assert_eq!(clean_org_name("Acme Ltd."), "Acme Ltd.");
+        assert_eq!(clean_org_name("Acme Corp."), "Acme Corp.");
+        assert_eq!(clean_org_name("Acme Co."), "Acme Co.");
+        assert_eq!(clean_org_name("Acme LLC."), "Acme LLC.");
+    }
+
+    #[test]
+    fn test_clean_org_name_whitespace_normalization() {
+        assert_eq!(clean_org_name("  Multi   Space   Name  "), "Multi Space Name");
+    }
+
+    // --- extract_from_schema_org edge cases ---
+
+    #[test]
+    fn test_schema_org_graph_type() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        {
+            "@graph": [
+                {"@type": "WebSite", "name": "My Site"},
+                {"@type": "Organization", "name": "Graph Corp"}
+            ]
+        }
+        </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Graph Corp");
+    }
+
+    #[test]
+    fn test_schema_org_legal_name_preferred() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        {"@type": "Organization", "name": "Short", "legalName": "Full Legal Name Inc."}
+        </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Full Legal Name Inc.");
+    }
+
+    #[test]
+    fn test_schema_org_publisher() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        {"@type": "WebSite", "publisher": {"@type": "Organization", "name": "Publisher Corp"}}
+        </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Publisher Corp");
+    }
+
+    #[test]
+    fn test_schema_org_author() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        {"@type": "WebSite", "author": {"@type": "Corporation", "name": "Author Corp"}}
+        </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Author Corp");
+    }
+
+    #[test]
+    fn test_schema_org_array() {
+        let html = r#"
+        <html><head>
+        <script type="application/ld+json">
+        [{"@type": "Organization", "name": "Array Corp"}]
+        </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Array Corp");
+    }
+
+    #[test]
+    fn test_schema_org_various_types() {
+        let types = [
+            "Organization", "Corporation", "LocalBusiness", "Company",
+            "Brand", "NGO", "GovernmentOrganization", "EducationalOrganization",
+        ];
+        for t in types {
+            let html = format!(
+                r#"<html><head>
+                <script type="application/ld+json">
+                {{"@type": "{}", "name": "Test {}"}}
+                </script>
+                </head><body></body></html>"#,
+                t, t
+            );
+            let result = extract_organization_from_html(&html, "test.com").unwrap();
+            assert!(result.is_some(), "Should detect @type: {}", t);
+        }
+    }
+
+    // --- extract_from_opengraph twitter fallback ---
+
+    #[test]
+    fn test_opengraph_twitter_handle() {
+        let html = r#"
+        <html><head>
+            <meta name="twitter:site" content="@anthropic">
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        let org = result.unwrap();
+        assert_eq!(org.organization, "Anthropic");
+        assert_eq!(org.source, WebOrgSource::OpenGraph);
+        assert!(org.confidence <= 0.65); // Lower confidence for Twitter handle
+    }
+
+    #[test]
+    fn test_opengraph_twitter_handle_too_short() {
+        let html = r#"
+        <html><head>
+            <meta name="twitter:site" content="@ab">
+        </head><body></body></html>"#;
+
+        // 2-char handle should be rejected
+        let doc = Html::parse_document(html);
+        assert!(extract_from_opengraph(&doc).is_none());
+    }
+
+    // --- extract_from_meta_tags ---
+
+    #[test]
+    fn test_meta_tag_application_name() {
+        let html = r#"
+        <html><head>
+            <meta name="application-name" content="MyApp Corp">
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "MyApp Corp");
+    }
+
+    #[test]
+    fn test_meta_tag_author() {
+        let html = r#"
+        <html><head>
+            <meta name="author" content="Author Organization">
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Author Organization");
+    }
+
+    #[test]
+    fn test_meta_tag_publisher() {
+        let html = r#"
+        <html><head>
+            <meta name="publisher" content="Publisher LLC">
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Publisher LLC");
+    }
+
+    #[test]
+    fn test_meta_tag_dc_publisher() {
+        let html = r#"
+        <html><head>
+            <meta name="DC.publisher" content="Dublin Core Publisher">
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Dublin Core Publisher");
+    }
+
+    // --- extract_from_title edge cases ---
+
+    #[test]
+    fn test_title_dash_separator() {
+        let html = r#"
+        <html><head><title>Product - Company Name</title></head>
+        <body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Company Name");
+    }
+
+    #[test]
+    fn test_title_em_dash_separator() {
+        let html = r#"
+        <html><head><title>Product — Great Corp</title></head>
+        <body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Great Corp");
+    }
+
+    #[test]
+    fn test_title_colon_separator() {
+        let html = r#"
+        <html><head><title>Acme Corp: Our Products</title></head>
+        <body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Acme Corp");
+    }
+
+    #[test]
+    fn test_title_no_separator_short() {
+        let html = r#"
+        <html><head><title>Stripe</title></head>
+        <body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Stripe");
+    }
+
+    #[test]
+    fn test_title_too_short() {
+        let html = r#"
+        <html><head><title>AB</title></head>
+        <body></body></html>"#;
+
+        let doc = Html::parse_document(html);
+        assert!(extract_from_title(&doc, "test.com").is_none());
+    }
+
+    #[test]
+    fn test_title_empty() {
+        let html = r#"
+        <html><head><title></title></head>
+        <body></body></html>"#;
+
+        let doc = Html::parse_document(html);
+        assert!(extract_from_title(&doc, "test.com").is_none());
+    }
+
+    #[test]
+    fn test_title_page_name_rejected() {
+        let html = r#"
+        <html><head><title>Home Page</title></head>
+        <body></body></html>"#;
+
+        let doc = Html::parse_document(html);
+        // "Home Page" contains "Home" indicator
+        assert!(extract_from_title(&doc, "test.com").is_none());
+    }
+
+    // --- extract_from_copyright edge cases ---
+
+    #[test]
+    fn test_copyright_pattern_2() {
+        let html = r#"
+        <html><body>
+            <footer>Copyright © 2024 Test Company Inc. All rights reserved.</footer>
+        </body></html>"#;
+
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert!(result.unwrap().organization.contains("Test Company"));
+    }
+
+    #[test]
+    fn test_copyright_pattern_c_paren() {
+        let html = r#"
+        <html><body>
+            <footer>(c) 2024 Paren Corp. All rights reserved.</footer>
+        </body></html>"#;
+
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert!(result.unwrap().organization.contains("Paren Corp"));
+    }
+
+    #[test]
+    fn test_copyright_no_footer_searches_html() {
+        // Copyright in body but not in a footer element
+        let html = r#"
+        <html><body>
+            <p>© 2024 Body Corp. All rights reserved.</p>
+        </body></html>"#;
+
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert!(result.unwrap().organization.contains("Body Corp"));
+    }
+
+    #[test]
+    fn test_copyright_no_match() {
+        let html = r#"
+        <html><body><footer>No copyright here</footer></body></html>"#;
+
+        let doc = Html::parse_document(html);
+        assert!(extract_from_copyright(&doc, html).is_none());
+    }
+
+    // --- get_meta_property / get_meta_name ---
+
+    #[test]
+    fn test_get_meta_property_missing() {
+        let html = "<html><head></head><body></body></html>";
+        let doc = Html::parse_document(html);
+        assert!(get_meta_property(&doc, "og:nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_meta_name_missing() {
+        let html = "<html><head></head><body></body></html>";
+        let doc = Html::parse_document(html);
+        assert!(get_meta_name(&doc, "nonexistent").is_none());
+    }
+
+    // --- Priority ordering ---
+
+    #[test]
+    fn test_extraction_priority_schema_over_opengraph() {
+        let html = r#"
+        <html><head>
+            <meta property="og:site_name" content="OG Name">
+            <script type="application/ld+json">
+            {"@type": "Organization", "name": "Schema Name"}
+            </script>
+        </head><body></body></html>"#;
+
+        let result = extract_organization_from_html(html, "test.com").unwrap();
+        assert!(result.is_some());
+        // Schema.org should take priority
+        assert_eq!(result.unwrap().organization, "Schema Name");
+    }
+
+    // --- Empty/no-org HTML ---
+
+    #[test]
+    fn test_extract_from_empty_html() {
+        let result = extract_organization_from_html("", "test.com").unwrap();
+        assert!(result.is_none());
+    }
 }

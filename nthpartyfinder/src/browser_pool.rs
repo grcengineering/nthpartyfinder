@@ -145,3 +145,174 @@ pub fn create_browser() -> anyhow::Result<BrowserGuard> {
         _permit: permit,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ──────────────────────────────────────────────────────────────────
+    // BrowserSemaphore unit tests
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_browser_semaphore_new() {
+        let sem = BrowserSemaphore::new(3);
+        assert_eq!(sem.max, 3);
+        let count = sem.state.lock().unwrap();
+        assert_eq!(*count, 0);
+    }
+
+    #[test]
+    fn test_browser_semaphore_acquire_increments_count() {
+        let sem = BrowserSemaphore::new(4);
+        let _p1 = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 1);
+        let _p2 = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_browser_semaphore_release_decrements_count() {
+        let sem = BrowserSemaphore::new(4);
+        let _p1 = sem.acquire();
+        let p2 = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 2);
+        drop(p2);
+        assert_eq!(*sem.state.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_browser_permit_drop_releases() {
+        let sem = BrowserSemaphore::new(2);
+        {
+            let _p = sem.acquire();
+            assert_eq!(*sem.state.lock().unwrap(), 1);
+        }
+        // After permit is dropped, count should be back to 0
+        assert_eq!(*sem.state.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_browser_semaphore_acquire_up_to_max() {
+        let sem = BrowserSemaphore::new(3);
+        let _p1 = sem.acquire();
+        let _p2 = sem.acquire();
+        let _p3 = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_browser_semaphore_blocks_at_max_then_releases() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let sem = Arc::new(BrowserSemaphore::new(1));
+
+        // Acquire the only permit
+        let p1 = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 1);
+
+        let sem2 = Arc::clone(&sem);
+        let handle = thread::spawn(move || {
+            // This should block until p1 is dropped
+            let _p2 = sem2.acquire();
+            assert_eq!(*sem2.state.lock().unwrap(), 1);
+        });
+
+        // Give the thread a moment to start blocking
+        thread::sleep(Duration::from_millis(50));
+        // Count should still be 1 (thread is blocked)
+        assert_eq!(*sem.state.lock().unwrap(), 1);
+
+        // Drop p1 to unblock the thread
+        drop(p1);
+        handle.join().unwrap();
+        // After thread exits, count is back to 0
+        assert_eq!(*sem.state.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_browser_semaphore_multiple_acquire_release_cycles() {
+        let sem = BrowserSemaphore::new(2);
+        for _ in 0..10 {
+            let _p = sem.acquire();
+            assert_eq!(*sem.state.lock().unwrap(), 1);
+        }
+        assert_eq!(*sem.state.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_browser_semaphore_release_notifies_waiters() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let sem = Arc::new(BrowserSemaphore::new(1));
+        let acquired = Arc::new(AtomicBool::new(false));
+
+        let p1 = sem.acquire();
+
+        let sem2 = Arc::clone(&sem);
+        let acquired2 = Arc::clone(&acquired);
+        let handle = thread::spawn(move || {
+            let _p2 = sem2.acquire();
+            acquired2.store(true, Ordering::SeqCst);
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        assert!(!acquired.load(Ordering::SeqCst), "Thread should be blocked");
+
+        drop(p1); // release, which calls notify_one
+        handle.join().unwrap();
+        assert!(
+            acquired.load(Ordering::SeqCst),
+            "Thread should have acquired after release"
+        );
+    }
+
+    #[test]
+    fn test_max_browser_instances_constant() {
+        assert_eq!(MAX_BROWSER_INSTANCES, 4);
+    }
+
+    #[test]
+    fn test_browser_semaphore_concurrent_acquire_release() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let sem = Arc::new(BrowserSemaphore::new(4));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let sem_clone = Arc::clone(&sem);
+            handles.push(thread::spawn(move || {
+                let _permit = sem_clone.acquire();
+                // Hold the permit briefly
+                thread::sleep(std::time::Duration::from_millis(10));
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(*sem.state.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_browser_semaphore_max_one() {
+        // Edge case: semaphore with max=1 acts like a mutex
+        let sem = BrowserSemaphore::new(1);
+        let _p = sem.acquire();
+        assert_eq!(*sem.state.lock().unwrap(), 1);
+        drop(_p);
+        assert_eq!(*sem.state.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_global_semaphore_exists() {
+        // Verify the lazy static is accessible without panicking
+        let _ = &*BROWSER_SEMAPHORE;
+    }
+}

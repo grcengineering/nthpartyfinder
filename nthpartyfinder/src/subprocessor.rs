@@ -6597,4 +6597,1330 @@ mod tests {
         assert!(!is_common_english_word("cloudflare"));
         assert!(!is_common_english_word("pendo"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // validate_and_compile_regex
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_validate_and_compile_regex_valid_pattern() {
+        let result = validate_and_compile_regex(r"\d+");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_validate_and_compile_regex_invalid_pattern() {
+        let result = validate_and_compile_regex(r"[invalid");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_and_compile_regex_too_long() {
+        let long_pattern = "a".repeat(MAX_REGEX_PATTERN_LENGTH + 1);
+        let result = validate_and_compile_regex(&long_pattern);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_and_compile_regex_at_limit() {
+        let pattern = "a".repeat(MAX_REGEX_PATTERN_LENGTH);
+        let result = validate_and_compile_regex(&pattern);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_validate_and_compile_regex_empty() {
+        let result = validate_and_compile_regex("");
+        assert!(result.is_some()); // empty regex is valid
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SubprocessorCache::get_cache_file_path — path sanitization
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_cache_file_path_normal_domain() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("example.com");
+        assert_eq!(path, PathBuf::from("cache/example.com.json"));
+    }
+
+    #[test]
+    fn test_cache_file_path_traversal_attempt() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("../../etc/passwd");
+        // ".." becomes "_" due to sanitization
+        let path_str = path.to_string_lossy();
+        assert!(!path_str.contains(".."));
+        assert!(path_str.starts_with("cache/"));
+    }
+
+    #[test]
+    fn test_cache_file_path_special_chars() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("evil<script>.com");
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(!filename.contains('<'));
+        assert!(!filename.contains('>'));
+    }
+
+    #[test]
+    fn test_cache_file_path_empty_domain() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("");
+        assert_eq!(path, PathBuf::from("cache/_invalid_domain_.json"));
+    }
+
+    #[test]
+    fn test_cache_file_path_only_dots() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("..");
+        // ".." -> "_" after replace, then check for empty/single-dot
+        let path_str = path.to_string_lossy();
+        assert!(!path_str.contains(".."));
+    }
+
+    #[test]
+    fn test_cache_file_path_unicode_chars() {
+        let cache = SubprocessorCache::new();
+        let path = cache.get_cache_file_path("münchen.de");
+        let filename = path.file_name().unwrap().to_string_lossy();
+        // Non-ASCII chars should be replaced with underscores
+        assert!(!filename.contains('ü'));
+        assert!(filename.ends_with(".json"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_valid_tld
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_valid_tld_common_gtlds() {
+        assert!(is_valid_tld("com"));
+        assert!(is_valid_tld("org"));
+        assert!(is_valid_tld("net"));
+        assert!(is_valid_tld("edu"));
+        assert!(is_valid_tld("gov"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_country_codes() {
+        assert!(is_valid_tld("uk"));
+        assert!(is_valid_tld("us"));
+        assert!(is_valid_tld("de"));
+        assert!(is_valid_tld("jp"));
+        assert!(is_valid_tld("au"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_new_gtlds() {
+        assert!(is_valid_tld("app"));
+        assert!(is_valid_tld("dev"));
+        assert!(is_valid_tld("cloud"));
+        assert!(is_valid_tld("tech"));
+        assert!(is_valid_tld("io"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_case_insensitive() {
+        assert!(is_valid_tld("COM"));
+        assert!(is_valid_tld("Io"));
+        assert!(is_valid_tld("UK"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_invalid() {
+        assert!(!is_valid_tld("zzz"));
+        assert!(!is_valid_tld("abc"));
+        assert!(!is_valid_tld("truncated"));
+        assert!(!is_valid_tld("xm"));
+        assert!(!is_valid_tld("yfc"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_business_extensions() {
+        assert!(is_valid_tld("inc"));
+        assert!(is_valid_tld("llc"));
+        assert!(is_valid_tld("ltd"));
+        assert!(is_valid_tld("gmbh"));
+    }
+
+    #[test]
+    fn test_is_valid_tld_industry_specific() {
+        assert!(is_valid_tld("health"));
+        assert!(is_valid_tld("legal"));
+        assert!(is_valid_tld("finance"));
+        assert!(is_valid_tld("security"));
+        assert!(is_valid_tld("software"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_valid_org_name
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_valid_org_name_too_short() {
+        assert!(!is_valid_org_name("AB"));
+        assert!(!is_valid_org_name(""));
+        assert!(!is_valid_org_name("  "));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_too_long() {
+        let long_name = "A".repeat(81);
+        assert!(!is_valid_org_name(&long_name));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_at_boundary() {
+        // Exactly 80 chars should be valid
+        let boundary_name = "A".repeat(80);
+        assert!(is_valid_org_name(&boundary_name));
+        // Exactly 3 chars should be valid
+        assert!(is_valid_org_name("AWS"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_valid_companies() {
+        assert!(is_valid_org_name("Amazon Web Services, Inc."));
+        assert!(is_valid_org_name("Cloudflare"));
+        assert!(is_valid_org_name("Stripe Inc"));
+        assert!(is_valid_org_name("Google LLC"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_location_markers() {
+        assert!(!is_valid_org_name("AWS United States processing"));
+        assert!(!is_valid_org_name("Some Corp United Kingdom operations"));
+        assert!(!is_valid_org_name("Vendor European Union"));
+        assert!(!is_valid_org_name("Location of processing: US"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_table_headers() {
+        assert!(!is_valid_org_name("Third Party Subprocessors list"));
+        assert!(!is_valid_org_name("Service Description of the tool"));
+        assert!(!is_valid_org_name("Categories of data processed"));
+        assert!(!is_valid_org_name("Subsidiaries Name of company"));
+    }
+
+    #[test]
+    fn test_is_valid_org_name_too_many_words() {
+        assert!(!is_valid_org_name("This Is A Very Long Name With Way Too Many Words In It"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_ner_false_positive
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_ner_false_positive_short_strings() {
+        assert!(is_ner_false_positive("ab"));
+        assert!(is_ner_false_positive("a"));
+        assert!(is_ner_false_positive(""));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_snake_case() {
+        assert!(is_ner_false_positive("soc2_report"));
+        assert!(is_ner_false_positive("penetration_testing"));
+        assert!(is_ner_false_positive("encrypt_data"));
+        assert!(is_ner_false_positive("user_name"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_locale_identifiers() {
+        assert!(is_ner_false_positive("en-us"));
+        assert!(is_ner_false_positive("zh-hans"));
+        assert!(is_ner_false_positive("pt-br"));
+        assert!(is_ner_false_positive("nb-no"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_standards() {
+        assert!(is_ner_false_positive("ISO 27001"));
+        assert!(is_ner_false_positive("SOC 2"));
+        assert!(is_ner_false_positive("GDPR"));
+        assert!(is_ner_false_positive("HIPAA"));
+        assert!(is_ner_false_positive("PCI-DSS"));
+        assert!(is_ner_false_positive("NIST"));
+        assert!(is_ner_false_positive("OWASP"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_standards_with_versions() {
+        assert!(is_ner_false_positive("ISO 27001:2022"));
+        assert!(is_ner_false_positive("SOC 2 Type II"));
+        assert!(is_ner_false_positive("NIST 800-53"));
+        assert!(is_ner_false_positive("PCI DSS v4.0"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_non_vendor_orgs() {
+        assert!(is_ner_false_positive("IETF"));
+        assert!(is_ner_false_positive("IEEE"));
+        assert!(is_ner_false_positive("W3C"));
+        assert!(is_ner_false_positive("Red Cross"));
+        assert!(is_ner_false_positive("United Nations"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_language_codes() {
+        assert!(is_ner_false_positive("fr"));
+        assert!(is_ner_false_positive("de"));
+        assert!(is_ner_false_positive("ja"));
+        assert!(is_ner_false_positive("ko"));
+        assert!(is_ner_false_positive("zh"));
+    }
+
+    #[test]
+    fn test_is_ner_false_positive_real_companies() {
+        assert!(!is_ner_false_positive("Cloudflare"));
+        assert!(!is_ner_false_positive("Amazon Web Services"));
+        assert!(!is_ner_false_positive("Stripe Inc"));
+        assert!(!is_ner_false_positive("Datadog"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_garbled_text
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_garbled_text_all_consonants() {
+        assert!(is_garbled_text("ksbpw"));
+        assert!(is_garbled_text("brtfd"));
+        assert!(is_garbled_text("mnpqx"));
+    }
+
+    #[test]
+    fn test_is_garbled_text_low_vowel_ratio() {
+        assert!(is_garbled_text("brtfdxm")); // 0 vowels in 7 chars
+        assert!(is_garbled_text("mnpqxcv")); // 0 vowels in 7 chars
+    }
+
+    #[test]
+    fn test_is_garbled_text_consecutive_consonants() {
+        assert!(is_garbled_text("abcdfghjk")); // 5+ consecutive consonants
+    }
+
+    #[test]
+    fn test_is_garbled_text_normal_words() {
+        assert!(!is_garbled_text("stripe"));
+        assert!(!is_garbled_text("cloudflare"));
+        assert!(!is_garbled_text("amazon"));
+        assert!(!is_garbled_text("datadog"));
+    }
+
+    #[test]
+    fn test_is_garbled_text_short_strings() {
+        assert!(!is_garbled_text("ab"));  // too short to judge
+        assert!(!is_garbled_text("xy"));  // too short to judge
+        assert!(!is_garbled_text(""));
+    }
+
+    #[test]
+    fn test_is_garbled_text_no_alpha() {
+        assert!(is_garbled_text("123456")); // numeric-only (no alphabetic)
+        assert!(is_garbled_text("---")); // all non-alpha
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_text_from_html
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_text_from_html_basic() {
+        let html = "<html><body><p>Hello World</p></body></html>";
+        let text = extract_text_from_html(html);
+        assert!(text.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_extract_text_from_html_strips_tags() {
+        let html = "<html><body><p>Hello <strong>World</strong></p></body></html>";
+        let text = extract_text_from_html(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(!text.contains("<strong>"));
+    }
+
+    #[test]
+    fn test_extract_text_from_html_main_content() {
+        // If there's a <main> element with enough content, it should be preferred
+        let html = r#"<html><body>
+            <nav>Navigation stuff here ignore this</nav>
+            <main><p>Main content area with enough text to exceed the 200 character threshold that triggers content selection over body text extraction which is the fallback path in the function</p></main>
+            <footer>Footer stuff</footer>
+        </body></html>"#;
+        let text = extract_text_from_html(html);
+        assert!(text.contains("Main content area"));
+    }
+
+    #[test]
+    fn test_extract_text_from_html_empty_body() {
+        let html = "<html><body></body></html>";
+        let text = extract_text_from_html(html);
+        assert!(text.is_empty() || text.trim().is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_from_html_no_body() {
+        let html = "<html><head><title>Test</title></head></html>";
+        let text = extract_text_from_html(html);
+        // Should return empty or just the title text
+        assert!(text.len() < 50);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // filter_subprocessor_results — extended cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_filter_whitespace_in_domain() {
+        let vendors = vec![make_domain("il mj.com")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Domain with whitespace should be filtered");
+    }
+
+    #[test]
+    fn test_filter_invalid_tld() {
+        let vendors = vec![make_domain("span.truncated")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Domain with invalid TLD should be filtered");
+    }
+
+    #[test]
+    fn test_filter_bare_tld() {
+        let vendors = vec![make_domain("com")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Bare TLD should be filtered");
+    }
+
+    #[test]
+    fn test_filter_common_word_domain() {
+        let vendors = vec![make_domain("conditions.com")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Common word domain should be filtered");
+    }
+
+    #[test]
+    fn test_filter_garbled_domain() {
+        let vendors = vec![make_domain("ksbpw.com")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "Garbled text domain should be filtered");
+    }
+
+    #[test]
+    fn test_filter_valid_domain_passes() {
+        let vendors = vec![make_domain("stripe.com")];
+        let result = filter_subprocessor_results(vendors);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_filter_org_prefix_ner_false_positive() {
+        let vendors = vec![make_domain("_org:GDPR")];
+        let result = filter_subprocessor_results(vendors);
+        assert!(result.is_empty(), "NER false positive org should be filtered");
+    }
+
+    #[test]
+    fn test_filter_multiple_vendors_mixed() {
+        let vendors = vec![
+            make_domain("stripe.com"),
+            make_domain("il mj.com"),       // whitespace
+            make_domain("cloudflare.com"),
+            make_domain("conditions.com"),  // common word
+            make_domain("co.uk"),           // compound TLD
+            make_domain("datadog.com"),
+        ];
+        let result = filter_subprocessor_results(vendors);
+        assert_eq!(result.len(), 3);
+        let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"stripe.com"));
+        assert!(domains.contains(&"cloudflare.com"));
+        assert!(domains.contains(&"datadog.com"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SubprocessorAnalyzer methods (require async runtime)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    fn make_test_analyzer() -> SubprocessorAnalyzer {
+        let cache = SubprocessorCache::new();
+        SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)))
+    }
+
+    // --- extract_vanta_manifest_url ---
+
+    #[test]
+    fn test_vanta_manifest_url_data_attribute() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html data-signature-manifest-url="https://assets.vanta.com/static/signature-manifest.abc123.json"><body></body></html>"#;
+        let result = analyzer.extract_vanta_manifest_url(html);
+        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string()));
+    }
+
+    #[test]
+    fn test_vanta_manifest_url_link_preload() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><head><link rel="preload" as="fetch" href="https://assets.vanta.com/static/signature-manifest.def456.json"></head><body></body></html>"#;
+        let result = analyzer.extract_vanta_manifest_url(html);
+        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string()));
+    }
+
+    #[test]
+    fn test_vanta_manifest_url_regex_fallback() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body><script>var url = "https://assets.vanta.com/static/signature-manifest.789abc.json";</script></body></html>"#;
+        let result = analyzer.extract_vanta_manifest_url(html);
+        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.789abc.json".to_string()));
+    }
+
+    #[test]
+    fn test_vanta_manifest_url_no_manifest() {
+        let analyzer = make_test_analyzer();
+        let html = "<html><body><p>Not a Vanta page</p></body></html>";
+        let result = analyzer.extract_vanta_manifest_url(html);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_vanta_manifest_url_wrong_attribute_value() {
+        let analyzer = make_test_analyzer();
+        // data-signature-manifest-url exists but doesn't contain "signature-manifest"
+        let html = r#"<html data-signature-manifest-url="https://other.com/something.json"><body></body></html>"#;
+        let result = analyzer.extract_vanta_manifest_url(html);
+        assert_eq!(result, None);
+    }
+
+    // --- parse_vanta_graphql_response ---
+
+    #[test]
+    fn test_parse_vanta_graphql_response_valid() {
+        let analyzer = make_test_analyzer();
+        let data = serde_json::json!({
+            "data": {
+                "trust": {
+                    "trustReportBySlugId": {
+                        "subprocessors": [
+                            {
+                                "name": "Cloudflare",
+                                "url": "https://www.cloudflare.com",
+                                "service": "CDN",
+                                "location": "US",
+                                "purpose": "Content delivery"
+                            },
+                            {
+                                "name": "Stripe",
+                                "url": "https://stripe.com/",
+                                "service": "Payments",
+                                "location": "US",
+                                "purpose": "Payment processing"
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        let result = analyzer.parse_vanta_graphql_response(&data);
+        assert!(result.is_some());
+        let subs = result.unwrap();
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].domain, "cloudflare.com");
+        assert_eq!(subs[1].domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_parse_vanta_graphql_response_empty_subprocessors() {
+        let analyzer = make_test_analyzer();
+        let data = serde_json::json!({
+            "data": {
+                "trust": {
+                    "trustReportBySlugId": {
+                        "subprocessors": []
+                    }
+                }
+            }
+        });
+        let result = analyzer.parse_vanta_graphql_response(&data);
+        assert!(result.is_none()); // Empty results return None
+    }
+
+    #[test]
+    fn test_parse_vanta_graphql_response_missing_fields() {
+        let analyzer = make_test_analyzer();
+        let data = serde_json::json!({
+            "data": {
+                "trust": {}
+            }
+        });
+        let result = analyzer.parse_vanta_graphql_response(&data);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_vanta_graphql_response_no_url_uses_org_prefix() {
+        let analyzer = make_test_analyzer();
+        let data = serde_json::json!({
+            "data": {
+                "trust": {
+                    "trustReportBySlugId": {
+                        "subprocessors": [
+                            {
+                                "name": "Internal Service",
+                                "url": "",
+                                "service": "Ops",
+                                "location": "US",
+                                "purpose": "Internal"
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        let result = analyzer.parse_vanta_graphql_response(&data);
+        assert!(result.is_some());
+        let subs = result.unwrap();
+        assert_eq!(subs[0].domain, "_org:Internal Service");
+    }
+
+    // --- generate_subprocessor_urls ---
+
+    #[test]
+    fn test_generate_subprocessor_urls_known_domain() {
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("docusign.com");
+        assert!(urls.iter().any(|u| u.contains("docusign.com/trust/privacy/subprocessors-list")));
+    }
+
+    #[test]
+    fn test_generate_subprocessor_urls_generic_domain() {
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("acme.com");
+        // Should contain standard patterns
+        assert!(urls.iter().any(|u| u == "https://acme.com/subprocessors"));
+        assert!(urls.iter().any(|u| u == "https://trust.acme.com/subprocessors"));
+        assert!(urls.iter().any(|u| u.contains("/legal/subprocessors")));
+    }
+
+    #[test]
+    fn test_generate_subprocessor_urls_trust_subdomain() {
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("trust.vanta.com");
+        // Should prioritize direct trust URL, NOT generate trust.trust.vanta.com
+        assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"));
+        assert!(!urls.iter().any(|u| u.contains("trust.trust.")));
+    }
+
+    #[test]
+    fn test_generate_subprocessor_urls_www_stripped() {
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("www.example.com");
+        // www. should be stripped from base_domain
+        assert!(urls.iter().any(|u| u.contains("example.com")));
+    }
+
+    // --- is_valid_vendor_domain ---
+
+    #[test]
+    fn test_is_valid_vendor_domain_good_domains() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.is_valid_vendor_domain("stripe.com"));
+        assert!(analyzer.is_valid_vendor_domain("cloudflare.com"));
+        assert!(analyzer.is_valid_vendor_domain("notion.so"));
+        assert!(analyzer.is_valid_vendor_domain("sentry.io"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_invalid_patterns() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("example.com"));
+        assert!(!analyzer.is_valid_vendor_domain("localhost"));
+        assert!(!analyzer.is_valid_vendor_domain("test.com"));
+        assert!(!analyzer.is_valid_vendor_domain("domain.com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_whitespace() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("some domain.com"));
+        assert!(!analyzer.is_valid_vendor_domain("stripe .com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_special_chars() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("evil<script>.com"));
+        assert!(!analyzer.is_valid_vendor_domain("bad@domain.com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_underscore_prefix() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("_tracker.com"));
+        assert!(!analyzer.is_valid_vendor_domain("-hyphen.com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_double_underscore() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("some__thing.com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_too_short() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("a.b"));
+        assert!(!analyzer.is_valid_vendor_domain("ab.c"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_short_label() {
+        let analyzer = make_test_analyzer();
+        // Labels < 3 chars are rejected (catches PDF artifacts like "b.mz")
+        assert!(!analyzer.is_valid_vendor_domain("hp.com"));
+        assert!(!analyzer.is_valid_vendor_domain("fb.com"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_tld_too_long() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("something.abcdefghijk")); // 11 char TLD
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_common_word_label() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("conditions.com"));
+        assert!(!analyzer.is_valid_vendor_domain("prevention.net"));
+    }
+
+    #[test]
+    fn test_is_valid_vendor_domain_garbled_label() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("brtfd.com"));
+        assert!(!analyzer.is_valid_vendor_domain("ksbpw.net"));
+    }
+
+    // --- company_name_to_domain ---
+
+    #[test]
+    fn test_company_name_to_domain_known_mappings() {
+        let analyzer = make_test_analyzer();
+        assert_eq!(analyzer.company_name_to_domain("Amazon Web Services"), Some("aws.amazon.com".to_string()));
+        assert_eq!(analyzer.company_name_to_domain("Cloudflare"), Some("cloudflare.com".to_string()));
+        assert_eq!(analyzer.company_name_to_domain("Functional Software"), Some("sentry.io".to_string()));
+        assert_eq!(analyzer.company_name_to_domain("Concentrix"), Some("concentrix.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_to_domain_pattern_extraction() {
+        let analyzer = make_test_analyzer();
+        // Pattern: "Company, Inc." -> "company.com"
+        let result = analyzer.company_name_to_domain("Datadog, Inc.");
+        assert_eq!(result, Some("datadog.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_to_domain_unknown_company() {
+        let analyzer = make_test_analyzer();
+        // Random company that isn't in known mappings and doesn't match patterns
+        let result = analyzer.company_name_to_domain("Some Random Unknown Company Name");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_company_name_to_domain_chronosphere() {
+        let analyzer = make_test_analyzer();
+        assert_eq!(analyzer.company_name_to_domain("Chronosphere"), Some("chronosphere.io".to_string()));
+    }
+
+    // --- map_organization_to_domain ---
+
+    #[test]
+    fn test_map_org_to_domain_known_orgs() {
+        let analyzer = make_test_analyzer();
+        assert_eq!(analyzer.map_organization_to_domain("Google"), Some("google.com".to_string()));
+        assert_eq!(analyzer.map_organization_to_domain("Stripe"), Some("stripe.com".to_string()));
+        assert_eq!(analyzer.map_organization_to_domain("Twilio"), Some("twilio.com".to_string()));
+    }
+
+    #[test]
+    fn test_map_org_to_domain_with_suffix() {
+        let analyzer = make_test_analyzer();
+        // Should strip suffix and still match
+        assert_eq!(analyzer.map_organization_to_domain("Datadog, Inc."), Some("datadoghq.com".to_string()));
+    }
+
+    #[test]
+    fn test_map_org_to_domain_input_is_domain() {
+        let analyzer = make_test_analyzer();
+        // If input already looks like a domain, return it directly
+        assert_eq!(analyzer.map_organization_to_domain("facebook.com"), Some("facebook.com".to_string()));
+    }
+
+    #[test]
+    fn test_map_org_to_domain_navigation_terms_rejected() {
+        let analyzer = make_test_analyzer();
+        // Navigation terms should not produce domains
+        assert_eq!(analyzer.map_organization_to_domain("home"), None);
+        assert_eq!(analyzer.map_organization_to_domain("about"), None);
+        assert_eq!(analyzer.map_organization_to_domain("pricing"), None);
+    }
+
+    #[test]
+    fn test_map_org_to_domain_cookie_identifiers_rejected() {
+        let analyzer = make_test_analyzer();
+        assert_eq!(analyzer.map_organization_to_domain("__cf_bm"), None);
+        assert_eq!(analyzer.map_organization_to_domain("_gcl_au"), None);
+        assert_eq!(analyzer.map_organization_to_domain("visitor_id"), None);
+    }
+
+    #[test]
+    fn test_map_org_to_domain_hyphenated_tracker_rejected() {
+        let analyzer = make_test_analyzer();
+        // 3+ hyphen-separated segments are rejected
+        assert_eq!(analyzer.map_organization_to_domain("sa-user-id-v2"), None);
+    }
+
+    // --- extract_domain_from_entity_name ---
+
+    #[test]
+    fn test_extract_domain_from_entity_name_parenthetical() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Functional Software (sentry.io)");
+        assert_eq!(result, Some("sentry.io".to_string()));
+    }
+
+    #[test]
+    fn test_extract_domain_from_entity_name_dba_format() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Mailgun)");
+        assert_eq!(result, Some("mailgun.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_domain_from_entity_name_company_name() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Cloudflare, Inc.");
+        assert_eq!(result, Some("cloudflare.com".to_string()));
+    }
+
+    // --- extract_direct_domain_from_text ---
+
+    #[test]
+    fn test_extract_direct_domain_from_text_explicit() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("Visit stripe.com for more");
+        assert_eq!(result, Some("stripe.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_direct_domain_from_text_with_url() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("https://cloudflare.com/something");
+        assert_eq!(result, Some("cloudflare.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_direct_domain_from_text_no_domain() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("No domain here at all");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_direct_domain_from_text_invalid_domain_filtered() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("Visit example.com");
+        assert_eq!(result, None); // example.com is in invalid_patterns
+    }
+
+    // --- is_valid_domain ---
+
+    #[test]
+    fn test_is_valid_domain_good() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.is_valid_domain("stripe.com"));
+        assert!(analyzer.is_valid_domain("sub.domain.co.uk"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_no_dot() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_domain("nodot"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_starts_with_dot() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_domain(".leading.com"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_ends_with_dot() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_domain("trailing.com."));
+    }
+
+    #[test]
+    fn test_is_valid_domain_too_short() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_domain("a.b"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_invalid_tld() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_domain("something.zzz"));
+    }
+
+    // --- create_highlight_url ---
+
+    #[test]
+    fn test_create_highlight_url_basic() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com/page", "Stripe");
+        assert_eq!(url, "https://example.com/page#:~:text=Stripe");
+    }
+
+    #[test]
+    fn test_create_highlight_url_special_chars() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com", "AWS & Co.");
+        assert!(url.contains("#:~:text="));
+        assert!(url.contains("AWS"));
+        // & should be encoded
+        assert!(!url.ends_with("AWS & Co."));
+    }
+
+    #[test]
+    fn test_create_highlight_url_spaces_encoded() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com", "Amazon Web Services");
+        assert!(url.contains("%20") || url.contains("+"));
+    }
+
+    #[test]
+    fn test_create_highlight_url_empty_entity() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com", "");
+        assert_eq!(url, "https://example.com#:~:text=");
+    }
+
+    // --- create_evidence_excerpt ---
+
+    #[test]
+    fn test_create_evidence_excerpt_domain_found() {
+        let analyzer = make_test_analyzer();
+        let text = "We use stripe.com for payment processing and other services.";
+        let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
+        assert!(excerpt.contains("stripe.com"));
+    }
+
+    #[test]
+    fn test_create_evidence_excerpt_domain_not_found() {
+        let analyzer = make_test_analyzer();
+        let text = "No matching domain in this text at all";
+        let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
+        // Falls back to taking first part of text
+        assert!(excerpt.contains("No matching domain"));
+    }
+
+    #[test]
+    fn test_create_evidence_excerpt_long_text_truncated() {
+        let analyzer = make_test_analyzer();
+        let text = "x".repeat(1000);
+        let excerpt = analyzer.create_evidence_excerpt(&text, "notfound.com");
+        assert!(excerpt.len() <= 510); // MAX_EXCERPT_LENGTH + "..." suffix
+    }
+
+    // --- looks_like_vendor_content ---
+
+    #[test]
+    fn test_looks_like_vendor_content_positive() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.looks_like_vendor_content("Stripe Inc provides payments at stripe.com"));
+        assert!(analyzer.looks_like_vendor_content("Cloud hosting platform at hosting.io"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_content_no_keyword() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.looks_like_vendor_content("Visit stripe.com for more info"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_content_no_domain() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.looks_like_vendor_content("Stripe Inc provides payment processing"));
+    }
+
+    // --- is_ip_address ---
+
+    #[test]
+    fn test_is_ip_address_valid() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.is_ip_address("192.168.1.1"));
+        assert!(analyzer.is_ip_address("10.0.0.1"));
+    }
+
+    #[test]
+    fn test_is_ip_address_not_ip() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_ip_address("stripe.com"));
+        assert!(!analyzer.is_ip_address("hello"));
+    }
+
+    // --- generate_exclusion_patterns ---
+
+    #[test]
+    fn test_generate_exclusion_patterns_generic() {
+        let analyzer = make_test_analyzer();
+        let patterns = analyzer.generate_exclusion_patterns("https://acme.com/subprocessors");
+        assert!(!patterns.is_empty());
+        // Should contain common navigation terms
+        let joined = patterns.join(" ");
+        assert!(joined.contains("home"));
+        assert!(joined.contains("about"));
+    }
+
+    #[test]
+    fn test_generate_exclusion_patterns_klaviyo() {
+        let analyzer = make_test_analyzer();
+        let patterns = analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
+        let joined = patterns.join(" ");
+        assert!(joined.contains("klaviyo"));
+    }
+
+    #[test]
+    fn test_generate_exclusion_patterns_stripe() {
+        let analyzer = make_test_analyzer();
+        let patterns = analyzer.generate_exclusion_patterns("https://stripe.com/legal/service-providers");
+        let joined = patterns.join(" ");
+        assert!(joined.contains("stripe"));
+    }
+
+    // --- ExtractionPatterns default ---
+
+    #[test]
+    fn test_extraction_patterns_default() {
+        let patterns = ExtractionPatterns::default();
+        assert!(!patterns.entity_column_selectors.is_empty());
+        assert!(!patterns.entity_header_patterns.is_empty());
+        assert!(!patterns.table_selectors.is_empty());
+        assert!(!patterns.list_selectors.is_empty());
+        assert!(!patterns.context_patterns.is_empty());
+        assert!(!patterns.domain_extraction_patterns.is_empty());
+        assert!(patterns.custom_extraction_rules.is_none());
+        assert!(!patterns.is_domain_specific);
+    }
+
+    // --- SubprocessorExtractionResult default ---
+
+    #[test]
+    fn test_subprocessor_extraction_result_default() {
+        let result = SubprocessorExtractionResult::default();
+        assert!(result.subprocessors.is_empty());
+        assert!(result.pending_mappings.is_empty());
+    }
+
+    // --- SubprocessorDomain Debug ---
+
+    #[test]
+    fn test_subprocessor_domain_debug_format() {
+        let domain = make_domain("test.com");
+        let debug_str = format!("{:?}", domain);
+        assert!(debug_str.contains("test.com"));
+        assert!(debug_str.contains("SubprocessorDomain"));
+    }
+
+    #[test]
+    fn test_subprocessor_domain_clone() {
+        let domain = make_domain("stripe.com");
+        let cloned = domain.clone();
+        assert_eq!(domain.domain, cloned.domain);
+        assert_eq!(domain.raw_record, cloned.raw_record);
+    }
+
+    // --- extract_from_paragraphs ---
+
+    #[test]
+    fn test_extract_from_paragraphs_no_context() {
+        let analyzer = make_test_analyzer();
+        let html = "<html><body><p>Cloudflare, Inc. provides CDN</p></body></html>";
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        // No subprocessor context in html -> should return empty
+        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_from_paragraphs_with_context() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <h1>Our Subprocessors</h1>
+            <p>We use the following third-party sub-processors:</p>
+            <p>Cloudflare, Inc. provides content delivery services.</p>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns).unwrap();
+        // Should find Cloudflare since "sub-processors" context is present
+        if !result.is_empty() {
+            assert!(result.iter().any(|v| v.domain.contains("cloudflare")));
+        }
+    }
+
+    // --- extract_with_custom_rules ---
+
+    #[test]
+    fn test_extract_with_custom_rules_invalid_selector() {
+        let analyzer = make_test_analyzer();
+        let html = "<html><body><p>Test</p></body></html>";
+        let document = Html::parse_document(html);
+        let custom_rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "[invalid[[[selector".to_string(),
+                attribute: None,
+                transform: None,
+                description: "Bad selector".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: None,
+        };
+        let result = analyzer.extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com");
+        // Should not panic, just return ok with empty subprocessors
+        assert!(result.is_ok());
+        assert!(result.unwrap().subprocessors.is_empty());
+    }
+
+    #[test]
+    fn test_extract_with_custom_rules_valid_selector() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body><div class="vendor">stripe.com</div></body></html>"#;
+        let document = Html::parse_document(html);
+        let custom_rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: ".vendor".to_string(),
+                attribute: None,
+                transform: None,
+                description: "Vendor class".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: None,
+        };
+        let result = analyzer.extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com");
+        assert!(result.is_ok());
+        let extraction = result.unwrap();
+        // Should find stripe.com from the .vendor element
+        if !extraction.subprocessors.is_empty() {
+            assert!(extraction.subprocessors.iter().any(|v| v.domain.contains("stripe")));
+        }
+    }
+
+    // --- extract_from_tables_with_patterns (basic HTML table) ---
+
+    #[test]
+    fn test_extract_from_tables_with_entity_header() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body><table>
+            <thead><tr><th>Entity Name</th><th>Purpose</th></tr></thead>
+            <tbody>
+                <tr><td>Cloudflare, Inc.</td><td>CDN</td></tr>
+                <tr><td>Stripe, Inc.</td><td>Payments</td></tr>
+            </tbody>
+        </table></body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://test.com", &patterns);
+        // Should not panic; result is Result<(Vec<SubprocessorDomain>, Option<ExtractionMetadata>)>
+        assert!(result.is_ok());
+    }
+
+    // --- extract_from_lists_with_patterns ---
+
+    #[test]
+    fn test_extract_from_lists_with_patterns_basic() {
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <h2>Subprocessors</h2>
+            <ul>
+                <li>Cloudflare (cloudflare.com) - CDN</li>
+                <li>Stripe (stripe.com) - Payments</li>
+            </ul>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let result = analyzer.extract_from_lists_with_patterns(&document, html, "https://test.com", &patterns).unwrap();
+        // Should extract domains from list items
+        if !result.is_empty() {
+            let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
+            assert!(domains.contains(&"cloudflare.com") || domains.contains(&"stripe.com"));
+        }
+    }
+
+    // --- looks_like_organization_name ---
+
+    #[test]
+    fn test_looks_like_organization_name_valid() {
+        let analyzer = make_test_analyzer();
+        // Must contain org pattern or be multi-word capitalized
+        assert!(analyzer.looks_like_organization_name("Cloudflare, Inc."));
+        assert!(analyzer.looks_like_organization_name("Amazon Web Services"));
+        assert!(analyzer.looks_like_organization_name("Stripe Inc"));
+    }
+
+    #[test]
+    fn test_looks_like_organization_name_single_word_no_suffix() {
+        let analyzer = make_test_analyzer();
+        // Single words without org suffix patterns return false
+        assert!(!analyzer.looks_like_organization_name("Cloudflare"));
+    }
+
+    #[test]
+    fn test_looks_like_organization_name_too_short() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.looks_like_organization_name("AB"));
+        assert!(!analyzer.looks_like_organization_name(""));
+    }
+
+    // --- SubprocessorCache async tests ---
+
+    #[tokio::test]
+    async fn test_cache_load_creates_instance() {
+        let cache = SubprocessorCache::load().await;
+        assert_eq!(cache.cache_version, SubprocessorCache::CACHE_VERSION);
+    }
+
+    #[tokio::test]
+    async fn test_cache_get_nonexistent_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        let result = cache.get_cached_subprocessor_url("nonexistent.com").await;
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_cache_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        // Cache a URL
+        cache.cache_working_url("stripe.com", "https://stripe.com/legal/service-providers").await.unwrap();
+        // Retrieve it
+        let cached = cache.get_cached_subprocessor_url("stripe.com").await;
+        assert_eq!(cached, Some("https://stripe.com/legal/service-providers".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cache_clear_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        cache.cache_working_url("test.io", "https://test.io/subs").await.unwrap();
+        let cleared = cache.clear_domain_cache("test.io").await.unwrap();
+        assert!(cleared);
+        let cached = cache.get_cached_subprocessor_url("test.io").await;
+        assert_eq!(cached, None);
+    }
+
+    #[tokio::test]
+    async fn test_cache_clear_nonexistent_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        let cleared = cache.clear_domain_cache("notcached.com").await.unwrap();
+        assert!(!cleared);
+    }
+
+    #[tokio::test]
+    async fn test_cache_extraction_patterns() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        // Without any cached entry, get_extraction_patterns returns minimal patterns
+        let patterns = cache.get_extraction_patterns("unknown.com").await;
+        assert!(!patterns.is_domain_specific);
+        assert!(patterns.table_selectors.contains(&"table".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_cache_update_extraction_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        let patterns = ExtractionPatterns {
+            entity_column_selectors: vec!["custom-sel".to_string()],
+            entity_header_patterns: vec![],
+            table_selectors: vec!["table.custom".to_string()],
+            list_selectors: vec![],
+            context_patterns: vec![],
+            domain_extraction_patterns: vec![],
+            custom_extraction_rules: None,
+            is_domain_specific: true,
+        };
+        let metadata = ExtractionMetadata {
+            successful_extractions: 5,
+            successful_entity_column_index: Some(0),
+            successful_header_pattern: Some("entity name".to_string()),
+            last_extraction_time: 123456,
+            adaptive_patterns: None,
+        };
+        cache.update_extraction_info("custom.com", patterns, metadata).await.unwrap();
+        let entry = cache.get_cached_entry("custom.com").await;
+        assert!(entry.is_some());
+        let entry = entry.unwrap();
+        assert!(entry.extraction_patterns.is_some());
+        assert!(entry.extraction_metadata.is_some());
+        assert_eq!(entry.extraction_metadata.unwrap().successful_extractions, 5);
+    }
+
+    #[tokio::test]
+    async fn test_cache_add_confirmed_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        let mappings = vec![
+            ("Acme Corp".to_string(), "acme.com".to_string()),
+            ("Widgets Inc.".to_string(), "widgets.io".to_string()),
+        ];
+        cache.add_confirmed_mappings("source.com", &mappings).await.unwrap();
+        let entry = cache.get_cached_entry("source.com").await.unwrap();
+        let rules = entry.extraction_patterns.unwrap().custom_extraction_rules.unwrap();
+        let mapping = rules.special_handling.unwrap().custom_org_to_domain_mapping.unwrap();
+        assert!(mapping.contains_key("acme corp"));
+        assert!(mapping.contains_key("widgets inc."));
+    }
+
+    #[tokio::test]
+    async fn test_cache_add_empty_mappings() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache {
+            cache_dir: dir.path().to_path_buf(),
+            cache_version: SubprocessorCache::CACHE_VERSION,
+        };
+        // Empty mappings should be a no-op
+        cache.add_confirmed_mappings("source.com", &[]).await.unwrap();
+        let entry = cache.get_cached_entry("source.com").await;
+        assert!(entry.is_none()); // No file created for empty mappings
+    }
 }

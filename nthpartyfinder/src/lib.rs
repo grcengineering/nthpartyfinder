@@ -2,6 +2,8 @@
 // but are part of the library's exposed interface
 #![allow(dead_code)]
 
+pub mod analysis;
+pub mod app;
 pub mod batch;
 pub mod browser_pool;
 pub mod cache_commands;
@@ -13,6 +15,7 @@ pub mod discovery;
 pub mod dns;
 pub mod domain_utils;
 pub mod export;
+pub mod interactive;
 pub mod known_vendors;
 pub mod logger;
 pub mod memory_monitor;

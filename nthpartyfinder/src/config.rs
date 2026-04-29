@@ -764,4 +764,442 @@ total_vendor_budget = 200
             "tenant_probe_concurrency should default to 20"
         );
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // Helper to create a minimal valid config string
+    fn minimal_config_str() -> String {
+        r#"
+[http]
+user_agent = "test/1.0"
+request_timeout_secs = 30
+
+[dns]
+[[dns.doh_servers]]
+name = "Test DoH"
+url = "https://test.example.com/dns-query"
+timeout_secs = 3
+
+[[dns.dns_servers]]
+name = "Test DNS"
+address = "1.1.1.1:53"
+timeout_secs = 2
+
+[patterns.regex]
+spf_macro_strip = '%\{[a-zA-Z]+\}\.?'
+domain_verification = '([a-zA-Z0-9]+)-verification='
+verification_prefix = 'verification-([a-zA-Z0-9]+)='
+site_verification = '([a-zA-Z0-9]+)-site-verification='
+provider_verify = '([A-Z0-9]+)_verify_'
+domain_validation = '^[a-zA-Z0-9][a-zA-Z0-9\-]{0,62}(\.[a-zA-Z0-9][a-zA-Z0-9\-]{0,62})*$'
+
+[patterns.verification]
+
+[patterns.provider_mappings]
+
+[analysis]
+strategy = "unlimited"
+concurrency_per_depth = [50, 20, 10, 5]
+request_delay_ms = 100
+vendor_limits_per_depth = [0, 20, 10, 5]
+total_vendor_budget = 200
+"#
+        .to_string()
+    }
+
+    // --- Validation error paths ---
+
+    #[test]
+    fn test_validate_empty_user_agent() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.http.user_agent = String::new();
+        match config.validate() {
+            Err(ConfigError::EmptyRequired { field }) => {
+                assert_eq!(field, "http.user_agent");
+            }
+            other => panic!("Expected EmptyRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_zero_timeout() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.http.request_timeout_secs = 0;
+        match config.validate() {
+            Err(ConfigError::EmptyRequired { field }) => {
+                assert_eq!(field, "http.request_timeout_secs");
+            }
+            other => panic!("Expected EmptyRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_no_servers() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.dns.doh_servers.clear();
+        config.dns.dns_servers.clear();
+        match config.validate() {
+            Err(ConfigError::NoServersConfigured) => {}
+            other => panic!("Expected NoServersConfigured, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_doh_not_https() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.dns.doh_servers[0].url = "http://insecure.example.com/dns".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidUrl { field, url }) => {
+                assert!(field.contains("doh_servers"));
+                assert!(url.contains("insecure"));
+            }
+            other => panic!("Expected InvalidUrl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_dns_address_no_port() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.dns.dns_servers[0].address = "1.1.1.1".to_string(); // Missing :port
+        match config.validate() {
+            Err(ConfigError::InvalidAddress { field, address }) => {
+                assert!(field.contains("dns_servers"));
+                assert_eq!(address, "1.1.1.1");
+            }
+            other => panic!("Expected InvalidAddress, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_regex_pattern() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.spf_macro_strip = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("spf_macro_strip"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_verification_pattern() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config
+            .patterns
+            .verification
+            .insert("[bad(".to_string(), "test.com".to_string());
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("verification"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_empty_concurrency_per_depth() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.concurrency_per_depth = vec![];
+        match config.validate() {
+            Err(ConfigError::EmptyRequired { field }) => {
+                assert!(field.contains("concurrency_per_depth"));
+            }
+            other => panic!("Expected EmptyRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_limits_strategy_empty_limits() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        config.analysis.vendor_limits_per_depth = vec![];
+        match config.validate() {
+            Err(ConfigError::EmptyRequired { field }) => {
+                assert!(field.contains("vendor_limits_per_depth"));
+            }
+            other => panic!("Expected EmptyRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_budget_strategy_zero_budget() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Budget;
+        config.analysis.total_vendor_budget = 0;
+        match config.validate() {
+            Err(ConfigError::EmptyRequired { field }) => {
+                assert!(field.contains("total_vendor_budget"));
+            }
+            other => panic!("Expected EmptyRequired, got {:?}", other),
+        }
+    }
+
+    // --- AnalysisConfig methods ---
+
+    #[test]
+    fn test_get_concurrency_for_depth_zero() {
+        let config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        // depth 0 returns first element
+        assert_eq!(config.analysis.get_concurrency_for_depth(0), 50);
+    }
+
+    #[test]
+    fn test_get_concurrency_for_depth_beyond_array() {
+        let config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        // depth 10 should clamp to last element
+        let last = *config.analysis.concurrency_per_depth.last().unwrap();
+        assert_eq!(config.analysis.get_concurrency_for_depth(10), last);
+    }
+
+    #[test]
+    fn test_get_concurrency_for_depth_normal() {
+        let config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        // depth 1 = index 0 = 50
+        assert_eq!(config.analysis.get_concurrency_for_depth(1), 50);
+        // depth 2 = index 1 = 20
+        assert_eq!(config.analysis.get_concurrency_for_depth(2), 20);
+    }
+
+    #[test]
+    fn test_get_vendor_limit_unlimited_strategy() {
+        let config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        // Unlimited strategy should always return None
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(1), None);
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(2), None);
+    }
+
+    #[test]
+    fn test_get_vendor_limit_limits_strategy() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        // vendor_limits_per_depth = [0, 20, 10, 5]
+        // depth 1, index 0 => limit 0 => None (unlimited for depth 1)
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(1), None);
+        // depth 2, index 1 => limit 20
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(2), Some(20));
+        // depth 3, index 2 => limit 10
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(3), Some(10));
+        // depth 4, index 3 => limit 5
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(4), Some(5));
+    }
+
+    #[test]
+    fn test_get_vendor_limit_depth_zero() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        // depth 0 returns first element: 0 => None
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(0), None);
+    }
+
+    // --- BackoffStrategy ---
+
+    #[test]
+    fn test_backoff_strategy_default_is_linear() {
+        let strategy = BackoffStrategy::default();
+        assert_eq!(strategy, BackoffStrategy::Linear);
+    }
+
+    // --- RateLimitConfig defaults ---
+
+    #[test]
+    fn test_rate_limit_config_defaults() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.dns_queries_per_second, 50);
+        assert_eq!(config.http_requests_per_second, 10);
+        assert_eq!(config.whois_queries_per_second, 2);
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.backoff_base_delay_ms, 1000);
+        assert_eq!(config.backoff_max_delay_ms, 30000);
+        assert_eq!(config.backoff_strategy, BackoffStrategy::Linear);
+    }
+
+    // --- OrganizationConfig ---
+
+    #[test]
+    fn test_organization_config_defaults() {
+        let org_config = OrganizationConfig::default();
+        assert!(org_config.enabled);
+        assert!((org_config.similarity_threshold - 0.85).abs() < f64::EPSILON);
+        assert!(org_config.aliases.is_empty());
+    }
+
+    #[test]
+    fn test_organization_config_parsing() {
+        let config_str = format!(
+            r#"{}
+
+[organization]
+enabled = false
+similarity_threshold = 0.9
+
+[organization.aliases]
+"google cloud" = "Google"
+"aws" = "Amazon"
+"#,
+            minimal_config_str()
+        );
+        let config: AppConfig = toml::from_str(&config_str).unwrap();
+        assert!(!config.organization.enabled);
+        assert!((config.organization.similarity_threshold - 0.9).abs() < f64::EPSILON);
+        assert_eq!(config.organization.aliases.len(), 2);
+        assert_eq!(config.organization.aliases.get("aws").unwrap(), "Amazon");
+    }
+
+    // --- DiscoveryConfig defaults ---
+
+    #[test]
+    fn test_discovery_config_full_defaults() {
+        let config = DiscoveryConfig::default();
+        assert!(config.subprocessor_enabled);
+        assert!(!config.subdomain_enabled);
+        assert_eq!(config.subfinder_path, "subfinder");
+        assert_eq!(config.subfinder_timeout_secs, 300);
+        assert!(!config.saas_tenant_enabled);
+        assert_eq!(config.tenant_probe_timeout_secs, 10);
+        assert_eq!(config.tenant_probe_concurrency, 20);
+        assert!(!config.ct_discovery_enabled);
+        assert_eq!(config.ct_timeout_secs, 30);
+        assert!(config.web_traffic_enabled);
+        assert_eq!(config.web_traffic_timeout_secs, 15);
+        assert!(config.web_org_enabled);
+        assert_eq!(config.web_org_timeout_secs, 10);
+        assert!((config.web_org_min_confidence - 0.6).abs() < f32::EPSILON);
+        assert!(config.ner_enabled);
+        assert!((config.ner_min_confidence - 0.6).abs() < f32::EPSILON);
+        assert_eq!(config.whois_concurrency, 5);
+    }
+
+    // --- load_from_path error ---
+
+    #[test]
+    fn test_load_from_path_not_found() {
+        let result = AppConfig::load_from_path(std::path::Path::new("/nonexistent/path.toml"));
+        match result {
+            Err(ConfigError::FileNotFound(p)) => {
+                assert!(p.to_string_lossy().contains("nonexistent"));
+            }
+            other => panic!("Expected FileNotFound, got {:?}", other),
+        }
+    }
+
+    // --- RateLimitConfig::calculate_backoff_delay ---
+
+    #[test]
+    fn test_calculate_backoff_delay_linear() {
+        let config = RateLimitConfig {
+            backoff_strategy: BackoffStrategy::Linear,
+            backoff_base_delay_ms: 500,
+            backoff_max_delay_ms: 5000,
+            ..RateLimitConfig::default()
+        };
+        assert_eq!(config.calculate_backoff_delay(0), std::time::Duration::ZERO);
+        assert_eq!(config.calculate_backoff_delay(1), std::time::Duration::from_millis(500));
+        assert_eq!(config.calculate_backoff_delay(2), std::time::Duration::from_millis(1000));
+        // Attempt 11 = 5500ms, capped at 5000ms
+        assert_eq!(config.calculate_backoff_delay(11), std::time::Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn test_calculate_backoff_delay_exponential() {
+        let config = RateLimitConfig {
+            backoff_strategy: BackoffStrategy::Exponential,
+            backoff_base_delay_ms: 100,
+            backoff_max_delay_ms: 10000,
+            ..RateLimitConfig::default()
+        };
+        assert_eq!(config.calculate_backoff_delay(0), std::time::Duration::ZERO);
+        assert_eq!(config.calculate_backoff_delay(1), std::time::Duration::from_millis(100)); // 100 * 2^0
+        assert_eq!(config.calculate_backoff_delay(2), std::time::Duration::from_millis(200)); // 100 * 2^1
+        assert_eq!(config.calculate_backoff_delay(3), std::time::Duration::from_millis(400)); // 100 * 2^2
+        assert_eq!(config.calculate_backoff_delay(4), std::time::Duration::from_millis(800)); // 100 * 2^3
+    }
+
+    // --- AnalysisStrategy parsing ---
+
+    #[test]
+    fn test_analysis_strategy_limits_parsing() {
+        let config_str = minimal_config_str().replace(
+            r#"strategy = "unlimited""#,
+            r#"strategy = "limits""#,
+        );
+        let config: AppConfig = toml::from_str(&config_str).unwrap();
+        assert_eq!(config.analysis.strategy, AnalysisStrategy::Limits);
+    }
+
+    #[test]
+    fn test_analysis_strategy_budget_parsing() {
+        let config_str = minimal_config_str().replace(
+            r#"strategy = "unlimited""#,
+            r#"strategy = "budget""#,
+        );
+        let config: AppConfig = toml::from_str(&config_str).unwrap();
+        assert_eq!(config.analysis.strategy, AnalysisStrategy::Budget);
+    }
+
+    // --- ConfigError Display ---
+
+    #[test]
+    fn test_config_error_display() {
+        let err = ConfigError::FileNotFound(std::path::PathBuf::from("/test/path"));
+        assert!(err.to_string().contains("/test/path"));
+
+        let err = ConfigError::NoServersConfigured;
+        assert!(err.to_string().contains("DoH server or DNS server"));
+
+        let err = ConfigError::InvalidRegex {
+            pattern_name: "test".to_string(),
+            pattern: "[bad".to_string(),
+            error: "parse error".to_string(),
+        };
+        assert!(err.to_string().contains("test"));
+        assert!(err.to_string().contains("[bad"));
+
+        let err = ConfigError::InvalidUrl {
+            field: "dns.doh".to_string(),
+            url: "http://bad".to_string(),
+        };
+        assert!(err.to_string().contains("dns.doh"));
+
+        let err = ConfigError::InvalidAddress {
+            field: "dns.server".to_string(),
+            address: "1.1.1.1".to_string(),
+        };
+        assert!(err.to_string().contains("ip:port"));
+
+        let err = ConfigError::EmptyRequired {
+            field: "http.user_agent".to_string(),
+        };
+        assert!(err.to_string().contains("http.user_agent"));
+    }
+
+    // --- Rate limit config parsing ---
+
+    #[test]
+    fn test_rate_limit_config_parsing() {
+        let config_str = format!(
+            r#"{}
+
+[rate_limits]
+dns_queries_per_second = 100
+http_requests_per_second = 20
+whois_queries_per_second = 5
+backoff_strategy = "exponential"
+max_retries = 5
+backoff_base_delay_ms = 2000
+backoff_max_delay_ms = 60000
+"#,
+            minimal_config_str()
+        );
+        let config: AppConfig = toml::from_str(&config_str).unwrap();
+        assert_eq!(config.rate_limits.dns_queries_per_second, 100);
+        assert_eq!(config.rate_limits.http_requests_per_second, 20);
+        assert_eq!(config.rate_limits.whois_queries_per_second, 5);
+        assert_eq!(config.rate_limits.backoff_strategy, BackoffStrategy::Exponential);
+        assert_eq!(config.rate_limits.max_retries, 5);
+        assert_eq!(config.rate_limits.backoff_base_delay_ms, 2000);
+        assert_eq!(config.rate_limits.backoff_max_delay_ms, 60000);
+    }
 }

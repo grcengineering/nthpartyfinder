@@ -389,4 +389,166 @@ mod tests {
         limiter.acquire("example.com").await;
         limiter.acquire("example.org").await;
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- RateLimiter token exhaustion ---
+
+    #[test]
+    fn test_rate_limiter_exhaust_tokens() {
+        let mut limiter = RateLimiter::new(5);
+        // Consume all 5 tokens
+        for _ in 0..5 {
+            assert!(limiter.try_acquire().is_none(), "Should get token");
+        }
+        // 6th request should need to wait
+        let wait = limiter.try_acquire();
+        assert!(wait.is_some(), "Should need to wait after exhausting tokens");
+        let duration = wait.unwrap();
+        assert!(duration.as_millis() > 0, "Wait duration should be positive");
+    }
+
+    #[test]
+    fn test_rate_limiter_refill_disabled() {
+        let mut limiter = RateLimiter::new(0);
+        limiter.refill(); // Should be a no-op
+        assert!(!limiter.enabled);
+    }
+
+    // --- SharedRateLimiter ---
+
+    #[tokio::test]
+    async fn test_shared_rate_limiter_acquire() {
+        let limiter = SharedRateLimiter::new(1000);
+        // High rate, should not block
+        limiter.acquire().await;
+        limiter.acquire().await;
+    }
+
+    #[tokio::test]
+    async fn test_shared_rate_limiter_disabled_acquire() {
+        let limiter = SharedRateLimiter::new(0);
+        assert!(!limiter.is_enabled().await);
+        // Should return immediately
+        limiter.acquire().await;
+    }
+
+    // --- DomainRateLimiter ---
+
+    #[tokio::test]
+    async fn test_domain_rate_limiter_disabled() {
+        let limiter = DomainRateLimiter::new(0);
+        // Should return immediately (no-op)
+        limiter.acquire("example.com").await;
+    }
+
+    #[tokio::test]
+    async fn test_domain_rate_limiter_same_domain() {
+        let limiter = DomainRateLimiter::new(1000);
+        // High rate, same domain, should not block
+        limiter.acquire("example.com").await;
+        limiter.acquire("example.com").await;
+    }
+
+    #[tokio::test]
+    async fn test_domain_rate_limiter_creates_per_domain() {
+        let limiter = DomainRateLimiter::new(100);
+        limiter.acquire("a.com").await;
+        limiter.acquire("b.com").await;
+        limiter.acquire("c.com").await;
+
+        // Check that each domain has its own limiter
+        let limiters = limiter.limiters.lock().await;
+        assert_eq!(limiters.len(), 3);
+        assert!(limiters.contains_key("a.com"));
+        assert!(limiters.contains_key("b.com"));
+        assert!(limiters.contains_key("c.com"));
+    }
+
+    // --- RetryHelper ---
+
+    #[test]
+    fn test_retry_helper_accessors() {
+        let config = RateLimitConfig {
+            max_retries: 5,
+            backoff_strategy: BackoffStrategy::Exponential,
+            ..RateLimitConfig::default()
+        };
+        let helper = RetryHelper::new(&config);
+        assert_eq!(helper.max_retries(), 5);
+        assert_eq!(*helper.backoff_strategy(), BackoffStrategy::Exponential);
+    }
+
+    #[tokio::test]
+    async fn test_retry_helper_success_first_try() {
+        let config = RateLimitConfig::default();
+        let helper = RetryHelper::new(&config);
+
+        let result: Result<i32, String> = helper.with_retry(|| async { Ok(42) }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn test_retry_helper_all_failures() {
+        let config = RateLimitConfig {
+            max_retries: 2,
+            backoff_base_delay_ms: 1, // Very short delay for test speed
+            backoff_max_delay_ms: 10,
+            ..RateLimitConfig::default()
+        };
+        let helper = RetryHelper::new(&config);
+
+        let result: Result<i32, String> =
+            helper.with_retry(|| async { Err("always fails".to_string()) }).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "always fails");
+    }
+
+    // --- RateLimitContext ---
+
+    #[test]
+    fn test_rate_limit_context_default() {
+        let ctx = RateLimitContext::default();
+        assert_eq!(ctx.config.dns_queries_per_second, 50);
+        assert_eq!(ctx.config.http_requests_per_second, 10);
+        assert_eq!(ctx.config.whois_queries_per_second, 2);
+    }
+
+    #[test]
+    fn test_rate_limit_context_from_config() {
+        let config = RateLimitConfig {
+            dns_queries_per_second: 100,
+            http_requests_per_second: 50,
+            whois_queries_per_second: 10,
+            ..RateLimitConfig::default()
+        };
+        let ctx = RateLimitContext::from_config(&config);
+        assert_eq!(ctx.config.dns_queries_per_second, 100);
+    }
+
+    #[test]
+    fn test_rate_limit_context_retry_helper() {
+        let ctx = RateLimitContext::default();
+        let helper = ctx.retry_helper();
+        assert_eq!(helper.max_retries(), ctx.config.max_retries);
+    }
+
+    #[test]
+    fn test_rate_limit_context_log_config() {
+        // Just verify it doesn't panic
+        let ctx = RateLimitContext::default();
+        ctx.log_config();
+
+        // Also test with unlimited rates
+        let config = RateLimitConfig {
+            dns_queries_per_second: 0,
+            http_requests_per_second: 0,
+            whois_queries_per_second: 0,
+            ..RateLimitConfig::default()
+        };
+        let ctx = RateLimitContext::from_config(&config);
+        ctx.log_config();
+    }
 }

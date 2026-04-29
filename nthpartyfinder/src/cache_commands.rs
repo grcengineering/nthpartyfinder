@@ -602,4 +602,409 @@ mod tests {
         // Verify the cache directory constant is correctly set
         assert_eq!(CACHE_DIR, "cache");
     }
+
+    // ── format_timestamp additional tests ──────────────────────────────
+
+    #[test]
+    fn test_format_timestamp_specific_date() {
+        // 2024-06-15 12:30:00 UTC = 1718451000
+        let ts = 1718451000;
+        let formatted = format_timestamp(ts);
+        assert!(formatted.contains("2024"));
+        assert!(formatted.contains("UTC"));
+    }
+
+    #[test]
+    fn test_format_timestamp_epoch_start() {
+        let formatted = format_timestamp(0);
+        assert_eq!(formatted, "1970-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn test_format_timestamp_new_years_2024() {
+        let ts = 1704067200; // 2024-01-01 00:00:00 UTC
+        let formatted = format_timestamp(ts);
+        assert_eq!(formatted, "2024-01-01 00:00:00 UTC");
+    }
+
+    #[test]
+    fn test_format_timestamp_large_value() {
+        // Far future: 2100-01-01 roughly
+        let ts = 4102444800;
+        let formatted = format_timestamp(ts);
+        assert!(formatted.contains("2100"));
+        assert!(formatted.contains("UTC"));
+    }
+
+    #[test]
+    fn test_format_timestamp_format_consistency() {
+        let formatted = format_timestamp(1000000000);
+        // Should match YYYY-MM-DD HH:MM:SS UTC format
+        assert_eq!(formatted.len(), "YYYY-MM-DD HH:MM:SS UTC".len());
+        assert!(formatted.ends_with("UTC"));
+    }
+
+    // ── ValidationStatus Display tests ─────────────────────────────────
+
+    #[test]
+    fn test_validation_status_display_all_variants() {
+        assert_eq!(format!("{}", ValidationStatus::Ok), "OK");
+        assert_eq!(format!("{}", ValidationStatus::NotFound), "Not Found (404)");
+        assert_eq!(format!("{}", ValidationStatus::Timeout), "Timeout");
+        assert_eq!(format!("{}", ValidationStatus::NetworkError), "Network Error");
+    }
+
+    #[test]
+    fn test_validation_status_server_error_various_codes() {
+        assert_eq!(format!("{}", ValidationStatus::ServerError(500)), "Server Error (500)");
+        assert_eq!(format!("{}", ValidationStatus::ServerError(502)), "Server Error (502)");
+        assert_eq!(format!("{}", ValidationStatus::ServerError(503)), "Server Error (503)");
+        assert_eq!(format!("{}", ValidationStatus::ServerError(504)), "Server Error (504)");
+        assert_eq!(format!("{}", ValidationStatus::ServerError(429)), "Server Error (429)");
+    }
+
+    #[test]
+    fn test_validation_status_redirect_various_urls() {
+        let s1 = ValidationStatus::Redirect("https://new.example.com".to_string());
+        assert_eq!(format!("{}", s1), "Redirect -> https://new.example.com");
+
+        let s2 = ValidationStatus::Redirect("".to_string());
+        assert_eq!(format!("{}", s2), "Redirect -> ");
+
+        let s3 = ValidationStatus::Redirect("/relative/path".to_string());
+        assert!(format!("{}", s3).contains("/relative/path"));
+    }
+
+    // ── ValidationResult construction tests ────────────────────────────
+
+    #[test]
+    fn test_validation_result_ok_status() {
+        let result = ValidationResult {
+            domain: "test.com".to_string(),
+            url: "https://test.com/subs".to_string(),
+            status: ValidationStatus::Ok,
+            response_time_ms: Some(42),
+            error_message: None,
+        };
+        assert_eq!(result.domain, "test.com");
+        assert_eq!(result.response_time_ms, Some(42));
+        assert!(result.error_message.is_none());
+        assert!(matches!(result.status, ValidationStatus::Ok));
+    }
+
+    #[test]
+    fn test_validation_result_timeout_status() {
+        let result = ValidationResult {
+            domain: "slow.com".to_string(),
+            url: "https://slow.com/page".to_string(),
+            status: ValidationStatus::Timeout,
+            response_time_ms: None,
+            error_message: Some("Request timed out".to_string()),
+        };
+        assert!(matches!(result.status, ValidationStatus::Timeout));
+        assert!(result.response_time_ms.is_none());
+        assert_eq!(result.error_message.as_deref(), Some("Request timed out"));
+    }
+
+    #[test]
+    fn test_validation_result_redirect_status() {
+        let result = ValidationResult {
+            domain: "old.com".to_string(),
+            url: "https://old.com/subs".to_string(),
+            status: ValidationStatus::Redirect("https://new.com/subs".to_string()),
+            response_time_ms: Some(200),
+            error_message: None,
+        };
+        if let ValidationStatus::Redirect(ref target) = result.status {
+            assert_eq!(target, "https://new.com/subs");
+        } else {
+            panic!("Expected redirect status");
+        }
+    }
+
+    #[test]
+    fn test_validation_result_not_found_status() {
+        let result = ValidationResult {
+            domain: "gone.com".to_string(),
+            url: "https://gone.com/page".to_string(),
+            status: ValidationStatus::NotFound,
+            response_time_ms: Some(50),
+            error_message: None,
+        };
+        assert!(matches!(result.status, ValidationStatus::NotFound));
+    }
+
+    #[test]
+    fn test_validation_result_server_error_status() {
+        let result = ValidationResult {
+            domain: "broken.com".to_string(),
+            url: "https://broken.com/api".to_string(),
+            status: ValidationStatus::ServerError(500),
+            response_time_ms: Some(100),
+            error_message: Some("Internal Server Error".to_string()),
+        };
+        if let ValidationStatus::ServerError(code) = result.status {
+            assert_eq!(code, 500);
+        } else {
+            panic!("Expected server error status");
+        }
+    }
+
+    #[test]
+    fn test_validation_result_network_error_status() {
+        let result = ValidationResult {
+            domain: "unreachable.com".to_string(),
+            url: "https://unreachable.com/subs".to_string(),
+            status: ValidationStatus::NetworkError,
+            response_time_ms: None,
+            error_message: Some("Connection refused".to_string()),
+        };
+        assert!(matches!(result.status, ValidationStatus::NetworkError));
+        assert!(result.response_time_ms.is_none());
+    }
+
+    // ── ValidationStatus Debug ─────────────────────────────────────────
+
+    #[test]
+    fn test_validation_status_debug() {
+        let s = ValidationStatus::Ok;
+        let debug_str = format!("{:?}", s);
+        assert_eq!(debug_str, "Ok");
+
+        let s2 = ValidationStatus::ServerError(503);
+        let debug_str2 = format!("{:?}", s2);
+        assert!(debug_str2.contains("503"));
+    }
+
+    #[test]
+    fn test_validation_result_debug() {
+        let result = ValidationResult {
+            domain: "test.com".to_string(),
+            url: "https://test.com".to_string(),
+            status: ValidationStatus::Ok,
+            response_time_ms: Some(100),
+            error_message: None,
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("test.com"));
+        assert!(debug_str.contains("100"));
+    }
+
+    // ── Async tests using tempdir for filesystem operations ────────────
+
+    #[tokio::test]
+    async fn test_list_cached_domains_with_temp_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write a valid cache entry
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "example.com".to_string(),
+            working_subprocessor_url: "https://example.com/subprocessors".to_string(),
+            last_successful_access: 1704067200,
+            cache_version: 1,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let cache_file = cache_dir.join("example.com.json");
+        tokio::fs::write(&cache_file, &json).await.unwrap();
+
+        // Verify the file was written correctly
+        let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
+        let parsed: SubprocessorUrlCacheEntry = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.domain, "example.com");
+        assert_eq!(parsed.working_subprocessor_url, "https://example.com/subprocessors");
+        assert_eq!(parsed.last_successful_access, 1704067200);
+        assert_eq!(parsed.cache_version, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cache_entry_serialization_roundtrip() {
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "test.org".to_string(),
+            working_subprocessor_url: "https://test.org/vendors".to_string(),
+            last_successful_access: 1718451000,
+            cache_version: 2,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+
+        let json = serde_json::to_string_pretty(&entry).unwrap();
+        let deserialized: SubprocessorUrlCacheEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.domain, entry.domain);
+        assert_eq!(deserialized.working_subprocessor_url, entry.working_subprocessor_url);
+        assert_eq!(deserialized.last_successful_access, entry.last_successful_access);
+        assert_eq!(deserialized.cache_version, entry.cache_version);
+    }
+
+    #[tokio::test]
+    async fn test_cache_entry_invalid_json() {
+        let result = serde_json::from_str::<SubprocessorUrlCacheEntry>("not json at all");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cache_entry_missing_fields() {
+        let partial = r#"{"domain": "test.com"}"#;
+        let result = serde_json::from_str::<SubprocessorUrlCacheEntry>(partial);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cache_dir_reading_empty_directory() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Reading an empty cache directory should yield no entries
+        let mut entries = tokio::fs::read_dir(&cache_dir).await.unwrap();
+        let mut count = 0;
+        while let Some(_) = entries.next_entry().await.unwrap() {
+            count += 1;
+        }
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_dir_ignores_non_json_files() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write a non-JSON file
+        tokio::fs::write(cache_dir.join("readme.txt"), "not a cache entry").await.unwrap();
+        // Write a JSON file
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "valid.com".to_string(),
+            working_subprocessor_url: "https://valid.com/subs".to_string(),
+            last_successful_access: 1000,
+            cache_version: 1,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("valid.com.json"),
+            serde_json::to_string(&entry).unwrap(),
+        ).await.unwrap();
+
+        // Count JSON files only
+        let mut entries = tokio::fs::read_dir(&cache_dir).await.unwrap();
+        let mut json_count = 0;
+        while let Some(e) = entries.next_entry().await.unwrap() {
+            if e.path().extension().and_then(|s| s.to_str()) == Some("json") {
+                json_count += 1;
+            }
+        }
+        assert_eq!(json_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cache_multiple_entries_sorting() {
+        // Verify that entries can be sorted by timestamp
+        let entries = vec![
+            ("b.com".to_string(), 100u64, "url-b".to_string()),
+            ("a.com".to_string(), 300u64, "url-a".to_string()),
+            ("c.com".to_string(), 200u64, "url-c".to_string()),
+        ];
+
+        let mut sorted = entries.clone();
+        sorted.sort_by_key(|e| std::cmp::Reverse(e.1));
+
+        assert_eq!(sorted[0].0, "a.com");  // 300 - most recent
+        assert_eq!(sorted[1].0, "c.com");  // 200
+        assert_eq!(sorted[2].0, "b.com");  // 100 - oldest
+    }
+
+    #[test]
+    fn test_url_truncation_logic() {
+        // Test the URL truncation logic from list_cached_domains
+        let short_url = "https://short.com";
+        let long_url = "https://very-long-domain-name-that-exceeds-forty-characters.com/subprocessors/list";
+
+        let short_display = if short_url.len() > 40 {
+            let mut end = 37;
+            while end > 0 && !short_url.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &short_url[..end])
+        } else {
+            short_url.to_string()
+        };
+        assert_eq!(short_display, short_url);
+
+        let long_display = if long_url.len() > 40 {
+            let mut end = 37;
+            while end > 0 && !long_url.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &long_url[..end])
+        } else {
+            long_url.to_string()
+        };
+        assert!(long_display.ends_with("..."));
+        assert!(long_display.len() <= 40);
+    }
+
+    #[test]
+    fn test_url_truncation_with_unicode() {
+        // Ensure char boundary safety with non-ASCII URLs
+        let unicode_url = "https://example.com/sub/\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
+        if unicode_url.len() > 40 {
+            let mut end = 37;
+            while end > 0 && !unicode_url.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = format!("{}...", &unicode_url[..end]);
+            // Should not panic and should end with "..."
+            assert!(truncated.ends_with("..."));
+        }
+    }
+
+    #[test]
+    fn test_domain_similarity_matching() {
+        // Test the "similar domain" matching logic from show_cache_entry
+        let search = "example";
+        let cached_domains = vec!["example.com", "my-example.org", "test.com", "other.com"];
+
+        let similar: Vec<_> = cached_domains
+            .iter()
+            .filter(|d| d.contains(search) || search.contains(*d))
+            .collect();
+
+        assert_eq!(similar.len(), 2);
+        assert!(similar.contains(&&"example.com"));
+        assert!(similar.contains(&&"my-example.org"));
+    }
+
+    #[test]
+    fn test_domain_similarity_no_matches() {
+        let search = "zzz-unknown";
+        let cached_domains = vec!["example.com", "test.org"];
+
+        let similar: Vec<_> = cached_domains
+            .iter()
+            .filter(|d| d.contains(search) || search.contains(*d))
+            .collect();
+
+        assert!(similar.is_empty());
+    }
+
+    #[test]
+    fn test_domain_similarity_exact_match() {
+        let search = "example.com";
+        let cached_domains = vec!["example.com", "other.com"];
+
+        let similar: Vec<_> = cached_domains
+            .iter()
+            .filter(|d| d.contains(search) || search.contains(*d))
+            .collect();
+
+        assert_eq!(similar.len(), 1);
+        assert!(similar.contains(&&"example.com"));
+    }
 }

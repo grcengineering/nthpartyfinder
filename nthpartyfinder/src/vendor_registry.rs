@@ -402,3 +402,677 @@ pub fn find_vendor_by_verification(txt: &str) -> Option<Arc<VendorConfig>> {
 pub fn get_all_saas_tenants() -> Vec<(String, SaasTenant)> {
     get().map_or(Vec::new(), |r| r.get_all_saas_tenants())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn sample_vendor_json() -> &'static str {
+        r#"{
+            "id": "acme",
+            "organization": "Acme Corp",
+            "primary_domain": "acme.com",
+            "domains": {
+                "acme.com": {
+                    "type": "primary",
+                    "category": "platform",
+                    "description": "Main website"
+                },
+                "acme-cdn.com": {
+                    "type": "cdn",
+                    "category": "infrastructure",
+                    "description": "CDN domain"
+                },
+                "acme-api.io": {
+                    "type": "api",
+                    "category": "development"
+                }
+            },
+            "verification_patterns": ["acme-verify", "acme-site-verification"],
+            "provider_aliases": ["acme", "acme-corp", "acme_inc"],
+            "saas_tenants": [
+                {
+                    "name": "Acme Workspace",
+                    "patterns": ["{tenant}.acme.com", "{tenant}.acme-app.com"],
+                    "detection": {
+                        "success_indicators": ["Welcome to Acme"],
+                        "failure_indicators": ["not found"],
+                        "notes": "Check for 200 response"
+                    }
+                }
+            ]
+        }"#
+    }
+
+    fn sample_vendor2_json() -> &'static str {
+        r#"{
+            "id": "globex",
+            "organization": "Globex Inc",
+            "primary_domain": "globex.net",
+            "parent_vendor": "mega-corp",
+            "acquired_year": 2020,
+            "domains": {
+                "globex.net": {
+                    "type": "primary",
+                    "category": "platform"
+                },
+                "globex-mail.com": {
+                    "type": "email",
+                    "category": "communication"
+                }
+            },
+            "verification_patterns": ["globex-verify"],
+            "provider_aliases": ["globex"],
+            "saas_tenants": []
+        }"#
+    }
+
+    fn setup_vendor_dir() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let vendors_dir = dir.path().join("vendors");
+        fs::create_dir_all(&vendors_dir).unwrap();
+        fs::write(vendors_dir.join("acme.json"), sample_vendor_json()).unwrap();
+        fs::write(vendors_dir.join("globex.json"), sample_vendor2_json()).unwrap();
+        dir
+    }
+
+    // ---- VendorRegistry::new ----
+
+    #[test]
+    fn new_creates_empty_registry() {
+        let reg = VendorRegistry::new();
+        assert_eq!(reg.vendor_count(), 0);
+        assert_eq!(reg.domain_count(), 0);
+    }
+
+    #[test]
+    fn default_creates_empty_registry() {
+        let reg = VendorRegistry::default();
+        assert_eq!(reg.vendor_count(), 0);
+        assert_eq!(reg.domain_count(), 0);
+    }
+
+    // ---- load_from_directory ----
+
+    #[test]
+    fn load_from_directory_loads_vendors() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(reg.vendor_count(), 2);
+        // acme has 3 domains + primary_domain (already in domains), globex has 2 + primary
+        assert!(reg.domain_count() >= 5);
+    }
+
+    #[test]
+    fn load_from_directory_missing_dir_returns_empty() {
+        let dir = tempdir().unwrap();
+        // No "vendors" subdirectory
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(reg.vendor_count(), 0);
+    }
+
+    #[test]
+    fn load_from_directory_skips_schema_json() {
+        let dir = tempdir().unwrap();
+        let vendors_dir = dir.path().join("vendors");
+        fs::create_dir_all(&vendors_dir).unwrap();
+        fs::write(vendors_dir.join("_schema.json"), r#"{"type": "object"}"#).unwrap();
+        fs::write(vendors_dir.join("acme.json"), sample_vendor_json()).unwrap();
+
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(reg.vendor_count(), 1);
+    }
+
+    #[test]
+    fn load_from_directory_skips_non_json_files() {
+        let dir = tempdir().unwrap();
+        let vendors_dir = dir.path().join("vendors");
+        fs::create_dir_all(&vendors_dir).unwrap();
+        fs::write(vendors_dir.join("readme.txt"), "not json").unwrap();
+        fs::write(vendors_dir.join("acme.json"), sample_vendor_json()).unwrap();
+
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+        assert_eq!(reg.vendor_count(), 1);
+    }
+
+    #[test]
+    fn load_from_directory_handles_invalid_json() {
+        let dir = tempdir().unwrap();
+        let vendors_dir = dir.path().join("vendors");
+        fs::create_dir_all(&vendors_dir).unwrap();
+        fs::write(vendors_dir.join("bad.json"), "not valid json!").unwrap();
+        fs::write(vendors_dir.join("acme.json"), sample_vendor_json()).unwrap();
+
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+        // bad.json should be skipped with a warning, acme.json should load
+        assert_eq!(reg.vendor_count(), 1);
+    }
+
+    // ---- load_vendor_file ----
+
+    #[test]
+    fn load_vendor_file_adds_to_registry() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("acme.json");
+        fs::write(&path, sample_vendor_json()).unwrap();
+
+        let mut reg = VendorRegistry::new();
+        let config = reg.load_vendor_file(&path).unwrap();
+        assert_eq!(config.id, "acme");
+        assert_eq!(config.organization, "Acme Corp");
+        assert_eq!(reg.vendor_count(), 1);
+    }
+
+    #[test]
+    fn load_vendor_file_registers_domains() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("acme.json");
+        fs::write(&path, sample_vendor_json()).unwrap();
+
+        let mut reg = VendorRegistry::new();
+        reg.load_vendor_file(&path).unwrap();
+
+        assert!(reg.is_known_domain("acme.com"));
+        assert!(reg.is_known_domain("acme-cdn.com"));
+        assert!(reg.is_known_domain("acme-api.io"));
+    }
+
+    #[test]
+    fn load_vendor_file_registers_aliases() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("acme.json");
+        fs::write(&path, sample_vendor_json()).unwrap();
+
+        let mut reg = VendorRegistry::new();
+        reg.load_vendor_file(&path).unwrap();
+
+        assert!(reg.get_vendor_by_alias("acme").is_some());
+        assert!(reg.get_vendor_by_alias("acme-corp").is_some());
+        assert!(reg.get_vendor_by_alias("acme_inc").is_some());
+    }
+
+    #[test]
+    fn load_vendor_file_registers_verification_patterns() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("acme.json");
+        fs::write(&path, sample_vendor_json()).unwrap();
+
+        let mut reg = VendorRegistry::new();
+        reg.load_vendor_file(&path).unwrap();
+
+        let found = reg.find_vendor_by_verification("acme-verify=abc123");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn load_vendor_file_invalid_path_returns_error() {
+        let mut reg = VendorRegistry::new();
+        let result = reg.load_vendor_file(Path::new("/nonexistent/path.json"));
+        assert!(result.is_err());
+    }
+
+    // ---- get_vendor_by_domain ----
+
+    #[test]
+    fn get_vendor_by_domain_exact_match() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.get_vendor_by_domain("acme.com");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().organization, "Acme Corp");
+    }
+
+    #[test]
+    fn get_vendor_by_domain_case_insensitive() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.get_vendor_by_domain("ACME.COM");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn get_vendor_by_domain_subdomain_fallback() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        // sub.acme.com should fall back to acme.com
+        let vendor = reg.get_vendor_by_domain("sub.acme.com");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn get_vendor_by_domain_unknown_returns_none() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert!(reg.get_vendor_by_domain("unknown-domain.com").is_none());
+    }
+
+    // ---- get_vendor_by_alias ----
+
+    #[test]
+    fn get_vendor_by_alias_exact() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.get_vendor_by_alias("acme");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn get_vendor_by_alias_case_insensitive() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.get_vendor_by_alias("ACME-CORP");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn get_vendor_by_alias_unknown_returns_none() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert!(reg.get_vendor_by_alias("nonexistent").is_none());
+    }
+
+    // ---- get_vendor ----
+
+    #[test]
+    fn get_vendor_by_id() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.get_vendor("acme");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().primary_domain, "acme.com");
+    }
+
+    #[test]
+    fn get_vendor_unknown_id_returns_none() {
+        let reg = VendorRegistry::new();
+        assert!(reg.get_vendor("nonexistent").is_none());
+    }
+
+    // ---- get_organization ----
+
+    #[test]
+    fn get_organization_returns_name() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert_eq!(reg.get_organization("acme.com"), Some("Acme Corp".to_string()));
+        assert_eq!(reg.get_organization("globex.net"), Some("Globex Inc".to_string()));
+    }
+
+    #[test]
+    fn get_organization_unknown_returns_none() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert_eq!(reg.get_organization("nope.com"), None);
+    }
+
+    // ---- find_vendor_by_verification ----
+
+    #[test]
+    fn find_vendor_by_verification_match() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.find_vendor_by_verification("acme-site-verification=1234");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    #[test]
+    fn find_vendor_by_verification_case_insensitive() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let vendor = reg.find_vendor_by_verification("GLOBEX-VERIFY=token");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "globex");
+    }
+
+    #[test]
+    fn find_vendor_by_verification_no_match() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert!(reg.find_vendor_by_verification("unknown-pattern").is_none());
+    }
+
+    // ---- get_all_saas_tenants ----
+
+    #[test]
+    fn get_all_saas_tenants_returns_tenants() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let tenants = reg.get_all_saas_tenants();
+        assert_eq!(tenants.len(), 1); // only acme has saas_tenants
+        let (vendor_id, tenant) = &tenants[0];
+        assert_eq!(vendor_id, "acme");
+        assert_eq!(tenant.name, "Acme Workspace");
+        assert_eq!(tenant.patterns.len(), 2);
+    }
+
+    #[test]
+    fn get_all_saas_tenants_empty_registry() {
+        let reg = VendorRegistry::new();
+        assert!(reg.get_all_saas_tenants().is_empty());
+    }
+
+    // ---- is_known_domain ----
+
+    #[test]
+    fn is_known_domain_true_for_registered() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert!(reg.is_known_domain("acme.com"));
+        assert!(reg.is_known_domain("ACME.COM"));
+        assert!(reg.is_known_domain("globex-mail.com"));
+    }
+
+    #[test]
+    fn is_known_domain_false_for_unknown() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert!(!reg.is_known_domain("unknown.com"));
+    }
+
+    // ---- vendor_count / domain_count ----
+
+    #[test]
+    fn vendor_and_domain_counts() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        assert_eq!(reg.vendor_count(), 2);
+        // acme: acme.com, acme-cdn.com, acme-api.io (3 from domains map + primary already included)
+        // globex: globex.net, globex-mail.com (2 from domains map + primary already included)
+        assert!(reg.domain_count() >= 5);
+    }
+
+    // ---- get_all_domain_mappings ----
+
+    #[test]
+    fn get_all_domain_mappings_returns_map() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        let mappings = reg.get_all_domain_mappings();
+        assert_eq!(mappings.get("acme.com"), Some(&"Acme Corp".to_string()));
+        assert_eq!(mappings.get("globex.net"), Some(&"Globex Inc".to_string()));
+        assert_eq!(mappings.get("acme-cdn.com"), Some(&"Acme Corp".to_string()));
+    }
+
+    #[test]
+    fn get_all_domain_mappings_empty_registry() {
+        let reg = VendorRegistry::new();
+        assert!(reg.get_all_domain_mappings().is_empty());
+    }
+
+    // ---- VendorConfig serialization/deserialization ----
+
+    #[test]
+    fn vendor_config_deserialize() {
+        let config: VendorConfig = serde_json::from_str(sample_vendor_json()).unwrap();
+        assert_eq!(config.id, "acme");
+        assert_eq!(config.organization, "Acme Corp");
+        assert_eq!(config.primary_domain, "acme.com");
+        assert!(config.parent_vendor.is_none());
+        assert!(config.acquired_year.is_none());
+        assert_eq!(config.domains.len(), 3);
+        assert_eq!(config.verification_patterns.len(), 2);
+        assert_eq!(config.provider_aliases.len(), 3);
+        assert_eq!(config.saas_tenants.len(), 1);
+    }
+
+    #[test]
+    fn vendor_config_with_parent_and_acquired() {
+        let config: VendorConfig = serde_json::from_str(sample_vendor2_json()).unwrap();
+        assert_eq!(config.parent_vendor, Some("mega-corp".to_string()));
+        assert_eq!(config.acquired_year, Some(2020));
+    }
+
+    #[test]
+    fn vendor_config_roundtrip() {
+        let config: VendorConfig = serde_json::from_str(sample_vendor_json()).unwrap();
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: VendorConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, config.id);
+        assert_eq!(deserialized.organization, config.organization);
+        assert_eq!(deserialized.primary_domain, config.primary_domain);
+        assert_eq!(deserialized.domains.len(), config.domains.len());
+    }
+
+    #[test]
+    fn vendor_config_minimal() {
+        let json = r#"{
+            "id": "minimal",
+            "organization": "Min Corp",
+            "primary_domain": "min.com"
+        }"#;
+        let config: VendorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.id, "minimal");
+        assert!(config.domains.is_empty());
+        assert!(config.verification_patterns.is_empty());
+        assert!(config.provider_aliases.is_empty());
+        assert!(config.saas_tenants.is_empty());
+        assert!(config.parent_vendor.is_none());
+        assert!(config.acquired_year.is_none());
+        assert!(config.schema.is_none());
+    }
+
+    #[test]
+    fn vendor_config_with_schema() {
+        let json = r#"{
+            "$schema": "vendor-schema.json",
+            "id": "withschema",
+            "organization": "Schema Corp",
+            "primary_domain": "schema.com"
+        }"#;
+        let config: VendorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.schema, Some("vendor-schema.json".to_string()));
+    }
+
+    // ---- DomainType enum ----
+
+    #[test]
+    fn domain_type_deserialize_all_variants() {
+        let variants = vec![
+            ("\"primary\"", DomainType::Primary),
+            ("\"service\"", DomainType::Service),
+            ("\"api\"", DomainType::Api),
+            ("\"cdn\"", DomainType::Cdn),
+            ("\"acquired\"", DomainType::Acquired),
+            ("\"alias\"", DomainType::Alias),
+            ("\"email\"", DomainType::Email),
+        ];
+        for (json, expected) in variants {
+            let dt: DomainType = serde_json::from_str(json).unwrap();
+            assert_eq!(dt, expected);
+        }
+    }
+
+    #[test]
+    fn domain_type_serialize() {
+        let dt = DomainType::Primary;
+        let s = serde_json::to_string(&dt).unwrap();
+        assert_eq!(s, "\"primary\"");
+    }
+
+    // ---- RiskCategory enum ----
+
+    #[test]
+    fn risk_category_deserialize_all_variants() {
+        let variants = vec![
+            ("\"platform\"", RiskCategory::Platform),
+            ("\"infrastructure\"", RiskCategory::Infrastructure),
+            ("\"tracking\"", RiskCategory::Tracking),
+            ("\"advertising\"", RiskCategory::Advertising),
+            ("\"security\"", RiskCategory::Security),
+            ("\"payment\"", RiskCategory::Payment),
+            ("\"communication\"", RiskCategory::Communication),
+            ("\"storage\"", RiskCategory::Storage),
+            ("\"development\"", RiskCategory::Development),
+            ("\"monitoring\"", RiskCategory::Monitoring),
+            ("\"media\"", RiskCategory::Media),
+            ("\"support\"", RiskCategory::Support),
+            ("\"analytics\"", RiskCategory::Analytics),
+        ];
+        for (json, expected) in variants {
+            let rc: RiskCategory = serde_json::from_str(json).unwrap();
+            assert_eq!(rc, expected);
+        }
+    }
+
+    #[test]
+    fn risk_category_serialize() {
+        let rc = RiskCategory::Infrastructure;
+        let s = serde_json::to_string(&rc).unwrap();
+        assert_eq!(s, "\"infrastructure\"");
+    }
+
+    // ---- DomainMetadata ----
+
+    #[test]
+    fn domain_metadata_deserialize() {
+        let json = r#"{
+            "type": "service",
+            "category": "analytics",
+            "description": "Analytics service",
+            "acquired_year": 2019,
+            "vendor_ref": "parent-vendor"
+        }"#;
+        let meta: DomainMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.domain_type, Some(DomainType::Service));
+        assert_eq!(meta.category, Some(RiskCategory::Analytics));
+        assert_eq!(meta.description, Some("Analytics service".to_string()));
+        assert_eq!(meta.acquired_year, Some(2019));
+        assert_eq!(meta.vendor_ref, Some("parent-vendor".to_string()));
+    }
+
+    #[test]
+    fn domain_metadata_all_optional() {
+        let json = r#"{}"#;
+        let meta: DomainMetadata = serde_json::from_str(json).unwrap();
+        assert!(meta.domain_type.is_none());
+        assert!(meta.category.is_none());
+        assert!(meta.description.is_none());
+        assert!(meta.acquired_year.is_none());
+        assert!(meta.vendor_ref.is_none());
+    }
+
+    // ---- TenantDetection ----
+
+    #[test]
+    fn tenant_detection_deserialize() {
+        let json = r#"{
+            "success_indicators": ["Welcome"],
+            "failure_indicators": ["404"],
+            "notes": "test note"
+        }"#;
+        let td: TenantDetection = serde_json::from_str(json).unwrap();
+        assert_eq!(td.success_indicators, Some(vec!["Welcome".to_string()]));
+        assert_eq!(td.failure_indicators, Some(vec!["404".to_string()]));
+        assert_eq!(td.notes, Some("test note".to_string()));
+    }
+
+    #[test]
+    fn tenant_detection_all_optional() {
+        let json = r#"{}"#;
+        let td: TenantDetection = serde_json::from_str(json).unwrap();
+        assert!(td.success_indicators.is_none());
+        assert!(td.failure_indicators.is_none());
+        assert!(td.notes.is_none());
+    }
+
+    // ---- SaasTenant ----
+
+    #[test]
+    fn saas_tenant_deserialize() {
+        let json = r#"{
+            "name": "Test Tenant",
+            "patterns": ["{tenant}.example.com"],
+            "detection": {
+                "success_indicators": ["OK"],
+                "failure_indicators": [],
+                "notes": null
+            }
+        }"#;
+        let st: SaasTenant = serde_json::from_str(json).unwrap();
+        assert_eq!(st.name, "Test Tenant");
+        assert_eq!(st.patterns, vec!["{tenant}.example.com"]);
+        assert!(st.detection.is_some());
+    }
+
+    #[test]
+    fn saas_tenant_without_detection() {
+        let json = r#"{
+            "name": "Simple",
+            "patterns": ["a.com", "b.com"]
+        }"#;
+        let st: SaasTenant = serde_json::from_str(json).unwrap();
+        assert_eq!(st.name, "Simple");
+        assert_eq!(st.patterns.len(), 2);
+        assert!(st.detection.is_none());
+    }
+
+    // ---- primary_domain as implicit domain entry ----
+
+    #[test]
+    fn primary_domain_registered_even_without_domains_entry() {
+        let json = r#"{
+            "id": "simple",
+            "organization": "Simple Corp",
+            "primary_domain": "simple.io"
+        }"#;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("simple.json");
+        fs::write(&path, json).unwrap();
+
+        let mut reg = VendorRegistry::new();
+        reg.load_vendor_file(&path).unwrap();
+
+        assert!(reg.is_known_domain("simple.io"));
+        assert_eq!(reg.get_organization("simple.io"), Some("Simple Corp".to_string()));
+    }
+
+    // ---- subdomain lookup with deeply nested subdomain ----
+
+    #[test]
+    fn get_vendor_by_domain_deeply_nested_subdomain() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        // deep.sub.acme.com should still resolve to acme via base domain fallback
+        let vendor = reg.get_vendor_by_domain("deep.sub.acme.com");
+        assert!(vendor.is_some());
+        assert_eq!(vendor.unwrap().id, "acme");
+    }
+
+    // ---- two-part domain (no subdomain fallback) ----
+
+    #[test]
+    fn get_vendor_by_domain_two_part_no_fallback() {
+        let dir = setup_vendor_dir();
+        let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
+
+        // unknown two-part domain should return None (no subdomain stripping for 2-part)
+        assert!(reg.get_vendor_by_domain("unknown.com").is_none());
+    }
+}

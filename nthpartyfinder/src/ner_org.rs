@@ -554,6 +554,8 @@ pub fn extract_all_organizations(
 mod tests {
     use super::*;
 
+    // ── NerOrgResult struct tests ─────────────────────────────────────
+
     #[test]
     fn test_ner_org_result() {
         let result = NerOrgResult {
@@ -564,6 +566,76 @@ mod tests {
         assert!((result.confidence - 0.95).abs() < 0.001);
     }
 
+    #[test]
+    fn test_ner_org_result_clone() {
+        let result = NerOrgResult {
+            organization: "Test Corp".to_string(),
+            confidence: 0.8,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.organization, "Test Corp");
+        assert!((cloned.confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_ner_org_result_debug() {
+        let result = NerOrgResult {
+            organization: "Debug Corp".to_string(),
+            confidence: 0.5,
+        };
+        let dbg = format!("{:?}", result);
+        assert!(dbg.contains("Debug Corp"));
+        assert!(dbg.contains("0.5"));
+    }
+
+    #[test]
+    fn test_ner_org_result_zero_confidence() {
+        let result = NerOrgResult {
+            organization: "Zero".to_string(),
+            confidence: 0.0,
+        };
+        assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_ner_org_result_max_confidence() {
+        let result = NerOrgResult {
+            organization: "Max".to_string(),
+            confidence: 1.0,
+        };
+        assert_eq!(result.confidence, 1.0);
+    }
+
+    #[test]
+    fn test_ner_org_result_empty_organization() {
+        let result = NerOrgResult {
+            organization: "".to_string(),
+            confidence: 0.9,
+        };
+        assert!(result.organization.is_empty());
+    }
+
+    #[test]
+    fn test_ner_org_result_unicode_organization() {
+        let result = NerOrgResult {
+            organization: "日本企業株式会社".to_string(),
+            confidence: 0.75,
+        };
+        assert_eq!(result.organization, "日本企業株式会社");
+    }
+
+    #[test]
+    fn test_ner_org_result_long_name() {
+        let long_name = "A".repeat(1000);
+        let result = NerOrgResult {
+            organization: long_name.clone(),
+            confidence: 0.6,
+        };
+        assert_eq!(result.organization.len(), 1000);
+    }
+
+    // ── Stub function tests (when embedded-ner is disabled) ───────────
+
     #[cfg(not(feature = "embedded-ner"))]
     #[test]
     fn test_stub_functions() {
@@ -572,7 +644,93 @@ mod tests {
         assert!(result.is_none());
     }
 
-    /// Test NER extraction with real company names in various contexts
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_init() {
+        // init should succeed (no-op)
+        assert!(init().is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_init_with_config() {
+        assert!(init_with_config(0.3).is_ok());
+        assert!(init_with_config(0.0).is_ok());
+        assert!(init_with_config(1.0).is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_is_available() {
+        assert!(!is_available());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_organization_with_content() {
+        let result =
+            extract_organization("example.com", Some("Some page content about Acme Corp"))
+                .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_organization_none_content() {
+        let result = extract_organization("test.com", None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_organizations() {
+        let result = extract_all_organizations("Some text about Microsoft", None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_organizations_with_confidence() {
+        let result =
+            extract_all_organizations("Some text about Google", Some(0.8)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_organization_various_domains() {
+        // Verify stubs handle any domain input gracefully
+        let domains = vec![
+            "google.com",
+            "api.stripe.com",
+            "sub.domain.example.co.uk",
+            "",
+            "localhost",
+            "192.168.1.1",
+        ];
+        for domain in domains {
+            let result = extract_organization(domain, None).unwrap();
+            assert!(result.is_none(), "Stub should return None for {}", domain);
+        }
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_empty_text() {
+        let result = extract_all_organizations("", None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_long_text() {
+        let long_text = "word ".repeat(10_000);
+        let result = extract_all_organizations(&long_text, Some(0.1)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── Embedded NER tests (when feature is enabled) ──────────────────
+
     #[cfg(feature = "embedded-ner")]
     #[test]
     fn test_ner_extraction_accuracy() {
@@ -636,14 +794,14 @@ mod tests {
 
                     if let Some(exp) = expected {
                         if extracted.to_lowercase().contains(&exp.to_lowercase()) {
-                            println!("  ✅ PASS - Expected {} found", exp);
+                            println!("  PASS - Expected {} found", exp);
                             passed += 1;
                         } else {
-                            println!("  ⚠️  DIFFERENT - Expected {}, got {}", exp, extracted);
+                            println!("  DIFFERENT - Expected {}, got {}", exp, extracted);
                         }
                     } else {
                         println!(
-                            "  ⚠️  UNEXPECTED - Expected no extraction, got {}",
+                            "  UNEXPECTED - Expected no extraction, got {}",
                             extracted
                         );
                     }
@@ -652,15 +810,15 @@ mod tests {
                     println!("Input: \"{}\"", text);
                     println!("  Extracted: None");
                     if let Some(exp) = expected {
-                        println!("  ❌ FAIL - Expected {}", exp);
+                        println!("  FAIL - Expected {}", exp);
                     } else {
-                        println!("  ✅ PASS - Expected no extraction");
+                        println!("  PASS - Expected no extraction");
                         passed += 1;
                     }
                 }
                 Err(e) => {
                     println!("Input: \"{}\"", text);
-                    println!("  ❌ ERROR: {}", e);
+                    println!("  ERROR: {}", e);
                 }
             }
             println!();
@@ -670,5 +828,146 @@ mod tests {
 
         // Don't fail the test, just report results
         // This is more of a benchmark/verification than a strict test
+    }
+
+    // ── NerOrgResult additional struct tests ─────────────────────────
+
+    #[test]
+    fn test_ner_org_result_clone_independence() {
+        let original = NerOrgResult {
+            organization: "Original".to_string(),
+            confidence: 0.9,
+        };
+        let mut cloned = original.clone();
+        cloned.organization = "Modified".to_string();
+        cloned.confidence = 0.1;
+        assert_eq!(original.organization, "Original");
+        assert!((original.confidence - 0.9).abs() < f32::EPSILON);
+        assert_eq!(cloned.organization, "Modified");
+        assert!((cloned.confidence - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_ner_org_result_negative_confidence() {
+        // Not semantically valid, but should not panic
+        let result = NerOrgResult {
+            organization: "Negative".to_string(),
+            confidence: -0.5,
+        };
+        assert!(result.confidence < 0.0);
+    }
+
+    #[test]
+    fn test_ner_org_result_nan_confidence() {
+        let result = NerOrgResult {
+            organization: "NaN".to_string(),
+            confidence: f32::NAN,
+        };
+        assert!(result.confidence.is_nan());
+    }
+
+    #[test]
+    fn test_ner_org_result_infinity_confidence() {
+        let result = NerOrgResult {
+            organization: "Inf".to_string(),
+            confidence: f32::INFINITY,
+        };
+        assert!(result.confidence.is_infinite());
+    }
+
+    #[test]
+    fn test_ner_org_result_special_chars_org() {
+        let result = NerOrgResult {
+            organization: "O'Brien & Co. (Inc.)".to_string(),
+            confidence: 0.85,
+        };
+        assert_eq!(result.organization, "O'Brien & Co. (Inc.)");
+    }
+
+    #[test]
+    fn test_ner_org_result_very_long_org_name() {
+        let name = "Corp".repeat(500);
+        let result = NerOrgResult {
+            organization: name.clone(),
+            confidence: 0.5,
+        };
+        assert_eq!(result.organization.len(), 2000);
+    }
+
+    #[test]
+    fn test_ner_org_result_debug_includes_all_fields() {
+        let result = NerOrgResult {
+            organization: "DebugTest".to_string(),
+            confidence: 0.42,
+        };
+        let dbg = format!("{:?}", result);
+        assert!(dbg.contains("NerOrgResult"));
+        assert!(dbg.contains("DebugTest"));
+        assert!(dbg.contains("0.42"));
+    }
+
+    #[test]
+    fn test_ner_org_result_whitespace_org() {
+        let result = NerOrgResult {
+            organization: "   ".to_string(),
+            confidence: 0.3,
+        };
+        assert_eq!(result.organization.trim(), "");
+    }
+
+    // ── Stub function additional tests ───────────────────────────────
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_init_multiple_times() {
+        // Stubs should be idempotent
+        assert!(init().is_ok());
+        assert!(init().is_ok());
+        assert!(init().is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_init_with_config_extreme_values() {
+        assert!(init_with_config(-1.0).is_ok());
+        assert!(init_with_config(f32::MAX).is_ok());
+        assert!(init_with_config(f32::NAN).is_ok());
+        assert!(init_with_config(f32::INFINITY).is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_organization_empty_domain() {
+        let result = extract_organization("", None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_organization_with_empty_content() {
+        let result = extract_organization("test.com", Some("")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_organizations_zero_confidence() {
+        let result = extract_all_organizations("text", Some(0.0)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_extract_all_organizations_negative_confidence() {
+        let result = extract_all_organizations("text", Some(-1.0)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stub_is_available_consistently_false() {
+        for _ in 0..10 {
+            assert!(!is_available());
+        }
     }
 }

@@ -970,4 +970,848 @@ mod tests {
             &baseline
         ));
     }
+
+    // ───────────────────────────────────────────────────────────────
+    // Additional coverage tests below
+    // ───────────────────────────────────────────────────────────────
+
+    // --- SaasTenantDiscovery construction and platform_count ---
+
+    #[test]
+    fn test_new_discovery_has_no_platforms() {
+        let disc = SaasTenantDiscovery::new(Duration::from_secs(5), 4);
+        assert_eq!(disc.platform_count(), 0);
+        assert_eq!(disc.concurrency, 4);
+    }
+
+    #[test]
+    fn test_platform_count_after_manual_push() {
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        disc.platforms.push(SaasPlatform {
+            name: "TestPlatform".into(),
+            vendor_domain: "test.com".into(),
+            tenant_patterns: vec!["{tenant}.test.com".into()],
+            detection: DetectionConfig {
+                success_indicators: vec![],
+                failure_indicators: vec![],
+                notes: None,
+            },
+        });
+        assert_eq!(disc.platform_count(), 1);
+    }
+
+    // --- load_platforms from file ---
+
+    #[test]
+    fn test_load_platforms_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("saas_platforms.json");
+        let content = r#"{
+            "platforms": [
+                {
+                    "name": "Okta",
+                    "vendor_domain": "okta.com",
+                    "tenant_patterns": ["{tenant}.okta.com"],
+                    "detection": {
+                        "success_indicators": ["Sign In"],
+                        "failure_indicators": ["not found"]
+                    }
+                },
+                {
+                    "name": "Slack",
+                    "vendor_domain": "slack.com",
+                    "tenant_patterns": ["{tenant}.slack.com"],
+                    "detection": {
+                        "success_indicators": ["Slack"],
+                        "failure_indicators": ["This workspace was not found"],
+                        "notes": "Enterprise only"
+                    }
+                }
+            ]
+        }"#;
+        std::fs::write(&file_path, content).unwrap();
+
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        disc.load_platforms(&file_path).unwrap();
+        assert_eq!(disc.platform_count(), 2);
+        assert_eq!(disc.platforms[0].name, "Okta");
+        assert_eq!(disc.platforms[1].name, "Slack");
+        assert_eq!(
+            disc.platforms[1].detection.notes,
+            Some("Enterprise only".to_string())
+        );
+    }
+
+    #[test]
+    fn test_load_platforms_missing_file() {
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        let result = disc.load_platforms(Path::new("/nonexistent/path.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_platforms_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("bad.json");
+        std::fs::write(&file_path, "not json at all").unwrap();
+
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        let result = disc.load_platforms(&file_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_platforms_empty_platforms_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("empty.json");
+        std::fs::write(&file_path, r#"{"platforms": []}"#).unwrap();
+
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        disc.load_platforms(&file_path).unwrap();
+        assert_eq!(disc.platform_count(), 0);
+    }
+
+    // --- generate_tenant_names ---
+
+    #[test]
+    fn test_generate_tenant_names_subdomain() {
+        let names = generate_tenant_names("mail.example.org");
+        assert_eq!(names[0], "mail");
+        assert!(names.contains(&"mail-inc".to_string()));
+        assert!(names.contains(&"mail-corp".to_string()));
+    }
+
+    #[test]
+    fn test_generate_tenant_names_uppercase() {
+        let names = generate_tenant_names("ACME.com");
+        assert!(names.contains(&"acme".to_string()));
+        assert!(names.contains(&"acme-inc".to_string()));
+        assert!(names.contains(&"acmecorp".to_string()));
+    }
+
+    #[test]
+    fn test_generate_tenant_names_no_dot() {
+        // Domain with no dots uses the full string
+        let names = generate_tenant_names("localhost");
+        assert_eq!(names[0], "localhost");
+        assert_eq!(names.len(), 5);
+    }
+
+    #[test]
+    fn test_generate_tenant_names_count() {
+        let names = generate_tenant_names("test.com");
+        assert_eq!(names.len(), 5);
+        assert_eq!(names[0], "test");
+        assert_eq!(names[1], "test-inc");
+        assert_eq!(names[2], "testinc");
+        assert_eq!(names[3], "test-corp");
+        assert_eq!(names[4], "testcorp");
+    }
+
+    // --- construct_probe_url ---
+
+    #[test]
+    fn test_construct_probe_url_already_has_https() {
+        let url = construct_probe_url("https://{tenant}.okta.com", "acme");
+        assert_eq!(url, "https://acme.okta.com");
+    }
+
+    #[test]
+    fn test_construct_probe_url_already_has_http() {
+        let url = construct_probe_url("http://{tenant}.example.com", "acme");
+        assert_eq!(url, "http://acme.example.com");
+    }
+
+    #[test]
+    fn test_construct_probe_url_no_scheme() {
+        let url = construct_probe_url("{tenant}.zendesk.com", "acme");
+        assert_eq!(url, "https://acme.zendesk.com");
+    }
+
+    #[test]
+    fn test_construct_probe_url_multiple_tenant_placeholders() {
+        let url = construct_probe_url("{tenant}.example.com/{tenant}/login", "acme");
+        assert_eq!(url, "https://acme.example.com/acme/login");
+    }
+
+    #[test]
+    fn test_construct_probe_url_no_placeholder() {
+        // Pattern without {tenant} — URL remains as-is
+        let url = construct_probe_url("static.example.com/login", "acme");
+        assert_eq!(url, "https://static.example.com/login");
+    }
+
+    // --- extract_host_from_url ---
+
+    #[test]
+    fn test_extract_host_https() {
+        assert_eq!(
+            extract_host_from_url("https://foo.bar.com/path"),
+            Some("foo.bar.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_http() {
+        assert_eq!(
+            extract_host_from_url("http://example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_no_scheme() {
+        assert_eq!(
+            extract_host_from_url("example.com/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_with_port() {
+        assert_eq!(
+            extract_host_from_url("https://example.com:8080/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_with_query() {
+        assert_eq!(
+            extract_host_from_url("https://example.com?q=1"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_uppercase_normalized() {
+        assert_eq!(
+            extract_host_from_url("https://EXAMPLE.COM/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_empty_after_scheme() {
+        // Edge case: "https://" with nothing after
+        assert_eq!(extract_host_from_url("https://"), None);
+    }
+
+    #[test]
+    fn test_extract_host_empty_string() {
+        assert_eq!(extract_host_from_url(""), None);
+    }
+
+    // --- extract_path_from_url ---
+
+    #[test]
+    fn test_extract_path_with_path() {
+        assert_eq!(
+            extract_path_from_url("https://example.com/foo/bar"),
+            "/foo/bar"
+        );
+    }
+
+    #[test]
+    fn test_extract_path_no_path() {
+        assert_eq!(extract_path_from_url("https://example.com"), "/");
+    }
+
+    #[test]
+    fn test_extract_path_root_only() {
+        assert_eq!(extract_path_from_url("https://example.com/"), "/");
+    }
+
+    #[test]
+    fn test_extract_path_with_query_string() {
+        assert_eq!(
+            extract_path_from_url("https://example.com/path?q=1&r=2"),
+            "/path"
+        );
+    }
+
+    #[test]
+    fn test_extract_path_http_scheme() {
+        assert_eq!(
+            extract_path_from_url("http://example.com/hello"),
+            "/hello"
+        );
+    }
+
+    #[test]
+    fn test_extract_path_no_scheme() {
+        assert_eq!(extract_path_from_url("example.com/test"), "/test");
+    }
+
+    // --- analyze_response edge cases ---
+
+    #[test]
+    fn test_analyze_response_400_status() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["OK".into()],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        assert_eq!(
+            analyze_response(400, "Bad Request", &detection),
+            TenantStatus::NotFound
+        );
+    }
+
+    #[test]
+    fn test_analyze_response_500_status() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        assert_eq!(
+            analyze_response(500, "Internal Server Error", &detection),
+            TenantStatus::NotFound
+        );
+    }
+
+    #[test]
+    fn test_analyze_response_301_redirect_unknown() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        assert_eq!(
+            analyze_response(301, "Moved Permanently", &detection),
+            TenantStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn test_analyze_response_case_insensitive_success() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["sign in".into()],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        assert_eq!(
+            analyze_response(200, "Please SIGN IN to continue", &detection),
+            TenantStatus::Confirmed
+        );
+    }
+
+    #[test]
+    fn test_analyze_response_case_insensitive_failure() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["Okta".into()],
+            failure_indicators: vec!["NOT FOUND".into()],
+            notes: None,
+        };
+        assert_eq!(
+            analyze_response(200, "page not found here", &detection),
+            TenantStatus::NotFound
+        );
+    }
+
+    // --- analyze_response_with_evidence ---
+
+    #[test]
+    fn test_analyze_response_with_evidence_confirmed() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["Sign In".into(), "Okta".into()],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(200, "Welcome to Okta Sign In page", &detection);
+        assert_eq!(status, TenantStatus::Confirmed);
+        assert!(matched.contains(&"Sign In".to_string()));
+        assert!(matched.contains(&"Okta".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_partial_match() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["Sign In".into(), "BrandX".into()],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(200, "Please Sign In", &detection);
+        assert_eq!(status, TenantStatus::Confirmed);
+        assert_eq!(matched, vec!["Sign In".to_string()]);
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_failure_indicator() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["Okta".into()],
+            failure_indicators: vec!["not found".into()],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(200, "Okta tenant not found", &detection);
+        assert_eq!(status, TenantStatus::NotFound);
+        assert_eq!(matched, vec!["failure:not found".to_string()]);
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_no_indicators_likely() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(200, "Some page", &detection);
+        assert_eq!(status, TenantStatus::Likely);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_indicators_defined_but_none_matched() {
+        let detection = DetectionConfig {
+            success_indicators: vec!["SpecificBrand".into()],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(200, "Generic page content", &detection);
+        assert_eq!(status, TenantStatus::Unknown);
+        assert!(matched.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_404() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(404, "Not Found", &detection);
+        assert_eq!(status, TenantStatus::NotFound);
+        assert_eq!(matched, vec!["http_status:404".to_string()]);
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_500() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(500, "Server Error", &detection);
+        assert_eq!(status, TenantStatus::NotFound);
+        assert_eq!(matched, vec!["http_status:500".to_string()]);
+    }
+
+    #[test]
+    fn test_analyze_response_with_evidence_302_redirect() {
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+        let (status, matched) =
+            analyze_response_with_evidence(302, "Redirecting...", &detection);
+        assert_eq!(status, TenantStatus::Unknown);
+        assert_eq!(matched, vec!["http_status:302".to_string()]);
+    }
+
+    // --- was_redirected_to_main_site additional edge cases ---
+
+    #[test]
+    fn test_redirect_no_host_in_original() {
+        // Malformed URL with no host
+        assert!(!was_redirected_to_main_site("", "https://example.com"));
+    }
+
+    #[test]
+    fn test_redirect_no_host_in_final() {
+        assert!(!was_redirected_to_main_site("https://example.com", ""));
+    }
+
+    #[test]
+    fn test_redirect_same_host_path_not_root() {
+        // Same host, both have meaningful paths — not a main-site redirect
+        assert!(!was_redirected_to_main_site(
+            "https://jobs.lever.co/klaviyo",
+            "https://jobs.lever.co/other-company"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_same_host_path_root_empty() {
+        // Same host, path changes from meaningful to empty (no trailing slash)
+        assert!(was_redirected_to_main_site(
+            "https://jobs.lever.co/klaviyo",
+            "https://jobs.lever.co"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_different_core_domain_not_known() {
+        // Different core domains not in known redirect list
+        assert!(!was_redirected_to_main_site(
+            "https://tenant.oldplatform.com",
+            "https://newplatform.io"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_same_core_but_different_subdomain() {
+        // Same core domain but final is not bare/www — not a main site redirect
+        assert!(!was_redirected_to_main_site(
+            "https://tenant.platform.com",
+            "https://login.platform.com"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_single_part_host_path_to_root() {
+        // Single-part hosts (like "localhost") — same host, path went from /tenant to /
+        // This IS a main-site redirect (path-based)
+        assert!(was_redirected_to_main_site(
+            "https://localhost/tenant",
+            "https://localhost/"
+        ));
+    }
+
+    #[test]
+    fn test_redirect_single_part_host_same_path() {
+        // Single-part host, same path — NOT a redirect
+        assert!(!was_redirected_to_main_site(
+            "https://localhost/tenant",
+            "https://localhost/tenant"
+        ));
+    }
+
+    // --- matches_baseline additional cases ---
+
+    #[test]
+    fn test_baseline_empty_final_url_no_redirect_match() {
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: 99999, // different hash
+            body_length: 50000, // very different length
+            final_url: "".to_string(),
+        };
+        // Empty baseline final_url should not match
+        assert!(!matches_baseline(
+            200,
+            "totally different content",
+            "",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_baseline_zero_body_length_no_length_match() {
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: 99999,
+            body_length: 0, // zero-length baseline
+            final_url: "https://different.com".to_string(),
+        };
+        // Even with zero-length probe body, body_length=0 guard should prevent division issue
+        assert!(!matches_baseline(
+            200,
+            "some content",
+            "https://other.com",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_baseline_boundary_tolerance_just_within() {
+        // 5% tolerance boundary: ratio of 1.05 exactly
+        let canary_body = "x".repeat(1000);
+        let real_body = "y".repeat(1050); // exactly 5% larger
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://different.com/a".to_string(),
+        };
+        assert!(matches_baseline(
+            200,
+            &real_body,
+            "https://different.com/b",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_baseline_boundary_tolerance_just_outside() {
+        // 5% tolerance boundary: ratio of 1.06 (outside)
+        let canary_body = "x".repeat(1000);
+        let real_body = "y".repeat(1060); // 6% larger — outside tolerance
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://different.com/a".to_string(),
+        };
+        assert!(!matches_baseline(
+            200,
+            &real_body,
+            "https://different.com/b",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_baseline_boundary_tolerance_just_below() {
+        // 5% tolerance: 0.95 exactly
+        let canary_body = "x".repeat(1000);
+        let real_body = "y".repeat(950); // exactly 5% smaller
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://different.com/a".to_string(),
+        };
+        assert!(matches_baseline(
+            200,
+            &real_body,
+            "https://different.com/b",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_baseline_boundary_tolerance_below_range() {
+        // ratio of 0.94 — outside lower bound
+        let canary_body = "x".repeat(1000);
+        let real_body = "y".repeat(940);
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash(&canary_body),
+            body_length: canary_body.len(),
+            final_url: "https://different.com/a".to_string(),
+        };
+        assert!(!matches_baseline(
+            200,
+            &real_body,
+            "https://different.com/b",
+            &baseline
+        ));
+    }
+
+    // --- compute_body_hash ---
+
+    #[test]
+    fn test_compute_body_hash_empty_string() {
+        // Empty string should still produce a deterministic hash
+        let h1 = compute_body_hash("");
+        let h2 = compute_body_hash("");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_compute_body_hash_very_long_body() {
+        let long = "a".repeat(100_000);
+        let h1 = compute_body_hash(&long);
+        let h2 = compute_body_hash(&long);
+        assert_eq!(h1, h2);
+        // Different content should differ
+        let long2 = "b".repeat(100_000);
+        assert_ne!(compute_body_hash(&long), compute_body_hash(&long2));
+    }
+
+    // --- TenantStatus / TenantProbeResult coverage ---
+
+    #[test]
+    fn test_tenant_status_equality() {
+        assert_eq!(TenantStatus::Confirmed, TenantStatus::Confirmed);
+        assert_eq!(TenantStatus::Likely, TenantStatus::Likely);
+        assert_eq!(TenantStatus::NotFound, TenantStatus::NotFound);
+        assert_eq!(TenantStatus::Unknown, TenantStatus::Unknown);
+        assert_ne!(TenantStatus::Confirmed, TenantStatus::Likely);
+    }
+
+    #[test]
+    fn test_tenant_status_debug() {
+        // Ensure Debug is implemented (compile-time check + format coverage)
+        let s = format!("{:?}", TenantStatus::Confirmed);
+        assert!(s.contains("Confirmed"));
+    }
+
+    #[test]
+    fn test_tenant_probe_result_debug_and_clone() {
+        let result = TenantProbeResult {
+            platform_name: "Okta".into(),
+            vendor_domain: "okta.com".into(),
+            tenant_url: "https://acme.okta.com".into(),
+            status: TenantStatus::Confirmed,
+            evidence: "HTTP 200 | Sign In".into(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.platform_name, "Okta");
+        assert_eq!(cloned.status, TenantStatus::Confirmed);
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("Okta"));
+    }
+
+    // --- SaasPlatform / DetectionConfig deserialization ---
+
+    #[test]
+    fn test_detection_config_default_notes() {
+        let json = r#"{"success_indicators": ["test"], "failure_indicators": []}"#;
+        let config: DetectionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.notes.is_none());
+        assert_eq!(config.success_indicators, vec!["test"]);
+    }
+
+    #[test]
+    fn test_saas_platform_deserialization() {
+        let json = r#"{
+            "name": "Jira",
+            "vendor_domain": "atlassian.com",
+            "tenant_patterns": ["{tenant}.atlassian.net"],
+            "detection": {
+                "success_indicators": ["Atlassian"],
+                "failure_indicators": ["This site can't be reached"],
+                "notes": "Cloud only"
+            }
+        }"#;
+        let platform: SaasPlatform = serde_json::from_str(json).unwrap();
+        assert_eq!(platform.name, "Jira");
+        assert_eq!(platform.vendor_domain, "atlassian.com");
+        assert_eq!(platform.tenant_patterns, vec!["{tenant}.atlassian.net"]);
+        assert_eq!(
+            platform.detection.notes,
+            Some("Cloud only".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detection_config_clone() {
+        let config = DetectionConfig {
+            success_indicators: vec!["A".into(), "B".into()],
+            failure_indicators: vec!["C".into()],
+            notes: Some("note".into()),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.success_indicators, config.success_indicators);
+        assert_eq!(cloned.notes, config.notes);
+    }
+
+    // --- Parameterized tests using rstest ---
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("{tenant}.okta.com", "acme", "https://acme.okta.com")]
+    #[case("jobs.lever.co/{tenant}", "acme", "https://jobs.lever.co/acme")]
+    #[case("https://{tenant}.zendesk.com", "acme", "https://acme.zendesk.com")]
+    #[case("http://{tenant}.test.com", "acme", "http://acme.test.com")]
+    #[case("{tenant}.my.salesforce.com", "acme", "https://acme.my.salesforce.com")]
+    fn test_construct_probe_url_parametrized(
+        #[case] pattern: &str,
+        #[case] tenant: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(construct_probe_url(pattern, tenant), expected);
+    }
+
+    #[rstest]
+    #[case("https://example.com/path", Some("example.com".to_string()))]
+    #[case("http://foo.bar.com:443/x", Some("foo.bar.com".to_string()))]
+    #[case("no-scheme.com/path", Some("no-scheme.com".to_string()))]
+    #[case("https://", None)]
+    #[case("", None)]
+    fn test_extract_host_parametrized(
+        #[case] url: &str,
+        #[case] expected: Option<String>,
+    ) {
+        assert_eq!(extract_host_from_url(url), expected);
+    }
+
+    #[rstest]
+    #[case("https://example.com/foo", "/foo")]
+    #[case("https://example.com", "/")]
+    #[case("https://example.com/", "/")]
+    #[case("https://example.com/a?b=c", "/a")]
+    #[case("http://x.com/p/q", "/p/q")]
+    fn test_extract_path_parametrized(
+        #[case] url: &str,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(extract_path_from_url(url), expected);
+    }
+
+    #[rstest]
+    // Status code edge values
+    #[case(200, "body", vec![], vec![], TenantStatus::Likely)]
+    #[case(200, "has brand", vec!["brand".to_string()], vec![], TenantStatus::Confirmed)]
+    #[case(200, "generic", vec!["brand".to_string()], vec![], TenantStatus::Unknown)]
+    #[case(403, "forbidden", vec![], vec![], TenantStatus::NotFound)]
+    #[case(404, "not found", vec![], vec![], TenantStatus::NotFound)]
+    #[case(301, "moved", vec![], vec![], TenantStatus::Unknown)]
+    #[case(204, "no content", vec![], vec![], TenantStatus::Unknown)]
+    fn test_analyze_response_parametrized(
+        #[case] status_code: u16,
+        #[case] body: &str,
+        #[case] success: Vec<String>,
+        #[case] failure: Vec<String>,
+        #[case] expected: TenantStatus,
+    ) {
+        let detection = DetectionConfig {
+            success_indicators: success,
+            failure_indicators: failure,
+            notes: None,
+        };
+        assert_eq!(analyze_response(status_code, body, &detection), expected);
+    }
+
+    // --- was_redirected_to_main_site parametrized ---
+
+    #[rstest]
+    #[case("https://tenant.bamboohr.com", "https://www.bamboohr.com", true)]
+    #[case("https://tenant.auth0.com", "https://auth0.com", true)]
+    #[case("https://tenant.duosecurity.com", "https://duo.com", true)]
+    #[case("https://tenant.okta.com", "https://tenant.okta.com", false)]
+    #[case("https://jobs.lever.co/tenant", "https://jobs.lever.co/", true)]
+    #[case("https://jobs.lever.co/tenant", "https://jobs.lever.co/other", false)]
+    #[case("https://tenant.platform.com", "https://app.platform.com/login", false)]
+    fn test_was_redirected_to_main_site_parametrized(
+        #[case] original: &str,
+        #[case] final_url: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(was_redirected_to_main_site(original, final_url), expected);
+    }
+
+    // --- Async probe test (mock HTTP with wiremock) ---
+
+    #[tokio::test]
+    async fn test_probe_with_no_platforms_returns_empty() {
+        let disc = SaasTenantDiscovery::new(Duration::from_secs(5), 4);
+        let results = disc.probe("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_probe_with_logger_no_platforms() {
+        let disc = SaasTenantDiscovery::new(Duration::from_secs(5), 4);
+        let results = disc.probe_with_logger("example.com", None).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    // --- BaselineResponse clone/debug coverage ---
+
+    #[test]
+    fn test_baseline_response_clone_and_debug() {
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: 12345,
+            body_length: 100,
+            final_url: "https://example.com".into(),
+        };
+        let cloned = baseline.clone();
+        assert_eq!(cloned.status_code, 200);
+        assert_eq!(cloned.body_hash, 12345);
+        let debug = format!("{:?}", baseline);
+        assert!(debug.contains("200"));
+    }
 }

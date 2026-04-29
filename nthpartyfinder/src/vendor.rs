@@ -295,29 +295,229 @@ impl AnalysisResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(RecordType::DnsTxtSpf, "DNS::TXT::SPF")]
+    #[case(RecordType::DnsTxtVerification, "DNS::TXT::VERIFICATION")]
+    #[case(RecordType::DnsTxtDmarc, "DNS::TXT::DMARC")]
+    #[case(RecordType::DnsTxtDkim, "DNS::TXT::DKIM")]
+    #[case(RecordType::DnsSubdomain, "DNS::SUBDOMAIN")]
+    #[case(RecordType::DnsMx, "DNS::MX")]
+    #[case(RecordType::DnsA, "DNS::A")]
+    #[case(RecordType::DnsAaaa, "DNS::AAAA")]
+    #[case(RecordType::HttpWellKnown, "HTTP::WELL_KNOWN")]
+    #[case(RecordType::HttpMeta, "HTTP::META")]
+    #[case(RecordType::HttpFile, "HTTP::FILE")]
+    #[case(RecordType::CertDomain, "CERT::DOMAIN")]
+    #[case(RecordType::CertSan, "CERT::SAN")]
+    #[case(RecordType::ApiEndpoint, "API::ENDPOINT")]
+    #[case(RecordType::ApiWebhook, "API::WEBHOOK")]
+    #[case(RecordType::HttpSubprocessor, "HTTP::SUBPROCESSOR")]
+    #[case(RecordType::SubfinderDiscovery, "DISCOVERY::SUBFINDER")]
+    #[case(RecordType::SaasTenantProbe, "DISCOVERY::SAAS_TENANT")]
+    #[case(RecordType::CtLogDiscovery, "DISCOVERY::CT_LOG")]
+    #[case(RecordType::TrustCenterApi, "TRUST_CENTER::API")]
+    #[case(RecordType::WebTrafficSource, "DISCOVERY::WEBPAGE_SOURCE")]
+    #[case(RecordType::WebTrafficNetwork, "DISCOVERY::WEBPAGE_NETWORK")]
+    #[case(RecordType::Unknown, "UNKNOWN")]
+    fn test_as_hierarchy_string(#[case] record_type: RecordType, #[case] expected: &str) {
+        assert_eq!(record_type.as_hierarchy_string(), expected);
+    }
+
+    #[rstest]
+    #[case(RecordType::DnsTxtSpf, "DNS::TXT::SPF")]
+    #[case(RecordType::Unknown, "UNKNOWN")]
+    fn test_display_matches_hierarchy(#[case] record_type: RecordType, #[case] expected: &str) {
+        assert_eq!(format!("{}", record_type), expected);
+    }
+
+    #[rstest]
+    #[case("SPF", RecordType::DnsTxtSpf)]
+    #[case("VERIFICATION", RecordType::DnsTxtVerification)]
+    #[case("SUBDOMAIN", RecordType::DnsSubdomain)]
+    #[case("unknown_value", RecordType::Unknown)]
+    #[case("", RecordType::Unknown)]
+    fn test_from_legacy_string(#[case] input: &str, #[case] expected: RecordType) {
+        assert_eq!(RecordType::from_legacy_string(input), expected);
+    }
+
+    #[rstest]
+    #[case(RecordType::DnsTxtSpf, "Email & Authentication")]
+    #[case(RecordType::DnsTxtVerification, "Email & Authentication")]
+    #[case(RecordType::DnsTxtDmarc, "Email & Authentication")]
+    #[case(RecordType::DnsTxtDkim, "Email & Authentication")]
+    #[case(RecordType::DnsSubdomain, "DNS Infrastructure")]
+    #[case(RecordType::DnsMx, "DNS Infrastructure")]
+    #[case(RecordType::DnsA, "DNS Infrastructure")]
+    #[case(RecordType::DnsAaaa, "DNS Infrastructure")]
+    #[case(RecordType::HttpWellKnown, "HTTP Verification")]
+    #[case(RecordType::HttpMeta, "HTTP Verification")]
+    #[case(RecordType::HttpFile, "HTTP Verification")]
+    #[case(RecordType::HttpSubprocessor, "HTTP Verification")]
+    #[case(RecordType::CertDomain, "Certificate Authority")]
+    #[case(RecordType::CertSan, "Certificate Authority")]
+    #[case(RecordType::ApiEndpoint, "API Integration")]
+    #[case(RecordType::ApiWebhook, "API Integration")]
+    #[case(RecordType::SubfinderDiscovery, "Discovery")]
+    #[case(RecordType::SaasTenantProbe, "Discovery")]
+    #[case(RecordType::CtLogDiscovery, "Discovery")]
+    #[case(RecordType::WebTrafficSource, "Discovery")]
+    #[case(RecordType::WebTrafficNetwork, "Discovery")]
+    #[case(RecordType::TrustCenterApi, "Trust Center")]
+    #[case(RecordType::Unknown, "Other")]
+    fn test_get_category(#[case] record_type: RecordType, #[case] expected: &str) {
+        assert_eq!(record_type.get_category(), expected);
+    }
 
     #[test]
-    fn test_new_record_types_display() {
-        // Test SubfinderDiscovery
-        assert_eq!(
-            RecordType::SubfinderDiscovery.as_hierarchy_string(),
-            "DISCOVERY::SUBFINDER"
+    fn test_evidence_priority_ordering() {
+        assert_eq!(RecordType::HttpSubprocessor.evidence_priority(), 10);
+        assert_eq!(RecordType::TrustCenterApi.evidence_priority(), 9);
+        assert_eq!(RecordType::DnsTxtVerification.evidence_priority(), 8);
+        assert_eq!(RecordType::Unknown.evidence_priority(), 0);
+        assert!(
+            RecordType::HttpSubprocessor.evidence_priority()
+                > RecordType::TrustCenterApi.evidence_priority()
         );
-        assert_eq!(RecordType::SubfinderDiscovery.get_category(), "Discovery");
-        assert_eq!(
-            RecordType::SubfinderDiscovery.get_description(),
-            "Subdomain discovered via subfinder"
+        assert!(
+            RecordType::TrustCenterApi.evidence_priority()
+                > RecordType::DnsTxtSpf.evidence_priority()
         );
+    }
 
-        // Test SaasTenantProbe
-        assert_eq!(
-            RecordType::SaasTenantProbe.as_hierarchy_string(),
-            "DISCOVERY::SAAS_TENANT"
+    #[rstest]
+    #[case(RecordType::DnsTxtSpf, "Email sending authorization record")]
+    #[case(RecordType::HttpSubprocessor, "HTTP subprocessor page listing")]
+    #[case(RecordType::TrustCenterApi, "Trust center API extraction")]
+    #[case(RecordType::WebTrafficNetwork, "Runtime network request from webpage to external domain")]
+    #[case(RecordType::Unknown, "Unknown or unclassified record type")]
+    fn test_get_description(#[case] record_type: RecordType, #[case] expected: &str) {
+        assert_eq!(record_type.get_description(), expected);
+    }
+
+    fn make_vendor(domain: &str, org: &str, layer: u32, record_type: RecordType) -> VendorRelationship {
+        VendorRelationship::new(
+            domain.to_string(),
+            org.to_string(),
+            layer,
+            "customer.com".to_string(),
+            "Customer Inc".to_string(),
+            format!("v=spf1 include:{}", domain),
+            record_type,
+            "root.com".to_string(),
+            "Root Inc".to_string(),
+            "test evidence".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_vendor_relationship_new() {
+        let vr = make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf);
+        assert_eq!(vr.nth_party_domain, "google.com");
+        assert_eq!(vr.nth_party_organization, "Google");
+        assert_eq!(vr.nth_party_layer, 3);
+        assert_eq!(vr.nth_party_record_type, RecordType::DnsTxtSpf);
+    }
+
+    #[test]
+    fn test_vendor_relationship_strips_org_prefix() {
+        let vr = VendorRelationship::new(
+            "_org:example.com".to_string(),
+            "_org:Example Inc".to_string(),
+            1,
+            "c.com".to_string(),
+            "C".to_string(),
+            "record".to_string(),
+            RecordType::Unknown,
+            "r.com".to_string(),
+            "R".to_string(),
+            "ev".to_string(),
         );
-        assert_eq!(RecordType::SaasTenantProbe.get_category(), "Discovery");
-        assert_eq!(
-            RecordType::SaasTenantProbe.get_description(),
-            "SaaS tenant probe discovery"
-        );
+        assert_eq!(vr.nth_party_domain, "example.com");
+        assert_eq!(vr.nth_party_organization, "Example Inc");
+    }
+
+    #[rstest]
+    #[case(1, "1st party")]
+    #[case(2, "2nd party")]
+    #[case(3, "3rd party")]
+    #[case(4, "4th party")]
+    #[case(5, "5th party")]
+    #[case(10, "10th party")]
+    fn test_layer_description(#[case] layer: u32, #[case] expected: &str) {
+        let vr = make_vendor("test.com", "Test", layer, RecordType::Unknown);
+        assert_eq!(vr.layer_description(), expected);
+    }
+
+    #[test]
+    fn test_analysis_result_empty() {
+        let result = AnalysisResult::new(vec![]);
+        assert_eq!(result.total_vendors, 0);
+        assert_eq!(result.max_depth_reached, 0);
+        assert!(result.unique_organizations.is_empty());
+    }
+
+    #[test]
+    fn test_analysis_result_basic() {
+        let vendors = vec![
+            make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf),
+            make_vendor("sendgrid.net", "SendGrid", 3, RecordType::DnsTxtSpf),
+            make_vendor("cloudflare.com", "Cloudflare", 4, RecordType::DnsSubdomain),
+        ];
+        let result = AnalysisResult::new(vendors);
+        assert_eq!(result.total_vendors, 3);
+        assert_eq!(result.max_depth_reached, 4);
+        assert_eq!(result.unique_organizations.len(), 3);
+    }
+
+    #[test]
+    fn test_analysis_result_dedup_orgs() {
+        let vendors = vec![
+            make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf),
+            make_vendor("google.com", "Google", 4, RecordType::DnsTxtVerification),
+        ];
+        let result = AnalysisResult::new(vendors);
+        assert_eq!(result.total_vendors, 2);
+        assert_eq!(result.unique_organizations.len(), 1);
+        assert_eq!(result.unique_organizations[0], "Google");
+    }
+
+    #[test]
+    fn test_get_vendors_by_layer() {
+        let vendors = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 4, RecordType::DnsTxtSpf),
+            make_vendor("c.com", "C", 3, RecordType::DnsTxtSpf),
+        ];
+        let result = AnalysisResult::new(vendors);
+        assert_eq!(result.get_vendors_by_layer(3).len(), 2);
+        assert_eq!(result.get_vendors_by_layer(4).len(), 1);
+        assert_eq!(result.get_vendors_by_layer(5).len(), 0);
+    }
+
+    #[test]
+    fn test_get_common_denominators() {
+        let vendors = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 4, RecordType::DnsTxtSpf),
+            make_vendor("c.com", "C", 5, RecordType::DnsTxtSpf),
+        ];
+        let result = AnalysisResult::new(vendors);
+        let denominators = result.get_common_denominators();
+        assert!(denominators.contains(&"B".to_string()));
+        assert!(denominators.contains(&"C".to_string()));
+        assert!(!denominators.contains(&"A".to_string()));
+    }
+
+    #[test]
+    fn test_unique_organizations_sorted() {
+        let vendors = vec![
+            make_vendor("z.com", "Zebra", 3, RecordType::DnsTxtSpf),
+            make_vendor("a.com", "Alpha", 3, RecordType::DnsTxtSpf),
+            make_vendor("m.com", "Maple", 3, RecordType::DnsTxtSpf),
+        ];
+        let result = AnalysisResult::new(vendors);
+        assert_eq!(result.unique_organizations, vec!["Alpha", "Maple", "Zebra"]);
     }
 }

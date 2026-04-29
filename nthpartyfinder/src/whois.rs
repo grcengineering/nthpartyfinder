@@ -1175,4 +1175,375 @@ mod tests {
             );
         }
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- extract_organization_from_domain edge cases ---
+
+    #[test]
+    fn test_extract_organization_from_domain_single_part() {
+        // Single part domain (no dots) - falls through to domain.to_string()
+        assert_eq!(extract_organization_from_domain("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_extract_organization_from_domain_capitalization() {
+        assert_eq!(
+            extract_organization_from_domain("stripe.com"),
+            "Stripe Inc."
+        );
+        assert_eq!(
+            extract_organization_from_domain("UPPER.com"),
+            "UPPER Inc."
+        );
+    }
+
+    // --- extract_organization_from_whois additional patterns ---
+
+    #[test]
+    fn test_extract_org_from_whois_orgname() {
+        let whois_data = "OrgName: My Organization\nAddress: 123 Main St";
+        assert_eq!(
+            extract_organization_from_whois(whois_data),
+            Some("My Organization".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_org_name_lowercase() {
+        let whois_data = "org-name: Lowercase Org\nstatus: active";
+        assert_eq!(
+            extract_organization_from_whois(whois_data),
+            Some("Lowercase Org".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_organisation() {
+        let whois_data = "organisation: British Org Ltd\ncountry: GB";
+        assert_eq!(
+            extract_organization_from_whois(whois_data),
+            Some("British Org Ltd".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_company() {
+        let whois_data = "Company: Test Company GmbH\nphone: +49";
+        assert_eq!(
+            extract_organization_from_whois(whois_data),
+            Some("Test Company GmbH".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_empty_org() {
+        // Empty organization field is matched by the regex but is_empty() check filters it
+        // The Registrar: pattern is also matched - but the regex captures everything after
+        // "Registrar:" which includes the rest of the line
+        let whois_data = "Organization: \nRegistrar: Acme Registrar";
+        let result = extract_organization_from_whois(whois_data);
+        // "Registrar:" line matches the registrar extraction path
+        assert!(result.is_some());
+    }
+
+    // --- extract_registrar_from_whois ---
+
+    #[test]
+    fn test_extract_registrar_sponsoring() {
+        let whois_data = "Sponsoring Registrar: Real Corp\nDomain: test.com";
+        assert_eq!(
+            extract_registrar_from_whois(whois_data),
+            Some("Real Corp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_registrar_name() {
+        let whois_data = "Registrar Name: Actual Business Inc\nDomain: test.com";
+        assert_eq!(
+            extract_registrar_from_whois(whois_data),
+            Some("Actual Business Inc".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_registrar_placeholder_filtered() {
+        let whois_data = "Registrar: Namecheap, Inc.\nDomain: test.com";
+        assert!(extract_registrar_from_whois(whois_data).is_none());
+    }
+
+    #[test]
+    fn test_extract_registrar_none() {
+        let whois_data = "Domain: test.com\nStatus: active";
+        assert!(extract_registrar_from_whois(whois_data).is_none());
+    }
+
+    // --- is_placeholder_organization additional patterns ---
+
+    #[test]
+    fn test_is_placeholder_additional_registrars() {
+        assert!(is_placeholder_organization("Porkbun LLC"));
+        assert!(is_placeholder_organization("Dynadot Inc"));
+        assert!(is_placeholder_organization("Hover, a Tucows company"));
+        assert!(is_placeholder_organization("Google Domains LLC"));
+        assert!(is_placeholder_organization("Squarespace Domains LLC"));
+        assert!(is_placeholder_organization("Bluehost Inc"));
+        assert!(is_placeholder_organization("DreamHost LLC"));
+        assert!(is_placeholder_organization("SiteGround Ltd"));
+        assert!(is_placeholder_organization("IONOS SE"));
+        assert!(is_placeholder_organization("Register.com Inc"));
+        assert!(is_placeholder_organization("Name.com Inc"));
+        assert!(is_placeholder_organization("Epik Inc"));
+    }
+
+    #[test]
+    fn test_is_placeholder_privacy_services() {
+        assert!(is_placeholder_organization("Perfect Privacy LLC"));
+        assert!(is_placeholder_organization("Identity Protect Limited"));
+        assert!(is_placeholder_organization("Identity Protection Service"));
+    }
+
+    #[test]
+    fn test_is_placeholder_registrant_fields() {
+        assert!(is_placeholder_organization("Registrant Street"));
+        assert!(is_placeholder_organization("Registrant City"));
+        assert!(is_placeholder_organization("Admin Street"));
+        assert!(is_placeholder_organization("PO Box 12345"));
+        assert!(is_placeholder_organization("P.O. Box 999"));
+        assert!(is_placeholder_organization("Care Of Someone"));
+        assert!(is_placeholder_organization("c/o Privacy"));
+    }
+
+    #[test]
+    fn test_is_placeholder_valid_orgs() {
+        assert!(!is_placeholder_organization("Stripe, Inc."));
+        assert!(!is_placeholder_organization("Anthropic PBC"));
+        assert!(!is_placeholder_organization("Datadog Inc."));
+        // Cloudflare IS in the placeholder list (it's a domain registrar)
+        assert!(is_placeholder_organization("Cloudflare, Inc."));
+        // These should NOT be placeholders
+        assert!(!is_placeholder_organization("Notion Labs, Inc."));
+        assert!(!is_placeholder_organization("Figma, Inc."));
+    }
+
+    // --- clean_organization_name ---
+
+    #[test]
+    fn test_clean_organization_name_complex() {
+        assert_eq!(
+            clean_organization_name("  Test\r\n\tOrg  Name  "),
+            "Test Org Name"
+        );
+    }
+
+    // --- execute_whois_command ---
+
+    #[test]
+    fn test_execute_whois_command_compiles() {
+        // This test just verifies the function exists and handles missing commands
+        // gracefully without panicking
+        let result = execute_whois_command("nonexistent-domain-12345.com");
+        // May succeed or fail depending on whether whois is installed
+        let _ = result;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_organization_from_whois — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_org_from_whois_registrant_organization() {
+        let whois = "Registrant Organization: Stripe, Inc.\nRegistrant Country: US";
+        let result = extract_organization_from_whois(whois);
+        assert_eq!(result, Some("Stripe, Inc.".to_string()));
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_company_field() {
+        let whois = "Company: Acme Corporation\nCountry: UK";
+        let result = extract_organization_from_whois(whois);
+        assert_eq!(result, Some("Acme Corporation".to_string()));
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_privacy_filtered() {
+        let whois = "Organization: Whois Privacy Protection Service\nRegistrar: GoDaddy";
+        let result = extract_organization_from_whois(whois);
+        // Privacy org should be filtered, falls back to registrar
+        // GoDaddy is also a registrar placeholder, so should return None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_empty_field() {
+        let whois = "Organization: \nRegistrar: MarkMonitor Inc.";
+        let result = extract_organization_from_whois(whois);
+        // Empty org field, falls back to registrar — but MarkMonitor is a placeholder
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_no_matching_field() {
+        let whois = "Domain: example.com\nCreated: 2020-01-01";
+        let result = extract_organization_from_whois(whois);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_org_from_whois_multiple_patterns() {
+        // Organization: takes priority over OrgName:
+        let whois = "Organization: Primary Corp\nOrgName: Secondary Corp";
+        let result = extract_organization_from_whois(whois);
+        assert_eq!(result, Some("Primary Corp".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_registrar_from_whois — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_registrar_from_whois_registrar_field() {
+        let whois = "Registrar: Gandi SAS\nRegistrar URL: https://gandi.net";
+        let result = extract_registrar_from_whois(whois);
+        // Gandi is in the placeholder list
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_registrar_from_whois_valid_registrar() {
+        let whois = "Registrar: Some Legitimate Company";
+        let result = extract_registrar_from_whois(whois);
+        assert_eq!(result, Some("Some Legitimate Company".to_string()));
+    }
+
+    #[test]
+    fn test_extract_registrar_from_whois_no_registrar() {
+        let whois = "Domain: test.com\nStatus: active";
+        let result = extract_registrar_from_whois(whois);
+        assert!(result.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_organization_from_domain — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_org_from_domain_standard() {
+        let result = extract_organization_from_domain("stripe.com");
+        assert_eq!(result, "Stripe Inc.");
+    }
+
+    #[test]
+    fn test_extract_org_from_domain_with_subdomain() {
+        let result = extract_organization_from_domain("api.stripe.com");
+        assert_eq!(result, "Stripe Inc.");
+    }
+
+    #[test]
+    fn test_extract_org_from_domain_bare_tld() {
+        let result = extract_organization_from_domain("com");
+        assert_eq!(result, "com"); // Single part domain returned as-is
+    }
+
+    #[test]
+    fn test_extract_org_from_domain_hyphenated() {
+        let result = extract_organization_from_domain("my-company.com");
+        assert_eq!(result, "My-company Inc.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_placeholder_organization — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_placeholder_address_starting_with_number() {
+        assert!(is_placeholder_organization("123 Main Street, Suite 100"));
+        assert!(is_placeholder_organization("5335 Gate Parkway"));
+    }
+
+    #[test]
+    fn test_is_placeholder_amazon_registrar() {
+        assert!(is_placeholder_organization("Amazon Registrar, Inc."));
+        assert!(is_placeholder_organization("amazon registrar"));
+    }
+
+    #[test]
+    fn test_is_placeholder_cctld_registries() {
+        assert!(is_placeholder_organization("NIC.RO"));
+        assert!(is_placeholder_organization("ROTLD"));
+        assert!(is_placeholder_organization("CNNIC"));
+        assert!(is_placeholder_organization("JPRS"));
+    }
+
+    #[test]
+    fn test_is_placeholder_case_insensitive() {
+        assert!(is_placeholder_organization("WHOISGUARD"));
+        assert!(is_placeholder_organization("Domains By Proxy"));
+        assert!(is_placeholder_organization("REDACTED FOR PRIVACY"));
+    }
+
+    #[test]
+    fn test_is_placeholder_registrant_address_fields() {
+        assert!(is_placeholder_organization("Registrant Street: 123 Main"));
+        assert!(is_placeholder_organization("Admin City: New York"));
+        assert!(is_placeholder_organization("PO Box 1234"));
+        assert!(is_placeholder_organization("c/o Domain Admin"));
+    }
+
+    #[test]
+    fn test_is_not_placeholder_real_orgs() {
+        assert!(!is_placeholder_organization("Stripe, Inc."));
+        assert!(!is_placeholder_organization("Amazon.com Services LLC")); // Not "Amazon Registrar"
+        assert!(!is_placeholder_organization("Microsoft Corporation"));
+        assert!(!is_placeholder_organization("Alphabet Inc."));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // clean_organization_name — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_clean_org_name_whitespace_only() {
+        assert_eq!(clean_organization_name("   "), "");
+    }
+
+    #[test]
+    fn test_clean_org_name_tabs_and_newlines() {
+        assert_eq!(clean_organization_name("Corp\t\tName\n\nHere"), "Corp Name Here");
+    }
+
+    #[test]
+    fn test_clean_org_name_normal_input() {
+        assert_eq!(clean_organization_name("Stripe Inc."), "Stripe Inc.");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OrganizationResult struct coverage
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_organization_result_debug() {
+        let result = OrganizationResult::verified("Test".to_string(), "whois");
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("Test"));
+    }
+
+    #[test]
+    fn test_organization_result_clone() {
+        let result = OrganizationResult::verified("Test Corp".to_string(), "whois");
+        let cloned = result.clone();
+        assert_eq!(result.name, cloned.name);
+        assert_eq!(result.is_verified, cloned.is_verified);
+        assert_eq!(result.source, cloned.source);
+    }
+
+    #[test]
+    fn test_organization_result_inferred_not_verified() {
+        let result = OrganizationResult::inferred("Test Corp".to_string());
+        assert!(!result.is_verified);
+        assert_eq!(result.source, "domain_fallback");
+    }
 }

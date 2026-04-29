@@ -613,3 +613,200 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vendor::{RecordType, VendorRelationship};
+    use rstest::rstest;
+    use tempfile::TempDir;
+
+    fn make_vendor(domain: &str, org: &str, layer: u32, rt: RecordType) -> VendorRelationship {
+        VendorRelationship::new(
+            domain.to_string(),
+            org.to_string(),
+            layer,
+            "customer.com".to_string(),
+            "Customer Inc".to_string(),
+            format!("v=spf1 include:{}", domain),
+            rt,
+            "root.com".to_string(),
+            "Root Inc".to_string(),
+            "test evidence".to_string(),
+        )
+    }
+
+    fn sample_relationships() -> Vec<VendorRelationship> {
+        vec![
+            make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf),
+            make_vendor("sendgrid.net", "SendGrid", 3, RecordType::DnsTxtVerification),
+            make_vendor("cloudflare.com", "Cloudflare", 4, RecordType::DnsSubdomain),
+            make_vendor("cdn.example.com", "ExampleCDN", 3, RecordType::WebTrafficSource),
+            make_vendor("analytics.test.com", "Analytics", 3, RecordType::WebTrafficNetwork),
+        ]
+    }
+
+    #[rstest]
+    #[case("example.com", "example_com")]
+    #[case("sub.domain.co.uk", "sub_domain_co_uk")]
+    #[case("test-site.org", "test_site_org")]
+    #[case("123.456.com", "n123_456_com")]
+    #[case("", "unknown")]
+    fn test_sanitize_mermaid_id(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(sanitize_mermaid_id(input), expected);
+    }
+
+    #[rstest]
+    #[case("hello", "hello")]
+    #[case("pipe|char", "pipe\\|char")]
+    #[case("*bold*", "\\*bold\\*")]
+    #[case("under_score", "under\\_score")]
+    #[case("a|b*c_d", "a\\|b\\*c\\_d")]
+    fn test_escape_markdown(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(escape_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_export_csv_with_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.csv");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_csv(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Root Customer Domain"));
+        assert!(content.contains("google.com"));
+        assert!(content.contains("SendGrid"));
+        assert!(content.contains("DNS::TXT::SPF"));
+    }
+
+    #[test]
+    fn test_export_csv_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.csv");
+        let path_str = path.to_str().unwrap();
+
+        export_csv(&[], path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Root Customer Domain"));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_export_json_with_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.json");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_json(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["summary"]["total_relationships"], 5);
+        assert!(parsed["summary"]["max_depth"].as_u64().unwrap() >= 3);
+        assert!(parsed["relationships"].is_array());
+        assert_eq!(parsed["relationships"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn test_export_json_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.json");
+        let path_str = path.to_str().unwrap();
+
+        export_json(&[], path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["summary"]["total_relationships"], 0);
+    }
+
+    #[test]
+    fn test_export_markdown_with_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.md");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Nth Party Analysis Report"));
+        assert!(content.contains("Executive Summary"));
+        assert!(content.contains("google.com"));
+        assert!(content.contains("Email Service Providers"));
+        assert!(content.contains("Integrated Services"));
+        assert!(content.contains("Webpage Discovery"));
+        assert!(content.contains("Risk Assessment"));
+        assert!(content.contains("mermaid"));
+    }
+
+    #[test]
+    fn test_export_markdown_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&[], path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("No vendor relationships found"));
+    }
+
+    #[test]
+    fn test_export_html_with_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.html");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_html(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("<html") || content.contains("<!DOCTYPE"));
+    }
+
+    #[test]
+    fn test_export_html_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.html");
+        let path_str = path.to_str().unwrap();
+
+        export_html(&[], path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("<html") || content.contains("<!DOCTYPE"));
+    }
+
+    #[test]
+    fn test_print_analysis_summary_empty() {
+        print_analysis_summary(&[]);
+    }
+
+    #[test]
+    fn test_print_analysis_summary_with_data() {
+        let rels = sample_relationships();
+        print_analysis_summary(&rels);
+    }
+
+    #[test]
+    fn test_export_markdown_other_record_types() {
+        let rels = vec![
+            make_vendor("api.example.com", "ApiCo", 3, RecordType::HttpSubprocessor),
+            make_vendor("trust.example.com", "TrustCo", 3, RecordType::TrustCenterApi),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("other.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Other Relationships"));
+    }
+}

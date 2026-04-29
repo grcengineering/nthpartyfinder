@@ -978,3 +978,467 @@ impl AnalysisLogger {
         self.multi_progress.suspend(f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use tempfile::TempDir;
+
+    #[rstest]
+    #[case(0, VerbosityLevel::Summary)]
+    #[case(1, VerbosityLevel::Detailed)]
+    #[case(2, VerbosityLevel::Debug)]
+    #[case(3, VerbosityLevel::Debug)]
+    #[case(255, VerbosityLevel::Debug)]
+    fn test_verbosity_from_verbose_count(#[case] count: u8, #[case] expected: VerbosityLevel) {
+        assert_eq!(VerbosityLevel::from_verbose_count(count), expected);
+    }
+
+    #[test]
+    fn test_verbosity_ordering() {
+        assert!(VerbosityLevel::Silent < VerbosityLevel::Summary);
+        assert!(VerbosityLevel::Summary < VerbosityLevel::Detailed);
+        assert!(VerbosityLevel::Detailed < VerbosityLevel::Debug);
+    }
+
+    #[test]
+    fn test_new_logger() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Summary);
+        assert!(!logger.is_log_export_enabled());
+        assert_eq!(logger.get_log_count(), 0);
+    }
+
+    #[test]
+    fn test_new_with_color_setting() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        assert!(!logger.is_color_enabled());
+
+        let logger2 = AnalysisLogger::new_with_color_setting(VerbosityLevel::Silent, false);
+        let _ = logger2.is_color_enabled();
+    }
+
+    #[test]
+    fn test_with_log_file() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("test.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+        assert!(logger.is_log_export_enabled());
+    }
+
+    #[test]
+    fn test_with_log_file_and_color() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("test.log");
+        let logger = AnalysisLogger::with_log_file_and_color(
+            VerbosityLevel::Detailed,
+            log_path.to_str().unwrap().to_string(),
+            true,
+        );
+        assert!(logger.is_log_export_enabled());
+        assert!(!logger.is_color_enabled());
+    }
+
+    #[test]
+    fn test_metadata_recording() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+
+        logger.record_dns_method("system");
+        logger.record_txt_records_found(5);
+        logger.record_txt_records_found(3);
+        logger.record_domain_processed();
+        logger.record_domain_processed();
+        logger.record_vendor_relationships(10);
+        logger.record_depth_reached(3);
+        logger.record_depth_reached(2);
+        logger.record_unique_vendors(7);
+        logger.record_output_file("output.csv");
+
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert_eq!(metadata.dns_method_used, "system");
+        assert_eq!(metadata.total_txt_records_found, 8);
+        assert_eq!(metadata.total_domains_processed, 2);
+        assert_eq!(metadata.total_vendor_relationships, 10);
+        assert_eq!(metadata.max_depth_reached, 3);
+        assert_eq!(metadata.unique_vendors, 7);
+        assert_eq!(metadata.output_file, "output.csv");
+    }
+
+    #[test]
+    fn test_log_methods_with_file() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("messages.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+
+        logger.info("info message");
+        logger.warn("warn message");
+        logger.error("error message");
+        logger.debug("debug message");
+        logger.success("success message");
+
+        assert!(logger.get_log_count() > 0);
+
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("info message"));
+        assert!(content.contains("error message"));
+        assert!(content.contains("success message"));
+    }
+
+    #[test]
+    fn test_log_verbosity_filtering() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("filter.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Silent,
+            log_path.to_str().unwrap().to_string(),
+        );
+
+        logger.info("should not appear");
+        logger.warn("should not appear");
+        logger.debug("should not appear");
+        logger.error("errors always appear");
+        logger.success("success always appears");
+
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("errors always appear"));
+        assert!(content.contains("success always appears"));
+    }
+
+    #[test]
+    fn test_specialized_log_methods() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("specialized.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+
+        logger.log_initialization("example.com");
+        logger.log_dns_lookup_start("example.com");
+        logger.log_dns_lookup_success("example.com", "system", 5);
+        logger.log_dns_lookup_failed("bad.com", "timeout");
+        logger.log_vendor_discovery("example.com", 3);
+        logger.log_vendor_discovery("empty.com", 0);
+        logger.log_parallel_processing_start(10, 3);
+        logger.log_parallel_processing_complete(25);
+        logger.log_export_start("csv");
+        logger.log_export_success("output.csv");
+        logger.log_whois_lookup("example.com", true);
+        logger.log_whois_lookup("bad.com", false);
+        logger.log_subprocessor_analysis("example.com", 5);
+        logger.log_subprocessor_analysis("empty.com", 0);
+        logger.log_subprocessor_url_attempt("https://example.com/sub");
+        logger.log_subprocessor_url_success("https://example.com/sub", 3);
+        logger.log_subprocessor_url_success("https://example.com/sub", 0);
+        logger.log_subprocessor_url_failed("https://bad.com/sub", "404");
+        logger.log_cache_hit_organization("example.com", 5);
+        logger.log_cache_miss_organization("example.com");
+        logger.log_cache_hit_url("https://example.com", "working");
+        logger.log_cache_hit_url("https://example.com", "(retrying)");
+        logger.log_cache_miss_url("https://new.com");
+        logger.log_cache_save(10, 5);
+
+        assert!(logger.get_log_count() > 20);
+    }
+
+    #[test]
+    fn test_print_final_summary_no_color() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.record_dns_method("system");
+        logger.record_vendor_relationships(5);
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+        }
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_print_final_summary_zero_vendors() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.record_vendor_relationships(0);
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+        }
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_export_logs_no_file() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        logger.info("test");
+        logger.export_logs().unwrap();
+    }
+
+    #[test]
+    fn test_suspend_for_io() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Summary);
+        let result = logger.suspend_for_io(|| 42);
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn test_async_progress_lifecycle() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+
+        logger.start_init_progress(5).await;
+        logger.complete_init_step("Step 1").await;
+        logger.complete_init_step("Step 2").await;
+        logger.finish_init().await;
+
+        logger.start_scan_progress(100).await;
+        logger.show_sub_progress("Processing...").await;
+        logger.clear_sub_progress().await;
+
+        logger.start_progress(50).await;
+        logger.update_progress("working...").await;
+        logger.advance_progress(10).await;
+        logger.set_progress_position(25).await;
+        logger.set_progress_total(100).await;
+        let pos = logger.get_progress_position().await;
+        assert!(pos <= 100);
+        logger.finish_progress("Done!").await;
+    }
+
+    #[tokio::test]
+    async fn test_silent_mode_skips_progress() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.start_init_progress(5).await;
+        logger.complete_init_step("Step").await;
+        logger.finish_init().await;
+        logger.start_scan_progress(10).await;
+    }
+
+    #[tokio::test]
+    async fn test_spinner_lifecycle() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_spinner("Scanning...").await;
+        logger.convert_to_progress(50).await;
+        logger.finish_progress("Done").await;
+    }
+
+    #[test]
+    fn test_ui_phase_enum() {
+        assert_eq!(UiPhase::PreInit, UiPhase::PreInit);
+        assert_ne!(UiPhase::PreInit, UiPhase::Scanning);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // print_final_summary — colored path
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_print_final_summary_colored_with_vendors() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, false);
+        logger.record_dns_method("doh");
+        logger.record_vendor_relationships(15);
+        logger.record_unique_vendors(10);
+        logger.record_output_file("results.json");
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+            metadata.total_domains_processed = 5;
+            metadata.total_txt_records_found = 20;
+            metadata.max_depth_reached = 3;
+        }
+        // Should exercise the colored branch
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_print_final_summary_colored_zero_vendors() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, false);
+        logger.record_vendor_relationships(0);
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+        }
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_print_final_summary_no_output_file() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        // Don't set output_file - should skip the "Results Exported" line
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+        }
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_print_final_summary_no_timing() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        // Don't set start/end time - should skip duration
+        logger.print_final_summary();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // print_message — branch coverage
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_print_message_all_levels_colored() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("colored.log");
+        let logger = AnalysisLogger::with_log_file_and_color(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+            false,
+        );
+        // Exercise all color branches
+        logger.info("info test");
+        logger.warn("warn test");
+        logger.error("error test");
+        logger.debug("debug test");
+        logger.success("success test");
+
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("info test"));
+        assert!(content.contains("warn test"));
+        assert!(content.contains("error test"));
+        assert!(content.contains("debug test"));
+        assert!(content.contains("success test"));
+    }
+
+    #[test]
+    fn test_print_message_no_log_file() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        // Without a log file, messages go to stderr only
+        logger.info("ephemeral message");
+        assert_eq!(logger.get_log_count(), 0); // No buffer without log file
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // metadata edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_depth_reached_keeps_max() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        logger.record_depth_reached(5);
+        logger.record_depth_reached(3);
+        logger.record_depth_reached(7);
+        logger.record_depth_reached(2);
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert_eq!(metadata.max_depth_reached, 7);
+    }
+
+    #[test]
+    fn test_txt_records_accumulate() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        logger.record_txt_records_found(10);
+        logger.record_txt_records_found(5);
+        logger.record_txt_records_found(3);
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert_eq!(metadata.total_txt_records_found, 18);
+    }
+
+    #[test]
+    fn test_domains_processed_accumulate() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        logger.record_domain_processed();
+        logger.record_domain_processed();
+        logger.record_domain_processed();
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert_eq!(metadata.total_domains_processed, 3);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // export_logs edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_export_logs_empty_buffer() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("empty.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+        // No messages logged
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // specialized log methods — more branch coverage
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_log_cache_hit_url_retrying() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("cache.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+        // Test the "(retrying)" branch
+        logger.log_cache_hit_url("https://example.com", "(retrying)");
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("retrying"));
+    }
+
+    #[test]
+    fn test_log_dns_lookup_success_zero_records() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("dns.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+        logger.log_dns_lookup_success("example.com", "doh", 0);
+        logger.export_logs().unwrap();
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("example.com"));
+    }
+
+    #[test]
+    fn test_verbosity_level_debug() {
+        let debug_str = format!("{:?}", VerbosityLevel::Debug);
+        assert_eq!(debug_str, "Debug");
+    }
+
+    #[test]
+    fn test_verbosity_level_clone() {
+        let level = VerbosityLevel::Detailed;
+        let cloned = level.clone();
+        assert_eq!(level, cloned);
+    }
+
+    #[tokio::test]
+    async fn test_progress_without_start() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Debug);
+        // Calling update/advance without starting should not panic
+        logger.update_progress("no-op").await;
+        logger.advance_progress(5).await;
+        let pos = logger.get_progress_position().await;
+        assert_eq!(pos, 0);
+    }
+
+    #[tokio::test]
+    async fn test_convert_spinner_to_progress_without_spinner() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        // Convert without starting spinner first
+        logger.convert_to_progress(100).await;
+        logger.finish_progress("done").await;
+    }
+}

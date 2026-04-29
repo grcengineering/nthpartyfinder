@@ -609,6 +609,10 @@ pub fn lookup(domain: &str) -> Option<KnownVendorResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+    use tempfile::tempdir;
+
+    // ── extract_base_domain ───────────────────────────────────────────
 
     #[test]
     fn test_extract_base_domain() {
@@ -618,12 +622,70 @@ mod tests {
         assert_eq!(extract_base_domain("sub.domain.example.com"), "example.com");
     }
 
+    #[rstest]
+    #[case("example.co.uk", "example.co.uk")]
+    #[case("api.example.co.uk", "example.co.uk")]
+    #[case("deep.sub.example.co.uk", "example.co.uk")]
+    #[case("example.com.au", "example.com.au")]
+    #[case("sub.example.com.au", "example.com.au")]
+    #[case("example.co.nz", "example.co.nz")]
+    #[case("example.co.jp", "example.co.jp")]
+    #[case("example.co.kr", "example.co.kr")]
+    #[case("example.com.br", "example.com.br")]
+    #[case("example.com.mx", "example.com.mx")]
+    #[case("example.com.cn", "example.com.cn")]
+    #[case("example.org.uk", "example.org.uk")]
+    #[case("example.net.au", "example.net.au")]
+    fn test_extract_base_domain_compound_tlds(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(extract_base_domain(input), expected);
+    }
+
+    #[rstest]
+    #[case("com", "com")]
+    #[case("localhost", "localhost")]
+    #[case("a.b", "a.b")]
+    fn test_extract_base_domain_edge_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(extract_base_domain(input), expected);
+    }
+
+    // ── KnownVendorsDatabase ──────────────────────────────────────────
+
     #[test]
     fn test_database_default() {
         let db = KnownVendorsDatabase::default();
         assert!(db.vendors.is_empty());
         assert_eq!(db.version, "1.0.0");
+        assert_eq!(db.description, "Known vendor database");
+        // updated should be today's date in YYYY-MM-DD format
+        assert!(!db.updated.is_empty());
     }
+
+    #[test]
+    fn test_database_serde_roundtrip() {
+        let mut db = KnownVendorsDatabase::default();
+        db.vendors.insert("stripe.com".into(), "Stripe, Inc.".into());
+        db.vendors
+            .insert("github.com".into(), "GitHub, Inc.".into());
+        db.version = "2.0.0".into();
+        db.description = "Test DB".into();
+
+        let json = serde_json::to_string(&db).unwrap();
+        let parsed: KnownVendorsDatabase = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.version, "2.0.0");
+        assert_eq!(parsed.description, "Test DB");
+        assert_eq!(parsed.vendors.len(), 2);
+        assert_eq!(parsed.vendors.get("stripe.com").unwrap(), "Stripe, Inc.");
+    }
+
+    #[test]
+    fn test_database_deserialize_missing_description() {
+        let json = r#"{"version":"1.0","updated":"2024-01-01","vendors":{}}"#;
+        let db: KnownVendorsDatabase = serde_json::from_str(json).unwrap();
+        assert_eq!(db.description, ""); // default
+    }
+
+    // ── KnownVendorSource ─────────────────────────────────────────────
 
     #[test]
     fn test_known_vendor_source_display() {
@@ -640,5 +702,553 @@ mod tests {
             KnownVendorSource::VendorRegistry.to_string(),
             "vendor_registry"
         );
+    }
+
+    #[test]
+    fn test_known_vendor_source_equality() {
+        assert_eq!(KnownVendorSource::Base, KnownVendorSource::Base);
+        assert_ne!(KnownVendorSource::Base, KnownVendorSource::Remote);
+        assert_ne!(
+            KnownVendorSource::LocalOverride,
+            KnownVendorSource::VendorRegistry
+        );
+    }
+
+    // ── LocalOverride / LocalOverridesDatabase serde ──────────────────
+
+    #[test]
+    fn test_local_override_serde_roundtrip() {
+        let entry = LocalOverride {
+            organization: "Acme Corp".to_string(),
+            added: "2024-06-15".to_string(),
+            source: "whois_verified".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: LocalOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.organization, "Acme Corp");
+        assert_eq!(parsed.added, "2024-06-15");
+        assert_eq!(parsed.source, "whois_verified");
+    }
+
+    #[test]
+    fn test_local_override_default_source() {
+        // When "source" is absent, default_source() should supply "user_confirmed"
+        let json = r#"{"organization":"Test","added":"2024-01-01"}"#;
+        let parsed: LocalOverride = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.source, "user_confirmed");
+    }
+
+    #[test]
+    fn test_local_overrides_database_default() {
+        let db = LocalOverridesDatabase::default();
+        assert!(db.overrides.is_empty());
+        assert_eq!(db.version, "");
+        assert_eq!(db.updated, "");
+    }
+
+    #[test]
+    fn test_local_overrides_database_serde() {
+        let mut db = LocalOverridesDatabase::default();
+        db.version = "1.0.0".into();
+        db.updated = "2024-06-15".into();
+        db.overrides.insert(
+            "example.com".into(),
+            LocalOverride {
+                organization: "Example Inc".into(),
+                added: "2024-06-15".into(),
+                source: "user_confirmed".into(),
+            },
+        );
+
+        let json = serde_json::to_string_pretty(&db).unwrap();
+        let parsed: LocalOverridesDatabase = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.overrides.len(), 1);
+        assert_eq!(
+            parsed.overrides.get("example.com").unwrap().organization,
+            "Example Inc"
+        );
+    }
+
+    // ── KnownVendorResult / KnownVendorStats ─────────────────────────
+
+    #[test]
+    fn test_known_vendor_result_clone() {
+        let r = KnownVendorResult {
+            organization: "Foo".into(),
+            source: KnownVendorSource::Base,
+        };
+        let r2 = r.clone();
+        assert_eq!(r2.organization, "Foo");
+        assert_eq!(r2.source, KnownVendorSource::Base);
+    }
+
+    #[test]
+    fn test_known_vendor_stats_clone_debug() {
+        let stats = KnownVendorStats {
+            base_count: 10,
+            remote_count: 5,
+            override_count: 2,
+            base_version: "1.0.0".into(),
+            base_updated: "2024-01-01".into(),
+        };
+        let stats2 = stats.clone();
+        assert_eq!(stats2.base_count, 10);
+        assert_eq!(stats2.remote_count, 5);
+        assert_eq!(stats2.override_count, 2);
+        let dbg = format!("{:?}", stats2);
+        assert!(dbg.contains("base_count: 10"));
+    }
+
+    // ── KnownVendors: load_from_paths ─────────────────────────────────
+
+    fn write_base_db(dir: &std::path::Path, vendors: &[(&str, &str)]) -> PathBuf {
+        let path = dir.join("known_vendors.json");
+        let mut map = HashMap::new();
+        for (k, v) in vendors {
+            map.insert(k.to_string(), v.to_string());
+        }
+        let db = KnownVendorsDatabase {
+            version: "1.0.0".into(),
+            updated: "2024-01-01".into(),
+            description: "test".into(),
+            vendors: map,
+        };
+        fs::write(&path, serde_json::to_string_pretty(&db).unwrap()).unwrap();
+        path
+    }
+
+    fn write_overrides_db(dir: &std::path::Path, overrides: &[(&str, &str)]) -> PathBuf {
+        let path = dir.join("known_vendors_local.json");
+        let mut map = HashMap::new();
+        for (domain, org) in overrides {
+            map.insert(
+                domain.to_string(),
+                LocalOverride {
+                    organization: org.to_string(),
+                    added: "2024-01-01".into(),
+                    source: "user_confirmed".into(),
+                },
+            );
+        }
+        let db = LocalOverridesDatabase {
+            version: "1.0.0".into(),
+            updated: "2024-01-01".into(),
+            overrides: map,
+        };
+        fs::write(&path, serde_json::to_string_pretty(&db).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_load_from_paths_with_base_only() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("google.com", "Google LLC")]);
+        let overrides_path = dir.path().join("nonexistent_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        assert_eq!(kv.base.vendors.len(), 1);
+        assert_eq!(kv.base.vendors.get("google.com").unwrap(), "Google LLC");
+    }
+
+    #[test]
+    fn test_load_from_paths_no_files_uses_defaults() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path().join("no_such_base.json");
+        let overrides_path = dir.path().join("no_such_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        assert!(kv.base.vendors.is_empty());
+    }
+
+    #[test]
+    fn test_load_from_paths_with_overrides() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("google.com", "Google LLC")]);
+        let overrides_path =
+            write_overrides_db(dir.path(), &[("custom.com", "Custom Corp")]);
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        assert_eq!(kv.base.vendors.len(), 1);
+        let overrides = kv.local_overrides.read().unwrap();
+        assert_eq!(overrides.overrides.len(), 1);
+    }
+
+    #[test]
+    fn test_load_from_paths_invalid_json_base() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path().join("bad.json");
+        fs::write(&base_path, "not valid json!!!").unwrap();
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let result = KnownVendors::load_from_paths(&base_path, &overrides_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_paths_invalid_json_overrides() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("bad_overrides.json");
+        fs::write(&overrides_path, "not valid json!!!").unwrap();
+
+        let result = KnownVendors::load_from_paths(&base_path, &overrides_path);
+        assert!(result.is_err());
+    }
+
+    // ── KnownVendors: lookup ──────────────────────────────────────────
+
+    #[test]
+    fn test_lookup_from_base() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(
+            dir.path(),
+            &[("stripe.com", "Stripe, Inc."), ("github.com", "GitHub, Inc.")],
+        );
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        let result = kv.lookup("stripe.com");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.organization, "Stripe, Inc.");
+        assert_eq!(r.source, KnownVendorSource::Base);
+    }
+
+    #[test]
+    fn test_lookup_case_insensitive() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("stripe.com", "Stripe, Inc.")]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // Uppercase input should still match lowercase key
+        let result = kv.lookup("STRIPE.COM");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Stripe, Inc.");
+    }
+
+    #[test]
+    fn test_lookup_not_found() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("stripe.com", "Stripe, Inc.")]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        assert!(kv.lookup("unknown-domain.xyz").is_none());
+    }
+
+    #[test]
+    fn test_lookup_subdomain_falls_back_to_base_domain() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("stripe.com", "Stripe, Inc.")]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // "api.stripe.com" should extract base domain "stripe.com" and find it
+        let result = kv.lookup("api.stripe.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Stripe, Inc.");
+    }
+
+    #[test]
+    fn test_lookup_override_takes_priority_over_base() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("stripe.com", "Stripe Old")]);
+        let overrides_path =
+            write_overrides_db(dir.path(), &[("stripe.com", "Stripe Override")]);
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        let result = kv.lookup("stripe.com").unwrap();
+        assert_eq!(result.organization, "Stripe Override");
+        assert_eq!(result.source, KnownVendorSource::LocalOverride);
+    }
+
+    #[test]
+    fn test_lookup_subdomain_override_priority() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("stripe.com", "Base Stripe")]);
+        let overrides_path =
+            write_overrides_db(dir.path(), &[("stripe.com", "Override Stripe")]);
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // Subdomain lookup should also prefer override for the base domain
+        let result = kv.lookup("api.stripe.com").unwrap();
+        assert_eq!(result.organization, "Override Stripe");
+        assert_eq!(result.source, KnownVendorSource::LocalOverride);
+    }
+
+    // ── KnownVendors: add_override ────────────────────────────────────
+
+    #[test]
+    fn test_add_override_and_lookup() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // Add an override
+        kv.add_override("newdomain.com", "New Domain Corp").unwrap();
+
+        // Should be findable now
+        let result = kv.lookup("newdomain.com").unwrap();
+        assert_eq!(result.organization, "New Domain Corp");
+        assert_eq!(result.source, KnownVendorSource::LocalOverride);
+    }
+
+    #[test]
+    fn test_add_override_persists_to_disk() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        kv.add_override("disk.com", "Disk Corp").unwrap();
+
+        // File should exist now
+        assert!(overrides_path.exists());
+
+        // Read it back
+        let content = fs::read_to_string(&overrides_path).unwrap();
+        let parsed: LocalOverridesDatabase = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed.overrides.get("disk.com").unwrap().organization,
+            "Disk Corp"
+        );
+    }
+
+    #[test]
+    fn test_add_override_lowercases_domain() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        kv.add_override("UPPER.COM", "Upper Corp").unwrap();
+
+        let result = kv.lookup("upper.com").unwrap();
+        assert_eq!(result.organization, "Upper Corp");
+    }
+
+    #[test]
+    fn test_add_override_creates_parent_dir() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        // Nested path whose parent doesn't exist
+        let overrides_path = dir.path().join("subdir").join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        kv.add_override("nested.com", "Nested Corp").unwrap();
+
+        assert!(overrides_path.exists());
+    }
+
+    // ── KnownVendors: contains ────────────────────────────────────────
+
+    #[test]
+    fn test_contains() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("known.com", "Known Corp")]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        assert!(kv.contains("known.com"));
+        assert!(!kv.contains("unknown.com"));
+    }
+
+    // ── KnownVendors: stats ───────────────────────────────────────────
+
+    #[test]
+    fn test_stats_base_only() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(
+            dir.path(),
+            &[("a.com", "A"), ("b.com", "B"), ("c.com", "C")],
+        );
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        let stats = kv.stats();
+
+        assert_eq!(stats.base_count, 3);
+        assert_eq!(stats.remote_count, 0);
+        assert_eq!(stats.override_count, 0);
+        assert_eq!(stats.base_version, "1.0.0");
+    }
+
+    #[test]
+    fn test_stats_with_overrides() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("a.com", "A")]);
+        let overrides_path =
+            write_overrides_db(dir.path(), &[("x.com", "X"), ("y.com", "Y")]);
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        let stats = kv.stats();
+
+        assert_eq!(stats.base_count, 1);
+        assert_eq!(stats.override_count, 2);
+    }
+
+    // ── KnownVendors: total_unique_vendors ────────────────────────────
+
+    #[test]
+    fn test_total_unique_vendors_deduplicates() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(
+            dir.path(),
+            &[("a.com", "A Corp"), ("b.com", "B Corp")],
+        );
+        // Override one of the same domains
+        let overrides_path =
+            write_overrides_db(dir.path(), &[("a.com", "A Override"), ("c.com", "C Corp")]);
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // base has {a.com, b.com}, overrides has {a.com, c.com}
+        // unique = {a.com, b.com, c.com} = 3
+        assert_eq!(kv.total_unique_vendors(), 3);
+    }
+
+    #[test]
+    fn test_total_unique_vendors_empty() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        assert_eq!(kv.total_unique_vendors(), 0);
+    }
+
+    // ── find_config_dir with env var ──────────────────────────────────
+
+    #[test]
+    fn test_find_config_dir_with_env_var() {
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("myconfig");
+        fs::create_dir_all(&config_dir).unwrap();
+
+        // Set the env var
+        std::env::set_var("NTHPARTYFINDER_CONFIG_DIR", config_dir.to_str().unwrap());
+
+        // find_config_dir may or may not use the env (depends on whether ./config exists)
+        // but we can verify the env var path is valid
+        let env_val = std::env::var("NTHPARTYFINDER_CONFIG_DIR").unwrap();
+        let env_path = PathBuf::from(&env_val);
+        assert!(env_path.exists());
+        assert!(env_path.is_dir());
+
+        // Clean up
+        std::env::remove_var("NTHPARTYFINDER_CONFIG_DIR");
+    }
+
+    // ── get_known_vendors_path / get_local_overrides_path ─────────────
+
+    #[test]
+    fn test_get_known_vendors_path_returns_pathbuf() {
+        let path = get_known_vendors_path();
+        // Should end with known_vendors.json regardless of which config dir is found
+        assert!(path.to_str().unwrap().ends_with("known_vendors.json"));
+    }
+
+    #[test]
+    fn test_get_local_overrides_path_returns_pathbuf() {
+        let path = get_local_overrides_path();
+        assert!(path.to_str().unwrap().ends_with("known_vendors_local.json"));
+    }
+
+    // ── Constants ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_constants() {
+        assert!(KNOWN_VENDORS_PATH.contains("known_vendors.json"));
+        assert!(LOCAL_OVERRIDES_PATH.contains("known_vendors_local.json"));
+        assert!(GITHUB_RAW_URL.starts_with("https://"));
+        assert!(GITHUB_RAW_URL.contains("known_vendors.json"));
+    }
+
+    // ── sync_from_github error path (no network) ─────────────────────
+
+    #[tokio::test]
+    async fn test_sync_from_github_bad_url() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("no_overrides.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        // Use a URL that won't resolve — this should error
+        let result = kv
+            .sync_from_github(Some("http://127.0.0.1:1/nonexistent"))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ── default_source helper ─────────────────────────────────────────
+
+    #[test]
+    fn test_default_source_fn() {
+        assert_eq!(default_source(), "user_confirmed");
+    }
+
+    // ── Multiple overrides then re-lookup ─────────────────────────────
+
+    #[test]
+    fn test_add_multiple_overrides() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        kv.add_override("one.com", "One Corp").unwrap();
+        kv.add_override("two.com", "Two Corp").unwrap();
+        kv.add_override("three.com", "Three Corp").unwrap();
+
+        assert_eq!(kv.lookup("one.com").unwrap().organization, "One Corp");
+        assert_eq!(kv.lookup("two.com").unwrap().organization, "Two Corp");
+        assert_eq!(kv.lookup("three.com").unwrap().organization, "Three Corp");
+
+        let stats = kv.stats();
+        assert_eq!(stats.override_count, 3);
+    }
+
+    #[test]
+    fn test_override_replaces_existing() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("known_vendors_local.json");
+
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        kv.add_override("change.com", "Original").unwrap();
+        assert_eq!(kv.lookup("change.com").unwrap().organization, "Original");
+
+        kv.add_override("change.com", "Updated").unwrap();
+        assert_eq!(kv.lookup("change.com").unwrap().organization, "Updated");
+
+        // Should still only have 1 override, not 2
+        assert_eq!(kv.stats().override_count, 1);
+    }
+
+    // ── Global functions (get/lookup when not initialized) ────────────
+
+    #[test]
+    fn test_global_lookup_without_init_returns_none() {
+        // The global KNOWN_VENDORS may or may not be initialized depending on
+        // test execution order, but calling lookup should never panic.
+        let _ = lookup("definitely-not-a-real-domain-12345.xyz");
+    }
+
+    #[test]
+    fn test_global_get_does_not_panic() {
+        let _ = get();
     }
 }

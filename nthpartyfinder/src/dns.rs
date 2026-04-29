@@ -1469,3 +1469,1140 @@ fn is_valid_domain(domain: &str) -> bool {
         && domain.len() <= 253
         && domain.len() >= 4
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[test]
+    fn test_extract_spf_records() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com include:sendgrid.net ~all".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(!results.is_empty());
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert!(domains.iter().any(|d| d.contains("google")));
+        assert!(domains.iter().any(|d| d.contains("sendgrid")));
+    }
+
+    #[test]
+    fn test_extract_verification_records() {
+        let records = vec![
+            "google-site-verification=abc123".to_string(),
+            "MS=ms12345678".to_string(),
+            "docusign=abcdef-1234-5678".to_string(),
+            "atlassian-domain-verification=abc123".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dmarc_record() {
+        let records = vec![
+            "v=DMARC1; p=reject; rua=mailto:dmarc@example.com; ruf=mailto:forensic@example.com".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        let _ = results;
+    }
+
+    #[test]
+    fn test_extract_dkim_record() {
+        let records = vec![
+            "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ...".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        let _ = results;
+    }
+
+    #[test]
+    fn test_extract_empty_records() {
+        let results = extract_vendor_domains_with_source(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_no_match_records() {
+        let records = vec!["just some random text".to_string()];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_with_logger() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "random-unmatched-record".to_string(),
+        ];
+        let results =
+            extract_vendor_domains_with_source_and_logger(&records, None, "example.com");
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dedup() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        let google_count = results.iter().filter(|r| r.domain.contains("google")).count();
+        assert_eq!(google_count, 1);
+    }
+
+    #[test]
+    fn test_extract_spf_multiple_includes() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com include:amazonses.com include:mailgun.org -all".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(results.len() >= 3);
+    }
+
+    #[test]
+    fn test_unescape_dns_txt() {
+        assert_eq!(unescape_dns_txt("hello"), "hello");
+        assert_eq!(unescape_dns_txt("he\\llo"), "hello");
+        assert_eq!(unescape_dns_txt("test\\\\value"), "test\\value");
+    }
+
+    #[rstest]
+    #[case("google.com", true)]
+    #[case("sub.domain.co.uk", true)]
+    #[case("_spf.google.com", true)]
+    #[case("", false)]
+    #[case("x", false)]
+    #[case("no-dot", false)]
+    #[case("a..b.com", false)]
+    fn test_is_valid_domain(#[case] domain: &str, #[case] expected: bool) {
+        assert_eq!(is_valid_domain(domain), expected, "domain: {}", domain);
+    }
+
+    #[test]
+    fn test_dns_server_pool_new() {
+        let pool = DnsServerPool::new();
+        let _ = pool;
+    }
+
+    #[test]
+    fn test_vendor_domain_source_types() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "google-site-verification=abc123".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        let spf_results: Vec<_> = results.iter().filter(|r| r.source_type == RecordType::DnsTxtSpf).collect();
+        let verification_results: Vec<_> = results.iter().filter(|r| r.source_type == RecordType::DnsTxtVerification).collect();
+        assert!(!spf_results.is_empty());
+        assert!(!verification_results.is_empty());
+    }
+
+    // ====================================================================
+    // Additional inline tests for private helper functions
+    // ====================================================================
+
+    // --- unescape_dns_txt edge cases ---
+
+    #[test]
+    fn test_unescape_dns_txt_empty() {
+        assert_eq!(unescape_dns_txt(""), "");
+    }
+
+    #[test]
+    fn test_unescape_dns_txt_trailing_backslash() {
+        // Trailing backslash with nothing after it
+        assert_eq!(unescape_dns_txt("test\\"), "test");
+    }
+
+    #[test]
+    fn test_unescape_dns_txt_escaped_quote() {
+        assert_eq!(unescape_dns_txt(r#"say \"hello\""#), r#"say "hello""#);
+    }
+
+    #[test]
+    fn test_unescape_dns_txt_escaped_underscore() {
+        assert_eq!(unescape_dns_txt("test\\_value"), "test_value");
+    }
+
+    // --- strip_spf_macros ---
+
+    #[test]
+    fn test_strip_spf_macros_simple() {
+        assert_eq!(strip_spf_macros("%{ir}.%{v}.domain.com"), "domain.com");
+    }
+
+    #[test]
+    fn test_strip_spf_macros_no_macros() {
+        assert_eq!(strip_spf_macros("_spf.google.com"), "_spf.google.com");
+    }
+
+    #[test]
+    fn test_strip_spf_macros_with_numbers() {
+        // SPF macros can have optional digit modifiers
+        assert_eq!(strip_spf_macros("%{d4r}.example.com"), "example.com");
+    }
+
+    // --- is_valid_domain edge cases ---
+
+    #[test]
+    fn test_is_valid_domain_trailing_dot() {
+        assert!(!is_valid_domain("example.com."));
+    }
+
+    #[test]
+    fn test_is_valid_domain_consecutive_dots() {
+        assert!(!is_valid_domain("example..com"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_too_long() {
+        let long_domain = format!("{}.com", "a".repeat(250));
+        assert!(!is_valid_domain(&long_domain));
+    }
+
+    #[test]
+    fn test_is_valid_domain_underscore_prefix() {
+        assert!(is_valid_domain("_spf.google.com"));
+        assert!(is_valid_domain("_dmarc.example.com"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_minimum_length() {
+        // 4 chars minimum: a.co
+        assert!(is_valid_domain("a.co"));
+        // 3 chars: too short
+        assert!(!is_valid_domain("a.c"));
+    }
+
+    // --- extract_from_spf_record ---
+
+    #[test]
+    fn test_extract_from_spf_non_spf_record() {
+        assert!(extract_from_spf_record("not an spf record", None, "", "").is_none());
+    }
+
+    #[test]
+    fn test_extract_from_spf_case_insensitive() {
+        // RFC compliance: V=SPF1 should also match
+        let result = extract_from_spf_record(
+            "V=SPF1 include:_spf.google.com ~all",
+            None,
+            "test.com",
+            "V=SPF1 include:_spf.google.com ~all",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_spf_redirect() {
+        let result = extract_from_spf_record(
+            "v=spf1 redirect=_spf.example.com",
+            None,
+            "test.com",
+            "v=spf1 redirect=_spf.example.com",
+        );
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain.contains("example")));
+    }
+
+    #[test]
+    fn test_extract_from_spf_a_mechanism() {
+        let result = extract_from_spf_record(
+            "v=spf1 a:mail.example.com ~all",
+            None,
+            "test.com",
+            "v=spf1 a:mail.example.com ~all",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_spf_mx_mechanism() {
+        let result = extract_from_spf_record(
+            "v=spf1 mx:mx.example.com ~all",
+            None,
+            "test.com",
+            "v=spf1 mx:mx.example.com ~all",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_spf_exists_mechanism() {
+        let result = extract_from_spf_record(
+            "v=spf1 exists:example.com ~all",
+            None,
+            "test.com",
+            "v=spf1 exists:example.com ~all",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_spf_ptr_mechanism() {
+        let result = extract_from_spf_record(
+            "v=spf1 ptr:example.com ~all",
+            None,
+            "test.com",
+            "v=spf1 ptr:example.com ~all",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_spf_with_macros() {
+        let result = extract_from_spf_record(
+            "v=spf1 exists:%{ir}.%{v}.%{d}.spf.has.pphosted.com ~all",
+            None,
+            "test.com",
+            "v=spf1 exists:%{ir}.%{v}.%{d}.spf.has.pphosted.com ~all",
+        );
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        // After macro stripping, should extract pphosted.com base domain
+        assert!(domains.iter().any(|d| d.domain.contains("pphosted")));
+    }
+
+    #[test]
+    fn test_extract_from_spf_no_domains() {
+        // SPF record with only ip4/ip6 mechanisms - no domains to extract
+        let result = extract_from_spf_record(
+            "v=spf1 ip4:192.168.1.0/24 ip6:::1 ~all",
+            None,
+            "test.com",
+            "v=spf1 ip4:192.168.1.0/24 ~all",
+        );
+        assert!(result.is_none());
+    }
+
+    // --- extract_from_dkim_record ---
+
+    #[test]
+    fn test_extract_from_dkim_non_dkim() {
+        assert!(extract_from_dkim_record("not a dkim record", None, "", "").is_none());
+    }
+
+    #[test]
+    fn test_extract_from_dkim_no_domains() {
+        // DKIM record with public key but no domain references
+        let result = extract_from_dkim_record(
+            "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBA; h=sha256; s=email",
+            None,
+            "test.com",
+            "DKIM record",
+        );
+        // h=sha256 and s=email don't contain dots, so no domains extracted
+        assert!(result.is_none());
+    }
+
+    // --- extract_from_dmarc_record ---
+
+    #[test]
+    fn test_extract_from_dmarc_non_dmarc() {
+        assert!(extract_from_dmarc_record("not a dmarc record", None, "", "").is_none());
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_case_insensitive() {
+        let result = extract_from_dmarc_record(
+            "V=DMARC1; p=reject; rua=mailto:reports@example.com",
+            None,
+            "test.com",
+            "V=DMARC1; p=reject; rua=mailto:reports@example.com",
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_multiple_mailto() {
+        let result = extract_from_dmarc_record(
+            "v=DMARC1; p=reject; rua=mailto:a@domain1.com,mailto:b@domain2.com; ruf=mailto:c@domain3.com",
+            None,
+            "test.com",
+            "dmarc record",
+        );
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        let domain_strs: Vec<&str> = domains.iter().map(|d| d.domain.as_str()).collect();
+        assert!(domain_strs.contains(&"domain1.com"));
+        assert!(domain_strs.contains(&"domain2.com"));
+        assert!(domain_strs.contains(&"domain3.com"));
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_no_mailto() {
+        let result = extract_from_dmarc_record(
+            "v=DMARC1; p=none; sp=none",
+            None,
+            "test.com",
+            "v=DMARC1; p=none",
+        );
+        assert!(result.is_none());
+    }
+
+    // --- extract_from_verification_record ---
+
+    #[test]
+    fn test_extract_from_verification_record_no_match() {
+        assert!(extract_from_verification_record("random text", None, "", "").is_none());
+    }
+
+    // --- try_static_verification_patterns ---
+
+    #[rstest]
+    #[case("facebook-domain-verification=abc123", "facebook.com")]
+    #[case("apple-domain-verification=abc123", "apple.com")]
+    #[case("adobe-idp-site-verification=abc123", "adobe.com")]
+    #[case("stripe-verification=abc123", "stripe.com")]
+    #[case("docusign=abc123", "docusign.com")]
+    #[case("dropbox-domain-verification=abc123", "dropbox.com")]
+    #[case("ZOOM_verify_abc123", "zoom.us")]
+    #[case("atlassian-domain-verification=abc123", "atlassian.com")]
+    #[case("slack-domain-verification=abc123", "slack.com")]
+    #[case("hubspot-domain-verification=abc123", "hubspot.com")]
+    #[case("openai-domain-verification=abc123", "openai.com")]
+    #[case("notion-domain-verification=abc123", "notion.so")]
+    #[case("anthropic-domain-verification=abc123", "anthropic.com")]
+    #[case("jetbrains-domain-verification=abc123", "jetbrains.com")]
+    #[case("heroku-domain-verification=abc123", "heroku.com")]
+    #[case("jamf-site-verification=abc123", "jamf.com")]
+    #[case("intacct-esk=abc123", "sage.com")]
+    #[case("mgverify=abc123", "mailgun.com")]
+    #[case("have-i-been-pwned-verification=abc123", "haveibeenpwned.com")]
+    fn test_static_verification_patterns(#[case] record: &str, #[case] expected_domain: &str) {
+        let result = try_static_verification_patterns(record, None, "", record);
+        assert!(result.is_some(), "Should match pattern: {}", record);
+        let domains = result.unwrap();
+        assert!(
+            domains.iter().any(|d| d.domain == expected_domain),
+            "Expected {} for record {}, got {:?}",
+            expected_domain,
+            record,
+            domains.iter().map(|d| &d.domain).collect::<Vec<_>>()
+        );
+    }
+
+    // --- infer_provider_domain ---
+
+    #[rstest]
+    #[case("google", Some("google.com"))]
+    #[case("zoom", Some("zoom.us"))]
+    #[case("notion", Some("notion.so"))]
+    #[case("datadome", Some("datadome.co"))]
+    #[case("aws", Some("amazon.com"))]
+    #[case("azure", Some("microsoft.com"))]
+    #[case("sendgrid", Some("sendgrid.com"))]
+    #[case("mailchimp", Some("mailchimp.com"))]
+    #[case("intercom", Some("intercom.com"))]
+    fn test_infer_provider_domain(#[case] provider: &str, #[case] expected: Option<&str>) {
+        assert_eq!(
+            infer_provider_domain(provider),
+            expected.map(|s| s.to_string()),
+            "provider: {}",
+            provider
+        );
+    }
+
+    #[test]
+    fn test_infer_provider_domain_unknown() {
+        // Short names or unknown providers
+        assert_eq!(infer_provider_domain("ab"), None);
+        assert_eq!(infer_provider_domain("unknown_xyz"), None);
+    }
+
+    #[test]
+    fn test_infer_provider_domain_known_fallback() {
+        // Providers that get .com appended as fallback
+        assert_eq!(infer_provider_domain("freshdesk"), Some("freshdesk.com".to_string()));
+        assert_eq!(infer_provider_domain("typeform"), Some("typeform.com".to_string()));
+    }
+
+    // --- try_dynamic_verification_patterns ---
+
+    #[test]
+    fn test_dynamic_verification_known_provider() {
+        let result = try_dynamic_verification_patterns(
+            "github-domain-verification=abc123",
+            None,
+            "",
+            "github-domain-verification=abc123",
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().iter().any(|d| d.domain == "github.com"));
+    }
+
+    #[test]
+    fn test_dynamic_verification_site_verification_pattern() {
+        let result = try_dynamic_verification_patterns(
+            "okta-site-verification=abc123",
+            None,
+            "",
+            "okta-site-verification=abc123",
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().iter().any(|d| d.domain == "okta.com"));
+    }
+
+    #[test]
+    fn test_dynamic_verification_prefix_pattern() {
+        let result = try_dynamic_verification_patterns(
+            "verification-sentry=abc123",
+            None,
+            "",
+            "verification-sentry=abc123",
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().iter().any(|d| d.domain == "sentry.io"));
+    }
+
+    // --- collect_spf_targets ---
+
+    #[test]
+    fn test_collect_spf_targets_basic() {
+        let mut targets = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        collect_spf_targets(
+            "v=spf1 include:spf.protection.outlook.com redirect=_spf.example.com ~all",
+            &mut targets,
+            &mut visited,
+        );
+        assert!(targets.contains(&"spf.protection.outlook.com".to_string()));
+        assert!(targets.contains(&"_spf.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_collect_spf_targets_dedup() {
+        let mut targets = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        collect_spf_targets(
+            "v=spf1 include:spf.google.com include:spf.google.com ~all",
+            &mut targets,
+            &mut visited,
+        );
+        // Should only appear once
+        assert_eq!(
+            targets.iter().filter(|t| t.contains("google")).count(),
+            1
+        );
+    }
+
+    // --- LogFailure trait with logger ---
+
+    struct TestLogger {
+        failures: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TestLogger {
+        fn new() -> Self {
+            Self {
+                failures: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl LogFailure for TestLogger {
+        fn log_failure(
+            &self,
+            source_domain: &str,
+            record_type: &str,
+            raw_record: &str,
+            extracted_service: Option<&str>,
+            failure_reason: &str,
+        ) {
+            self.failures.lock().unwrap().push(format!(
+                "{}:{}:{}:{}:{}",
+                source_domain,
+                record_type,
+                raw_record,
+                extracted_service.unwrap_or("none"),
+                failure_reason
+            ));
+        }
+    }
+
+    #[test]
+    fn test_extract_with_logger_logs_unmatched() {
+        let logger = TestLogger::new();
+        let records = vec![
+            "some-unmatched-but-long-enough-record".to_string(),
+        ];
+        let _ = extract_vendor_domains_with_source_and_logger(
+            &records,
+            Some(&logger),
+            "example.com",
+        );
+        let failures = logger.failures.lock().unwrap();
+        assert!(!failures.is_empty(), "Should log unmatched records");
+        assert!(failures[0].contains("UNMATCHED_TXT"));
+    }
+
+    #[test]
+    fn test_extract_with_logger_skips_short_unmatched() {
+        let logger = TestLogger::new();
+        let records = vec!["short".to_string()];
+        let _ = extract_vendor_domains_with_source_and_logger(
+            &records,
+            Some(&logger),
+            "example.com",
+        );
+        let failures = logger.failures.lock().unwrap();
+        assert!(failures.is_empty(), "Should not log short unmatched records");
+    }
+
+    // --- DnsServerPool default ---
+
+    #[test]
+    fn test_dns_server_pool_default() {
+        let pool = DnsServerPool::default();
+        assert!(!pool.doh_servers.is_empty());
+        assert!(!pool.dns_servers.is_empty());
+    }
+
+    #[test]
+    fn test_dns_server_pool_with_test_urls() {
+        let pool = DnsServerPool::with_test_urls(vec![
+            "http://localhost:8080/dns".to_string(),
+            "http://localhost:8081/dns".to_string(),
+        ]);
+        assert_eq!(pool.doh_servers.len(), 2);
+        assert_eq!(pool.doh_servers[0].name, "Test DoH Server 1");
+        assert_eq!(pool.doh_servers[1].name, "Test DoH Server 2");
+    }
+
+    // --- DnsServerPool rotation ---
+
+    #[test]
+    fn test_dns_server_pool_rotation() {
+        let pool = DnsServerPool::new();
+        let first = pool.next_doh_server().name.clone();
+        let second = pool.next_doh_server().name.clone();
+        // Should rotate to different servers
+        assert_ne!(first, second, "Should rotate between servers");
+    }
+
+    #[test]
+    fn test_dns_server_pool_dns_rotation() {
+        let pool = DnsServerPool::new();
+        let first = pool.next_dns_server().name.clone();
+        let second = pool.next_dns_server().name.clone();
+        assert_ne!(first, second, "DNS servers should rotate");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // is_valid_domain — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_valid_domain_empty() {
+        assert!(!is_valid_domain(""));
+    }
+
+    #[test]
+    fn test_is_valid_domain_single_label() {
+        assert!(!is_valid_domain("localhost"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_length_253() {
+        // Exactly at the limit
+        let label = "a".repeat(60);
+        let domain = format!("{}.{}.{}.{}.com", label, label, label, label);
+        // This should be true if total <= 253
+        if domain.len() <= 253 {
+            assert!(is_valid_domain(&domain));
+        }
+    }
+
+    #[test]
+    fn test_is_valid_domain_length_too_long() {
+        let label = "a".repeat(63);
+        let domain = format!("{}.{}.{}.{}.com", label, label, label, label);
+        // This should be false if total > 253
+        if domain.len() > 253 {
+            assert!(!is_valid_domain(&domain));
+        }
+    }
+
+    #[test]
+    fn test_is_valid_domain_spf_underscore_prefix() {
+        // SPF delegation domains use underscore prefixes
+        assert!(is_valid_domain("_spf.google.com"));
+        assert!(is_valid_domain("_dmarc.example.com"));
+        assert!(is_valid_domain("_domainkey.example.com"));
+    }
+
+    #[test]
+    fn test_is_valid_domain_three_char_minimum() {
+        assert!(!is_valid_domain("a.b")); // len < 4
+        assert!(is_valid_domain("ab.cd")); // len == 5
+    }
+
+    #[test]
+    fn test_is_valid_domain_hyphen_in_label() {
+        assert!(is_valid_domain("my-domain.com"));
+        assert!(is_valid_domain("sub-domain.example.com"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // unescape_dns_txt — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_unescape_dns_txt_no_escapes() {
+        assert_eq!(unescape_dns_txt("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_unescape_dns_txt_double_backslash() {
+        assert_eq!(unescape_dns_txt("path\\\\file"), "path\\file");
+    }
+
+    #[test]
+    fn test_unescape_dns_txt_mixed_escapes() {
+        assert_eq!(unescape_dns_txt(r#"v=spf1 include:\_spf.google.com"#), "v=spf1 include:_spf.google.com");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // strip_spf_macros — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_strip_spf_macros_multiple_macros() {
+        let input = "%{ir}.%{v}.%{d}.spf.has.pphosted.com";
+        let result = strip_spf_macros(input);
+        assert_eq!(result, "spf.has.pphosted.com");
+    }
+
+    #[test]
+    fn test_strip_spf_macros_empty() {
+        assert_eq!(strip_spf_macros(""), "");
+    }
+
+    #[test]
+    fn test_strip_spf_macros_only_macros() {
+        let result = strip_spf_macros("%{ir}.%{v}.");
+        assert!(result.is_empty() || result == ".");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_spf_record — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_from_spf_record_with_macros() {
+        let record = "v=spf1 exists:%{ir}.%{v}.%{d}.spf.has.pphosted.com ~all";
+        let result = extract_from_spf_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain.contains("pphosted.com")));
+    }
+
+    #[test]
+    fn test_extract_from_spf_all_mechanism_types() {
+        let record = "v=spf1 include:spf.protection.outlook.com a:mail.example.com mx:mx.example.com ptr:ptr.example.com redirect=redirect.example.com ~all";
+        let result = extract_from_spf_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        // Should have extracted from include, a, mx, ptr, and redirect
+        assert!(domains.len() >= 4);
+    }
+
+    #[test]
+    fn test_extract_from_spf_empty_record() {
+        let record = "v=spf1 ~all";
+        let result = extract_from_spf_record(record, None, "test.com", record);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_spf_with_ip4_mechanisms() {
+        // ip4 mechanisms should be ignored (they're IPs, not domains)
+        let record = "v=spf1 ip4:192.168.1.0/24 include:_spf.google.com ~all";
+        let result = extract_from_spf_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        // Should only extract from include, not from ip4
+        assert!(domains.iter().all(|d| !d.domain.contains("192.168")));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_dkim_record — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_from_dkim_record_rsa_only() {
+        let record = "k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ";
+        let result = extract_from_dkim_record(record, None, "test.com", record);
+        // The p= value is a base64 key, not a domain, so should be None
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_dkim_record_ed25519() {
+        let record = "k=ed25519; p=dGVzdA==";
+        let result = extract_from_dkim_record(record, None, "test.com", record);
+        assert!(result.is_none()); // No valid domains in key material
+    }
+
+    #[test]
+    fn test_extract_from_dkim_record_not_dkim() {
+        let record = "This is not a DKIM record at all";
+        let result = extract_from_dkim_record(record, None, "test.com", record);
+        assert!(result.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_dmarc_record — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_from_dmarc_record_rua_and_ruf() {
+        let record = "v=DMARC1; p=quarantine; rua=mailto:dmarc@agari.com; ruf=mailto:forensics@proofpoint.com";
+        let result = extract_from_dmarc_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "agari.com"));
+        assert!(domains.iter().any(|d| d.domain == "proofpoint.com"));
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_record_sp_tag_not_extracted() {
+        // sp= contains policy values, not domains
+        let record = "v=DMARC1; p=reject; sp=quarantine; rua=mailto:dmarc@example.com";
+        let result = extract_from_dmarc_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        // sp=quarantine should NOT produce a domain
+        assert!(domains.iter().all(|d| d.domain != "quarantine"));
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_record_mixed_case() {
+        let record = "V=DMARC1; p=reject; RUA=mailto:report@dmarcian.com";
+        let result = extract_from_dmarc_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "dmarcian.com"));
+    }
+
+    #[test]
+    fn test_extract_from_dmarc_record_no_mailto() {
+        let record = "v=DMARC1; p=none";
+        let result = extract_from_dmarc_record(record, None, "test.com", record);
+        assert!(result.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_verification_record — static patterns
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_verification_record_stripe() {
+        let record = "stripe-verification=abc123def";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "stripe.com"));
+    }
+
+    #[test]
+    fn test_verification_record_zoom() {
+        let record = "ZOOM_verify_abc123";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "zoom.us"));
+    }
+
+    #[test]
+    fn test_verification_record_anthropic() {
+        let record = "anthropic-domain-verification=xyz789";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "anthropic.com"));
+    }
+
+    #[test]
+    fn test_verification_record_whimsical_angle_bracket() {
+        let record = "<whimsical=abc123>";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "whimsical.com"));
+    }
+
+    #[test]
+    fn test_verification_record_mailgun() {
+        let record = "mgverify=abc123";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "mailgun.com"));
+    }
+
+    #[test]
+    fn test_verification_record_sage_intacct() {
+        let record = "intacct-esk=abc123";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "sage.com"));
+    }
+
+    #[test]
+    fn test_verification_record_no_match() {
+        let record = "some-random-text-not-a-verification-record";
+        let result = extract_from_verification_record(record, None, "test.com", record);
+        assert!(result.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // infer_provider_domain — additional cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_infer_provider_domain_cloud_providers() {
+        assert_eq!(infer_provider_domain("aws"), Some("amazon.com".to_string()));
+        assert_eq!(infer_provider_domain("gcp"), Some("google.com".to_string()));
+        assert_eq!(infer_provider_domain("azure"), Some("microsoft.com".to_string()));
+    }
+
+    #[test]
+    fn test_infer_provider_domain_common_saas() {
+        assert_eq!(infer_provider_domain("salesforce"), Some("salesforce.com".to_string()));
+        assert_eq!(infer_provider_domain("shopify"), Some("shopify.com".to_string()));
+        assert_eq!(infer_provider_domain("zendesk"), Some("zendesk.com".to_string()));
+    }
+
+    #[test]
+    fn test_infer_provider_domain_known_fallback_com_providers() {
+        assert_eq!(infer_provider_domain("sendgrid"), Some("sendgrid.com".to_string()));
+        assert_eq!(infer_provider_domain("mailchimp"), Some("mailchimp.com".to_string()));
+        assert_eq!(infer_provider_domain("intercom"), Some("intercom.com".to_string()));
+        assert_eq!(infer_provider_domain("typeform"), Some("typeform.com".to_string()));
+    }
+
+    #[test]
+    fn test_infer_provider_domain_returns_none_for_unknown() {
+        assert_eq!(infer_provider_domain("xyzunknownprovider"), None);
+        assert_eq!(infer_provider_domain("ab"), None); // too short
+    }
+
+    #[test]
+    fn test_infer_provider_domain_security_vendors() {
+        assert_eq!(infer_provider_domain("sentry"), Some("sentry.io".to_string()));
+        assert_eq!(infer_provider_domain("okta"), Some("okta.com".to_string()));
+        assert_eq!(infer_provider_domain("auth0"), Some("auth0.com".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // try_dynamic_verification_patterns — edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_dynamic_verification_domain_verification_pattern() {
+        let record = "hubspot-domain-verification=abc123";
+        let result = try_dynamic_verification_patterns(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "hubspot.com"));
+    }
+
+    #[test]
+    fn test_dynamic_verification_verification_prefix() {
+        let record = "verification-sentry=abc123";
+        let result = try_dynamic_verification_patterns(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "sentry.io"));
+    }
+
+    #[test]
+    fn test_dynamic_verification_provider_verify_uppercase() {
+        let record = "TWILIO_verify_abc123";
+        let result = try_dynamic_verification_patterns(record, None, "test.com", record);
+        assert!(result.is_some());
+        let domains = result.unwrap();
+        assert!(domains.iter().any(|d| d.domain == "twilio.com"));
+    }
+
+    #[test]
+    fn test_dynamic_verification_unknown_provider() {
+        let record = "unknownxyz-domain-verification=abc123";
+        let result = try_dynamic_verification_patterns(record, None, "test.com", record);
+        // Unknown provider should not produce results
+        assert!(result.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // collect_spf_targets — additional edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_collect_spf_targets_with_macros() {
+        let record = "v=spf1 include:%{ir}._spf.google.com redirect=_spf.salesforce.com ~all";
+        let mut to_resolve = Vec::new();
+        let mut visited = HashSet::new();
+        collect_spf_targets(record, &mut to_resolve, &mut visited);
+        // Should strip macros and collect valid targets
+        assert!(to_resolve.iter().any(|t| t.contains("google.com")));
+        assert!(to_resolve.iter().any(|t| t.contains("salesforce.com")));
+    }
+
+    #[test]
+    fn test_collect_spf_targets_no_targets() {
+        let record = "v=spf1 ip4:192.168.1.0/24 ~all";
+        let mut to_resolve = Vec::new();
+        let mut visited = HashSet::new();
+        collect_spf_targets(record, &mut to_resolve, &mut visited);
+        assert!(to_resolve.is_empty());
+    }
+
+    #[test]
+    fn test_collect_spf_targets_visited_dedup() {
+        let record = "v=spf1 include:_spf.google.com include:_spf.google.com ~all";
+        let mut to_resolve = Vec::new();
+        let mut visited = HashSet::new();
+        collect_spf_targets(record, &mut to_resolve, &mut visited);
+        // Should only have one entry despite duplicate includes
+        let google_count = to_resolve.iter().filter(|t| t.contains("google")).count();
+        assert_eq!(google_count, 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_vendor_domains_with_source — integration edge cases
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_extract_vendor_domains_multiple_record_types() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "google-site-verification=abc123".to_string(),
+            "v=DMARC1; p=reject; rua=mailto:report@proofpoint.com".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(results.len() >= 3); // At least one from each record type
+        let source_types: Vec<String> = results.iter().map(|r| r.source_type.as_hierarchy_string()).collect();
+        assert!(source_types.iter().any(|t| t.contains("SPF")));
+        assert!(source_types.iter().any(|t| t.contains("VERIFICATION")));
+        assert!(source_types.iter().any(|t| t.contains("DMARC")));
+    }
+
+    #[test]
+    fn test_extract_vendor_domains_empty_records() {
+        let records: Vec<String> = vec![];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_vendor_domains_quoted_records() {
+        // DNS TXT records are often wrapped in quotes
+        let records = vec![
+            "\"v=spf1 include:_spf.google.com ~all\"".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_vendor_domains_dedup_same_entry() {
+        let records = vec![
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+            "v=spf1 include:_spf.google.com ~all".to_string(),
+        ];
+        let results = extract_vendor_domains_with_source(&records);
+        // Should deduplicate identical entries
+        let google_count = results.iter().filter(|r| r.domain.contains("google")).count();
+        assert_eq!(google_count, 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VendorDomain struct and RecordType coverage
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_vendor_domain_debug() {
+        let vd = VendorDomain {
+            domain: "stripe.com".to_string(),
+            source_type: RecordType::DnsTxtSpf,
+            raw_record: "v=spf1 include:stripe.com".to_string(),
+        };
+        let debug_str = format!("{:?}", vd);
+        assert!(debug_str.contains("stripe.com"));
+    }
+
+    #[test]
+    fn test_vendor_domain_fields() {
+        let vd = VendorDomain {
+            domain: "stripe.com".to_string(),
+            source_type: RecordType::DnsTxtSpf,
+            raw_record: "v=spf1 include:stripe.com".to_string(),
+        };
+        assert_eq!(vd.domain, "stripe.com");
+        assert_eq!(vd.raw_record, "v=spf1 include:stripe.com");
+        assert_eq!(vd.source_type.as_hierarchy_string(), RecordType::DnsTxtSpf.as_hierarchy_string());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DnsServerPool — additional coverage
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_dns_server_pool_wraps_around() {
+        let pool = DnsServerPool::new();
+        let server_count = pool.doh_servers.len();
+        // Access one more than the total to trigger wrap-around
+        let mut names: Vec<String> = Vec::new();
+        for _ in 0..=server_count {
+            names.push(pool.next_doh_server().name.clone());
+        }
+        // The (server_count+1)th should wrap back to the first
+        assert_eq!(names[0], names[server_count]);
+    }
+
+    #[test]
+    fn test_dns_server_pool_dns_wraps_around() {
+        let pool = DnsServerPool::new();
+        let server_count = pool.dns_servers.len();
+        let mut names: Vec<String> = Vec::new();
+        for _ in 0..=server_count {
+            names.push(pool.next_dns_server().name.clone());
+        }
+        assert_eq!(names[0], names[server_count]);
+    }
+
+    #[test]
+    fn test_dns_server_pool_test_urls_empty() {
+        let pool = DnsServerPool::with_test_urls(vec![]);
+        assert!(pool.doh_servers.is_empty());
+    }
+
+    #[test]
+    fn test_doh_server_config_fields() {
+        let config = DohServerConfig {
+            url: "https://dns.google/dns-query".to_string(),
+            name: "Google DoH".to_string(),
+            timeout_secs: 3,
+        };
+        assert_eq!(config.url, "https://dns.google/dns-query");
+        assert_eq!(config.name, "Google DoH");
+        assert_eq!(config.timeout_secs, 3);
+    }
+
+    #[test]
+    fn test_dns_server_config_fields() {
+        let config = DnsServerConfig {
+            address: "1.1.1.1:53".to_string(),
+            name: "Cloudflare".to_string(),
+            timeout_secs: 2,
+        };
+        assert_eq!(config.address, "1.1.1.1:53");
+        assert_eq!(config.name, "Cloudflare");
+        assert_eq!(config.timeout_secs, 2);
+    }
+}

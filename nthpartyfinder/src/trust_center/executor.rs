@@ -725,4 +725,429 @@ mod tests {
             "Should return empty map when no canonical_assets"
         );
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- extract_domain_from_url_text edge cases ---
+
+    #[test]
+    fn test_extract_domain_from_url_text_whitespace() {
+        assert_eq!(extract_domain_from_url_text("   "), None);
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_bare_domain() {
+        assert_eq!(
+            extract_domain_from_url_text("example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_www_prefix() {
+        assert_eq!(
+            extract_domain_from_url_text("www.example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_http_scheme() {
+        assert_eq!(
+            extract_domain_from_url_text("http://example.com/path"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_no_dots() {
+        assert_eq!(extract_domain_from_url_text("localhost"), None);
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_too_short() {
+        // "a.b" is 3 chars which passes the len > 3 check as false, but
+        // the function adds https:// scheme and parses it - "a.b" has a dot
+        // and is treated as a valid domain by the fallback check (len > 3 fails).
+        // Actually "a.b".len() == 3, and the check is > 3, so it returns None? No:
+        // url::Url::parse("https://a.b") succeeds with host "a.b" which contains '.'
+        // but the result host "a.b" doesn't pass the last-resort check (len == 3, not > 3).
+        // The function tries the URL parse path first though, which succeeds.
+        // Let's just verify the actual behavior:
+        assert_eq!(extract_domain_from_url_text("a.b"), Some("a.b".to_string()));
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_too_long() {
+        let long_domain = format!("{}.com", "a".repeat(100));
+        // 104 chars, under 100 but the text itself is > 3 and < 100
+        assert!(extract_domain_from_url_text(&long_domain).is_some());
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_spaces() {
+        assert_eq!(extract_domain_from_url_text("not a domain"), None);
+    }
+
+    // --- resolve_slug ---
+
+    #[test]
+    fn test_resolve_slug_multiple_placeholders() {
+        assert_eq!(
+            resolve_slug("https://api.com/{{slug}}/{{slug}}/data", Some("acme")),
+            "https://api.com/acme/acme/data"
+        );
+    }
+
+    #[test]
+    fn test_resolve_slug_no_placeholder() {
+        assert_eq!(
+            resolve_slug("https://api.com/data", Some("acme")),
+            "https://api.com/data"
+        );
+    }
+
+    // --- require_html ---
+
+    #[test]
+    fn test_require_html_with_content() {
+        let endpoint = EndpointConfig {
+            url: String::new(),
+            slug: None,
+            requires_browser: false,
+        };
+        let result = require_html(Some("<html>test</html>"), &endpoint);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "<html>test</html>");
+    }
+
+    #[test]
+    fn test_require_html_none_requires_browser() {
+        let endpoint = EndpointConfig {
+            url: String::new(),
+            slug: None,
+            requires_browser: true,
+        };
+        let result = require_html(None, &endpoint);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires browser"));
+    }
+
+    #[test]
+    fn test_require_html_none_no_browser() {
+        let endpoint = EndpointConfig {
+            url: String::new(),
+            slug: None,
+            requires_browser: false,
+        };
+        let result = require_html(None, &endpoint);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No HTML content"));
+    }
+
+    // --- extract_embedded_base64 ---
+
+    #[test]
+    fn test_extract_embedded_base64_valid() {
+        use base64::Engine;
+        let json = serde_json::json!({"key": "value"});
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string().as_bytes());
+        let html = format!(r#"data-payload="{}""#, b64);
+        let pattern = r#"data-payload="([A-Za-z0-9+/=]+)""#;
+        let result = extract_embedded_base64(&html, pattern);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().get("key").unwrap().as_str().unwrap(), "value");
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_invalid_pattern() {
+        let result = extract_embedded_base64("test", r"[invalid(");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid base64 locator"));
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_no_match() {
+        let result = extract_embedded_base64("no match here", r"data-x=([A-Za-z0-9+/=]+)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_no_capture_group() {
+        let result = extract_embedded_base64("abcdef", r"[a-f]+");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_invalid_base64() {
+        let html = r#"data-payload="!!!not-base64!!!""#;
+        let pattern = r#"data-payload="([^"]+)""#;
+        let result = extract_embedded_base64(html, pattern);
+        assert!(result.is_err());
+    }
+
+    // --- extract_embedded_js_object ---
+
+    #[test]
+    fn test_extract_embedded_js_object_valid() {
+        let html = r#"window.DATA = {"items": [1, 2, 3]};"#;
+        let pattern = r#"window\.DATA\s*=\s*(\{[^;]+\})"#;
+        let result = extract_embedded_js_object(html, pattern);
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val.get("items").unwrap().as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_extract_embedded_js_object_invalid_pattern() {
+        let result = extract_embedded_js_object("test", r"[invalid(");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedded_js_object_no_match() {
+        let result = extract_embedded_js_object("no match", r"window\.X\s*=\s*(\{.*\})");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedded_js_object_invalid_json() {
+        let html = r#"window.DATA = {not valid json};"#;
+        let pattern = r#"window\.DATA\s*=\s*(\{[^;]+\})"#;
+        let result = extract_embedded_js_object(html, pattern);
+        assert!(result.is_err());
+    }
+
+    // --- extract_hydration_data ---
+
+    #[test]
+    fn test_extract_hydration_data_valid() {
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"items":[1,2,3]}}
+            </script></body></html>"#;
+        let result = extract_hydration_data(html, "script#__NEXT_DATA__", "props.items");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_extract_hydration_data_invalid_selector() {
+        let result = extract_hydration_data("<html></html>", "???invalid", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_hydration_data_missing_element() {
+        let result = extract_hydration_data("<html><body></body></html>", "script#missing", "");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_extract_hydration_data_invalid_json() {
+        let html = r#"<html><body>
+            <script id="data">not json</script>
+        </body></html>"#;
+        let result = extract_hydration_data(html, "script#data", "");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_hydration_data_path_not_found() {
+        let html = r#"<html><body>
+            <script id="data" type="application/json">
+            {"a":{"b":1}}
+            </script>
+        </body></html>"#;
+        let result = extract_hydration_data(html, "script#data", "a.c.d");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found in hydration"));
+    }
+
+    // --- extract_subprocessors_from_json edge cases ---
+
+    #[test]
+    fn test_extract_subprocessors_missing_path() {
+        let json = serde_json::json!({"other": "data"});
+        let mapping = ResponseMapping {
+            subprocessors_path: "data.subprocessors".to_string(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_subprocessors_not_array() {
+        let json = serde_json::json!({"data": {"subprocessors": "not an array"}});
+        let mapping = ResponseMapping {
+            subprocessors_path: "data.subprocessors".to_string(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_subprocessors_short_name_skipped() {
+        let json = serde_json::json!({
+            "data": [
+                {"name": "A"},
+                {"name": "OK Corp"},
+                {"name": ""}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "data".to_string(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        // "A" (1 char) and "" should be skipped
+        assert_eq!(result.len(), 1);
+        assert!(result[0].domain.contains("OK Corp"));
+    }
+
+    #[test]
+    fn test_extract_subprocessors_no_url_uses_org_prefix() {
+        let json = serde_json::json!({
+            "items": [
+                {"name": "Vendor Corp"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "_org:Vendor Corp");
+    }
+
+    #[test]
+    fn test_extract_subprocessors_empty_evidence_fields() {
+        let json = serde_json::json!({
+            "items": [
+                {"name": "TestVendor", "url": "https://test.com"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: Some("url".to_string()),
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        // With empty evidence_fields, evidence should be the name
+        assert_eq!(result[0].raw_record, "TestVendor");
+    }
+
+    // --- resolve_canonical_asset edge cases ---
+
+    #[test]
+    fn test_resolve_canonical_asset_missing_id() {
+        let item = serde_json::json!({"description": "Cloud"});
+        let lookup = std::collections::HashMap::new();
+        let mapping = ResponseMapping {
+            subprocessors_path: String::new(),
+            name_field: "name".to_string(),
+            url_field: Some("website".to_string()),
+            purpose_field: Some("description".to_string()),
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let (name, domain, evidence) = resolve_canonical_asset(&item, &lookup, &mapping);
+        assert!(name.is_none());
+        assert!(domain.is_none());
+        assert!(evidence.is_none());
+    }
+
+    #[test]
+    fn test_resolve_canonical_asset_no_description() {
+        let item = serde_json::json!({"canonical_asset_id": "ca1"});
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("ca1".to_string(), CanonicalAsset {
+            name: "AWS".to_string(),
+            website: Some("https://aws.amazon.com".to_string()),
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: String::new(),
+            name_field: "name".to_string(),
+            url_field: Some("website".to_string()),
+            purpose_field: Some("description".to_string()),
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let (name, domain, evidence) = resolve_canonical_asset(&item, &lookup, &mapping);
+        assert_eq!(name, Some("AWS".to_string()));
+        assert_eq!(domain, Some("aws.amazon.com".to_string()));
+        // Evidence should be just name when no description
+        assert_eq!(evidence, Some("AWS".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_canonical_asset_no_website() {
+        let item = serde_json::json!({"canonical_asset_id": "ca1", "description": "Cloud"});
+        let mut lookup = std::collections::HashMap::new();
+        lookup.insert("ca1".to_string(), CanonicalAsset {
+            name: "AWS".to_string(),
+            website: None,
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: String::new(),
+            name_field: "name".to_string(),
+            url_field: Some("website".to_string()),
+            purpose_field: Some("description".to_string()),
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let (name, domain, evidence) = resolve_canonical_asset(&item, &lookup, &mapping);
+        assert_eq!(name, Some("AWS".to_string()));
+        assert!(domain.is_none());
+        assert_eq!(evidence, Some("AWS | Cloud".to_string()));
+    }
+
+    // --- extract_subprocessors empty root path ---
+
+    #[test]
+    fn test_extract_subprocessors_empty_path() {
+        // When subprocessors_path is empty, navigate_json_path returns the root
+        let json = serde_json::json!([
+            {"name": "AWS", "url": "https://aws.amazon.com"},
+            {"name": "GCP", "url": "https://cloud.google.com"},
+            {"name": "Azure", "url": "https://azure.microsoft.com"}
+        ]);
+        let mapping = ResponseMapping {
+            subprocessors_path: String::new(),
+            name_field: "name".to_string(),
+            url_field: Some("url".to_string()),
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec!["name".to_string()],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 3);
+    }
 }

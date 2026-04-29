@@ -1322,4 +1322,657 @@ mod tests {
         let html_no_slug = r#"window.APP_CONFIG = {"key":"value"};"#;
         assert_eq!(extract_conveyor_slug(html_no_slug), None);
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- is_likely_spa edge cases ---
+
+    #[test]
+    fn test_is_likely_spa_empty_html() {
+        assert!(!is_likely_spa(""));
+    }
+
+    #[test]
+    fn test_is_likely_spa_low_text_ratio() {
+        // Construct HTML with lots of tags and very little text content
+        let mut html = String::from("<html><head>");
+        for _ in 0..200 {
+            html.push_str("<link rel=\"stylesheet\" href=\"style.css\">");
+        }
+        html.push_str("</head><body>x</body></html>");
+        // The text ratio should be very low, and html_len > 1000
+        assert!(html.len() > 1000);
+        assert!(is_likely_spa(&html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_framework_markers() {
+        let markers = vec![
+            r#"<div id="root"></div>"#,
+            r#"<div data-reactroot></div>"#,
+            r#"<script>window.__nuxt__={}</script>"#,
+            r#"<div ng-app="myApp"></div>"#,
+            r#"<div id="app"></div>"#,
+        ];
+        for marker_html in markers {
+            let html = format!("<html><head></head><body>{}</body></html>", marker_html);
+            assert!(is_likely_spa(&html), "Should detect SPA for marker: {}", marker_html);
+        }
+    }
+
+    #[test]
+    fn test_is_likely_spa_body_scripts_only() {
+        // Body with only scripts and no visible content elements
+        let html = r#"<html><head><title>Test</title></head>
+            <body id="body">
+            <script src="/bundle.js"></script>
+            <script>window.init()</script>
+            </body></html>"#;
+        assert!(is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_body_with_visible_content() {
+        // Body with div and scripts - should NOT be detected as SPA
+        // because it has visible content elements
+        let html = r#"<html><head><title>Test</title></head>
+            <body>
+            <div>Hello world</div>
+            <script src="/bundle.js"></script>
+            </body></html>"#;
+        assert!(!is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_body_no_closing_tag() {
+        // Body with scripts but no </body> closing tag - should still detect
+        let html = r#"<html><head></head>
+            <body>
+            <script src="/app.js"></script>
+            <script>init()</script>"#;
+        assert!(is_likely_spa(html));
+    }
+
+    // --- extract_slug_from_url edge cases ---
+
+    #[test]
+    fn test_extract_slug_from_url_non_slug_paths() {
+        // First path segment is a known non-slug
+        assert_eq!(extract_slug_from_url("https://example.com/api/v1"), None);
+        assert_eq!(extract_slug_from_url("https://example.com/trust/center"), None);
+        assert_eq!(extract_slug_from_url("https://example.com/security/info"), None);
+        assert_eq!(extract_slug_from_url("https://example.com/legal/terms"), None);
+        assert_eq!(extract_slug_from_url("https://example.com/privacy/policy"), None);
+        assert_eq!(extract_slug_from_url("https://example.com/subprocessors"), None);
+    }
+
+    #[test]
+    fn test_extract_slug_from_url_with_slug() {
+        assert_eq!(
+            extract_slug_from_url("https://trust.vanta.com/mycompany/trust"),
+            Some("mycompany".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_slug_from_url_invalid_url() {
+        assert_eq!(extract_slug_from_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_extract_slug_from_url_root_path() {
+        // Single segment path
+        assert_eq!(extract_slug_from_url("https://example.com/"), None);
+    }
+
+    // --- extract_graphql_operation ---
+
+    #[test]
+    fn test_extract_graphql_operation_with_operation_name() {
+        assert_eq!(
+            extract_graphql_operation("https://api.example.com/graphql?operationName=GetSubprocessors"),
+            Some("GetSubprocessors".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_graphql_operation_with_operation_param() {
+        assert_eq!(
+            extract_graphql_operation("https://api.example.com/graphql?operation=ListVendors"),
+            Some("ListVendors".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_graphql_operation_no_param() {
+        assert_eq!(
+            extract_graphql_operation("https://api.example.com/graphql"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_graphql_operation_invalid_url() {
+        assert_eq!(extract_graphql_operation("not-a-url"), None);
+    }
+
+    // --- extract_js_object_assignment ---
+
+    #[test]
+    fn test_extract_js_object_simple() {
+        let html = r#"window.MY_VAR = {"key": "value"};"#;
+        let result = extract_js_object_assignment(html, "MY_VAR");
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert_eq!(val.get("key").unwrap().as_str().unwrap(), "value");
+    }
+
+    #[test]
+    fn test_extract_js_object_nested_braces() {
+        let html = r#"window.DATA = {"outer": {"inner": {"deep": true}}};"#;
+        let result = extract_js_object_assignment(html, "DATA");
+        assert!(result.is_some());
+        let val = result.unwrap();
+        assert!(val.get("outer").unwrap().get("inner").unwrap().get("deep").unwrap().as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_extract_js_object_with_strings_containing_braces() {
+        let html = r#"window.TEST = {"text": "hello {world}"};"#;
+        let result = extract_js_object_assignment(html, "TEST");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().get("text").unwrap().as_str().unwrap(), "hello {world}");
+    }
+
+    #[test]
+    fn test_extract_js_object_not_found() {
+        let html = r#"window.OTHER = {"key": "value"};"#;
+        assert!(extract_js_object_assignment(html, "MISSING").is_none());
+    }
+
+    #[test]
+    fn test_extract_js_object_no_equals() {
+        let html = r#"window.MY_VAR {"key": "value"};"#;
+        assert!(extract_js_object_assignment(html, "MY_VAR").is_none());
+    }
+
+    #[test]
+    fn test_extract_js_object_not_object() {
+        let html = r#"window.MY_VAR = "string_value";"#;
+        assert!(extract_js_object_assignment(html, "MY_VAR").is_none());
+    }
+
+    #[test]
+    fn test_extract_js_object_with_escaped_quotes() {
+        let html = r#"window.DATA = {"text": "say \"hello\""};"#;
+        let result = extract_js_object_assignment(html, "DATA");
+        assert!(result.is_some());
+    }
+
+    // --- count_conveyor_subprocessors ---
+
+    #[test]
+    fn test_count_conveyor_subprocessors_with_data() {
+        let html = r#"window.VENDOR_REPORT = {"_embedded":{"subprocessors":[
+            {"id":"s1"},{"id":"s2"},{"id":"s3"}
+        ]}};"#;
+        assert_eq!(count_conveyor_subprocessors(html), 3);
+    }
+
+    #[test]
+    fn test_count_conveyor_subprocessors_no_report() {
+        assert_eq!(count_conveyor_subprocessors("nothing here"), 0);
+    }
+
+    #[test]
+    fn test_count_conveyor_subprocessors_no_embedded() {
+        let html = r#"window.VENDOR_REPORT = {"data": "something"};"#;
+        assert_eq!(count_conveyor_subprocessors(html), 0);
+    }
+
+    // --- discover_via_html_patterns ---
+
+    #[test]
+    fn test_discover_via_html_patterns_empty() {
+        let result = discover_via_html_patterns("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_discover_via_html_patterns_plain_html() {
+        let html = "<html><body><p>Hello world</p></body></html>";
+        let result = discover_via_html_patterns(html).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_discover_via_html_patterns_safebase_takes_priority() {
+        // SafeBase HTML should be detected by SafeBase probe, not generic Next.js probe
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"acme","name":"Acme","show":true,
+                    "raw":{"spData":{"items":{
+                        "uid-1":{"listEntries":[
+                            {"company":{"name":"AWS","domain":"aws.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"GCP","domain":"cloud.google.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"Stripe","domain":"stripe.com"},"purpose":"Pay","location":"US"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script></body></html>"#;
+
+        let result = discover_via_html_patterns(html).unwrap();
+        assert!(!result.is_empty());
+        // The SafeBase candidate should have high score
+        let best = result.iter().max_by(|a, b| a.score.partial_cmp(&b.score).unwrap()).unwrap();
+        assert!(best.score >= 0.9);
+    }
+
+    // --- probe_next_data edge cases ---
+
+    #[test]
+    fn test_probe_next_data_no_script() {
+        assert!(probe_next_data("<html><body>no script</body></html>").is_none());
+    }
+
+    #[test]
+    fn test_probe_next_data_invalid_json() {
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {invalid json}
+            </script></body></html>"#;
+        assert!(probe_next_data(html).is_none());
+    }
+
+    #[test]
+    fn test_probe_next_data_no_arrays() {
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"title":"Hello"}}}
+            </script></body></html>"#;
+        assert!(probe_next_data(html).is_none());
+    }
+
+    #[test]
+    fn test_probe_next_data_small_array_low_score() {
+        // Array exists but doesn't look like subprocessors
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"items":[
+                {"x":1}, {"x":2}, {"x":3}
+            ]}}}
+            </script></body></html>"#;
+        // These items have no name/url/purpose fields, so score will be low
+        assert!(probe_next_data(html).is_none());
+    }
+
+    // --- probe_json_script_tags ---
+
+    #[test]
+    fn test_probe_json_script_tags_empty() {
+        let mut candidates = Vec::new();
+        probe_json_script_tags("<html><body></body></html>", &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_short_content() {
+        let html = r#"<html><body>
+            <script type="application/json">{"a":1}</script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(candidates.is_empty()); // Too short (< 50 chars)
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_with_subprocessor_data() {
+        let html = r#"<html><body>
+            <script type="application/json">
+            {"subprocessors":[
+                {"name":"AWS","url":"https://aws.amazon.com","purpose":"Cloud infrastructure"},
+                {"name":"Cloudflare","url":"https://cloudflare.com","purpose":"CDN and security"},
+                {"name":"Datadog","url":"https://datadoghq.com","purpose":"Monitoring services"},
+                {"name":"Stripe","url":"https://stripe.com","purpose":"Payment processing"},
+                {"name":"Google","url":"https://google.com","purpose":"Analytics and search"}
+            ]}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(!candidates.is_empty());
+        assert!(candidates[0].score >= 0.4);
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_invalid_json() {
+        let html = r#"<html><body>
+            <script type="application/json">
+            this is not json but it is longer than fifty characters so it will attempt to parse
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    // --- probe_base64_blobs ---
+
+    #[test]
+    fn test_probe_base64_blobs_empty() {
+        let mut candidates = Vec::new();
+        probe_base64_blobs("<html><body></body></html>", &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_with_valid_data() {
+        use base64::Engine;
+        let json_data = serde_json::json!({"vendors":[
+            {"name":"AWS","url":"https://aws.amazon.com","purpose":"Cloud infrastructure hosting"},
+            {"name":"Cloudflare","url":"https://cloudflare.com","purpose":"CDN and DDoS protection"},
+            {"name":"Datadog","url":"https://datadoghq.com","purpose":"Application monitoring"},
+            {"name":"Stripe","url":"https://stripe.com","purpose":"Payment processing"},
+            {"name":"Okta","url":"https://okta.com","purpose":"Identity management"}
+        ]});
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json_data.to_string().as_bytes());
+        let html = format!(
+            r#"<html><body><script>var data = atob("{}");</script></body></html>"#,
+            b64
+        );
+        let mut candidates = Vec::new();
+        probe_base64_blobs(&html, &mut candidates);
+        assert!(!candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_invalid_base64() {
+        // atob with non-base64 content
+        let html = r#"<html><body><script>var x = atob("!!!not-base64-at-all-but-long-enough-to-match-the-regex-pattern-here!!!");</script></body></html>"#;
+        let mut candidates = Vec::new();
+        probe_base64_blobs(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    // --- probe_js_object_assignments ---
+
+    #[test]
+    fn test_probe_js_object_assignments_empty() {
+        let mut candidates = Vec::new();
+        probe_js_object_assignments("<html><body></body></html>", &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    // --- analyze_intercepted_responses ---
+
+    #[test]
+    fn test_analyze_intercepted_responses_empty() {
+        let result = analyze_intercepted_responses(&[], "https://example.com").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_intercepted_responses_invalid_json() {
+        let responses = vec![InterceptedResponse {
+            url: "https://api.example.com/data".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            body: "not valid json".to_string(),
+            request_url: "https://api.example.com/data".to_string(),
+            request_method: "GET".to_string(),
+            request_body: None,
+        }];
+        let result = analyze_intercepted_responses(&responses, "https://example.com").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_intercepted_responses_with_subprocessors() {
+        let body = serde_json::json!({
+            "subprocessors": [
+                {"name": "AWS", "url": "https://aws.amazon.com", "purpose": "Cloud hosting and infrastructure"},
+                {"name": "Cloudflare", "url": "https://cloudflare.com", "purpose": "CDN and security services"},
+                {"name": "Datadog", "url": "https://datadoghq.com", "purpose": "Application monitoring tools"},
+                {"name": "Stripe", "url": "https://stripe.com", "purpose": "Payment processing services"},
+                {"name": "Google", "url": "https://google.com", "purpose": "Analytics and advertising"}
+            ]
+        }).to_string();
+
+        let responses = vec![InterceptedResponse {
+            url: "https://api.example.com/trust/data".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            body,
+            request_url: "https://api.example.com/trust/data".to_string(),
+            request_method: "GET".to_string(),
+            request_body: None,
+        }];
+
+        let result = analyze_intercepted_responses(&responses, "https://trust.example.com/acme/subprocessors").unwrap();
+        assert!(!result.is_empty());
+        let candidate = &result[0];
+        assert!(candidate.score >= 0.4);
+        assert_eq!(candidate.item_count, 5);
+        // Should extract slug from page URL
+        assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_intercepted_responses_graphql_url() {
+        let body = serde_json::json!({
+            "data": {
+                "vendors": [
+                    {"name": "AWS", "url": "https://aws.amazon.com", "purpose": "Cloud"},
+                    {"name": "GCP", "url": "https://cloud.google.com", "purpose": "Cloud"},
+                    {"name": "Azure", "url": "https://azure.microsoft.com", "purpose": "Cloud"},
+                    {"name": "Stripe", "url": "https://stripe.com", "purpose": "Payments"},
+                    {"name": "Datadog", "url": "https://datadoghq.com", "purpose": "Monitoring"}
+                ]
+            }
+        }).to_string();
+
+        let responses = vec![InterceptedResponse {
+            url: "https://api.example.com/graphql?operationName=GetVendors".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            body,
+            request_url: "https://api.example.com/graphql?operationName=GetVendors".to_string(),
+            request_method: "POST".to_string(),
+            request_body: Some(r#"{"query":"query GetVendors { vendors { name } }"}"#.to_string()),
+        }];
+
+        let result = analyze_intercepted_responses(&responses, "https://trust.example.com/subprocessors").unwrap();
+        assert!(!result.is_empty());
+        let candidate = &result[0];
+        // Strategy type should be GraphQL
+        match &candidate.strategy.strategy_type {
+            StrategyType::GraphqlApi { operation_name, .. } => {
+                assert_eq!(operation_name.as_deref(), Some("GetVendors"));
+            }
+            _ => panic!("Expected GraphqlApi strategy for GraphQL URL"),
+        }
+    }
+
+    #[test]
+    fn test_analyze_intercepted_responses_low_score_skipped() {
+        // JSON with arrays but no name/url fields - low score
+        let body = serde_json::json!({
+            "numbers": [
+                {"x": 1, "y": 2},
+                {"x": 3, "y": 4},
+                {"x": 5, "y": 6},
+                {"x": 7, "y": 8},
+                {"x": 9, "y": 10}
+            ]
+        }).to_string();
+
+        let responses = vec![InterceptedResponse {
+            url: "https://api.example.com/data".to_string(),
+            status: 200,
+            content_type: "application/json".to_string(),
+            body,
+            request_url: "https://api.example.com/data".to_string(),
+            request_method: "GET".to_string(),
+            request_body: None,
+        }];
+
+        let result = analyze_intercepted_responses(&responses, "https://example.com").unwrap();
+        // The items don't have name fields, so they should score below 0.4 and be skipped
+        assert!(result.is_empty());
+    }
+
+    // --- discover_strategy ---
+
+    #[tokio::test]
+    async fn test_discover_strategy_strong_html_candidate() {
+        // If HTML patterns find a strong candidate (score >= 0.7),
+        // it should return immediately without browser probes
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"test","name":"Test","show":true,
+                    "raw":{"spData":{"items":{
+                        "uid-1":{"listEntries":[
+                            {"company":{"name":"A","domain":"a.com"},"purpose":"P","location":"US"},
+                            {"company":{"name":"B","domain":"b.com"},"purpose":"P","location":"US"},
+                            {"company":{"name":"C","domain":"c.com"},"purpose":"P","location":"US"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script></body></html>"#;
+
+        let result = discover_strategy("https://trust.example.com/test", html).await.unwrap();
+        assert!(result.is_some());
+        let strategy = result.unwrap();
+        // Should be HydrationData (from SafeBase probe)
+        match &strategy.strategy_type {
+            StrategyType::HydrationData { .. } => {}
+            other => panic!("Expected HydrationData, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_strategy_no_candidates() {
+        let html = "<html><body><p>Nothing useful here</p></body></html>";
+        let result = discover_strategy("https://example.com/page", html).await.unwrap();
+        // No network interception candidates either (browser won't launch in test),
+        // so result should be None
+        assert!(result.is_none());
+    }
+
+    // --- SafeBase edge cases ---
+
+    #[test]
+    fn test_probe_safebase_missing_next_data() {
+        // Has __SB_CONFIG__ but no __NEXT_DATA__
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {"NEXT_PUBLIC_SITE":"https://app.safebase.io"};</script>
+            <div id="__next">Hello</div>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_invalid_json() {
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {invalid json content here}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_no_products() {
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{}}}}}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_product_no_items() {
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"test","name":"Test","show":true,
+                    "raw":{"spData":{}}
+                }
+            }}}}}}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_too_few_entries() {
+        // listEntries with fewer than 3 items should be skipped
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"test","name":"Test","show":true,
+                    "raw":{"spData":{"items":{
+                        "uid-1":{"listEntries":[
+                            {"company":{"name":"A","domain":"a.com"},"purpose":"P","location":"US"},
+                            {"company":{"name":"B","domain":"b.com"},"purpose":"P","location":"US"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_product_default_show() {
+        // Product without explicit "show" field should default to true
+        let html = r#"<html><body>
+            <script>window.__SB_CONFIG__ = {};</script>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"orgInfo":{"sp":{"products":{
+                "default":{
+                    "id":"default","slug":"acme","name":"Acme",
+                    "raw":{"spData":{"items":{
+                        "uid-1":{"listEntries":[
+                            {"company":{"name":"AWS","domain":"aws.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"GCP","domain":"gcp.com"},"purpose":"Cloud","location":"US"},
+                            {"company":{"name":"Azure","domain":"azure.com"},"purpose":"Cloud","location":"US"}
+                        ]}
+                    }}}
+                }
+            }}}}}}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert_eq!(candidates.len(), 1, "Product without 'show' should default to visible");
+    }
 }

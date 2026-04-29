@@ -149,4 +149,81 @@ mod tests {
         let status = monitor.status_string();
         assert!(status.contains("GB"));
     }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn test_memory_usage_pct() {
+        let mut monitor = MemoryMonitor::new(10);
+        let pct = monitor.memory_usage_pct();
+        // Should be between 0 and 100 on any real system
+        assert!(pct >= 0.0, "Memory usage should be >= 0");
+        assert!(pct <= 100.0, "Memory usage should be <= 100");
+    }
+
+    #[test]
+    fn test_effective_concurrency_handle() {
+        let monitor = MemoryMonitor::new(20);
+        let handle = monitor.effective_concurrency_handle();
+        assert_eq!(
+            handle.load(std::sync::atomic::Ordering::Relaxed),
+            20
+        );
+    }
+
+    #[test]
+    fn test_pressure_level_equality() {
+        assert_eq!(PressureLevel::Normal, PressureLevel::Normal);
+        assert_eq!(PressureLevel::Warning, PressureLevel::Warning);
+        assert_eq!(PressureLevel::Critical, PressureLevel::Critical);
+        assert_ne!(PressureLevel::Normal, PressureLevel::Warning);
+        assert_ne!(PressureLevel::Warning, PressureLevel::Critical);
+    }
+
+    #[test]
+    fn test_base_concurrency_one() {
+        let mut monitor = MemoryMonitor::new(1);
+        assert_eq!(monitor.base_concurrency(), 1);
+        let (level, concurrency) = monitor.check();
+        // With base=1, warning halves to 0 but max(1)=1, critical=1
+        match level {
+            PressureLevel::Normal => assert_eq!(concurrency, 1),
+            PressureLevel::Warning => assert_eq!(concurrency, 1), // max(0,1) = 1
+            PressureLevel::Critical => assert_eq!(concurrency, 1),
+        }
+    }
+
+    #[test]
+    fn test_effective_concurrency_updates_after_check() {
+        let mut monitor = MemoryMonitor::new(50);
+        let handle = monitor.effective_concurrency_handle();
+
+        // Initial value
+        assert_eq!(handle.load(std::sync::atomic::Ordering::Relaxed), 50);
+
+        // After check, it should be updated based on memory pressure
+        let (_, new_concurrency) = monitor.check();
+        assert_eq!(
+            handle.load(std::sync::atomic::Ordering::Relaxed),
+            new_concurrency
+        );
+    }
+
+    #[test]
+    fn test_status_string_format() {
+        let mut monitor = MemoryMonitor::new(10);
+        let status = monitor.status_string();
+        // Should contain "used" and "available" info
+        assert!(status.contains("used"), "Status should mention 'used': {}", status);
+        assert!(status.contains("available"), "Status should mention 'available': {}", status);
+    }
+
+    #[test]
+    fn test_large_base_concurrency() {
+        let monitor = MemoryMonitor::new(1000);
+        assert_eq!(monitor.base_concurrency(), 1000);
+        assert_eq!(monitor.effective_concurrency(), 1000);
+    }
 }

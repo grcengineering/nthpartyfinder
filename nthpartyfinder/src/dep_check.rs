@@ -498,6 +498,9 @@ pub fn download_onnx_runtime_interactive() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    // ── get_ort_download_info ─────────────────────────────────────────
 
     #[test]
     fn test_get_ort_download_info_returns_valid_url() {
@@ -509,12 +512,32 @@ mod tests {
     }
 
     #[test]
+    fn test_get_ort_download_info_contains_platform() {
+        let (os_name, arch, url) = get_ort_download_info();
+        // URL should contain both os and arch
+        assert!(url.contains(os_name));
+        assert!(url.contains(arch));
+        // URL should end with .tgz
+        assert!(url.ends_with(".tgz"));
+    }
+
+    // ── check_whois ───────────────────────────────────────────────────
+
+    #[test]
     fn test_check_whois_returns_result() {
         let result = check_whois();
         assert_eq!(result.name, "whois");
         // whois is available on macOS by default
         assert!(result.message.is_some());
     }
+
+    #[test]
+    fn test_check_whois_required_flag() {
+        let result = check_whois();
+        assert!(result.required, "whois should be marked as required");
+    }
+
+    // ── check_chrome ──────────────────────────────────────────────────
 
     #[test]
     fn test_check_chrome_returns_result() {
@@ -526,6 +549,40 @@ mod tests {
     }
 
     #[test]
+    fn test_check_chrome_message_content() {
+        let result = check_chrome();
+        let msg = result.message.unwrap();
+        if result.available {
+            // Should mention where it was found
+            assert!(msg.contains("Found"));
+        } else {
+            // Should contain install instructions
+            assert!(msg.contains("Chrome/Chromium not found"));
+        }
+    }
+
+    #[test]
+    fn test_check_chrome_with_env_var_nonexistent_path() {
+        // Save and set a bogus CHROME_PATH
+        let original = std::env::var("CHROME_PATH").ok();
+        std::env::set_var("CHROME_PATH", "/nonexistent/chrome/binary");
+
+        let result = check_chrome();
+        // The bogus path shouldn't make it "available" -- it should fall through
+        // (unless one of the system paths exists)
+        // Regardless, the function should not panic
+        assert_eq!(result.name, "Chrome/Chromium");
+
+        // Restore
+        match original {
+            Some(val) => std::env::set_var("CHROME_PATH", val),
+            None => std::env::remove_var("CHROME_PATH"),
+        }
+    }
+
+    // ── check_subfinder ───────────────────────────────────────────────
+
+    #[test]
     fn test_check_subfinder_returns_result() {
         let result = check_subfinder();
         assert_eq!(result.name, "subfinder");
@@ -534,12 +591,130 @@ mod tests {
     }
 
     #[test]
+    fn test_check_subfinder_message_content() {
+        let result = check_subfinder();
+        let msg = result.message.unwrap();
+        if result.available {
+            assert!(msg.contains("Found at"));
+        } else {
+            assert!(msg.contains("subfinder not found"));
+            assert!(msg.contains("projectdiscovery"));
+        }
+    }
+
+    // ── check_onnx_runtime ────────────────────────────────────────────
+
+    #[test]
     fn test_check_onnx_runtime_returns_result() {
         let result = check_onnx_runtime();
         assert_eq!(result.name, "ONNX Runtime");
         assert!(result.message.is_some());
         assert!(result.required);
     }
+
+    #[test]
+    fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
+        // Temporarily unset ORT_DYLIB_PATH so we exercise the search paths
+        let original = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::remove_var("ORT_DYLIB_PATH");
+
+        let result = check_onnx_runtime();
+        if !result.available {
+            let msg = result.message.unwrap();
+            assert!(msg.contains("ONNX Runtime not found"));
+            assert!(msg.contains("install"));
+        }
+
+        // Restore
+        if let Some(val) = original {
+            std::env::set_var("ORT_DYLIB_PATH", val);
+        }
+    }
+
+    // ── check_onnx_runtime_availability ───────────────────────────────
+
+    #[test]
+    fn test_check_onnx_runtime_availability_returns_bool() {
+        // Just ensure it doesn't panic and returns a bool
+        let _available: bool = check_onnx_runtime_availability();
+    }
+
+    // ── find_ort_in_directory ─────────────────────────────────────────
+
+    #[test]
+    fn test_find_ort_in_directory_nonexistent() {
+        let result = find_ort_in_directory(
+            std::path::Path::new("/nonexistent/path"),
+            "libonnxruntime.dylib",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_empty_dir() {
+        let dir = tempdir().unwrap();
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_flat_structure() {
+        let dir = tempdir().unwrap();
+        // Create onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.dylib
+        let ort_dir = dir
+            .path()
+            .join("onnxruntime-osx-arm64-1.20.1")
+            .join("lib");
+        std::fs::create_dir_all(&ort_dir).unwrap();
+        let lib_file = ort_dir.join("libonnxruntime.dylib");
+        std::fs::write(&lib_file, b"fake lib").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_some());
+        assert!(result.unwrap().ends_with("libonnxruntime.dylib"));
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_nested_structure() {
+        let dir = tempdir().unwrap();
+        // Create onnxruntime/onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.dylib
+        let nested_dir = dir
+            .path()
+            .join("onnxruntime")
+            .join("onnxruntime-osx-arm64-1.20.1")
+            .join("lib");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let lib_file = nested_dir.join("libonnxruntime.dylib");
+        std::fs::write(&lib_file, b"fake lib").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_non_ort_dirs_ignored() {
+        let dir = tempdir().unwrap();
+        // Create a directory that doesn't start with "onnxruntime"
+        let other_dir = dir.path().join("other-library").join("lib");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        std::fs::write(other_dir.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_onnxruntime_file_not_dir() {
+        let dir = tempdir().unwrap();
+        // Create a file (not dir) named onnxruntime-something
+        let file_path = dir.path().join("onnxruntime-fake");
+        std::fs::write(&file_path, b"not a directory").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_none());
+    }
+
+    // ── check_dependencies ────────────────────────────────────────────
 
     #[test]
     fn test_check_dependencies_disabled_features_passes() {
@@ -557,11 +732,473 @@ mod tests {
     }
 
     #[test]
-    fn test_find_ort_in_directory_nonexistent() {
-        let result = find_ort_in_directory(
-            std::path::Path::new("/nonexistent/path"),
-            "libonnxruntime.dylib",
+    fn test_check_dependencies_disabled_returns_whois_only() {
+        let result = check_dependencies(
+            false, false, false, false, false, false, false,
         );
+        // With disable_slm=false and config_slm_enabled=false, SLM is not wanted
+        // Only whois should be checked
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        // At minimum, whois is always checked
+        assert!(results.iter().any(|r| r.name == "whois"));
+    }
+
+    #[test]
+    fn test_check_dependencies_web_org_includes_chrome() {
+        let result = check_dependencies(
+            false, // enable_slm
+            true,  // disable_slm
+            false, // enable_subdomain_discovery
+            true,  // enable_web_org
+            false, // enable_web_traffic_discovery
+            false, // config_slm_enabled
+            false, // config_subdomain_enabled
+        );
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "Chrome/Chromium"));
+    }
+
+    #[test]
+    fn test_check_dependencies_web_traffic_includes_chrome() {
+        let result = check_dependencies(
+            false, // enable_slm
+            true,  // disable_slm
+            false, // enable_subdomain_discovery
+            false, // enable_web_org
+            true,  // enable_web_traffic_discovery
+            false, // config_slm_enabled
+            false, // config_subdomain_enabled
+        );
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "Chrome/Chromium"));
+    }
+
+    #[test]
+    fn test_check_dependencies_subdomain_includes_subfinder() {
+        let result = check_dependencies(
+            false, // enable_slm
+            true,  // disable_slm
+            true,  // enable_subdomain_discovery
+            false, // enable_web_org
+            false, // enable_web_traffic_discovery
+            false, // config_slm_enabled
+            false, // config_subdomain_enabled
+        );
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "subfinder"));
+    }
+
+    #[test]
+    fn test_check_dependencies_config_subdomain_includes_subfinder() {
+        let result = check_dependencies(
+            false, // enable_slm
+            true,  // disable_slm
+            false, // enable_subdomain_discovery
+            false, // enable_web_org
+            false, // enable_web_traffic_discovery
+            false, // config_slm_enabled
+            true,  // config_subdomain_enabled
+        );
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "subfinder"));
+    }
+
+    #[test]
+    fn test_check_dependencies_slm_via_config_enables_ort_check() {
+        // enable_slm=false, disable_slm=false, config_slm_enabled=true
+        // => slm_wanted = true
+        let result = check_dependencies(
+            false, // enable_slm
+            false, // disable_slm
+            false, // enable_subdomain_discovery
+            false, // enable_web_org
+            false, // enable_web_traffic_discovery
+            true,  // config_slm_enabled
+            false, // config_subdomain_enabled
+        );
+        // This may error if ONNX is not installed, which is fine
+        // We just verify the function ran and included ORT check
+        match result {
+            Ok(results) => {
+                assert!(results.iter().any(|r| r.name == "ONNX Runtime"));
+            }
+            Err(err_msg) => {
+                assert!(err_msg.contains("ONNX Runtime"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_dependencies_enable_slm_flag() {
+        let result = check_dependencies(
+            true,  // enable_slm
+            false, // disable_slm
+            false, // enable_subdomain_discovery
+            false, // enable_web_org
+            false, // enable_web_traffic_discovery
+            false, // config_slm_enabled
+            false, // config_subdomain_enabled
+        );
+        match result {
+            Ok(results) => {
+                assert!(results.iter().any(|r| r.name == "ONNX Runtime"));
+            }
+            Err(err_msg) => {
+                assert!(err_msg.contains("ONNX Runtime"));
+            }
+        }
+    }
+
+    // ── DepCheckResult fields ─────────────────────────────────────────
+
+    #[test]
+    fn test_dep_check_result_debug() {
+        let r = DepCheckResult {
+            name: "test-tool",
+            available: true,
+            required: false,
+            message: Some("test msg".into()),
+        };
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("test-tool"));
+        assert!(dbg.contains("true"));
+    }
+
+    // ── ORT env var path ──────────────────────────────────────────────
+
+    #[test]
+    fn test_check_onnx_with_valid_env_path() {
+        let dir = tempdir().unwrap();
+        let fake_lib = dir.path().join("libonnxruntime.dylib");
+        std::fs::write(&fake_lib, b"fake ort lib").unwrap();
+
+        let original = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::set_var("ORT_DYLIB_PATH", fake_lib.to_str().unwrap());
+
+        let result = check_onnx_runtime();
+        assert!(result.available);
+        assert!(result.message.unwrap().contains("ORT_DYLIB_PATH"));
+
+        // Restore
+        match original {
+            Some(val) => std::env::set_var("ORT_DYLIB_PATH", val),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
+        }
+    }
+
+    #[test]
+    fn test_check_onnx_with_invalid_env_path() {
+        let original = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::set_var("ORT_DYLIB_PATH", "/nonexistent/libonnxruntime.dylib");
+
+        let result = check_onnx_runtime();
+        // Should fall through to search paths since the env path doesn't exist
+        assert_eq!(result.name, "ONNX Runtime");
+
+        // Restore
+        match original {
+            Some(val) => std::env::set_var("ORT_DYLIB_PATH", val),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
+        }
+    }
+
+    // ── Chrome env var ────────────────────────────────────────────────
+
+    #[test]
+    fn test_check_chrome_with_valid_env_path() {
+        let dir = tempdir().unwrap();
+        let fake_chrome = dir.path().join("chrome");
+        std::fs::write(&fake_chrome, b"fake chrome").unwrap();
+
+        let original = std::env::var("CHROME_PATH").ok();
+        std::env::set_var("CHROME_PATH", fake_chrome.to_str().unwrap());
+
+        let result = check_chrome();
+        assert!(result.available);
+        assert!(result.message.unwrap().contains("CHROME_PATH"));
+
+        match original {
+            Some(val) => std::env::set_var("CHROME_PATH", val),
+            None => std::env::remove_var("CHROME_PATH"),
+        }
+    }
+
+    // ── DepCheckResult struct fields ──────────────────────────────────
+
+    #[test]
+    fn test_dep_check_result_all_fields() {
+        let r = DepCheckResult {
+            name: "my-dep",
+            available: false,
+            required: true,
+            message: Some("not found".to_string()),
+        };
+        assert_eq!(r.name, "my-dep");
+        assert!(!r.available);
+        assert!(r.required);
+        assert_eq!(r.message.as_deref(), Some("not found"));
+    }
+
+    #[test]
+    fn test_dep_check_result_none_message() {
+        let r = DepCheckResult {
+            name: "no-msg",
+            available: true,
+            required: false,
+            message: None,
+        };
+        assert!(r.message.is_none());
+    }
+
+    #[test]
+    fn test_dep_check_result_debug_format() {
+        let r = DepCheckResult {
+            name: "dbg",
+            available: true,
+            required: true,
+            message: Some("ok".into()),
+        };
+        let s = format!("{:?}", r);
+        assert!(s.contains("dbg"));
+        assert!(s.contains("true"));
+        assert!(s.contains("ok"));
+    }
+
+    // ── get_ort_download_info additional tests ───────────────────────
+
+    #[test]
+    fn test_get_ort_download_info_url_is_tgz() {
+        let (_, _, url) = get_ort_download_info();
+        assert!(url.ends_with(".tgz"), "URL should end with .tgz: {}", url);
+    }
+
+    #[test]
+    fn test_get_ort_download_info_version_1_20_1() {
+        let (_, _, url) = get_ort_download_info();
+        assert!(url.contains("v1.20.1"), "URL should contain v1.20.1: {}", url);
+    }
+
+    #[test]
+    fn test_get_ort_download_info_valid_os() {
+        let (os_name, _, _) = get_ort_download_info();
+        assert!(
+            ["osx", "win", "linux"].contains(&os_name),
+            "OS name should be osx/win/linux, got: {}",
+            os_name
+        );
+    }
+
+    #[test]
+    fn test_get_ort_download_info_valid_arch() {
+        let (_, arch, _) = get_ort_download_info();
+        assert!(
+            ["arm64", "x86_64", "x64", "aarch64"].contains(&arch),
+            "Arch should be a known value, got: {}",
+            arch
+        );
+    }
+
+    // ── find_ort_in_directory additional edge cases ──────────────────
+
+    #[test]
+    fn test_find_ort_in_directory_multiple_ort_dirs_finds_first() {
+        let dir = tempdir().unwrap();
+        // Create two onnxruntime directories, only second has the lib
+        let first = dir.path().join("onnxruntime-v1").join("lib");
+        std::fs::create_dir_all(&first).unwrap();
+        // No lib file in first
+
+        let second = dir.path().join("onnxruntime-v2").join("lib");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_wrong_lib_name() {
+        let dir = tempdir().unwrap();
+        let ort_dir = dir.path().join("onnxruntime-v1").join("lib");
+        std::fs::create_dir_all(&ort_dir).unwrap();
+        std::fs::write(ort_dir.join("libonnxruntime.so"), b"fake").unwrap();
+
+        // Looking for .dylib but only .so exists
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_deeply_nested_not_found() {
+        let dir = tempdir().unwrap();
+        // Create a deeply nested dir that doesn't match the expected pattern
+        let deep = dir.path().join("onnxruntime").join("other").join("lib");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        // The nested check only looks at onnxruntime/onnxruntime-*/lib/
+        // "other" doesn't start with "onnxruntime" so it shouldn't find it
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_nested_correct_pattern() {
+        let dir = tempdir().unwrap();
+        // onnxruntime/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so
+        let nested = dir
+            .path()
+            .join("onnxruntime")
+            .join("onnxruntime-linux-x64-1.20.1")
+            .join("lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("libonnxruntime.so"), b"fake").unwrap();
+
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.so");
+        assert!(result.is_some());
+        let found = result.unwrap();
+        assert!(found.ends_with("libonnxruntime.so"));
+    }
+
+    #[test]
+    fn test_find_ort_in_directory_lib_directly_in_ort_dir_no_subdir() {
+        let dir = tempdir().unwrap();
+        // onnxruntime-v1/ exists but has the lib directly (not in lib/ subdir)
+        let ort = dir.path().join("onnxruntime-v1");
+        std::fs::create_dir_all(&ort).unwrap();
+        std::fs::write(ort.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        // The function checks entry.path().join("lib").join(lib_name), so this shouldn't match
+        let result = find_ort_in_directory(dir.path(), "libonnxruntime.dylib");
+        assert!(result.is_none());
+    }
+
+    // ── check_dependencies comprehensive combos ──────────────────────
+
+    #[test]
+    fn test_check_dependencies_all_flags_off() {
+        let result = check_dependencies(false, false, false, false, false, false, false);
+        // slm_wanted = enable_slm(false) || (!disable_slm(true) && config(false)) = false
+        // so no ONNX check, only whois
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "whois"));
+        assert!(!results.iter().any(|r| r.name == "ONNX Runtime"));
+        assert!(!results.iter().any(|r| r.name == "Chrome/Chromium"));
+        assert!(!results.iter().any(|r| r.name == "subfinder"));
+    }
+
+    #[test]
+    fn test_check_dependencies_web_org_and_web_traffic_both() {
+        let result = check_dependencies(false, true, false, true, true, false, false);
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        // Chrome should be checked (from either enable_web_org or enable_web_traffic_discovery)
+        assert!(results.iter().any(|r| r.name == "Chrome/Chromium"));
+    }
+
+    #[test]
+    fn test_check_dependencies_disable_slm_overrides_config() {
+        // disable_slm=true should prevent ONNX check even if config_slm_enabled=true
+        let result = check_dependencies(false, true, false, false, false, true, false);
+        // slm_wanted = false || (!true && true) = false
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(!results.iter().any(|r| r.name == "ONNX Runtime"));
+    }
+
+    #[test]
+    fn test_check_dependencies_enable_slm_overrides_disable() {
+        // enable_slm=true, disable_slm=true
+        // slm_wanted = true || (!true && false) = true
+        let result = check_dependencies(true, true, false, false, false, false, false);
+        match result {
+            Ok(results) => {
+                assert!(results.iter().any(|r| r.name == "ONNX Runtime"));
+            }
+            Err(e) => {
+                assert!(e.contains("ONNX"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_dependencies_all_optional_enabled() {
+        let result = check_dependencies(false, true, true, true, true, false, true);
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert!(results.iter().any(|r| r.name == "Chrome/Chromium"));
+        assert!(results.iter().any(|r| r.name == "subfinder"));
+        assert!(results.iter().any(|r| r.name == "whois"));
+    }
+
+    // ── check_whois additional ────────────────────────────────────────
+
+    #[test]
+    fn test_check_whois_message_not_empty() {
+        let result = check_whois();
+        assert!(result.message.is_some());
+        assert!(!result.message.unwrap().is_empty());
+    }
+
+    // ── check_subfinder message content ──────────────────────────────
+
+    #[test]
+    fn test_check_subfinder_not_required() {
+        let result = check_subfinder();
+        assert!(!result.required);
+    }
+
+    // ── check_chrome not required ────────────────────────────────────
+
+    #[test]
+    fn test_check_chrome_not_required() {
+        let result = check_chrome();
+        assert!(!result.required, "Chrome should not be required");
+    }
+
+    // ── check_onnx_runtime required ──────────────────────────────────
+
+    #[test]
+    fn test_check_onnx_runtime_is_required() {
+        let result = check_onnx_runtime();
+        assert!(result.required, "ONNX Runtime should be marked required");
+    }
+
+    // ── download_onnx_runtime_interactive non-interactive ────────────
+
+    #[test]
+    fn test_download_onnx_runtime_interactive_non_interactive() {
+        // In test/CI, stdin is not a terminal, so this should return an error
+        let result = download_onnx_runtime_interactive();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("non-interactive") || err.contains("ONNX Runtime"),
+            "Error should mention non-interactive mode: {}",
+            err
+        );
+    }
+
+    // ── check_onnx_runtime with env var edge cases ───────────────────
+
+    #[test]
+    fn test_check_onnx_with_empty_env_var() {
+        let original = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::set_var("ORT_DYLIB_PATH", "");
+
+        let result = check_onnx_runtime();
+        // Empty path won't exist, should fall through
+        assert_eq!(result.name, "ONNX Runtime");
+
+        match original {
+            Some(val) => std::env::set_var("ORT_DYLIB_PATH", val),
+            None => std::env::remove_var("ORT_DYLIB_PATH"),
+        }
     }
 }
