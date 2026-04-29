@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Verify CHANGELOG entry
         shell: bash
@@ -36,11 +36,11 @@ jobs:
           grep -q "## \[${TAG#v}\]" CHANGELOG.md \
             || (echo "CHANGELOG entry missing for $TAG" && exit 1)
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: nthpartyfinder -> target
 
@@ -53,7 +53,7 @@ jobs:
           tar czf nthpartyfinder-${{ matrix.target }}.tgz nthpartyfinder*
           shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz
