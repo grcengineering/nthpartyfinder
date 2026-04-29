@@ -1,0 +1,7 @@
+# cargo-audit configuration — mirrors deny.toml advisory triage (GRC-138)
+# See deny.toml for full risk acceptance documentation per advisory.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0421", # idna 0.5.0 — transitive via whois-rs, no upstream fix
+]
