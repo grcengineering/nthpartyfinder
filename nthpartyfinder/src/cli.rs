@@ -343,16 +343,17 @@ impl Args {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        // Domain validation only applies when not using --init and not in batch mode
+        // Domain validation only applies when not using --init, not in batch mode,
+        // and no subcommand is active
         if !self.init && !self.is_batch_mode() {
             match &self.domain {
                 None => {
                     return Err(
-                        "Domain is required (use --domain or --input-file for batch mode)"
+                        "either -d <domain> or --input-file <file> is required. Run with --help for usage."
                             .to_string(),
                     )
                 }
-                Some(d) if d.is_empty() => return Err("Domain cannot be empty".to_string()),
+                Some(d) if d.is_empty() => return Err("domain cannot be empty".to_string()),
                 _ => {}
             }
         }
@@ -360,36 +361,45 @@ impl Args {
         // Batch mode validation
         if self.is_batch_mode() {
             if self.batch_parallel == 0 {
-                return Err("Batch parallel must be greater than 0".to_string());
+                return Err("--batch-parallel must be >= 1".to_string());
             }
             if self.batch_parallel > 20 {
                 return Err(
-                    "Batch parallel cannot exceed 20 to avoid overwhelming systems".to_string(),
+                    "--batch-parallel cannot exceed 20 to avoid overwhelming target systems"
+                        .to_string(),
                 );
             }
         }
 
         if !["csv", "json", "markdown", "html"].contains(&self.output_format.as_str()) {
-            return Err("Output format must be 'csv', 'json', 'markdown', or 'html'".to_string());
+            return Err("output format must be 'csv', 'json', 'markdown', or 'html'".to_string());
         }
 
         if let Some(depth) = self.depth {
             if depth == 0 {
-                return Err("Depth must be greater than 0".to_string());
+                return Err("--depth must be >= 1".to_string());
             }
         }
 
         if self.parallel_jobs == 0 {
-            return Err("Parallel jobs must be greater than 0".to_string());
+            return Err("--parallelism must be >= 1".to_string());
         }
 
-        if self.parallel_jobs > 100 {
-            return Err(
-                "Parallel jobs cannot exceed 100 to avoid overwhelming DNS servers".to_string(),
-            );
+        let max_parallel = std::cmp::min(64, Self::num_cpus() * 8);
+        if self.parallel_jobs > max_parallel {
+            return Err(format!(
+                "--parallelism cannot exceed {} (min of 64, num_cpus*8) to avoid overwhelming DNS servers",
+                max_parallel
+            ));
         }
 
         Ok(())
+    }
+
+    fn num_cpus() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
     }
 
     pub fn get_default_output_dir() -> Result<String, String> {

@@ -117,6 +117,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Validate arguments early — before config/logger/progress bar init so
+    // errors are never swallowed by the progress bar.
+    if let Err(e) = args.validate() {
+        eprintln!("error: {}", e);
+        std::process::exit(2);
+    }
+
     // Load configuration BEFORE starting the progress bar.
     // Config loading may trigger an interactive prompt (e.g., "Create default config?")
     // which would be hidden by the progress bar's steady-tick redraws.
@@ -404,17 +411,187 @@ async fn main() -> Result<()> {
         eprintln!("⚠️  Warning: Failed to set Ctrl-C handler: {}. Interrupt signals may not be handled gracefully.", e);
     });
 
-    // Validate arguments
-    if let Err(e) = args.validate() {
-        logger.error(&format!("Invalid arguments: {}", e));
-        std::process::exit(1);
-    }
-
     // Handle batch mode if --input-file is provided
-    // TODO: Implement batch analysis - run_batch_analysis function not yet ported
     if args.is_batch_mode() {
-        eprintln!("Batch mode is not yet implemented. Please analyze domains individually.");
-        std::process::exit(1);
+        let input_path = std::path::Path::new(args.input_file.as_ref().unwrap());
+        let domains = match batch::parse_domain_file(input_path) {
+            Ok(d) if d.is_empty() => {
+                eprintln!("error: no valid domains found in {}", input_path.display());
+                std::process::exit(2);
+            }
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("error: failed to read input file: {}", e);
+                std::process::exit(2);
+            }
+        };
+
+        let output_dir = args
+            .batch_output_dir
+            .clone()
+            .or_else(|| args.output_dir.clone())
+            .unwrap_or_else(|| Args::get_default_output_dir().unwrap_or_else(|_| ".".into()));
+        let output_base = std::path::Path::new(&output_dir);
+        if let Err(e) = std::fs::create_dir_all(output_base) {
+            eprintln!("error: failed to create output directory: {}", e);
+            std::process::exit(1);
+        }
+
+        let batch_start = std::time::Instant::now();
+        let mut summary = batch::new_batch_summary();
+
+        let parallelism = args.batch_parallel;
+        let semaphore = Arc::new(Semaphore::new(parallelism));
+
+        let domains_total = domains.len();
+        logger.info(&format!(
+            "Batch mode: {} domains, parallelism={}",
+            domains_total, parallelism
+        ));
+
+        let results: Arc<Mutex<Vec<batch::DomainAnalysisResult>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for entry in &domains {
+            let sem = semaphore.clone();
+            let domain = entry.domain.clone();
+            let label = entry.label.clone();
+            let format = args.output_format.clone();
+            let depth = args.depth;
+            let dns_only = args.dns_only;
+            let output_base = output_base.to_path_buf();
+            let batch_combined = args.batch_combined;
+            let results = results.clone();
+            let logger = logger.clone();
+
+            let handle = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let domain_start = std::time::Instant::now();
+
+                logger.info(&format!("Batch: starting analysis of {}", domain));
+
+                let mut cmd_args = vec![
+                    "nthpartyfinder".to_string(),
+                    "-d".to_string(),
+                    domain.clone(),
+                    "-f".to_string(),
+                    format.clone(),
+                ];
+                if let Some(d) = depth {
+                    cmd_args.push("-r".to_string());
+                    cmd_args.push(d.to_string());
+                }
+                if dns_only {
+                    cmd_args.push("--dns-only".to_string());
+                }
+                if !batch_combined {
+                    let domain_dir = output_base.join(domain.replace('.', "_"));
+                    let _ = std::fs::create_dir_all(&domain_dir);
+                    cmd_args.push("--output-dir".to_string());
+                    cmd_args.push(domain_dir.to_string_lossy().to_string());
+                }
+
+                let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(&cmd_args[1..])
+                    .env("NO_COLOR", "1")
+                    .output()
+                    .await;
+
+                let duration = domain_start.elapsed().as_secs_f64();
+
+                let result = match output {
+                    Ok(out) if out.status.success() => {
+                        let output_file = if !batch_combined {
+                            Some(
+                                output_base
+                                    .join(domain.replace('.', "_"))
+                                    .join(batch::domain_output_filename(&domain, &format))
+                                    .to_string_lossy()
+                                    .to_string(),
+                            )
+                        } else {
+                            None
+                        };
+                        batch::DomainAnalysisResult {
+                            domain: domain.clone(),
+                            label,
+                            success: true,
+                            error: None,
+                            relationship_count: 0,
+                            output_file,
+                            duration_secs: duration,
+                        }
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        batch::DomainAnalysisResult {
+                            domain: domain.clone(),
+                            label,
+                            success: false,
+                            error: Some(stderr),
+                            relationship_count: 0,
+                            output_file: None,
+                            duration_secs: duration,
+                        }
+                    }
+                    Err(e) => batch::DomainAnalysisResult {
+                        domain: domain.clone(),
+                        label,
+                        success: false,
+                        error: Some(format!("Failed to spawn: {}", e)),
+                        relationship_count: 0,
+                        output_file: None,
+                        duration_secs: duration,
+                    },
+                };
+
+                results.lock().await.push(result);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        summary.domain_results = Arc::try_unwrap(results)
+            .unwrap_or_else(|arc| {
+                let guard = arc.try_lock().unwrap();
+                Mutex::new(guard.clone())
+            })
+            .into_inner();
+
+        summary.total_duration_secs = batch_start.elapsed().as_secs_f64();
+        batch::finalize_batch_summary(&mut summary);
+
+        if args.batch_combined {
+            let combined_path = output_base.join(format!(
+                "{}.{}",
+                args.output, args.output_format
+            ));
+            if let Err(e) = batch::export_batch_summary(&summary, &combined_path) {
+                eprintln!("error: failed to write combined report: {}", e);
+                std::process::exit(1);
+            }
+            logger.info(&format!("Combined report: {}", combined_path.display()));
+        }
+
+        let summary_path = output_base.join("batch_summary.json");
+        if let Err(e) = batch::export_batch_summary(&summary, &summary_path) {
+            eprintln!("error: failed to write batch summary: {}", e);
+            std::process::exit(1);
+        }
+
+        logger.info(&format!(
+            "Batch complete: {}/{} succeeded in {:.1}s",
+            summary.successful, summary.total_domains, summary.total_duration_secs
+        ));
+
+        if summary.failed > 0 {
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 
     // Get domain (required at this point since --init was not used and not batch mode)
