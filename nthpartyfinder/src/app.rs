@@ -1057,9 +1057,9 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 eprintln!();
                 eprint!("Select option [1-{}]: ", options.len());
 
-                let mut input = String::new();
-                if input.read_line(&mut input).is_ok() {
-                    input.trim().parse::<usize>().ok().and_then(|n| {
+                let mut line_buf = String::new();
+                if input.read_line(&mut line_buf).is_ok() {
+                    line_buf.trim().parse::<usize>().ok().and_then(|n| {
                         if n >= 1 && n <= options.len() {
                             Some(options[n - 1])
                         } else {
@@ -1643,8 +1643,8 @@ pub async fn run_batch_analysis(
 
     print!("Press Enter to start batch analysis or Ctrl+C to cancel: ");
     io::Write::flush(&mut io::stdout()).unwrap();
-    let mut input = String::new();
-    let _ = input.read_line(&mut input);
+    let mut line_buf = String::new();
+    let _ = input.read_line(&mut line_buf);
     println!();
 
     let mut summary = new_batch_summary();
