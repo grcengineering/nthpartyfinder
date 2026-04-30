@@ -82,6 +82,9 @@ pkg-url = "{ repo }/releases/download/v{ version }/nthpartyfinder-{ target }{ ar
 bin-dir = "nthpartyfinder{ binary-ext }"
 pkg-fmt = "tgz"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
 [[example]]
 name = "progress_test"
 path = "examples/progress_test.rs"

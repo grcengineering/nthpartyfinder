@@ -1251,111 +1251,108 @@ pub async fn discover_nth_parties_minimal(
 
     let mut results = Vec::new();
 
-    match dns::get_txt_records_with_pool(domain, &dns_pool).await {
-        Ok(txt_records) => {
-            let mut vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
-                &txt_records,
-                Some(verification_logger),
-                domain,
-            );
+    if let Ok(txt_records) = dns::get_txt_records_with_pool(domain, &dns_pool).await {
+        let mut vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
+            &txt_records,
+            Some(verification_logger),
+            domain,
+        );
 
-            let spf_recursive =
-                dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
-            vendor_domains_with_source.extend(spf_recursive);
+        let spf_recursive =
+            dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
+        vendor_domains_with_source.extend(spf_recursive);
 
-            for vendor_domain_info in vendor_domains_with_source {
-                let base_domain = domain_utils::extract_base_domain(&vendor_domain_info.domain);
-                let customer_base_domain = domain_utils::extract_base_domain(domain);
+        for vendor_domain_info in vendor_domains_with_source {
+            let base_domain = domain_utils::extract_base_domain(&vendor_domain_info.domain);
+            let customer_base_domain = domain_utils::extract_base_domain(domain);
 
-                if base_domain == customer_base_domain {
-                    continue;
-                }
+            if base_domain == customer_base_domain {
+                continue;
+            }
 
-                if !{
-                    let vendors = discovered_vendors.lock().await;
-                    vendors.contains_key(&base_domain)
-                } {
-                    match whois::get_organization_with_status_and_config(&base_domain, false, 0.5)
-                        .await
-                    {
-                        Ok(org_result) => {
-                            let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(
-                                base_domain.clone(),
-                                org_normalizer::normalize(&org_result.name),
-                            );
-                        }
-                        Err(_) => {
-                            let mut vendors = discovered_vendors.lock().await;
-                            vendors.insert(
-                                base_domain.clone(),
-                                org_normalizer::normalize(&base_domain),
-                            );
-                        }
-                    }
-                }
-
-                let (customer_org, vendor_org) = {
-                    let vendors = discovered_vendors.lock().await;
-                    let customer_org = vendors
-                        .get(&customer_base_domain)
-                        .unwrap_or(&customer_base_domain.to_string())
-                        .clone();
-                    let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
-                    (customer_org, vendor_org)
-                };
-
-                let record_value = build_record_value(
-                    &vendor_domain_info.source_type,
-                    &base_domain,
-                    domain,
-                    &vendor_domain_info.raw_record,
-                    &vendor_domain_info.domain,
-                );
-
-                let relationship = VendorRelationship::new(
-                    base_domain.clone(),
-                    vendor_org,
-                    current_depth,
-                    customer_base_domain.clone(),
-                    customer_org,
-                    record_value,
-                    vendor_domain_info.source_type.clone(),
-                    root_customer_domain.to_string(),
-                    root_customer_organization.to_string(),
-                    vendor_domain_info.raw_record.clone(),
-                );
-
-                results.push(relationship);
-
-                if !is_common_denominator(&base_domain) {
-                    let lookup_domain =
-                        domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
-
-                    if let Ok(sub_results) = Box::pin(discover_nth_parties_minimal(
-                        &lookup_domain,
-                        max_depth,
-                        discovered_vendors.clone(),
-                        processed_domains.clone(),
-                        semaphore.clone(),
-                        current_depth + 1,
-                        root_customer_domain,
-                        root_customer_organization,
-                        verification_logger,
-                        dns_pool.clone(),
-                        recursive_semaphore.clone(),
-                        parallel_jobs,
-                        logger.clone(),
-                        analysis_config,
-                    ))
+            if !{
+                let vendors = discovered_vendors.lock().await;
+                vendors.contains_key(&base_domain)
+            } {
+                match whois::get_organization_with_status_and_config(&base_domain, false, 0.5)
                     .await
-                    {
-                        results.extend(sub_results);
+                {
+                    Ok(org_result) => {
+                        let mut vendors = discovered_vendors.lock().await;
+                        vendors.insert(
+                            base_domain.clone(),
+                            org_normalizer::normalize(&org_result.name),
+                        );
+                    }
+                    Err(_) => {
+                        let mut vendors = discovered_vendors.lock().await;
+                        vendors.insert(
+                            base_domain.clone(),
+                            org_normalizer::normalize(&base_domain),
+                        );
                     }
                 }
             }
+
+            let (customer_org, vendor_org) = {
+                let vendors = discovered_vendors.lock().await;
+                let customer_org = vendors
+                    .get(&customer_base_domain)
+                    .unwrap_or(&customer_base_domain.to_string())
+                    .clone();
+                let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
+                (customer_org, vendor_org)
+            };
+
+            let record_value = build_record_value(
+                &vendor_domain_info.source_type,
+                &base_domain,
+                domain,
+                &vendor_domain_info.raw_record,
+                &vendor_domain_info.domain,
+            );
+
+            let relationship = VendorRelationship::new(
+                base_domain.clone(),
+                vendor_org,
+                current_depth,
+                customer_base_domain.clone(),
+                customer_org,
+                record_value,
+                vendor_domain_info.source_type.clone(),
+                root_customer_domain.to_string(),
+                root_customer_organization.to_string(),
+                vendor_domain_info.raw_record.clone(),
+            );
+
+            results.push(relationship);
+
+            if !is_common_denominator(&base_domain) {
+                let lookup_domain =
+                    domain_utils::normalize_for_dns_lookup(&vendor_domain_info.domain);
+
+                if let Ok(sub_results) = Box::pin(discover_nth_parties_minimal(
+                    &lookup_domain,
+                    max_depth,
+                    discovered_vendors.clone(),
+                    processed_domains.clone(),
+                    semaphore.clone(),
+                    current_depth + 1,
+                    root_customer_domain,
+                    root_customer_organization,
+                    verification_logger,
+                    dns_pool.clone(),
+                    recursive_semaphore.clone(),
+                    parallel_jobs,
+                    logger.clone(),
+                    analysis_config,
+                ))
+                .await
+                {
+                    results.extend(sub_results);
+                }
+            }
         }
-        Err(_) => {}
     }
 
     Ok(results)

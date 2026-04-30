@@ -349,9 +349,9 @@ pub async fn confirm_unverified_organizations(
 }
 
 /// Group pending mappings by source domain (extracted for testability).
-pub(crate) fn group_pending_by_source<'a>(
-    pending: &'a [subprocessor::PendingOrgMapping],
-) -> HashMap<&'a str, Vec<&'a subprocessor::PendingOrgMapping>> {
+pub(crate) fn group_pending_by_source(
+    pending: &[subprocessor::PendingOrgMapping],
+) -> HashMap<&str, Vec<&subprocessor::PendingOrgMapping>> {
     let mut grouped: HashMap<&str, Vec<&subprocessor::PendingOrgMapping>> = HashMap::new();
     for mapping in pending {
         grouped
