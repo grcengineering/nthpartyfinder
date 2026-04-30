@@ -1358,7 +1358,11 @@ mod tests {
         ];
         for marker_html in markers {
             let html = format!("<html><head></head><body>{}</body></html>", marker_html);
-            assert!(is_likely_spa(&html), "Should detect SPA for marker: {}", marker_html);
+            assert!(
+                is_likely_spa(&html),
+                "Should detect SPA for marker: {}",
+                marker_html
+            );
         }
     }
 
@@ -1401,11 +1405,26 @@ mod tests {
     fn test_extract_slug_from_url_non_slug_paths() {
         // First path segment is a known non-slug
         assert_eq!(extract_slug_from_url("https://example.com/api/v1"), None);
-        assert_eq!(extract_slug_from_url("https://example.com/trust/center"), None);
-        assert_eq!(extract_slug_from_url("https://example.com/security/info"), None);
-        assert_eq!(extract_slug_from_url("https://example.com/legal/terms"), None);
-        assert_eq!(extract_slug_from_url("https://example.com/privacy/policy"), None);
-        assert_eq!(extract_slug_from_url("https://example.com/subprocessors"), None);
+        assert_eq!(
+            extract_slug_from_url("https://example.com/trust/center"),
+            None
+        );
+        assert_eq!(
+            extract_slug_from_url("https://example.com/security/info"),
+            None
+        );
+        assert_eq!(
+            extract_slug_from_url("https://example.com/legal/terms"),
+            None
+        );
+        assert_eq!(
+            extract_slug_from_url("https://example.com/privacy/policy"),
+            None
+        );
+        assert_eq!(
+            extract_slug_from_url("https://example.com/subprocessors"),
+            None
+        );
     }
 
     #[test]
@@ -1432,7 +1451,9 @@ mod tests {
     #[test]
     fn test_extract_graphql_operation_with_operation_name() {
         assert_eq!(
-            extract_graphql_operation("https://api.example.com/graphql?operationName=GetSubprocessors"),
+            extract_graphql_operation(
+                "https://api.example.com/graphql?operationName=GetSubprocessors"
+            ),
             Some("GetSubprocessors".to_string())
         );
     }
@@ -1475,7 +1496,15 @@ mod tests {
         let result = extract_js_object_assignment(html, "DATA");
         assert!(result.is_some());
         let val = result.unwrap();
-        assert!(val.get("outer").unwrap().get("inner").unwrap().get("deep").unwrap().as_bool().unwrap());
+        assert!(val
+            .get("outer")
+            .unwrap()
+            .get("inner")
+            .unwrap()
+            .get("deep")
+            .unwrap()
+            .as_bool()
+            .unwrap());
     }
 
     #[test]
@@ -1483,7 +1512,10 @@ mod tests {
         let html = r#"window.TEST = {"text": "hello {world}"};"#;
         let result = extract_js_object_assignment(html, "TEST");
         assert!(result.is_some());
-        assert_eq!(result.unwrap().get("text").unwrap().as_str().unwrap(), "hello {world}");
+        assert_eq!(
+            result.unwrap().get("text").unwrap().as_str().unwrap(),
+            "hello {world}"
+        );
     }
 
     #[test]
@@ -1570,7 +1602,10 @@ mod tests {
         let result = discover_via_html_patterns(html).unwrap();
         assert!(!result.is_empty());
         // The SafeBase candidate should have high score
-        let best = result.iter().max_by(|a, b| a.score.partial_cmp(&b.score).unwrap()).unwrap();
+        let best = result
+            .iter()
+            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+            .unwrap();
         assert!(best.score >= 0.9);
     }
 
@@ -1681,7 +1716,8 @@ mod tests {
             {"name":"Stripe","url":"https://stripe.com","purpose":"Payment processing"},
             {"name":"Okta","url":"https://okta.com","purpose":"Identity management"}
         ]});
-        let b64 = base64::engine::general_purpose::STANDARD.encode(json_data.to_string().as_bytes());
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(json_data.to_string().as_bytes());
         let html = format!(
             r#"<html><body><script>var data = atob("{}");</script></body></html>"#,
             b64
@@ -1754,7 +1790,11 @@ mod tests {
             request_body: None,
         }];
 
-        let result = analyze_intercepted_responses(&responses, "https://trust.example.com/acme/subprocessors").unwrap();
+        let result = analyze_intercepted_responses(
+            &responses,
+            "https://trust.example.com/acme/subprocessors",
+        )
+        .unwrap();
         assert!(!result.is_empty());
         let candidate = &result[0];
         assert!(candidate.score >= 0.4);
@@ -1775,7 +1815,8 @@ mod tests {
                     {"name": "Datadog", "url": "https://datadoghq.com", "purpose": "Monitoring"}
                 ]
             }
-        }).to_string();
+        })
+        .to_string();
 
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/graphql?operationName=GetVendors".to_string(),
@@ -1787,7 +1828,9 @@ mod tests {
             request_body: Some(r#"{"query":"query GetVendors { vendors { name } }"}"#.to_string()),
         }];
 
-        let result = analyze_intercepted_responses(&responses, "https://trust.example.com/subprocessors").unwrap();
+        let result =
+            analyze_intercepted_responses(&responses, "https://trust.example.com/subprocessors")
+                .unwrap();
         assert!(!result.is_empty());
         let candidate = &result[0];
         // Strategy type should be GraphQL
@@ -1810,7 +1853,8 @@ mod tests {
                 {"x": 7, "y": 8},
                 {"x": 9, "y": 10}
             ]
-        }).to_string();
+        })
+        .to_string();
 
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/data".to_string(),
@@ -1850,7 +1894,9 @@ mod tests {
             }}}}}}
             </script></body></html>"#;
 
-        let result = discover_strategy("https://trust.example.com/test", html).await.unwrap();
+        let result = discover_strategy("https://trust.example.com/test", html)
+            .await
+            .unwrap();
         assert!(result.is_some());
         let strategy = result.unwrap();
         // Should be HydrationData (from SafeBase probe)
@@ -1863,7 +1909,9 @@ mod tests {
     #[tokio::test]
     async fn test_discover_strategy_no_candidates() {
         let html = "<html><body><p>Nothing useful here</p></body></html>";
-        let result = discover_strategy("https://example.com/page", html).await.unwrap();
+        let result = discover_strategy("https://example.com/page", html)
+            .await
+            .unwrap();
         // No network interception candidates either (browser won't launch in test),
         // so result should be None
         assert!(result.is_none());
@@ -1973,6 +2021,10 @@ mod tests {
         </body></html>"#;
         let mut candidates = Vec::new();
         probe_safebase(html, &mut candidates);
-        assert_eq!(candidates.len(), 1, "Product without 'show' should default to visible");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "Product without 'show' should default to visible"
+        );
     }
 }

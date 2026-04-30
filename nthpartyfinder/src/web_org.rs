@@ -920,9 +920,21 @@ mod tests {
     #[test]
     fn test_is_valid_org_name_invalid_strings() {
         let invalid = [
-            "undefined", "null", "none", "n/a", "test", "example",
-            "loading", "loading...", "please wait", "redirecting",
-            "dashboard", "admin", "404", "error", "page not found",
+            "undefined",
+            "null",
+            "none",
+            "n/a",
+            "test",
+            "example",
+            "loading",
+            "loading...",
+            "please wait",
+            "redirecting",
+            "dashboard",
+            "admin",
+            "404",
+            "error",
+            "page not found",
         ];
         for name in invalid {
             assert!(!is_valid_org_name(name), "Should reject: {}", name);
@@ -942,11 +954,26 @@ mod tests {
     #[test]
     fn test_looks_like_page_name_all_indicators() {
         let indicators = [
-            "Login Page", "Sign Up", "Register Now", "Dashboard View",
-            "Settings Panel", "Profile Edit", "Account Info", "Blog Post",
-            "News Article", "Products List", "Services Overview", "Pricing Plans",
-            "Support Center", "Help Docs", "FAQ Section", "Privacy Policy",
-            "Terms of Service", "Legal Notice", "Careers Page", "Jobs Board",
+            "Login Page",
+            "Sign Up",
+            "Register Now",
+            "Dashboard View",
+            "Settings Panel",
+            "Profile Edit",
+            "Account Info",
+            "Blog Post",
+            "News Article",
+            "Products List",
+            "Services Overview",
+            "Pricing Plans",
+            "Support Center",
+            "Help Docs",
+            "FAQ Section",
+            "Privacy Policy",
+            "Terms of Service",
+            "Legal Notice",
+            "Careers Page",
+            "Jobs Board",
         ];
         for name in indicators {
             assert!(looks_like_page_name(name), "Should be page name: {}", name);
@@ -979,7 +1006,10 @@ mod tests {
 
     #[test]
     fn test_clean_org_name_whitespace_normalization() {
-        assert_eq!(clean_org_name("  Multi   Space   Name  "), "Multi Space Name");
+        assert_eq!(
+            clean_org_name("  Multi   Space   Name  "),
+            "Multi Space Name"
+        );
     }
 
     // --- extract_from_schema_org edge cases ---
@@ -1062,8 +1092,14 @@ mod tests {
     #[test]
     fn test_schema_org_various_types() {
         let types = [
-            "Organization", "Corporation", "LocalBusiness", "Company",
-            "Brand", "NGO", "GovernmentOrganization", "EducationalOrganization",
+            "Organization",
+            "Corporation",
+            "LocalBusiness",
+            "Company",
+            "Brand",
+            "NGO",
+            "GovernmentOrganization",
+            "EducationalOrganization",
         ];
         for t in types {
             let html = format!(

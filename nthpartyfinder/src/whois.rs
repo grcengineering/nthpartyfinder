@@ -1194,10 +1194,7 @@ mod tests {
             extract_organization_from_domain("stripe.com"),
             "Stripe Inc."
         );
-        assert_eq!(
-            extract_organization_from_domain("UPPER.com"),
-            "UPPER Inc."
-        );
+        assert_eq!(extract_organization_from_domain("UPPER.com"), "UPPER Inc.");
     }
 
     // --- extract_organization_from_whois additional patterns ---
@@ -1512,7 +1509,10 @@ mod tests {
 
     #[test]
     fn test_clean_org_name_tabs_and_newlines() {
-        assert_eq!(clean_organization_name("Corp\t\tName\n\nHere"), "Corp Name Here");
+        assert_eq!(
+            clean_organization_name("Corp\t\tName\n\nHere"),
+            "Corp Name Here"
+        );
     }
 
     #[test]

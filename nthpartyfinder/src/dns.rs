@@ -1477,9 +1477,7 @@ mod tests {
 
     #[test]
     fn test_extract_spf_records() {
-        let records = vec![
-            "v=spf1 include:_spf.google.com include:sendgrid.net ~all".to_string(),
-        ];
+        let records = vec!["v=spf1 include:_spf.google.com include:sendgrid.net ~all".to_string()];
         let results = extract_vendor_domains_with_source(&records);
         assert!(!results.is_empty());
         let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
@@ -1502,7 +1500,8 @@ mod tests {
     #[test]
     fn test_extract_dmarc_record() {
         let records = vec![
-            "v=DMARC1; p=reject; rua=mailto:dmarc@example.com; ruf=mailto:forensic@example.com".to_string(),
+            "v=DMARC1; p=reject; rua=mailto:dmarc@example.com; ruf=mailto:forensic@example.com"
+                .to_string(),
         ];
         let results = extract_vendor_domains_with_source(&records);
         let _ = results;
@@ -1510,9 +1509,8 @@ mod tests {
 
     #[test]
     fn test_extract_dkim_record() {
-        let records = vec![
-            "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ...".to_string(),
-        ];
+        let records =
+            vec!["v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQ...".to_string()];
         let results = extract_vendor_domains_with_source(&records);
         let _ = results;
     }
@@ -1536,8 +1534,7 @@ mod tests {
             "v=spf1 include:_spf.google.com ~all".to_string(),
             "random-unmatched-record".to_string(),
         ];
-        let results =
-            extract_vendor_domains_with_source_and_logger(&records, None, "example.com");
+        let results = extract_vendor_domains_with_source_and_logger(&records, None, "example.com");
         assert!(!results.is_empty());
     }
 
@@ -1548,14 +1545,18 @@ mod tests {
             "v=spf1 include:_spf.google.com ~all".to_string(),
         ];
         let results = extract_vendor_domains_with_source(&records);
-        let google_count = results.iter().filter(|r| r.domain.contains("google")).count();
+        let google_count = results
+            .iter()
+            .filter(|r| r.domain.contains("google"))
+            .count();
         assert_eq!(google_count, 1);
     }
 
     #[test]
     fn test_extract_spf_multiple_includes() {
         let records = vec![
-            "v=spf1 include:_spf.google.com include:amazonses.com include:mailgun.org -all".to_string(),
+            "v=spf1 include:_spf.google.com include:amazonses.com include:mailgun.org -all"
+                .to_string(),
         ];
         let results = extract_vendor_domains_with_source(&records);
         assert!(results.len() >= 3);
@@ -1593,8 +1594,14 @@ mod tests {
             "google-site-verification=abc123".to_string(),
         ];
         let results = extract_vendor_domains_with_source(&records);
-        let spf_results: Vec<_> = results.iter().filter(|r| r.source_type == RecordType::DnsTxtSpf).collect();
-        let verification_results: Vec<_> = results.iter().filter(|r| r.source_type == RecordType::DnsTxtVerification).collect();
+        let spf_results: Vec<_> = results
+            .iter()
+            .filter(|r| r.source_type == RecordType::DnsTxtSpf)
+            .collect();
+        let verification_results: Vec<_> = results
+            .iter()
+            .filter(|r| r.source_type == RecordType::DnsTxtVerification)
+            .collect();
         assert!(!spf_results.is_empty());
         assert!(!verification_results.is_empty());
     }
@@ -1916,8 +1923,14 @@ mod tests {
     #[test]
     fn test_infer_provider_domain_known_fallback() {
         // Providers that get .com appended as fallback
-        assert_eq!(infer_provider_domain("freshdesk"), Some("freshdesk.com".to_string()));
-        assert_eq!(infer_provider_domain("typeform"), Some("typeform.com".to_string()));
+        assert_eq!(
+            infer_provider_domain("freshdesk"),
+            Some("freshdesk.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("typeform"),
+            Some("typeform.com".to_string())
+        );
     }
 
     // --- try_dynamic_verification_patterns ---
@@ -1983,10 +1996,7 @@ mod tests {
             &mut visited,
         );
         // Should only appear once
-        assert_eq!(
-            targets.iter().filter(|t| t.contains("google")).count(),
-            1
-        );
+        assert_eq!(targets.iter().filter(|t| t.contains("google")).count(), 1);
     }
 
     // --- LogFailure trait with logger ---
@@ -2026,14 +2036,9 @@ mod tests {
     #[test]
     fn test_extract_with_logger_logs_unmatched() {
         let logger = TestLogger::new();
-        let records = vec![
-            "some-unmatched-but-long-enough-record".to_string(),
-        ];
-        let _ = extract_vendor_domains_with_source_and_logger(
-            &records,
-            Some(&logger),
-            "example.com",
-        );
+        let records = vec!["some-unmatched-but-long-enough-record".to_string()];
+        let _ =
+            extract_vendor_domains_with_source_and_logger(&records, Some(&logger), "example.com");
         let failures = logger.failures.lock().unwrap();
         assert!(!failures.is_empty(), "Should log unmatched records");
         assert!(failures[0].contains("UNMATCHED_TXT"));
@@ -2043,13 +2048,13 @@ mod tests {
     fn test_extract_with_logger_skips_short_unmatched() {
         let logger = TestLogger::new();
         let records = vec!["short".to_string()];
-        let _ = extract_vendor_domains_with_source_and_logger(
-            &records,
-            Some(&logger),
-            "example.com",
-        );
+        let _ =
+            extract_vendor_domains_with_source_and_logger(&records, Some(&logger), "example.com");
         let failures = logger.failures.lock().unwrap();
-        assert!(failures.is_empty(), "Should not log short unmatched records");
+        assert!(
+            failures.is_empty(),
+            "Should not log short unmatched records"
+        );
     }
 
     // --- DnsServerPool default ---
@@ -2162,7 +2167,10 @@ mod tests {
 
     #[test]
     fn test_unescape_dns_txt_mixed_escapes() {
-        assert_eq!(unescape_dns_txt(r#"v=spf1 include:\_spf.google.com"#), "v=spf1 include:_spf.google.com");
+        assert_eq!(
+            unescape_dns_txt(r#"v=spf1 include:\_spf.google.com"#),
+            "v=spf1 include:_spf.google.com"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2368,22 +2376,46 @@ mod tests {
     fn test_infer_provider_domain_cloud_providers() {
         assert_eq!(infer_provider_domain("aws"), Some("amazon.com".to_string()));
         assert_eq!(infer_provider_domain("gcp"), Some("google.com".to_string()));
-        assert_eq!(infer_provider_domain("azure"), Some("microsoft.com".to_string()));
+        assert_eq!(
+            infer_provider_domain("azure"),
+            Some("microsoft.com".to_string())
+        );
     }
 
     #[test]
     fn test_infer_provider_domain_common_saas() {
-        assert_eq!(infer_provider_domain("salesforce"), Some("salesforce.com".to_string()));
-        assert_eq!(infer_provider_domain("shopify"), Some("shopify.com".to_string()));
-        assert_eq!(infer_provider_domain("zendesk"), Some("zendesk.com".to_string()));
+        assert_eq!(
+            infer_provider_domain("salesforce"),
+            Some("salesforce.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("shopify"),
+            Some("shopify.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("zendesk"),
+            Some("zendesk.com".to_string())
+        );
     }
 
     #[test]
     fn test_infer_provider_domain_known_fallback_com_providers() {
-        assert_eq!(infer_provider_domain("sendgrid"), Some("sendgrid.com".to_string()));
-        assert_eq!(infer_provider_domain("mailchimp"), Some("mailchimp.com".to_string()));
-        assert_eq!(infer_provider_domain("intercom"), Some("intercom.com".to_string()));
-        assert_eq!(infer_provider_domain("typeform"), Some("typeform.com".to_string()));
+        assert_eq!(
+            infer_provider_domain("sendgrid"),
+            Some("sendgrid.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("mailchimp"),
+            Some("mailchimp.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("intercom"),
+            Some("intercom.com".to_string())
+        );
+        assert_eq!(
+            infer_provider_domain("typeform"),
+            Some("typeform.com".to_string())
+        );
     }
 
     #[test]
@@ -2394,9 +2426,15 @@ mod tests {
 
     #[test]
     fn test_infer_provider_domain_security_vendors() {
-        assert_eq!(infer_provider_domain("sentry"), Some("sentry.io".to_string()));
+        assert_eq!(
+            infer_provider_domain("sentry"),
+            Some("sentry.io".to_string())
+        );
         assert_eq!(infer_provider_domain("okta"), Some("okta.com".to_string()));
-        assert_eq!(infer_provider_domain("auth0"), Some("auth0.com".to_string()));
+        assert_eq!(
+            infer_provider_domain("auth0"),
+            Some("auth0.com".to_string())
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -2486,7 +2524,10 @@ mod tests {
         ];
         let results = extract_vendor_domains_with_source(&records);
         assert!(results.len() >= 3); // At least one from each record type
-        let source_types: Vec<String> = results.iter().map(|r| r.source_type.as_hierarchy_string()).collect();
+        let source_types: Vec<String> = results
+            .iter()
+            .map(|r| r.source_type.as_hierarchy_string())
+            .collect();
         assert!(source_types.iter().any(|t| t.contains("SPF")));
         assert!(source_types.iter().any(|t| t.contains("VERIFICATION")));
         assert!(source_types.iter().any(|t| t.contains("DMARC")));
@@ -2502,9 +2543,7 @@ mod tests {
     #[test]
     fn test_extract_vendor_domains_quoted_records() {
         // DNS TXT records are often wrapped in quotes
-        let records = vec![
-            "\"v=spf1 include:_spf.google.com ~all\"".to_string(),
-        ];
+        let records = vec!["\"v=spf1 include:_spf.google.com ~all\"".to_string()];
         let results = extract_vendor_domains_with_source(&records);
         assert!(!results.is_empty());
     }
@@ -2517,7 +2556,10 @@ mod tests {
         ];
         let results = extract_vendor_domains_with_source(&records);
         // Should deduplicate identical entries
-        let google_count = results.iter().filter(|r| r.domain.contains("google")).count();
+        let google_count = results
+            .iter()
+            .filter(|r| r.domain.contains("google"))
+            .count();
         assert_eq!(google_count, 1);
     }
 
@@ -2545,7 +2587,10 @@ mod tests {
         };
         assert_eq!(vd.domain, "stripe.com");
         assert_eq!(vd.raw_record, "v=spf1 include:stripe.com");
-        assert_eq!(vd.source_type.as_hierarchy_string(), RecordType::DnsTxtSpf.as_hierarchy_string());
+        assert_eq!(
+            vd.source_type.as_hierarchy_string(),
+            RecordType::DnsTxtSpf.as_hierarchy_string()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

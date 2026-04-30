@@ -651,16 +651,34 @@ mod tests {
         assert_eq!(format!("{}", ValidationStatus::Ok), "OK");
         assert_eq!(format!("{}", ValidationStatus::NotFound), "Not Found (404)");
         assert_eq!(format!("{}", ValidationStatus::Timeout), "Timeout");
-        assert_eq!(format!("{}", ValidationStatus::NetworkError), "Network Error");
+        assert_eq!(
+            format!("{}", ValidationStatus::NetworkError),
+            "Network Error"
+        );
     }
 
     #[test]
     fn test_validation_status_server_error_various_codes() {
-        assert_eq!(format!("{}", ValidationStatus::ServerError(500)), "Server Error (500)");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(502)), "Server Error (502)");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(503)), "Server Error (503)");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(504)), "Server Error (504)");
-        assert_eq!(format!("{}", ValidationStatus::ServerError(429)), "Server Error (429)");
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(500)),
+            "Server Error (500)"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(502)),
+            "Server Error (502)"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(503)),
+            "Server Error (503)"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(504)),
+            "Server Error (504)"
+        );
+        assert_eq!(
+            format!("{}", ValidationStatus::ServerError(429)),
+            "Server Error (429)"
+        );
     }
 
     #[test]
@@ -816,7 +834,10 @@ mod tests {
         let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
         let parsed: SubprocessorUrlCacheEntry = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.domain, "example.com");
-        assert_eq!(parsed.working_subprocessor_url, "https://example.com/subprocessors");
+        assert_eq!(
+            parsed.working_subprocessor_url,
+            "https://example.com/subprocessors"
+        );
         assert_eq!(parsed.last_successful_access, 1704067200);
         assert_eq!(parsed.cache_version, 1);
     }
@@ -836,8 +857,14 @@ mod tests {
         let json = serde_json::to_string_pretty(&entry).unwrap();
         let deserialized: SubprocessorUrlCacheEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.domain, entry.domain);
-        assert_eq!(deserialized.working_subprocessor_url, entry.working_subprocessor_url);
-        assert_eq!(deserialized.last_successful_access, entry.last_successful_access);
+        assert_eq!(
+            deserialized.working_subprocessor_url,
+            entry.working_subprocessor_url
+        );
+        assert_eq!(
+            deserialized.last_successful_access,
+            entry.last_successful_access
+        );
         assert_eq!(deserialized.cache_version, entry.cache_version);
     }
 
@@ -876,7 +903,9 @@ mod tests {
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
         // Write a non-JSON file
-        tokio::fs::write(cache_dir.join("readme.txt"), "not a cache entry").await.unwrap();
+        tokio::fs::write(cache_dir.join("readme.txt"), "not a cache entry")
+            .await
+            .unwrap();
         // Write a JSON file
         let entry = SubprocessorUrlCacheEntry {
             domain: "valid.com".to_string(),
@@ -890,7 +919,9 @@ mod tests {
         tokio::fs::write(
             cache_dir.join("valid.com.json"),
             serde_json::to_string(&entry).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Count JSON files only
         let mut entries = tokio::fs::read_dir(&cache_dir).await.unwrap();
@@ -915,16 +946,17 @@ mod tests {
         let mut sorted = entries.clone();
         sorted.sort_by_key(|e| std::cmp::Reverse(e.1));
 
-        assert_eq!(sorted[0].0, "a.com");  // 300 - most recent
-        assert_eq!(sorted[1].0, "c.com");  // 200
-        assert_eq!(sorted[2].0, "b.com");  // 100 - oldest
+        assert_eq!(sorted[0].0, "a.com"); // 300 - most recent
+        assert_eq!(sorted[1].0, "c.com"); // 200
+        assert_eq!(sorted[2].0, "b.com"); // 100 - oldest
     }
 
     #[test]
     fn test_url_truncation_logic() {
         // Test the URL truncation logic from list_cached_domains
         let short_url = "https://short.com";
-        let long_url = "https://very-long-domain-name-that-exceeds-forty-characters.com/subprocessors/list";
+        let long_url =
+            "https://very-long-domain-name-that-exceeds-forty-characters.com/subprocessors/list";
 
         let short_display = if short_url.len() > 40 {
             let mut end = 37;

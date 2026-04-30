@@ -614,7 +614,8 @@ garbage
     #[test]
     fn test_parse_subfinder_extra_fields_ignored() {
         // serde should still parse even if there are extra fields
-        let output = r#"{"host":"extra.com","source":"src","input":"example.com","extra_field":"ignored"}"#;
+        let output =
+            r#"{"host":"extra.com","source":"src","input":"example.com","extra_field":"ignored"}"#;
         let results = parse_subfinder_output(output);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].subdomain, "extra.com");
@@ -849,7 +850,9 @@ garbage
         let url = SubfinderDiscovery::get_platform_download_url();
         // Should return Some on CI/dev machines
         if let Some(u) = url {
-            assert!(u.starts_with("https://github.com/projectdiscovery/subfinder/releases/download/"));
+            assert!(
+                u.starts_with("https://github.com/projectdiscovery/subfinder/releases/download/")
+            );
             assert!(u.contains(SUBFINDER_VERSION));
             assert!(u.ends_with(".zip"));
         }
@@ -872,9 +875,21 @@ garbage
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             let os = std::env::consts::OS;
             match os {
-                "macos" => assert!(url.contains("darwin"), "macOS URL should contain 'darwin': {}", url),
-                "linux" => assert!(url.contains("linux"), "Linux URL should contain 'linux': {}", url),
-                "windows" => assert!(url.contains("windows"), "Windows URL should contain 'windows': {}", url),
+                "macos" => assert!(
+                    url.contains("darwin"),
+                    "macOS URL should contain 'darwin': {}",
+                    url
+                ),
+                "linux" => assert!(
+                    url.contains("linux"),
+                    "Linux URL should contain 'linux': {}",
+                    url
+                ),
+                "windows" => assert!(
+                    url.contains("windows"),
+                    "Windows URL should contain 'windows': {}",
+                    url
+                ),
                 _ => {} // Skip on unsupported
             }
         }
@@ -885,8 +900,16 @@ garbage
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             let arch = std::env::consts::ARCH;
             match arch {
-                "x86_64" => assert!(url.contains("amd64"), "x86_64 URL should contain 'amd64': {}", url),
-                "aarch64" => assert!(url.contains("arm64"), "aarch64 URL should contain 'arm64': {}", url),
+                "x86_64" => assert!(
+                    url.contains("amd64"),
+                    "x86_64 URL should contain 'amd64': {}",
+                    url
+                ),
+                "aarch64" => assert!(
+                    url.contains("arm64"),
+                    "aarch64 URL should contain 'arm64': {}",
+                    url
+                ),
                 _ => {}
             }
         }
@@ -980,7 +1003,8 @@ garbage
     #[test]
     fn test_with_bundled_or_path_custom_path() {
         let custom = PathBuf::from("/custom/subfinder");
-        let sf = SubfinderDiscovery::with_bundled_or_path(Some(custom.clone()), Duration::from_secs(60));
+        let sf =
+            SubfinderDiscovery::with_bundled_or_path(Some(custom.clone()), Duration::from_secs(60));
         assert_eq!(sf.binary_path, custom);
         assert_eq!(sf.timeout, Duration::from_secs(60));
     }
@@ -1009,7 +1033,8 @@ garbage
     fn test_with_bundled_or_path_custom_takes_precedence() {
         // Even if bundled exists, custom path should take precedence
         let custom = PathBuf::from("/my/custom/subfinder");
-        let sf = SubfinderDiscovery::with_bundled_or_path(Some(custom.clone()), Duration::from_secs(10));
+        let sf =
+            SubfinderDiscovery::with_bundled_or_path(Some(custom.clone()), Duration::from_secs(10));
         assert_eq!(sf.binary_path, custom);
     }
 
@@ -1020,7 +1045,10 @@ garbage
     #[test]
     fn test_get_download_url_static() {
         let url = SubfinderDiscovery::get_download_url();
-        assert_eq!(url, "https://github.com/projectdiscovery/subfinder/releases/latest");
+        assert_eq!(
+            url,
+            "https://github.com/projectdiscovery/subfinder/releases/latest"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1053,7 +1081,9 @@ garbage
     #[test]
     fn test_get_available_install_options_manual_before_skip() {
         let options = SubfinderDiscovery::get_available_install_options();
-        let manual_pos = options.iter().position(|o| *o == InstallOption::ManualDownload);
+        let manual_pos = options
+            .iter()
+            .position(|o| *o == InstallOption::ManualDownload);
         let skip_pos = options.iter().position(|o| *o == InstallOption::Skip);
         assert!(manual_pos.unwrap() < skip_pos.unwrap());
     }
@@ -1138,7 +1168,8 @@ garbage
 
     #[test]
     fn test_subfinder_json_line_deserialize_with_extra_fields() {
-        let json = r#"{"host":"test.com","source":"src","input":"example.com","resolver":"8.8.8.8"}"#;
+        let json =
+            r#"{"host":"test.com","source":"src","input":"example.com","resolver":"8.8.8.8"}"#;
         let parsed: SubfinderJsonLine = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.host, "test.com");
         assert_eq!(parsed.source, "src");
@@ -1271,7 +1302,8 @@ garbage
         for i in 0..1000 {
             output.push_str(&format!(
                 "{{\"host\":\"sub{}.example.com\",\"source\":\"src{}\"}}\n",
-                i, i % 10
+                i,
+                i % 10
             ));
         }
         let results = parse_subfinder_output(&output);
@@ -1329,7 +1361,11 @@ garbage
     fn test_get_installation_instructions_multiline() {
         let instructions = SubfinderDiscovery::get_installation_instructions();
         let lines: Vec<&str> = instructions.lines().collect();
-        assert!(lines.len() > 10, "Instructions should be multi-line, got {} lines", lines.len());
+        assert!(
+            lines.len() > 10,
+            "Instructions should be multi-line, got {} lines",
+            lines.len()
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
@@ -1469,7 +1505,8 @@ garbage
 
     #[test]
     fn test_parse_subfinder_crlf_line_endings() {
-        let output = "{\"host\":\"a.com\",\"source\":\"s\"}\r\n{\"host\":\"b.com\",\"source\":\"s\"}\r\n";
+        let output =
+            "{\"host\":\"a.com\",\"source\":\"s\"}\r\n{\"host\":\"b.com\",\"source\":\"s\"}\r\n";
         let results = parse_subfinder_output(output);
         assert_eq!(results.len(), 2);
     }
@@ -1560,7 +1597,10 @@ garbage
     #[test]
     fn test_get_available_install_options_at_least_two() {
         let options = SubfinderDiscovery::get_available_install_options();
-        assert!(options.len() >= 2, "Should have at least ManualDownload + Skip");
+        assert!(
+            options.len() >= 2,
+            "Should have at least ManualDownload + Skip"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────

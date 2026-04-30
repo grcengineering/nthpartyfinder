@@ -510,12 +510,17 @@ mod tests {
     fn cli_parse_all_flags() {
         let cli = Cli::parse_from([
             "nthpartyfinder",
-            "-d", "test.com",
-            "-r", "3",
-            "-f", "json",
-            "-o", "output_name",
+            "-d",
+            "test.com",
+            "-r",
+            "3",
+            "-f",
+            "json",
+            "-o",
+            "output_name",
             "-v",
-            "-j", "5",
+            "-j",
+            "5",
             "--log-verification-failures",
             "--enable-subprocessor-analysis",
             "--enable-subdomain-discovery",
@@ -526,15 +531,22 @@ mod tests {
             "--enable-slm",
             "--enable-web-org",
             "--no-color",
-            "--dns-rate-limit", "100",
-            "--http-rate-limit", "50",
-            "--backoff-strategy", "exponential",
-            "--max-retries", "3",
-            "--whois-concurrency", "8",
-            "--timeout", "300",
+            "--dns-rate-limit",
+            "100",
+            "--http-rate-limit",
+            "50",
+            "--backoff-strategy",
+            "exponential",
+            "--max-retries",
+            "3",
+            "--whois-concurrency",
+            "8",
+            "--timeout",
+            "300",
             "--include-infra",
             "--dns-only",
-            "--batch-parallel", "5",
+            "--batch-parallel",
+            "5",
             "--batch-combined",
         ]);
         assert_eq!(cli.domain, Some("test.com".to_string()));
@@ -581,7 +593,9 @@ mod tests {
     fn cli_parse_cache_list_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "list"]);
         match cli.command {
-            Some(Commands::Cache { action: CacheCommands::List }) => {}
+            Some(Commands::Cache {
+                action: CacheCommands::List,
+            }) => {}
             _ => panic!("Expected Cache List subcommand"),
         }
     }
@@ -590,7 +604,9 @@ mod tests {
     fn cli_parse_cache_show_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "show", "example.com"]);
         match cli.command {
-            Some(Commands::Cache { action: CacheCommands::Show { domain } }) => {
+            Some(Commands::Cache {
+                action: CacheCommands::Show { domain },
+            }) => {
                 assert_eq!(domain, "example.com");
             }
             _ => panic!("Expected Cache Show subcommand"),
@@ -601,7 +617,9 @@ mod tests {
     fn cli_parse_cache_clear_domain() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "example.com"]);
         match cli.command {
-            Some(Commands::Cache { action: CacheCommands::Clear { domain, all } }) => {
+            Some(Commands::Cache {
+                action: CacheCommands::Clear { domain, all },
+            }) => {
                 assert_eq!(domain, Some("example.com".to_string()));
                 assert!(!all);
             }
@@ -613,7 +631,9 @@ mod tests {
     fn cli_parse_cache_clear_all() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "--all"]);
         match cli.command {
-            Some(Commands::Cache { action: CacheCommands::Clear { domain, all } }) => {
+            Some(Commands::Cache {
+                action: CacheCommands::Clear { domain, all },
+            }) => {
                 assert!(domain.is_none());
                 assert!(all);
             }
@@ -623,9 +643,18 @@ mod tests {
 
     #[test]
     fn cli_parse_cache_validate() {
-        let cli = Cli::parse_from(["nthpartyfinder", "cache", "validate", "--detailed", "--domain", "x.com"]);
+        let cli = Cli::parse_from([
+            "nthpartyfinder",
+            "cache",
+            "validate",
+            "--detailed",
+            "--domain",
+            "x.com",
+        ]);
         match cli.command {
-            Some(Commands::Cache { action: CacheCommands::Validate { detailed, domain } }) => {
+            Some(Commands::Cache {
+                action: CacheCommands::Validate { detailed, domain },
+            }) => {
                 assert!(detailed);
                 assert_eq!(domain, Some("x.com".to_string()));
             }
@@ -852,7 +881,10 @@ mod tests {
     fn get_resume_mode_auto_resume() {
         let mut args = default_args();
         args.resume = true;
-        assert_eq!(args.get_resume_mode(), crate::checkpoint::ResumeMode::AutoResume);
+        assert_eq!(
+            args.get_resume_mode(),
+            crate::checkpoint::ResumeMode::AutoResume
+        );
     }
 
     #[test]
@@ -865,7 +897,10 @@ mod tests {
     #[test]
     fn get_resume_mode_prompt_default() {
         let args = default_args();
-        assert_eq!(args.get_resume_mode(), crate::checkpoint::ResumeMode::Prompt);
+        assert_eq!(
+            args.get_resume_mode(),
+            crate::checkpoint::ResumeMode::Prompt
+        );
     }
 
     // ---- Cli disable flags ----
@@ -873,7 +908,9 @@ mod tests {
     #[test]
     fn cli_parse_disable_flags() {
         let cli = Cli::parse_from([
-            "nthpartyfinder", "-d", "x.com",
+            "nthpartyfinder",
+            "-d",
+            "x.com",
             "--disable-subprocessor-analysis",
             "--disable-subdomain-discovery",
             "--disable-saas-tenant-discovery",
@@ -901,21 +938,39 @@ mod tests {
 
     #[test]
     fn cli_parse_log_file() {
-        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--log-file", "/tmp/log.txt"]);
+        let cli = Cli::parse_from([
+            "nthpartyfinder",
+            "-d",
+            "x.com",
+            "--log-file",
+            "/tmp/log.txt",
+        ]);
         let args = Args::from(&cli);
         assert_eq!(args.log_file, Some("/tmp/log.txt".to_string()));
     }
 
     #[test]
     fn cli_parse_subfinder_path() {
-        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--subfinder-path", "/usr/bin/subfinder"]);
+        let cli = Cli::parse_from([
+            "nthpartyfinder",
+            "-d",
+            "x.com",
+            "--subfinder-path",
+            "/usr/bin/subfinder",
+        ]);
         let args = Args::from(&cli);
         assert_eq!(args.subfinder_path, Some("/usr/bin/subfinder".to_string()));
     }
 
     #[test]
     fn cli_parse_batch_output_dir() {
-        let cli = Cli::parse_from(["nthpartyfinder", "--input-file", "f.csv", "--batch-output-dir", "/out"]);
+        let cli = Cli::parse_from([
+            "nthpartyfinder",
+            "--input-file",
+            "f.csv",
+            "--batch-output-dir",
+            "/out",
+        ]);
         let args = Args::from(&cli);
         assert_eq!(args.batch_output_dir, Some("/out".to_string()));
     }

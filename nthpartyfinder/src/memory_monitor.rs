@@ -167,10 +167,7 @@ mod tests {
     fn test_effective_concurrency_handle() {
         let monitor = MemoryMonitor::new(20);
         let handle = monitor.effective_concurrency_handle();
-        assert_eq!(
-            handle.load(std::sync::atomic::Ordering::Relaxed),
-            20
-        );
+        assert_eq!(handle.load(std::sync::atomic::Ordering::Relaxed), 20);
     }
 
     #[test]
@@ -216,8 +213,16 @@ mod tests {
         let mut monitor = MemoryMonitor::new(10);
         let status = monitor.status_string();
         // Should contain "used" and "available" info
-        assert!(status.contains("used"), "Status should mention 'used': {}", status);
-        assert!(status.contains("available"), "Status should mention 'available': {}", status);
+        assert!(
+            status.contains("used"),
+            "Status should mention 'used': {}",
+            status
+        );
+        assert!(
+            status.contains("available"),
+            "Status should mention 'available': {}",
+            status
+        );
     }
 
     #[test]

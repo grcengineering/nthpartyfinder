@@ -669,8 +669,7 @@ mod tests {
     #[test]
     fn test_stub_extract_organization_with_content() {
         let result =
-            extract_organization("example.com", Some("Some page content about Acme Corp"))
-                .unwrap();
+            extract_organization("example.com", Some("Some page content about Acme Corp")).unwrap();
         assert!(result.is_none());
     }
 
@@ -691,8 +690,7 @@ mod tests {
     #[cfg(not(feature = "embedded-ner"))]
     #[test]
     fn test_stub_extract_all_organizations_with_confidence() {
-        let result =
-            extract_all_organizations("Some text about Google", Some(0.8)).unwrap();
+        let result = extract_all_organizations("Some text about Google", Some(0.8)).unwrap();
         assert!(result.is_empty());
     }
 
@@ -800,10 +798,7 @@ mod tests {
                             println!("  DIFFERENT - Expected {}, got {}", exp, extracted);
                         }
                     } else {
-                        println!(
-                            "  UNEXPECTED - Expected no extraction, got {}",
-                            extracted
-                        );
+                        println!("  UNEXPECTED - Expected no extraction, got {}", extracted);
                     }
                 }
                 Ok(None) => {

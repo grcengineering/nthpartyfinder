@@ -52,7 +52,9 @@ pub fn is_depth_allowed(current_depth: u32, max_depth: Option<u32>) -> bool {
 
 /// Deduplicate a list of `VendorDomain` entries by (base_domain, source_type, raw_record).
 /// Returns (deduplicated list, number of duplicates removed).
-pub fn dedup_vendor_domains(vendor_domains: Vec<dns::VendorDomain>) -> (Vec<dns::VendorDomain>, usize) {
+pub fn dedup_vendor_domains(
+    vendor_domains: Vec<dns::VendorDomain>,
+) -> (Vec<dns::VendorDomain>, usize) {
     let pre_dedup_count = vendor_domains.len();
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
     let mut deduped: Vec<dns::VendorDomain> = Vec::new();
@@ -306,7 +308,10 @@ pub async fn discover_nth_parties(
                 ABSOLUTE_MAX_DEPTH, domain
             ));
         } else {
-            logger.debug(&format!("Reached max depth {:?} for domain {}", max_depth, domain));
+            logger.debug(&format!(
+                "Reached max depth {:?} for domain {}",
+                max_depth, domain
+            ));
         }
         return Ok(());
     }
@@ -1274,8 +1279,7 @@ pub async fn discover_nth_parties_minimal(
                 let vendors = discovered_vendors.lock().await;
                 vendors.contains_key(&base_domain)
             } {
-                match whois::get_organization_with_status_and_config(&base_domain, false, 0.5)
-                    .await
+                match whois::get_organization_with_status_and_config(&base_domain, false, 0.5).await
                 {
                     Ok(org_result) => {
                         let mut vendors = discovered_vendors.lock().await;
@@ -1286,10 +1290,8 @@ pub async fn discover_nth_parties_minimal(
                     }
                     Err(_) => {
                         let mut vendors = discovered_vendors.lock().await;
-                        vendors.insert(
-                            base_domain.clone(),
-                            org_normalizer::normalize(&base_domain),
-                        );
+                        vendors
+                            .insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
                     }
                 }
             }
@@ -1395,12 +1397,25 @@ mod tests {
     #[test]
     fn test_is_common_denominator_all_entries() {
         let all = vec![
-            "amazon.com", "amazonaws.com", "microsoft.com", "google.com",
-            "cloudflare.com", "fastly.com", "akamai.com", "azure.com",
-            "office365.com", "outlook.com", "googlemail.com", "gmail.com",
+            "amazon.com",
+            "amazonaws.com",
+            "microsoft.com",
+            "google.com",
+            "cloudflare.com",
+            "fastly.com",
+            "akamai.com",
+            "azure.com",
+            "office365.com",
+            "outlook.com",
+            "googlemail.com",
+            "gmail.com",
         ];
         for domain in all {
-            assert!(is_common_denominator(domain), "Expected {} to be common denominator", domain);
+            assert!(
+                is_common_denominator(domain),
+                "Expected {} to be common denominator",
+                domain
+            );
         }
     }
 
@@ -1432,8 +1447,14 @@ mod tests {
     #[test]
     fn test_is_likely_inferred_org_not_inferred() {
         assert!(!is_likely_inferred_org("google.com", "Alphabet Inc."));
-        assert!(!is_likely_inferred_org("aws.amazon.com", "Amazon Web Services"));
-        assert!(!is_likely_inferred_org("stripe.com", "Payment Processing Corp"));
+        assert!(!is_likely_inferred_org(
+            "aws.amazon.com",
+            "Amazon Web Services"
+        ));
+        assert!(!is_likely_inferred_org(
+            "stripe.com",
+            "Payment Processing Corp"
+        ));
     }
 
     #[test]
@@ -1565,22 +1586,40 @@ mod tests {
     fn test_is_likely_inferred_org_real_companies_not_inferred() {
         // Real company names that differ from domain
         assert!(!is_likely_inferred_org("google.com", "Alphabet Inc."));
-        assert!(!is_likely_inferred_org("github.com", "Microsoft Corporation"));
-        assert!(!is_likely_inferred_org("aws.amazon.com", "Amazon Web Services, Inc."));
-        assert!(!is_likely_inferred_org("azure.com", "Microsoft Corporation"));
+        assert!(!is_likely_inferred_org(
+            "github.com",
+            "Microsoft Corporation"
+        ));
+        assert!(!is_likely_inferred_org(
+            "aws.amazon.com",
+            "Amazon Web Services, Inc."
+        ));
+        assert!(!is_likely_inferred_org(
+            "azure.com",
+            "Microsoft Corporation"
+        ));
     }
 
     #[test]
     fn test_is_likely_inferred_org_unrelated_org() {
-        assert!(!is_likely_inferred_org("example.com", "Totally Different Company"));
-        assert!(!is_likely_inferred_org("test.com", "Unrelated Organization LLC"));
+        assert!(!is_likely_inferred_org(
+            "example.com",
+            "Totally Different Company"
+        ));
+        assert!(!is_likely_inferred_org(
+            "test.com",
+            "Unrelated Organization LLC"
+        ));
     }
 
     #[test]
     fn test_is_likely_inferred_org_subdomain() {
         // Subdomain: base is the first label
         assert!(is_likely_inferred_org("app.mycompany.com", "app inc."));
-        assert!(!is_likely_inferred_org("app.mycompany.com", "mycompany inc."));
+        assert!(!is_likely_inferred_org(
+            "app.mycompany.com",
+            "mycompany inc."
+        ));
     }
 
     #[test]
@@ -1600,8 +1639,14 @@ mod tests {
     fn test_is_likely_inferred_org_all_suffix_patterns() {
         // Patterns that use space separator: "base suffix"
         let space_suffixes = vec![
-            "inc", "inc.", "llc", "corp",
-            "corporation", "company", "co", "ltd",
+            "inc",
+            "inc.",
+            "llc",
+            "corp",
+            "corporation",
+            "company",
+            "co",
+            "ltd",
         ];
         for suffix in space_suffixes {
             let org = format!("testdomain {}", suffix);
@@ -1675,7 +1720,10 @@ mod tests {
     #[test]
     fn test_depth_allowed_at_absolute_max() {
         assert!(is_depth_allowed(ABSOLUTE_MAX_DEPTH, None));
-        assert!(is_depth_allowed(ABSOLUTE_MAX_DEPTH, Some(ABSOLUTE_MAX_DEPTH)));
+        assert!(is_depth_allowed(
+            ABSOLUTE_MAX_DEPTH,
+            Some(ABSOLUTE_MAX_DEPTH)
+        ));
     }
 
     #[test]
@@ -1932,12 +1980,24 @@ mod tests {
 
     #[test]
     fn test_source_type_label_all_known() {
-        assert_eq!(source_type_label(&RecordType::HttpSubprocessor), "subprocessor");
+        assert_eq!(
+            source_type_label(&RecordType::HttpSubprocessor),
+            "subprocessor"
+        );
         assert_eq!(source_type_label(&RecordType::DnsTxtSpf), "SPF");
-        assert_eq!(source_type_label(&RecordType::DnsTxtVerification), "DNS verification");
+        assert_eq!(
+            source_type_label(&RecordType::DnsTxtVerification),
+            "DNS verification"
+        );
         assert_eq!(source_type_label(&RecordType::DnsTxtDmarc), "DMARC");
-        assert_eq!(source_type_label(&RecordType::SubfinderDiscovery), "subfinder");
-        assert_eq!(source_type_label(&RecordType::SaasTenantProbe), "SaaS tenant");
+        assert_eq!(
+            source_type_label(&RecordType::SubfinderDiscovery),
+            "subfinder"
+        );
+        assert_eq!(
+            source_type_label(&RecordType::SaasTenantProbe),
+            "SaaS tenant"
+        );
         assert_eq!(source_type_label(&RecordType::CtLogDiscovery), "CT log");
     }
 
@@ -1946,8 +2006,14 @@ mod tests {
         assert_eq!(source_type_label(&RecordType::DnsTxtDkim), "discovery");
         assert_eq!(source_type_label(&RecordType::DnsSubdomain), "discovery");
         assert_eq!(source_type_label(&RecordType::Unknown), "discovery");
-        assert_eq!(source_type_label(&RecordType::WebTrafficSource), "discovery");
-        assert_eq!(source_type_label(&RecordType::WebTrafficNetwork), "discovery");
+        assert_eq!(
+            source_type_label(&RecordType::WebTrafficSource),
+            "discovery"
+        );
+        assert_eq!(
+            source_type_label(&RecordType::WebTrafficNetwork),
+            "discovery"
+        );
         assert_eq!(source_type_label(&RecordType::TrustCenterApi), "discovery");
     }
 
@@ -1982,8 +2048,8 @@ mod tests {
     fn test_truncate_utf8_multibyte_char_boundary() {
         // "café" has a multi-byte é (2 bytes in UTF-8)
         let s = "caf\u{00e9}!"; // "café!"
-        // Truncating at 4 bytes: "caf" + first byte of é is not a boundary
-        // Should back up to 3 bytes: "caf"
+                                // Truncating at 4 bytes: "caf" + first byte of é is not a boundary
+                                // Should back up to 3 bytes: "caf"
         let result = truncate_utf8(s, 4);
         assert!(result.ends_with("..."));
         // The result should be valid UTF-8
@@ -2039,7 +2105,8 @@ mod tests {
             vendor_limits_per_depth: vec![10],
             total_vendor_budget: 1000,
         };
-        let (result, removed) = apply_vendor_limits(domains, &AnalysisStrategy::Unlimited, &config, 1);
+        let (result, removed) =
+            apply_vendor_limits(domains, &AnalysisStrategy::Unlimited, &config, 1);
         assert_eq!(result.len(), 100);
         assert_eq!(removed, 0);
     }

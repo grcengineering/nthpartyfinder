@@ -379,7 +379,10 @@ mod tests {
         let mut sink = ResultSink::new(tmp.path()).unwrap();
 
         assert_eq!(sink.count(), 0);
-        assert!(sink.path().to_string_lossy().contains("nthpartyfinder-results-"));
+        assert!(sink
+            .path()
+            .to_string_lossy()
+            .contains("nthpartyfinder-results-"));
         assert!(sink.path().to_string_lossy().ends_with(".jsonl.zst"));
 
         sink.append_one(&make_test_result("test.com", 1)).unwrap();
@@ -389,7 +392,11 @@ mod tests {
     #[test]
     fn test_with_path_nested_dir() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("nested").join("dir").join("results.jsonl.zst");
+        let path = tmp
+            .path()
+            .join("nested")
+            .join("dir")
+            .join("results.jsonl.zst");
         let mut sink = ResultSink::with_path(&path).unwrap();
 
         sink.append_one(&make_test_result("test.com", 1)).unwrap();

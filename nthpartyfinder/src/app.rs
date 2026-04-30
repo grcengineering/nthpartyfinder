@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, IsTerminal};
+use std::io::{self, BufRead, IsTerminal};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -32,6 +32,34 @@ use crate::whois;
 
 use std::path::PathBuf;
 
+#[derive(Debug)]
+pub struct AppExitCode(pub i32);
+
+impl std::fmt::Display for AppExitCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit code {}", self.0)
+    }
+}
+
+impl std::error::Error for AppExitCode {}
+
+pub trait InputSource: Send + Sync {
+    fn is_terminal(&self) -> bool;
+    fn read_line(&self, buf: &mut String) -> io::Result<usize>;
+}
+
+pub struct StdioInput;
+
+impl InputSource for StdioInput {
+    fn is_terminal(&self) -> bool {
+        std::io::stdin().is_terminal()
+    }
+
+    fn read_line(&self, buf: &mut String) -> io::Result<usize> {
+        io::stdin().lock().read_line(buf)
+    }
+}
+
 /// Feature flags computed from CLI args + config, used to decide which discovery methods run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureFlags {
@@ -47,8 +75,7 @@ pub struct FeatureFlags {
 pub fn compute_feature_flags(args: &Args, config: &AppConfig) -> FeatureFlags {
     FeatureFlags {
         web_org: !args.dns_only
-            && (args.enable_web_org
-                || (!args.disable_web_org && config.discovery.web_org_enabled)),
+            && (args.enable_web_org || (!args.disable_web_org && config.discovery.web_org_enabled)),
         subprocessor: !args.dns_only
             && (args.enable_subprocessor_analysis
                 || (!args.disable_subprocessor_analysis && config.discovery.subprocessor_enabled)),
@@ -130,7 +157,10 @@ pub fn filter_infra_providers(
 /// Compute the analysis timeout from CLI args and environment variable.
 /// Returns None if timeout is disabled (0), otherwise the Duration.
 pub fn compute_analysis_timeout(cli_timeout: Option<u64>) -> Option<std::time::Duration> {
-    compute_analysis_timeout_with_env(cli_timeout, std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS").ok())
+    compute_analysis_timeout_with_env(
+        cli_timeout,
+        std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS").ok(),
+    )
 }
 
 /// Inner function for testability: compute timeout from CLI arg and env value.
@@ -138,11 +168,8 @@ pub fn compute_analysis_timeout_with_env(
     cli_timeout: Option<u64>,
     env_value: Option<String>,
 ) -> Option<std::time::Duration> {
-    let timeout_secs: u64 = cli_timeout.unwrap_or_else(|| {
-        env_value
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(600)
-    });
+    let timeout_secs: u64 =
+        cli_timeout.unwrap_or_else(|| env_value.and_then(|v| v.parse().ok()).unwrap_or(600));
     if timeout_secs == 0 {
         None
     } else {
@@ -211,6 +238,7 @@ pub fn collect_unverified_orgs(
     unverified
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run() -> Result<()> {
     eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("  Parsing arguments...");
@@ -245,7 +273,19 @@ pub async fn run() -> Result<()> {
     }
 
     let args = Args::from(&cli);
+    let input = StdioInput;
+    match run_inner(args, &input).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(code) = e.downcast_ref::<AppExitCode>() {
+                std::process::exit(code.0);
+            }
+            Err(e)
+        }
+    }
+}
 
+pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
             Ok(path) => {
@@ -254,49 +294,45 @@ pub async fn run() -> Result<()> {
                     path.display()
                 );
                 println!("   Edit this file to customize settings, then run nthpartyfinder again.");
-                std::process::exit(0);
+                return Ok(());
             }
             Err(e) => {
                 eprintln!("❌ Failed to create configuration file: {}", e);
-                std::process::exit(1);
+                bail!(AppExitCode(1));
             }
         }
     }
 
     if let Err(e) = args.validate() {
         eprintln!("error: {}", e);
-        std::process::exit(2);
+        bail!(AppExitCode(2));
     }
 
     eprintln!("  Loading configuration...");
     let _app_config = match AppConfig::load() {
         Ok(cfg) => cfg,
-        Err(ConfigError::FileNotFound(path)) => {
-            match AppConfig::prompt_create_config() {
-                Ok(Some(created_path)) => {
-                    println!(
-                        "✅ Created default configuration file at: {}",
-                        created_path.display()
-                    );
-                    println!(
-                        "   Edit this file to customize settings, then run nthpartyfinder again."
-                    );
-                    std::process::exit(0);
-                }
-                Ok(None) => {
-                    eprintln!("❌ Configuration file not found at: {}", path.display());
-                    eprintln!("   Run with --init to create a default configuration file.");
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("❌ Failed to create configuration file: {}", e);
-                    std::process::exit(1);
-                }
+        Err(ConfigError::FileNotFound(path)) => match AppConfig::prompt_create_config() {
+            Ok(Some(created_path)) => {
+                println!(
+                    "✅ Created default configuration file at: {}",
+                    created_path.display()
+                );
+                println!("   Edit this file to customize settings, then run nthpartyfinder again.");
+                return Ok(());
             }
-        }
+            Ok(None) => {
+                eprintln!("❌ Configuration file not found at: {}", path.display());
+                eprintln!("   Run with --init to create a default configuration file.");
+                bail!(AppExitCode(1));
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to create configuration file: {}", e);
+                bail!(AppExitCode(1));
+            }
+        },
         Err(e) => {
             eprintln!("❌ Configuration error: {}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     };
 
@@ -339,7 +375,7 @@ pub async fn run() -> Result<()> {
         }
         Err(e) => {
             eprintln!("❌ Missing required dependency:\n{}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 
@@ -506,7 +542,9 @@ pub async fn run() -> Result<()> {
         logger.info("Webpage source & network request discovery enabled");
     }
 
-    ctrlc::set_handler(move || {
+    ctrlc::set_handler(
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        move || {
         analysis::set_interrupted();
         eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -521,12 +559,12 @@ pub async fn run() -> Result<()> {
         let domains = match batch::parse_domain_file(input_path) {
             Ok(d) if d.is_empty() => {
                 eprintln!("error: no valid domains found in {}", input_path.display());
-                std::process::exit(2);
+                bail!(AppExitCode(2));
             }
             Ok(d) => d,
             Err(e) => {
                 eprintln!("error: failed to read input file: {}", e);
-                std::process::exit(2);
+                bail!(AppExitCode(2));
             }
         };
 
@@ -538,7 +576,7 @@ pub async fn run() -> Result<()> {
         let output_base = std::path::Path::new(&output_dir);
         if let Err(e) = std::fs::create_dir_all(output_base) {
             eprintln!("error: failed to create output directory: {}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
 
         let batch_start = std::time::Instant::now();
@@ -670,13 +708,10 @@ pub async fn run() -> Result<()> {
         batch::finalize_batch_summary(&mut summary);
 
         if args.batch_combined {
-            let combined_path = output_base.join(format!(
-                "{}.{}",
-                args.output, args.output_format
-            ));
+            let combined_path = output_base.join(format!("{}.{}", args.output, args.output_format));
             if let Err(e) = batch::export_batch_summary(&summary, &combined_path) {
                 eprintln!("error: failed to write combined report: {}", e);
-                std::process::exit(1);
+                bail!(AppExitCode(1));
             }
             logger.info(&format!("Combined report: {}", combined_path.display()));
         }
@@ -684,7 +719,7 @@ pub async fn run() -> Result<()> {
         let summary_path = output_base.join("batch_summary.json");
         if let Err(e) = batch::export_batch_summary(&summary, &summary_path) {
             eprintln!("error: failed to write batch summary: {}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
 
         logger.info(&format!(
@@ -693,9 +728,9 @@ pub async fn run() -> Result<()> {
         ));
 
         if summary.failed > 0 {
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
-        std::process::exit(0);
+        return Ok(());
     }
 
     let domain = args
@@ -707,7 +742,7 @@ pub async fn run() -> Result<()> {
         Ok(dir) => dir,
         Err(e) => {
             logger.error(&format!("Failed to determine output directory: {}", e));
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     };
 
@@ -716,14 +751,14 @@ pub async fn run() -> Result<()> {
             "Failed to create output directory '{}': {}",
             output_dir, e
         ));
-        std::process::exit(1);
+        bail!(AppExitCode(1));
     }
 
     let output_filename = build_output_filename(&args.output, &args.output_format, domain);
     let output_path = build_full_output_path(&output_dir, &output_filename);
     let output_path_str = output_path.to_string_lossy();
 
-    let is_interactive = std::io::stdin().is_terminal();
+    let is_interactive = input.is_terminal();
     let final_output_path = if is_interactive {
         logger.suspend_for_io(|| {
             println!("📁 Output file will be saved to: {}", output_path_str);
@@ -732,7 +767,7 @@ pub async fn run() -> Result<()> {
             io::Write::flush(&mut io::stdout()).unwrap();
 
             let mut user_input = String::new();
-            if let Err(e) = io::stdin().read_line(&mut user_input) {
+            if let Err(e) = input.read_line(&mut user_input) {
                 eprintln!(
                     "Warning: Failed to read stdin: {}, using default output path",
                     e
@@ -791,7 +826,7 @@ pub async fn run() -> Result<()> {
                         let _ = Checkpoint::delete(output_dir_path);
                     }
                     ResumeMode::Prompt => {
-                        if !std::io::stdin().is_terminal() {
+                        if !input.is_terminal() {
                             if is_compatible {
                                 logger.info("Auto-resuming from compatible checkpoint (non-interactive mode)");
                                 checkpoint = Some(existing_checkpoint);
@@ -805,7 +840,7 @@ pub async fn run() -> Result<()> {
                                 .created_at
                                 .format("%Y-%m-%d %H:%M:%S UTC")
                                 .to_string();
-                            let resume_result = logger.suspend_for_io(|| {
+                            let resume_result = logger.suspend_for_io(|| -> Result<Option<bool>> {
                                 println!();
                                 println!("╔════════════════════════════════════════════════════════════════╗");
                                 println!("║         INCOMPLETE ANALYSIS CHECKPOINT FOUND                  ║");
@@ -820,15 +855,15 @@ pub async fn run() -> Result<()> {
                                     io::Write::flush(&mut io::stdout()).unwrap();
 
                                     let mut resume_input = String::new();
-                                    let _ = io::stdin().read_line(&mut resume_input);
+                                    let _ = input.read_line(&mut resume_input);
                                     let resume_input = resume_input.trim().to_lowercase();
 
                                     if resume_input.is_empty() || resume_input == "y" || resume_input == "yes" {
                                         println!("Resuming from checkpoint...");
-                                        Some(true)
+                                        Ok(Some(true))
                                     } else {
                                         println!("Starting fresh analysis...");
-                                        Some(false)
+                                        Ok(Some(false))
                                     }
                                 } else {
                                     println!("Checkpoint is incompatible with current settings.");
@@ -837,18 +872,18 @@ pub async fn run() -> Result<()> {
                                     io::Write::flush(&mut io::stdout()).unwrap();
 
                                     let mut delete_input = String::new();
-                                    let _ = io::stdin().read_line(&mut delete_input);
+                                    let _ = input.read_line(&mut delete_input);
                                     let delete_input = delete_input.trim().to_lowercase();
 
                                     if delete_input.is_empty() || delete_input == "y" || delete_input == "yes" {
                                         println!("Starting fresh analysis...");
-                                        None
+                                        Ok(None)
                                     } else {
                                         println!("Cannot proceed with incompatible checkpoint. Exiting.");
-                                        std::process::exit(1);
+                                        bail!(AppExitCode(1));
                                     }
                                 }
-                            });
+                            })?;
 
                             match resume_result {
                                 Some(true) => checkpoint = Some(existing_checkpoint),
@@ -874,12 +909,7 @@ pub async fn run() -> Result<()> {
     }
 
     let checkpoint = Arc::new(Mutex::new(checkpoint.unwrap_or_else(|| {
-        Checkpoint::new(
-            domain.clone(),
-            None,
-            args.depth,
-            settings_hash.clone(),
-        )
+        Checkpoint::new(domain.clone(), None, args.depth, settings_hash.clone())
     })));
 
     let verification_logger = verification_logger::VerificationFailureLogger::new(
@@ -1005,7 +1035,7 @@ pub async fn run() -> Result<()> {
         );
         if discovery.is_available() {
             Some(discovery)
-        } else if !std::io::stdin().is_terminal() {
+        } else if !input.is_terminal() {
             logger.warn("Subfinder binary not found — subdomain discovery disabled (non-interactive mode, cannot prompt for installation)");
             None
         } else {
@@ -1028,7 +1058,7 @@ pub async fn run() -> Result<()> {
                 eprint!("Select option [1-{}]: ", options.len());
 
                 let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_ok() {
+                if input.read_line(&mut input).is_ok() {
                     input.trim().parse::<usize>().ok().and_then(|n| {
                         if n >= 1 && n <= options.len() {
                             Some(options[n - 1])
@@ -1305,9 +1335,7 @@ pub async fn run() -> Result<()> {
     logger.start_scan_progress(100).await;
 
     let analysis_timeout = compute_analysis_timeout(args.timeout);
-    let analysis_timeout_secs = analysis_timeout
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let analysis_timeout_secs = analysis_timeout.map(|d| d.as_secs()).unwrap_or(0);
 
     let analysis_future = analysis::discover_nth_parties(
         domain,
@@ -1370,7 +1398,7 @@ pub async fn run() -> Result<()> {
                 );
                 eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
                 eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
-                std::process::exit(1);
+                bail!(AppExitCode(1));
             }
         }
     } else {
@@ -1379,7 +1407,7 @@ pub async fn run() -> Result<()> {
 
     if analysis::is_interrupted() {
         logger.warn("Analysis interrupted by user.");
-        std::process::exit(130);
+        bail!(AppExitCode(130));
     }
 
     let new_results = {
@@ -1488,7 +1516,7 @@ pub async fn run() -> Result<()> {
 
     logger.log_export_success(&final_output_path);
 
-    let is_interactive_post = std::io::stdin().is_terminal();
+    let is_interactive_post = input.is_terminal();
     if is_interactive_post {
         if let Some(analyzer) = &subprocessor_analyzer {
             let pending = analyzer.get_pending_mappings().await;
@@ -1511,7 +1539,12 @@ pub async fn run() -> Result<()> {
         drop(vendors);
 
         if !all_unverified.is_empty() && is_interactive_post {
-            interactive::confirm_unverified_organizations(&all_unverified, &discovered_vendors, &logger).await?;
+            interactive::confirm_unverified_organizations(
+                &all_unverified,
+                &discovered_vendors,
+                &logger,
+            )
+            .await?;
         }
     }
 
@@ -1546,6 +1579,7 @@ pub async fn run_batch_analysis(
     args: &Args,
     app_config: &AppConfig,
     logger: Arc<AnalysisLogger>,
+    input: &dyn InputSource,
 ) -> Result<()> {
     use batch::{
         export_batch_summary, finalize_batch_summary, new_batch_summary, parse_domain_file,
@@ -1571,13 +1605,13 @@ pub async fn run_batch_analysis(
         Ok(domains) => {
             if domains.is_empty() {
                 logger.error("No valid domains found in input file");
-                std::process::exit(1);
+                bail!(AppExitCode(1));
             }
             domains
         }
         Err(e) => {
             logger.error(&format!("Failed to parse input file: {}", e));
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     };
 
@@ -1594,7 +1628,7 @@ pub async fn run_batch_analysis(
 
     if let Err(e) = std::fs::create_dir_all(&batch_output_dir) {
         logger.error(&format!("Failed to create batch output directory: {}", e));
-        std::process::exit(1);
+        bail!(AppExitCode(1));
     }
 
     println!("Batch output directory: {}", batch_output_dir.display());
@@ -1610,7 +1644,7 @@ pub async fn run_batch_analysis(
     print!("Press Enter to start batch analysis or Ctrl+C to cancel: ");
     io::Write::flush(&mut io::stdout()).unwrap();
     let mut input = String::new();
-    let _ = io::stdin().read_line(&mut input);
+    let _ = input.read_line(&mut input);
     println!();
 
     let mut summary = new_batch_summary();
@@ -2091,8 +2125,20 @@ mod tests {
     #[test]
     fn test_deduplicate_no_duplicates() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "spf record"),
-            make_relationship("google.com", "Google", "example.com", RecordType::DnsTxtSpf, "spf include"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "spf record",
+            ),
+            make_relationship(
+                "google.com",
+                "Google",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "spf include",
+            ),
         ];
         let (deduped, raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 2);
@@ -2102,8 +2148,20 @@ mod tests {
     #[test]
     fn test_deduplicate_merges_evidence() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "evidence-A"),
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "evidence-B"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "evidence-A",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "evidence-B",
+            ),
         ];
         let (deduped, raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 1);
@@ -2115,8 +2173,20 @@ mod tests {
     #[test]
     fn test_deduplicate_does_not_merge_duplicate_evidence() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "same-evidence"),
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "same-evidence"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "same-evidence",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "same-evidence",
+            ),
         ];
         let (deduped, _raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 1);
@@ -2127,8 +2197,20 @@ mod tests {
     #[test]
     fn test_deduplicate_different_record_types_not_merged() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "ev1"),
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::HttpSubprocessor, "ev2"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev1",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::HttpSubprocessor,
+                "ev2",
+            ),
         ];
         let (deduped, _raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 2);
@@ -2137,8 +2219,20 @@ mod tests {
     #[test]
     fn test_deduplicate_different_customers_not_merged() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "customer-a.com", RecordType::DnsTxtSpf, "ev1"),
-            make_relationship("stripe.com", "Stripe", "customer-b.com", RecordType::DnsTxtSpf, "ev2"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "customer-a.com",
+                RecordType::DnsTxtSpf,
+                "ev1",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "customer-b.com",
+                RecordType::DnsTxtSpf,
+                "ev2",
+            ),
         ];
         let (deduped, _raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 2);
@@ -2147,9 +2241,27 @@ mod tests {
     #[test]
     fn test_deduplicate_preserves_order_of_first_occurrence() {
         let results = vec![
-            make_relationship("aaa.com", "AAA", "example.com", RecordType::DnsTxtSpf, "first"),
-            make_relationship("bbb.com", "BBB", "example.com", RecordType::DnsTxtSpf, "second"),
-            make_relationship("aaa.com", "AAA", "example.com", RecordType::DnsTxtSpf, "third"),
+            make_relationship(
+                "aaa.com",
+                "AAA",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "first",
+            ),
+            make_relationship(
+                "bbb.com",
+                "BBB",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "second",
+            ),
+            make_relationship(
+                "aaa.com",
+                "AAA",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "third",
+            ),
         ];
         let (deduped, _raw) = deduplicate_results(results);
         assert_eq!(deduped.len(), 2);
@@ -2162,8 +2274,20 @@ mod tests {
     #[test]
     fn test_filter_infra_include_infra_returns_all() {
         let results = vec![
-            make_relationship("amazonaws.com", "Amazon", "example.com", RecordType::DnsTxtSpf, "ev"),
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship(
+                "amazonaws.com",
+                "Amazon",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
         ];
         let (filtered, removed) = filter_infra_providers(results, true);
         assert_eq!(filtered.len(), 2);
@@ -2173,9 +2297,27 @@ mod tests {
     #[test]
     fn test_filter_infra_removes_common_providers() {
         let results = vec![
-            make_relationship("amazonaws.com", "Amazon", "example.com", RecordType::DnsTxtSpf, "ev"),
-            make_relationship("google.com", "Google", "example.com", RecordType::DnsTxtSpf, "ev"),
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship(
+                "amazonaws.com",
+                "Amazon",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+            make_relationship(
+                "google.com",
+                "Google",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
         ];
         let (filtered, removed) = filter_infra_providers(results, false);
         assert_eq!(filtered.len(), 1);
@@ -2193,8 +2335,20 @@ mod tests {
     #[test]
     fn test_filter_infra_all_infra() {
         let results = vec![
-            make_relationship("amazonaws.com", "Amazon", "example.com", RecordType::DnsTxtSpf, "ev"),
-            make_relationship("cloudflare.com", "Cloudflare", "example.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship(
+                "amazonaws.com",
+                "Amazon",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+            make_relationship(
+                "cloudflare.com",
+                "Cloudflare",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
         ];
         let (filtered, removed) = filter_infra_providers(results, false);
         assert_eq!(filtered.len(), 0);
@@ -2204,8 +2358,20 @@ mod tests {
     #[test]
     fn test_filter_infra_no_infra() {
         let results = vec![
-            make_relationship("stripe.com", "Stripe", "example.com", RecordType::DnsTxtSpf, "ev"),
-            make_relationship("pendo.io", "Pendo", "example.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+            make_relationship(
+                "pendo.io",
+                "Pendo",
+                "example.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
         ];
         let (filtered, removed) = filter_infra_providers(results, false);
         assert_eq!(filtered.len(), 2);
@@ -2214,9 +2380,13 @@ mod tests {
 
     #[test]
     fn test_filter_infra_subdomain_of_infra() {
-        let results = vec![
-            make_relationship("s3.amazonaws.com", "Amazon", "example.com", RecordType::DnsTxtSpf, "ev"),
-        ];
+        let results = vec![make_relationship(
+            "s3.amazonaws.com",
+            "Amazon",
+            "example.com",
+            RecordType::DnsTxtSpf,
+            "ev",
+        )];
         let (filtered, removed) = filter_infra_providers(results, false);
         assert_eq!(filtered.len(), 0);
         assert_eq!(removed, 1);
@@ -2314,8 +2484,14 @@ mod tests {
 
     #[test]
     fn test_build_full_output_path_with_spaces() {
-        let path = build_full_output_path("/home/user/My Documents", "Nth Party Analysis for test.com.html");
-        assert_eq!(path, PathBuf::from("/home/user/My Documents/Nth Party Analysis for test.com.html"));
+        let path = build_full_output_path(
+            "/home/user/My Documents",
+            "Nth Party Analysis for test.com.html",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/My Documents/Nth Party Analysis for test.com.html")
+        );
     }
 
     #[test]
@@ -2346,9 +2522,18 @@ mod tests {
 
     #[test]
     fn test_resolve_checkpoint_fresh_always_false() {
-        assert_eq!(resolve_checkpoint_resume(&ResumeMode::Fresh, true, true), Some(false));
-        assert_eq!(resolve_checkpoint_resume(&ResumeMode::Fresh, false, true), Some(false));
-        assert_eq!(resolve_checkpoint_resume(&ResumeMode::Fresh, true, false), Some(false));
+        assert_eq!(
+            resolve_checkpoint_resume(&ResumeMode::Fresh, true, true),
+            Some(false)
+        );
+        assert_eq!(
+            resolve_checkpoint_resume(&ResumeMode::Fresh, false, true),
+            Some(false)
+        );
+        assert_eq!(
+            resolve_checkpoint_resume(&ResumeMode::Fresh, true, false),
+            Some(false)
+        );
     }
 
     #[test]
@@ -2394,7 +2579,10 @@ mod tests {
     fn test_collect_unverified_orgs_real_company_not_inferred() {
         let mut vendors = HashMap::new();
         vendors.insert("google.com".to_string(), "Alphabet Inc.".to_string());
-        vendors.insert("github.com".to_string(), "Microsoft Corporation".to_string());
+        vendors.insert(
+            "github.com".to_string(),
+            "Microsoft Corporation".to_string(),
+        );
         let result = collect_unverified_orgs(&vendors);
         assert!(result.is_empty());
     }

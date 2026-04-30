@@ -157,7 +157,8 @@ mod tests {
     #[test]
     fn new_enabled_creates_file_path() {
         let dir = tempdir().unwrap();
-        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "example.com", true);
+        let logger =
+            VerificationFailureLogger::new(dir.path().to_str().unwrap(), "example.com", true);
         assert!(logger.is_enabled());
         let path = logger.get_file_path();
         assert!(path.contains("verification_failures_example_com_"));
@@ -198,7 +199,13 @@ mod tests {
         let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
         logger.initialize().unwrap();
 
-        logger.log_failure("test.org", "TXT", "v=spf1 include:example.com", Some("example"), "unknown pattern");
+        logger.log_failure(
+            "test.org",
+            "TXT",
+            "v=spf1 include:example.com",
+            Some("example"),
+            "unknown pattern",
+        );
 
         logger.close();
 
@@ -347,7 +354,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path;
         {
-            let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
+            let logger =
+                VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
             file_path = logger.get_file_path().to_string();
             logger.initialize().unwrap();
             logger.log_failure("test.org", "TXT", "rec", None, "reason");
@@ -362,7 +370,11 @@ mod tests {
     #[test]
     fn domain_with_dots_replaced_in_filename() {
         let dir = tempdir().unwrap();
-        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "sub.domain.example.com", true);
+        let logger = VerificationFailureLogger::new(
+            dir.path().to_str().unwrap(),
+            "sub.domain.example.com",
+            true,
+        );
         let path = logger.get_file_path();
         assert!(path.contains("sub_domain_example_com"));
         assert!(!path.contains("sub.domain.example.com"));

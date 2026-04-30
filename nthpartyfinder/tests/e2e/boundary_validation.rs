@@ -23,9 +23,9 @@ fn excess_parallelism_rejected_with_exit_2() {
 #[test]
 fn no_input_rejected_with_exit_2() {
     let (mut cmd, _tmp) = isolated_run();
-    cmd.assert()
-        .code(2)
-        .stderr(predicate::str::contains("either -d <domain> or --input-file <file> is required"));
+    cmd.assert().code(2).stderr(predicate::str::contains(
+        "either -d <domain> or --input-file <file> is required",
+    ));
 }
 
 #[test]
@@ -38,7 +38,9 @@ fn batch_parallel_excess_rejected_with_exit_2() {
         .args(["--batch-parallel", "21"])
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("--batch-parallel cannot exceed 20"));
+        .stderr(predicate::str::contains(
+            "--batch-parallel cannot exceed 20",
+        ));
 }
 
 #[test]

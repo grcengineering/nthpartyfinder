@@ -661,10 +661,7 @@ mod tests {
     fn test_find_ort_in_directory_flat_structure() {
         let dir = tempdir().unwrap();
         // Create onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.dylib
-        let ort_dir = dir
-            .path()
-            .join("onnxruntime-osx-arm64-1.20.1")
-            .join("lib");
+        let ort_dir = dir.path().join("onnxruntime-osx-arm64-1.20.1").join("lib");
         std::fs::create_dir_all(&ort_dir).unwrap();
         let lib_file = ort_dir.join("libonnxruntime.dylib");
         std::fs::write(&lib_file, b"fake lib").unwrap();
@@ -733,9 +730,7 @@ mod tests {
 
     #[test]
     fn test_check_dependencies_disabled_returns_whois_only() {
-        let result = check_dependencies(
-            false, false, false, false, false, false, false,
-        );
+        let result = check_dependencies(false, false, false, false, false, false, false);
         // With disable_slm=false and config_slm_enabled=false, SLM is not wanted
         // Only whois should be checked
         assert!(result.is_ok());
@@ -980,7 +975,11 @@ mod tests {
     #[test]
     fn test_get_ort_download_info_version_1_20_1() {
         let (_, _, url) = get_ort_download_info();
-        assert!(url.contains("v1.20.1"), "URL should contain v1.20.1: {}", url);
+        assert!(
+            url.contains("v1.20.1"),
+            "URL should contain v1.20.1: {}",
+            url
+        );
     }
 
     #[test]

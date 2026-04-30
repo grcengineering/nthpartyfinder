@@ -639,10 +639,25 @@ mod tests {
     fn sample_relationships() -> Vec<VendorRelationship> {
         vec![
             make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf),
-            make_vendor("sendgrid.net", "SendGrid", 3, RecordType::DnsTxtVerification),
+            make_vendor(
+                "sendgrid.net",
+                "SendGrid",
+                3,
+                RecordType::DnsTxtVerification,
+            ),
             make_vendor("cloudflare.com", "Cloudflare", 4, RecordType::DnsSubdomain),
-            make_vendor("cdn.example.com", "ExampleCDN", 3, RecordType::WebTrafficSource),
-            make_vendor("analytics.test.com", "Analytics", 3, RecordType::WebTrafficNetwork),
+            make_vendor(
+                "cdn.example.com",
+                "ExampleCDN",
+                3,
+                RecordType::WebTrafficSource,
+            ),
+            make_vendor(
+                "analytics.test.com",
+                "Analytics",
+                3,
+                RecordType::WebTrafficNetwork,
+            ),
         ]
     }
 
@@ -798,7 +813,12 @@ mod tests {
     fn test_export_markdown_other_record_types() {
         let rels = vec![
             make_vendor("api.example.com", "ApiCo", 3, RecordType::HttpSubprocessor),
-            make_vendor("trust.example.com", "TrustCo", 3, RecordType::TrustCenterApi),
+            make_vendor(
+                "trust.example.com",
+                "TrustCo",
+                3,
+                RecordType::TrustCenterApi,
+            ),
         ];
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("other.md");

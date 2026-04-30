@@ -1232,10 +1232,7 @@ mod tests {
 
     #[test]
     fn test_extract_path_http_scheme() {
-        assert_eq!(
-            extract_path_from_url("http://example.com/hello"),
-            "/hello"
-        );
+        assert_eq!(extract_path_from_url("http://example.com/hello"), "/hello");
     }
 
     #[test]
@@ -1333,8 +1330,7 @@ mod tests {
             failure_indicators: vec![],
             notes: None,
         };
-        let (status, matched) =
-            analyze_response_with_evidence(200, "Please Sign In", &detection);
+        let (status, matched) = analyze_response_with_evidence(200, "Please Sign In", &detection);
         assert_eq!(status, TenantStatus::Confirmed);
         assert_eq!(matched, vec!["Sign In".to_string()]);
     }
@@ -1359,8 +1355,7 @@ mod tests {
             failure_indicators: vec![],
             notes: None,
         };
-        let (status, matched) =
-            analyze_response_with_evidence(200, "Some page", &detection);
+        let (status, matched) = analyze_response_with_evidence(200, "Some page", &detection);
         assert_eq!(status, TenantStatus::Likely);
         assert!(matched.is_empty());
     }
@@ -1385,8 +1380,7 @@ mod tests {
             failure_indicators: vec![],
             notes: None,
         };
-        let (status, matched) =
-            analyze_response_with_evidence(404, "Not Found", &detection);
+        let (status, matched) = analyze_response_with_evidence(404, "Not Found", &detection);
         assert_eq!(status, TenantStatus::NotFound);
         assert_eq!(matched, vec!["http_status:404".to_string()]);
     }
@@ -1398,8 +1392,7 @@ mod tests {
             failure_indicators: vec![],
             notes: None,
         };
-        let (status, matched) =
-            analyze_response_with_evidence(500, "Server Error", &detection);
+        let (status, matched) = analyze_response_with_evidence(500, "Server Error", &detection);
         assert_eq!(status, TenantStatus::NotFound);
         assert_eq!(matched, vec!["http_status:500".to_string()]);
     }
@@ -1411,8 +1404,7 @@ mod tests {
             failure_indicators: vec![],
             notes: None,
         };
-        let (status, matched) =
-            analyze_response_with_evidence(302, "Redirecting...", &detection);
+        let (status, matched) = analyze_response_with_evidence(302, "Redirecting...", &detection);
         assert_eq!(status, TenantStatus::Unknown);
         assert_eq!(matched, vec!["http_status:302".to_string()]);
     }
@@ -1491,7 +1483,7 @@ mod tests {
     fn test_baseline_empty_final_url_no_redirect_match() {
         let baseline = BaselineResponse {
             status_code: 200,
-            body_hash: 99999, // different hash
+            body_hash: 99999,   // different hash
             body_length: 50000, // very different length
             final_url: "".to_string(),
         };
@@ -1678,10 +1670,7 @@ mod tests {
         assert_eq!(platform.name, "Jira");
         assert_eq!(platform.vendor_domain, "atlassian.com");
         assert_eq!(platform.tenant_patterns, vec!["{tenant}.atlassian.net"]);
-        assert_eq!(
-            platform.detection.notes,
-            Some("Cloud only".to_string())
-        );
+        assert_eq!(platform.detection.notes, Some("Cloud only".to_string()));
     }
 
     #[test]
@@ -1720,10 +1709,7 @@ mod tests {
     #[case("no-scheme.com/path", Some("no-scheme.com".to_string()))]
     #[case("https://", None)]
     #[case("", None)]
-    fn test_extract_host_parametrized(
-        #[case] url: &str,
-        #[case] expected: Option<String>,
-    ) {
+    fn test_extract_host_parametrized(#[case] url: &str, #[case] expected: Option<String>) {
         assert_eq!(extract_host_from_url(url), expected);
     }
 
@@ -1733,10 +1719,7 @@ mod tests {
     #[case("https://example.com/", "/")]
     #[case("https://example.com/a?b=c", "/a")]
     #[case("http://x.com/p/q", "/p/q")]
-    fn test_extract_path_parametrized(
-        #[case] url: &str,
-        #[case] expected: &str,
-    ) {
+    fn test_extract_path_parametrized(#[case] url: &str, #[case] expected: &str) {
         assert_eq!(extract_path_from_url(url), expected);
     }
 

@@ -6806,7 +6806,9 @@ mod tests {
 
     #[test]
     fn test_is_valid_org_name_too_many_words() {
-        assert!(!is_valid_org_name("This Is A Very Long Name With Way Too Many Words In It"));
+        assert!(!is_valid_org_name(
+            "This Is A Very Long Name With Way Too Many Words In It"
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -6913,8 +6915,8 @@ mod tests {
 
     #[test]
     fn test_is_garbled_text_short_strings() {
-        assert!(!is_garbled_text("ab"));  // too short to judge
-        assert!(!is_garbled_text("xy"));  // too short to judge
+        assert!(!is_garbled_text("ab")); // too short to judge
+        assert!(!is_garbled_text("xy")); // too short to judge
         assert!(!is_garbled_text(""));
     }
 
@@ -6979,14 +6981,20 @@ mod tests {
     fn test_filter_whitespace_in_domain() {
         let vendors = vec![make_domain("il mj.com")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Domain with whitespace should be filtered");
+        assert!(
+            result.is_empty(),
+            "Domain with whitespace should be filtered"
+        );
     }
 
     #[test]
     fn test_filter_invalid_tld() {
         let vendors = vec![make_domain("span.truncated")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Domain with invalid TLD should be filtered");
+        assert!(
+            result.is_empty(),
+            "Domain with invalid TLD should be filtered"
+        );
     }
 
     #[test]
@@ -7022,17 +7030,20 @@ mod tests {
     fn test_filter_org_prefix_ner_false_positive() {
         let vendors = vec![make_domain("_org:GDPR")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "NER false positive org should be filtered");
+        assert!(
+            result.is_empty(),
+            "NER false positive org should be filtered"
+        );
     }
 
     #[test]
     fn test_filter_multiple_vendors_mixed() {
         let vendors = vec![
             make_domain("stripe.com"),
-            make_domain("il mj.com"),       // whitespace
+            make_domain("il mj.com"), // whitespace
             make_domain("cloudflare.com"),
-            make_domain("conditions.com"),  // common word
-            make_domain("co.uk"),           // compound TLD
+            make_domain("conditions.com"), // common word
+            make_domain("co.uk"),          // compound TLD
             make_domain("datadog.com"),
         ];
         let result = filter_subprocessor_results(vendors);
@@ -7059,7 +7070,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let html = r#"<html data-signature-manifest-url="https://assets.vanta.com/static/signature-manifest.abc123.json"><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string())
+        );
     }
 
     #[test]
@@ -7067,7 +7081,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let html = r#"<html><head><link rel="preload" as="fetch" href="https://assets.vanta.com/static/signature-manifest.def456.json"></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string())
+        );
     }
 
     #[test]
@@ -7075,7 +7092,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let html = r#"<html><body><script>var url = "https://assets.vanta.com/static/signature-manifest.789abc.json";</script></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.789abc.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.789abc.json".to_string())
+        );
     }
 
     #[test]
@@ -7192,7 +7212,9 @@ mod tests {
     fn test_generate_subprocessor_urls_known_domain() {
         let analyzer = make_test_analyzer();
         let urls = analyzer.generate_subprocessor_urls("docusign.com");
-        assert!(urls.iter().any(|u| u.contains("docusign.com/trust/privacy/subprocessors-list")));
+        assert!(urls
+            .iter()
+            .any(|u| u.contains("docusign.com/trust/privacy/subprocessors-list")));
     }
 
     #[test]
@@ -7201,7 +7223,9 @@ mod tests {
         let urls = analyzer.generate_subprocessor_urls("acme.com");
         // Should contain standard patterns
         assert!(urls.iter().any(|u| u == "https://acme.com/subprocessors"));
-        assert!(urls.iter().any(|u| u == "https://trust.acme.com/subprocessors"));
+        assert!(urls
+            .iter()
+            .any(|u| u == "https://trust.acme.com/subprocessors"));
         assert!(urls.iter().any(|u| u.contains("/legal/subprocessors")));
     }
 
@@ -7210,7 +7234,9 @@ mod tests {
         let analyzer = make_test_analyzer();
         let urls = analyzer.generate_subprocessor_urls("trust.vanta.com");
         // Should prioritize direct trust URL, NOT generate trust.trust.vanta.com
-        assert!(urls.iter().any(|u| u == "https://trust.vanta.com/subprocessors"));
+        assert!(urls
+            .iter()
+            .any(|u| u == "https://trust.vanta.com/subprocessors"));
         assert!(!urls.iter().any(|u| u.contains("trust.trust.")));
     }
 
@@ -7309,10 +7335,22 @@ mod tests {
     #[test]
     fn test_company_name_to_domain_known_mappings() {
         let analyzer = make_test_analyzer();
-        assert_eq!(analyzer.company_name_to_domain("Amazon Web Services"), Some("aws.amazon.com".to_string()));
-        assert_eq!(analyzer.company_name_to_domain("Cloudflare"), Some("cloudflare.com".to_string()));
-        assert_eq!(analyzer.company_name_to_domain("Functional Software"), Some("sentry.io".to_string()));
-        assert_eq!(analyzer.company_name_to_domain("Concentrix"), Some("concentrix.com".to_string()));
+        assert_eq!(
+            analyzer.company_name_to_domain("Amazon Web Services"),
+            Some("aws.amazon.com".to_string())
+        );
+        assert_eq!(
+            analyzer.company_name_to_domain("Cloudflare"),
+            Some("cloudflare.com".to_string())
+        );
+        assert_eq!(
+            analyzer.company_name_to_domain("Functional Software"),
+            Some("sentry.io".to_string())
+        );
+        assert_eq!(
+            analyzer.company_name_to_domain("Concentrix"),
+            Some("concentrix.com".to_string())
+        );
     }
 
     #[test]
@@ -7334,7 +7372,10 @@ mod tests {
     #[test]
     fn test_company_name_to_domain_chronosphere() {
         let analyzer = make_test_analyzer();
-        assert_eq!(analyzer.company_name_to_domain("Chronosphere"), Some("chronosphere.io".to_string()));
+        assert_eq!(
+            analyzer.company_name_to_domain("Chronosphere"),
+            Some("chronosphere.io".to_string())
+        );
     }
 
     // --- map_organization_to_domain ---
@@ -7342,23 +7383,38 @@ mod tests {
     #[test]
     fn test_map_org_to_domain_known_orgs() {
         let analyzer = make_test_analyzer();
-        assert_eq!(analyzer.map_organization_to_domain("Google"), Some("google.com".to_string()));
-        assert_eq!(analyzer.map_organization_to_domain("Stripe"), Some("stripe.com".to_string()));
-        assert_eq!(analyzer.map_organization_to_domain("Twilio"), Some("twilio.com".to_string()));
+        assert_eq!(
+            analyzer.map_organization_to_domain("Google"),
+            Some("google.com".to_string())
+        );
+        assert_eq!(
+            analyzer.map_organization_to_domain("Stripe"),
+            Some("stripe.com".to_string())
+        );
+        assert_eq!(
+            analyzer.map_organization_to_domain("Twilio"),
+            Some("twilio.com".to_string())
+        );
     }
 
     #[test]
     fn test_map_org_to_domain_with_suffix() {
         let analyzer = make_test_analyzer();
         // Should strip suffix and still match
-        assert_eq!(analyzer.map_organization_to_domain("Datadog, Inc."), Some("datadoghq.com".to_string()));
+        assert_eq!(
+            analyzer.map_organization_to_domain("Datadog, Inc."),
+            Some("datadoghq.com".to_string())
+        );
     }
 
     #[test]
     fn test_map_org_to_domain_input_is_domain() {
         let analyzer = make_test_analyzer();
         // If input already looks like a domain, return it directly
-        assert_eq!(analyzer.map_organization_to_domain("facebook.com"), Some("facebook.com".to_string()));
+        assert_eq!(
+            analyzer.map_organization_to_domain("facebook.com"),
+            Some("facebook.com".to_string())
+        );
     }
 
     #[test]
@@ -7397,7 +7453,8 @@ mod tests {
     #[test]
     fn test_extract_domain_from_entity_name_dba_format() {
         let analyzer = make_test_analyzer();
-        let result = analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Mailgun)");
+        let result =
+            analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Mailgun)");
         assert_eq!(result, Some("mailgun.com".to_string()));
     }
 
@@ -7590,7 +7647,8 @@ mod tests {
     #[test]
     fn test_generate_exclusion_patterns_klaviyo() {
         let analyzer = make_test_analyzer();
-        let patterns = analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
         let joined = patterns.join(" ");
         assert!(joined.contains("klaviyo"));
     }
@@ -7598,7 +7656,8 @@ mod tests {
     #[test]
     fn test_generate_exclusion_patterns_stripe() {
         let analyzer = make_test_analyzer();
-        let patterns = analyzer.generate_exclusion_patterns("https://stripe.com/legal/service-providers");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://stripe.com/legal/service-providers");
         let joined = patterns.join(" ");
         assert!(joined.contains("stripe"));
     }
@@ -7654,7 +7713,9 @@ mod tests {
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         // No subprocessor context in html -> should return empty
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(&document, html, "https://example.com", &patterns)
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -7668,7 +7729,9 @@ mod tests {
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(&document, html, "https://example.com", &patterns)
+            .unwrap();
         // Should find Cloudflare since "sub-processors" context is present
         if !result.is_empty() {
             assert!(result.iter().any(|v| v.domain.contains("cloudflare")));
@@ -7692,7 +7755,13 @@ mod tests {
             custom_regex_patterns: vec![],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com");
+        let result = analyzer.extract_with_custom_rules(
+            &document,
+            html,
+            "https://test.com",
+            &custom_rules,
+            "test.com",
+        );
         // Should not panic, just return ok with empty subprocessors
         assert!(result.is_ok());
         assert!(result.unwrap().subprocessors.is_empty());
@@ -7713,12 +7782,21 @@ mod tests {
             custom_regex_patterns: vec![],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com");
+        let result = analyzer.extract_with_custom_rules(
+            &document,
+            html,
+            "https://test.com",
+            &custom_rules,
+            "test.com",
+        );
         assert!(result.is_ok());
         let extraction = result.unwrap();
         // Should find stripe.com from the .vendor element
         if !extraction.subprocessors.is_empty() {
-            assert!(extraction.subprocessors.iter().any(|v| v.domain.contains("stripe")));
+            assert!(extraction
+                .subprocessors
+                .iter()
+                .any(|v| v.domain.contains("stripe")));
         }
     }
 
@@ -7736,7 +7814,12 @@ mod tests {
         </table></body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://test.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &document,
+            html,
+            "https://test.com",
+            &patterns,
+        );
         // Should not panic; result is Result<(Vec<SubprocessorDomain>, Option<ExtractionMetadata>)>
         assert!(result.is_ok());
     }
@@ -7755,7 +7838,9 @@ mod tests {
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_lists_with_patterns(&document, html, "https://test.com", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_lists_with_patterns(&document, html, "https://test.com", &patterns)
+            .unwrap();
         // Should extract domains from list items
         if !result.is_empty() {
             let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
@@ -7815,10 +7900,16 @@ mod tests {
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
         // Cache a URL
-        cache.cache_working_url("stripe.com", "https://stripe.com/legal/service-providers").await.unwrap();
+        cache
+            .cache_working_url("stripe.com", "https://stripe.com/legal/service-providers")
+            .await
+            .unwrap();
         // Retrieve it
         let cached = cache.get_cached_subprocessor_url("stripe.com").await;
-        assert_eq!(cached, Some("https://stripe.com/legal/service-providers".to_string()));
+        assert_eq!(
+            cached,
+            Some("https://stripe.com/legal/service-providers".to_string())
+        );
     }
 
     #[tokio::test]
@@ -7828,7 +7919,10 @@ mod tests {
             cache_dir: dir.path().to_path_buf(),
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
-        cache.cache_working_url("test.io", "https://test.io/subs").await.unwrap();
+        cache
+            .cache_working_url("test.io", "https://test.io/subs")
+            .await
+            .unwrap();
         let cleared = cache.clear_domain_cache("test.io").await.unwrap();
         assert!(cleared);
         let cached = cache.get_cached_subprocessor_url("test.io").await;
@@ -7883,7 +7977,10 @@ mod tests {
             last_extraction_time: 123456,
             adaptive_patterns: None,
         };
-        cache.update_extraction_info("custom.com", patterns, metadata).await.unwrap();
+        cache
+            .update_extraction_info("custom.com", patterns, metadata)
+            .await
+            .unwrap();
         let entry = cache.get_cached_entry("custom.com").await;
         assert!(entry.is_some());
         let entry = entry.unwrap();
@@ -7903,10 +8000,21 @@ mod tests {
             ("Acme Corp".to_string(), "acme.com".to_string()),
             ("Widgets Inc.".to_string(), "widgets.io".to_string()),
         ];
-        cache.add_confirmed_mappings("source.com", &mappings).await.unwrap();
+        cache
+            .add_confirmed_mappings("source.com", &mappings)
+            .await
+            .unwrap();
         let entry = cache.get_cached_entry("source.com").await.unwrap();
-        let rules = entry.extraction_patterns.unwrap().custom_extraction_rules.unwrap();
-        let mapping = rules.special_handling.unwrap().custom_org_to_domain_mapping.unwrap();
+        let rules = entry
+            .extraction_patterns
+            .unwrap()
+            .custom_extraction_rules
+            .unwrap();
+        let mapping = rules
+            .special_handling
+            .unwrap()
+            .custom_org_to_domain_mapping
+            .unwrap();
         assert!(mapping.contains_key("acme corp"));
         assert!(mapping.contains_key("widgets inc."));
     }
@@ -7919,7 +8027,10 @@ mod tests {
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
         // Empty mappings should be a no-op
-        cache.add_confirmed_mappings("source.com", &[]).await.unwrap();
+        cache
+            .add_confirmed_mappings("source.com", &[])
+            .await
+            .unwrap();
         let entry = cache.get_cached_entry("source.com").await;
         assert!(entry.is_none()); // No file created for empty mappings
     }

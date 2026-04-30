@@ -390,13 +390,21 @@ mod tests {
     #[case(RecordType::DnsTxtSpf, "Email sending authorization record")]
     #[case(RecordType::HttpSubprocessor, "HTTP subprocessor page listing")]
     #[case(RecordType::TrustCenterApi, "Trust center API extraction")]
-    #[case(RecordType::WebTrafficNetwork, "Runtime network request from webpage to external domain")]
+    #[case(
+        RecordType::WebTrafficNetwork,
+        "Runtime network request from webpage to external domain"
+    )]
     #[case(RecordType::Unknown, "Unknown or unclassified record type")]
     fn test_get_description(#[case] record_type: RecordType, #[case] expected: &str) {
         assert_eq!(record_type.get_description(), expected);
     }
 
-    fn make_vendor(domain: &str, org: &str, layer: u32, record_type: RecordType) -> VendorRelationship {
+    fn make_vendor(
+        domain: &str,
+        org: &str,
+        layer: u32,
+        record_type: RecordType,
+    ) -> VendorRelationship {
         VendorRelationship::new(
             domain.to_string(),
             org.to_string(),

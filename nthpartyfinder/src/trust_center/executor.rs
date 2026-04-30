@@ -858,14 +858,20 @@ mod tests {
         let pattern = r#"data-payload="([A-Za-z0-9+/=]+)""#;
         let result = extract_embedded_base64(&html, pattern);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().get("key").unwrap().as_str().unwrap(), "value");
+        assert_eq!(
+            result.unwrap().get("key").unwrap().as_str().unwrap(),
+            "value"
+        );
     }
 
     #[test]
     fn test_extract_embedded_base64_invalid_pattern() {
         let result = extract_embedded_base64("test", r"[invalid(");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid base64 locator"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid base64 locator"));
     }
 
     #[test]
@@ -965,7 +971,10 @@ mod tests {
         </body></html>"#;
         let result = extract_hydration_data(html, "script#data", "a.c.d");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found in hydration"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in hydration"));
     }
 
     // --- extract_subprocessors_from_json edge cases ---
@@ -1088,10 +1097,13 @@ mod tests {
     fn test_resolve_canonical_asset_no_description() {
         let item = serde_json::json!({"canonical_asset_id": "ca1"});
         let mut lookup = std::collections::HashMap::new();
-        lookup.insert("ca1".to_string(), CanonicalAsset {
-            name: "AWS".to_string(),
-            website: Some("https://aws.amazon.com".to_string()),
-        });
+        lookup.insert(
+            "ca1".to_string(),
+            CanonicalAsset {
+                name: "AWS".to_string(),
+                website: Some("https://aws.amazon.com".to_string()),
+            },
+        );
         let mapping = ResponseMapping {
             subprocessors_path: String::new(),
             name_field: "name".to_string(),
@@ -1111,10 +1123,13 @@ mod tests {
     fn test_resolve_canonical_asset_no_website() {
         let item = serde_json::json!({"canonical_asset_id": "ca1", "description": "Cloud"});
         let mut lookup = std::collections::HashMap::new();
-        lookup.insert("ca1".to_string(), CanonicalAsset {
-            name: "AWS".to_string(),
-            website: None,
-        });
+        lookup.insert(
+            "ca1".to_string(),
+            CanonicalAsset {
+                name: "AWS".to_string(),
+                website: None,
+            },
+        );
         let mapping = ResponseMapping {
             subprocessors_path: String::new(),
             name_field: "name".to_string(),

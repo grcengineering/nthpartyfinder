@@ -710,8 +710,14 @@ mod tests {
         let dir = setup_vendor_dir();
         let reg = VendorRegistry::load_from_directory(dir.path()).unwrap();
 
-        assert_eq!(reg.get_organization("acme.com"), Some("Acme Corp".to_string()));
-        assert_eq!(reg.get_organization("globex.net"), Some("Globex Inc".to_string()));
+        assert_eq!(
+            reg.get_organization("acme.com"),
+            Some("Acme Corp".to_string())
+        );
+        assert_eq!(
+            reg.get_organization("globex.net"),
+            Some("Globex Inc".to_string())
+        );
     }
 
     #[test]
@@ -1049,7 +1055,10 @@ mod tests {
         reg.load_vendor_file(&path).unwrap();
 
         assert!(reg.is_known_domain("simple.io"));
-        assert_eq!(reg.get_organization("simple.io"), Some("Simple Corp".to_string()));
+        assert_eq!(
+            reg.get_organization("simple.io"),
+            Some("Simple Corp".to_string())
+        );
     }
 
     // ---- subdomain lookup with deeply nested subdomain ----

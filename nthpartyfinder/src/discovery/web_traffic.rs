@@ -593,7 +593,10 @@ mod tests {
             WebTrafficSource::NetworkTraffic,
             WebTrafficSource::NetworkTraffic
         );
-        assert_ne!(WebTrafficSource::PageSource, WebTrafficSource::NetworkTraffic);
+        assert_ne!(
+            WebTrafficSource::PageSource,
+            WebTrafficSource::NetworkTraffic
+        );
     }
 
     #[test]
@@ -662,14 +665,13 @@ mod tests {
     #[case("stripe.com", false)]
     #[case("google.com", false)]
     #[case("example.com", false)] // example.com is not infrastructure noise (different from CT logs)
-    fn test_is_infrastructure_noise_parametrized(
-        #[case] domain: &str,
-        #[case] expected: bool,
-    ) {
+    fn test_is_infrastructure_noise_parametrized(#[case] domain: &str, #[case] expected: bool) {
         assert_eq!(
             is_infrastructure_noise(domain),
             expected,
-            "Domain '{}' should be noise={}", domain, expected
+            "Domain '{}' should be noise={}",
+            domain,
+            expected
         );
     }
 
@@ -695,14 +697,13 @@ mod tests {
     #[case("stripe.com", false)]
     #[case("facebooks.com", false)] // typo/lookalike should not match
     #[case("mylinkedin.com", false)]
-    fn test_is_social_media_domain_parametrized(
-        #[case] domain: &str,
-        #[case] expected: bool,
-    ) {
+    fn test_is_social_media_domain_parametrized(#[case] domain: &str, #[case] expected: bool) {
         assert_eq!(
             is_social_media_domain(domain),
             expected,
-            "Domain '{}' should be social={}", domain, expected
+            "Domain '{}' should be social={}",
+            domain,
+            expected
         );
     }
 
@@ -722,7 +723,9 @@ mod tests {
         assert_eq!(
             is_active_resource_load(element_type),
             expected,
-            "Element type '{}' should be active={}", element_type, expected
+            "Element type '{}' should be active={}",
+            element_type,
+            expected
         );
     }
 
@@ -748,7 +751,8 @@ mod tests {
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(
             domains.contains(&"launchdarkly.com"),
-            "Should find launchdarkly.com from data-src, got: {:?}", domains
+            "Should find launchdarkly.com from data-src, got: {:?}",
+            domains
         );
     }
 
@@ -759,7 +763,8 @@ mod tests {
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(
             domains.contains(&"intercom.io"),
-            "Should find intercom.io from data-href, got: {:?}", domains
+            "Should find intercom.io from data-href, got: {:?}",
+            domains
         );
     }
 
@@ -775,8 +780,7 @@ mod tests {
 
     #[test]
     fn test_extract_link_href() {
-        let html =
-            r#"<link href="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css" rel="stylesheet">"#;
+        let html = r#"<link href="https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css" rel="stylesheet">"#;
         let results = extract_external_domains_from_html(html, "example.com");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].vendor_domain, "jsdelivr.net");
@@ -803,13 +807,11 @@ mod tests {
         // twitter.com from script src — is_active_resource_load("script src") = true
         assert!(
             domains.contains(&"twitter.com"),
-            "Should find twitter.com SDK from script src, got: {:?}", domains
+            "Should find twitter.com SDK from script src, got: {:?}",
+            domains
         );
         // The dedup means twitter.com only appears once (from the script, which is processed first)
-        assert_eq!(
-            domains.iter().filter(|&&d| d == "twitter.com").count(),
-            1
-        );
+        assert_eq!(domains.iter().filter(|&&d| d == "twitter.com").count(), 1);
     }
 
     #[test]
@@ -822,10 +824,15 @@ mod tests {
         </script>"#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"mixpanel.com"), "Should find mixpanel.com, got: {:?}", domains);
+        assert!(
+            domains.contains(&"mixpanel.com"),
+            "Should find mixpanel.com, got: {:?}",
+            domains
+        );
         assert!(
             domains.contains(&"customer.io"),
-            "Should find customer.io, got: {:?}", domains
+            "Should find customer.io, got: {:?}",
+            domains
         );
     }
 
@@ -838,7 +845,8 @@ mod tests {
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(
             domains.contains(&"clearbit.com"),
-            "Should find clearbit.com from single-quoted inline URL, got: {:?}", domains
+            "Should find clearbit.com from single-quoted inline URL, got: {:?}",
+            domains
         );
     }
 
@@ -868,9 +876,7 @@ mod tests {
     fn test_evidence_format_inline_url() {
         let html = r#"<script>fetch("https://api.amplitude.com/2/httpapi")</script>"#;
         let results = extract_external_domains_from_html(html, "example.com");
-        let amp = results
-            .iter()
-            .find(|r| r.vendor_domain == "amplitude.com");
+        let amp = results.iter().find(|r| r.vendor_domain == "amplitude.com");
         assert!(amp.is_some(), "Should find amplitude.com");
         assert!(amp.unwrap().evidence.contains("inline URL"));
     }
@@ -898,9 +904,7 @@ mod tests {
         let results = extract_external_domains_from_html(html, "example.com");
         // Protocol-relative URLs don't start with http(s):// so they won't be captured
         // by the regex patterns that require absolute URLs. This is expected behavior.
-        let has_vendor = results
-            .iter()
-            .any(|r| r.vendor_domain == "vendor.com");
+        let has_vendor = results.iter().any(|r| r.vendor_domain == "vendor.com");
         // This depends on whether regex matches — the test documents current behavior
         assert!(!has_vendor || has_vendor); // No assertion on specific behavior, just no panic
     }
@@ -944,8 +948,7 @@ mod tests {
 
     #[test]
     fn test_non_social_media_in_link_href_kept() {
-        let html =
-            r#"<link href="https://fonts.gstatic.com/font.woff2" rel="preload" as="font">"#;
+        let html = r#"<link href="https://fonts.gstatic.com/font.woff2" rel="preload" as="font">"#;
         let results = extract_external_domains_from_html(html, "example.com");
         // gstatic.com is infrastructure noise, so filtered
         assert!(results.is_empty());
@@ -992,19 +995,52 @@ mod tests {
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
 
         // Should find real vendors
-        assert!(domains.contains(&"segment.io"), "Missing segment.io, got: {:?}", domains);
-        assert!(domains.contains(&"stripe.com"), "Missing stripe.com, got: {:?}", domains);
-        assert!(domains.contains(&"facebook.com"), "Missing facebook.com (tracking pixel), got: {:?}", domains);
-        assert!(domains.contains(&"intercom.io"), "Missing intercom.io, got: {:?}", domains);
-        assert!(domains.contains(&"jsdelivr.net"), "Missing jsdelivr.net, got: {:?}", domains);
-        assert!(domains.contains(&"cookiebot.com"), "Missing cookiebot.com, got: {:?}", domains);
+        assert!(
+            domains.contains(&"segment.io"),
+            "Missing segment.io, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Missing stripe.com, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"facebook.com"),
+            "Missing facebook.com (tracking pixel), got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"intercom.io"),
+            "Missing intercom.io, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"jsdelivr.net"),
+            "Missing jsdelivr.net, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"cookiebot.com"),
+            "Missing cookiebot.com, got: {:?}",
+            domains
+        );
 
         // Should filter infrastructure noise
-        assert!(!domains.contains(&"googleapis.com"), "Should filter googleapis.com");
+        assert!(
+            !domains.contains(&"googleapis.com"),
+            "Should filter googleapis.com"
+        );
 
         // Should filter social media links (non-active)
-        assert!(!domains.contains(&"youtube.com"), "Should filter youtube.com iframe");
-        assert!(!domains.contains(&"linkedin.com"), "Should filter linkedin.com link");
+        assert!(
+            !domains.contains(&"youtube.com"),
+            "Should filter youtube.com iframe"
+        );
+        assert!(
+            !domains.contains(&"linkedin.com"),
+            "Should filter linkedin.com link"
+        );
         // twitter.com from <a> tag is inline URL — depends on regex
     }
 

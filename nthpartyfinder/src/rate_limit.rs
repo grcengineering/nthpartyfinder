@@ -405,7 +405,10 @@ mod tests {
         }
         // 6th request should need to wait
         let wait = limiter.try_acquire();
-        assert!(wait.is_some(), "Should need to wait after exhausting tokens");
+        assert!(
+            wait.is_some(),
+            "Should need to wait after exhausting tokens"
+        );
         let duration = wait.unwrap();
         assert!(duration.as_millis() > 0, "Wait duration should be positive");
     }
@@ -500,8 +503,9 @@ mod tests {
         };
         let helper = RetryHelper::new(&config);
 
-        let result: Result<i32, String> =
-            helper.with_retry(|| async { Err("always fails".to_string()) }).await;
+        let result: Result<i32, String> = helper
+            .with_retry(|| async { Err("always fails".to_string()) })
+            .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "always fails");
     }

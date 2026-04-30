@@ -378,7 +378,9 @@ pub(crate) fn dedup_grouped_mappings<'a>(
 }
 
 /// Deduplicate unverified org mappings, keeping first-seen inferred_org per domain.
-pub(crate) fn dedup_unverified_orgs(unverified: &[UnverifiedOrgMapping]) -> HashMap<String, String> {
+pub(crate) fn dedup_unverified_orgs(
+    unverified: &[UnverifiedOrgMapping],
+) -> HashMap<String, String> {
     let mut unique: HashMap<String, String> = HashMap::new();
     for mapping in unverified {
         unique
@@ -397,7 +399,11 @@ pub(crate) fn sort_domain_org_pairs(unique: &HashMap<String, String>) -> Vec<(&S
 
 /// Format the plural suffix for counts.
 pub(crate) fn plural_suffix(count: usize) -> &'static str {
-    if count == 1 { "" } else { "s" }
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 #[cfg(test)]

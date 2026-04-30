@@ -295,7 +295,11 @@ mod tests {
         assert_eq!(entry.issuer_ca_id, Some(12345));
         assert_eq!(entry.id, 9876543210);
         assert_eq!(entry.common_name, Some("*.example.com".to_string()));
-        assert!(entry.name_value.as_ref().unwrap().contains("www.example.com"));
+        assert!(entry
+            .name_value
+            .as_ref()
+            .unwrap()
+            .contains("www.example.com"));
         assert_eq!(entry.not_before, Some("2024-01-15T00:00:00".to_string()));
     }
 
@@ -322,7 +326,10 @@ mod tests {
         let entries: Vec<CrtShEntry> = serde_json::from_str(json).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, 1);
-        assert_eq!(entries[1].name_value, Some("vendor2.com\nvendor3.com".to_string()));
+        assert_eq!(
+            entries[1].name_value,
+            Some("vendor2.com\nvendor3.com".to_string())
+        );
     }
 
     #[test]
@@ -390,20 +397,19 @@ mod tests {
     // NOT infrastructure — should be false
     #[case("klaviyo.com", false)]
     #[case("google.com", false)]
-    #[case("heroku.com", false)]  // M009: intentionally not filtered
-    #[case("wpengine.com", false)]  // M009: intentionally not filtered
-    #[case("globalsign.com", false)]  // M009: removed from filter
+    #[case("heroku.com", false)] // M009: intentionally not filtered
+    #[case("wpengine.com", false)] // M009: intentionally not filtered
+    #[case("globalsign.com", false)] // M009: removed from filter
     #[case("stripe.com", false)]
     #[case("pendo.io", false)]
     #[case("okta.com", false)]
-    fn test_is_infrastructure_domain_parametrized(
-        #[case] domain: &str,
-        #[case] expected: bool,
-    ) {
+    fn test_is_infrastructure_domain_parametrized(#[case] domain: &str, #[case] expected: bool) {
         assert_eq!(
             CtLogDiscovery::is_infrastructure_domain(domain),
             expected,
-            "Domain '{}' should be infrastructure={}", domain, expected
+            "Domain '{}' should be infrastructure={}",
+            domain,
+            expected
         );
     }
 
@@ -414,18 +420,16 @@ mod tests {
     #[test]
     fn test_discover_logic_extracts_san_domains() {
         // Simulate the processing logic from discover()
-        let entries = vec![
-            CrtShEntry {
-                issuer_ca_id: Some(1),
-                issuer_name: Some("Let's Encrypt R3".to_string()),
-                common_name: Some("*.example.com".to_string()),
-                name_value: Some("example.com\ncdn.vendorA.com\napi.vendorB.io".to_string()),
-                id: 100,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-        ];
+        let entries = vec![CrtShEntry {
+            issuer_ca_id: Some(1),
+            issuer_name: Some("Let's Encrypt R3".to_string()),
+            common_name: Some("*.example.com".to_string()),
+            name_value: Some("example.com\ncdn.vendorA.com\napi.vendorB.io".to_string()),
+            id: 100,
+            entry_timestamp: None,
+            not_before: None,
+            not_after: None,
+        }];
 
         let base_domain = "example.com".to_string();
         let mut seen_domains = HashSet::new();
@@ -460,18 +464,16 @@ mod tests {
 
     #[test]
     fn test_discover_logic_deduplicates_san_domains() {
-        let entries = vec![
-            CrtShEntry {
-                issuer_ca_id: None,
-                issuer_name: None,
-                common_name: None,
-                name_value: Some("cdn.vendor.com\napi.vendor.com\nwww.vendor.com".to_string()),
-                id: 200,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-        ];
+        let entries = vec![CrtShEntry {
+            issuer_ca_id: None,
+            issuer_name: None,
+            common_name: None,
+            name_value: Some("cdn.vendor.com\napi.vendor.com\nwww.vendor.com".to_string()),
+            id: 200,
+            entry_timestamp: None,
+            not_before: None,
+            not_after: None,
+        }];
 
         let base_domain = "example.com".to_string();
         let mut seen_domains = HashSet::new();
@@ -486,7 +488,9 @@ mod tests {
                         continue;
                     }
                     let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
+                    if san_base == base_domain
+                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
+                    {
                         continue;
                     }
                     if seen_domains.insert(san_base.clone()) {
@@ -503,20 +507,18 @@ mod tests {
 
     #[test]
     fn test_discover_logic_filters_infrastructure_from_sans() {
-        let entries = vec![
-            CrtShEntry {
-                issuer_ca_id: None,
-                issuer_name: None,
-                common_name: None,
-                name_value: Some(
-                    "cdn.cloudflare.com\ns3.amazonaws.com\nreal-vendor.com\nlocalhost".to_string(),
-                ),
-                id: 300,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-        ];
+        let entries = vec![CrtShEntry {
+            issuer_ca_id: None,
+            issuer_name: None,
+            common_name: None,
+            name_value: Some(
+                "cdn.cloudflare.com\ns3.amazonaws.com\nreal-vendor.com\nlocalhost".to_string(),
+            ),
+            id: 300,
+            entry_timestamp: None,
+            not_before: None,
+            not_after: None,
+        }];
 
         let base_domain = "example.com".to_string();
         let mut seen_domains = HashSet::new();
@@ -531,7 +533,9 @@ mod tests {
                         continue;
                     }
                     let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
+                    if san_base == base_domain
+                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
+                    {
                         continue;
                     }
                     if seen_domains.insert(san_base.clone()) {
@@ -548,18 +552,16 @@ mod tests {
 
     #[test]
     fn test_discover_logic_skips_self_references() {
-        let entries = vec![
-            CrtShEntry {
-                issuer_ca_id: None,
-                issuer_name: None,
-                common_name: None,
-                name_value: Some("www.example.com\nmail.example.com\nvendor.io".to_string()),
-                id: 400,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-        ];
+        let entries = vec![CrtShEntry {
+            issuer_ca_id: None,
+            issuer_name: None,
+            common_name: None,
+            name_value: Some("www.example.com\nmail.example.com\nvendor.io".to_string()),
+            id: 400,
+            entry_timestamp: None,
+            not_before: None,
+            not_after: None,
+        }];
 
         let base_domain = "example.com".to_string();
         let mut seen_domains = HashSet::new();
@@ -574,7 +576,9 @@ mod tests {
                         continue;
                     }
                     let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
+                    if san_base == base_domain
+                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
+                    {
                         continue;
                     }
                     if seen_domains.insert(san_base.clone()) {
@@ -895,7 +899,9 @@ mod tests {
                         continue;
                     }
                     let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
+                    if san_base == base_domain
+                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
+                    {
                         continue;
                     }
                     if seen_domains.insert(san_base.clone()) {

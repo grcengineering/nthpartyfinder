@@ -1096,10 +1096,19 @@ similarity_threshold = 0.9
             ..RateLimitConfig::default()
         };
         assert_eq!(config.calculate_backoff_delay(0), std::time::Duration::ZERO);
-        assert_eq!(config.calculate_backoff_delay(1), std::time::Duration::from_millis(500));
-        assert_eq!(config.calculate_backoff_delay(2), std::time::Duration::from_millis(1000));
+        assert_eq!(
+            config.calculate_backoff_delay(1),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            config.calculate_backoff_delay(2),
+            std::time::Duration::from_millis(1000)
+        );
         // Attempt 11 = 5500ms, capped at 5000ms
-        assert_eq!(config.calculate_backoff_delay(11), std::time::Duration::from_millis(5000));
+        assert_eq!(
+            config.calculate_backoff_delay(11),
+            std::time::Duration::from_millis(5000)
+        );
     }
 
     #[test]
@@ -1111,30 +1120,38 @@ similarity_threshold = 0.9
             ..RateLimitConfig::default()
         };
         assert_eq!(config.calculate_backoff_delay(0), std::time::Duration::ZERO);
-        assert_eq!(config.calculate_backoff_delay(1), std::time::Duration::from_millis(100)); // 100 * 2^0
-        assert_eq!(config.calculate_backoff_delay(2), std::time::Duration::from_millis(200)); // 100 * 2^1
-        assert_eq!(config.calculate_backoff_delay(3), std::time::Duration::from_millis(400)); // 100 * 2^2
-        assert_eq!(config.calculate_backoff_delay(4), std::time::Duration::from_millis(800)); // 100 * 2^3
+        assert_eq!(
+            config.calculate_backoff_delay(1),
+            std::time::Duration::from_millis(100)
+        ); // 100 * 2^0
+        assert_eq!(
+            config.calculate_backoff_delay(2),
+            std::time::Duration::from_millis(200)
+        ); // 100 * 2^1
+        assert_eq!(
+            config.calculate_backoff_delay(3),
+            std::time::Duration::from_millis(400)
+        ); // 100 * 2^2
+        assert_eq!(
+            config.calculate_backoff_delay(4),
+            std::time::Duration::from_millis(800)
+        ); // 100 * 2^3
     }
 
     // --- AnalysisStrategy parsing ---
 
     #[test]
     fn test_analysis_strategy_limits_parsing() {
-        let config_str = minimal_config_str().replace(
-            r#"strategy = "unlimited""#,
-            r#"strategy = "limits""#,
-        );
+        let config_str =
+            minimal_config_str().replace(r#"strategy = "unlimited""#, r#"strategy = "limits""#);
         let config: AppConfig = toml::from_str(&config_str).unwrap();
         assert_eq!(config.analysis.strategy, AnalysisStrategy::Limits);
     }
 
     #[test]
     fn test_analysis_strategy_budget_parsing() {
-        let config_str = minimal_config_str().replace(
-            r#"strategy = "unlimited""#,
-            r#"strategy = "budget""#,
-        );
+        let config_str =
+            minimal_config_str().replace(r#"strategy = "unlimited""#, r#"strategy = "budget""#);
         let config: AppConfig = toml::from_str(&config_str).unwrap();
         assert_eq!(config.analysis.strategy, AnalysisStrategy::Budget);
     }
@@ -1197,7 +1214,10 @@ backoff_max_delay_ms = 60000
         assert_eq!(config.rate_limits.dns_queries_per_second, 100);
         assert_eq!(config.rate_limits.http_requests_per_second, 20);
         assert_eq!(config.rate_limits.whois_queries_per_second, 5);
-        assert_eq!(config.rate_limits.backoff_strategy, BackoffStrategy::Exponential);
+        assert_eq!(
+            config.rate_limits.backoff_strategy,
+            BackoffStrategy::Exponential
+        );
         assert_eq!(config.rate_limits.max_retries, 5);
         assert_eq!(config.rate_limits.backoff_base_delay_ms, 2000);
         assert_eq!(config.rate_limits.backoff_max_delay_ms, 60000);

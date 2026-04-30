@@ -663,7 +663,8 @@ mod tests {
     #[test]
     fn test_database_serde_roundtrip() {
         let mut db = KnownVendorsDatabase::default();
-        db.vendors.insert("stripe.com".into(), "Stripe, Inc.".into());
+        db.vendors
+            .insert("stripe.com".into(), "Stripe, Inc.".into());
         db.vendors
             .insert("github.com".into(), "GitHub, Inc.".into());
         db.version = "2.0.0".into();
@@ -864,8 +865,7 @@ mod tests {
     fn test_load_from_paths_with_overrides() {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("google.com", "Google LLC")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("custom.com", "Custom Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("custom.com", "Custom Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
         assert_eq!(kv.base.vendors.len(), 1);
@@ -902,7 +902,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(
             dir.path(),
-            &[("stripe.com", "Stripe, Inc."), ("github.com", "GitHub, Inc.")],
+            &[
+                ("stripe.com", "Stripe, Inc."),
+                ("github.com", "GitHub, Inc."),
+            ],
         );
         let overrides_path = dir.path().join("no_overrides.json");
 
@@ -958,8 +961,7 @@ mod tests {
     fn test_lookup_override_takes_priority_over_base() {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("stripe.com", "Stripe Old")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("stripe.com", "Stripe Override")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("stripe.com", "Stripe Override")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -972,8 +974,7 @@ mod tests {
     fn test_lookup_subdomain_override_priority() {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("stripe.com", "Base Stripe")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("stripe.com", "Override Stripe")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("stripe.com", "Override Stripe")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -1087,8 +1088,7 @@ mod tests {
     fn test_stats_with_overrides() {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("a.com", "A")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("x.com", "X"), ("y.com", "Y")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("x.com", "X"), ("y.com", "Y")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
         let stats = kv.stats();
@@ -1102,10 +1102,7 @@ mod tests {
     #[test]
     fn test_total_unique_vendors_deduplicates() {
         let dir = tempdir().unwrap();
-        let base_path = write_base_db(
-            dir.path(),
-            &[("a.com", "A Corp"), ("b.com", "B Corp")],
-        );
+        let base_path = write_base_db(dir.path(), &[("a.com", "A Corp"), ("b.com", "B Corp")]);
         // Override one of the same domains
         let overrides_path =
             write_overrides_db(dir.path(), &[("a.com", "A Override"), ("c.com", "C Corp")]);
