@@ -3,8 +3,9 @@
 //! This module provides functionality to list, show, clear, and validate
 //! the subprocessor URL cache stored in the /cache directory.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
+use crate::app::AppExitCode;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -222,7 +223,7 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                 eprintln!("No cache directory found.");
             }
 
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
@@ -238,11 +239,11 @@ pub async fn clear_domain_cache(domain: &str) -> Result<()> {
         }
         Ok(false) => {
             eprintln!("No cache entry found for: {}", domain);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
         Err(e) => {
             eprintln!("Failed to clear cache for {}: {}", domain, e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
@@ -262,7 +263,7 @@ pub async fn clear_all_cache() -> Result<()> {
         }
         Err(e) => {
             eprintln!("Failed to clear cache: {}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
