@@ -48,21 +48,30 @@ pub struct CtDiscoveryResult {
 pub struct CtLogDiscovery {
     client: Client,
     timeout: Duration,
+    base_url: String,
 }
 
 impl CtLogDiscovery {
     pub fn new(timeout: Duration) -> Self {
+        Self::with_base_url(timeout, "https://crt.sh".to_string())
+    }
+
+    pub fn with_base_url(timeout: Duration, base_url: String) -> Self {
         let client = Client::builder()
             .timeout(timeout)
             .user_agent("nthpartyfinder/1.0")
             .build()
             .unwrap_or_default();
 
-        Self { client, timeout }
+        Self {
+            client,
+            timeout,
+            base_url,
+        }
     }
 
     /// Discover vendors from CT logs for a domain
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn discover(&self, domain: &str) -> Result<Vec<CtDiscoveryResult>> {
         info!("Querying CT logs for certificates related to {}", domain);
 
@@ -155,11 +164,12 @@ impl CtLogDiscovery {
     }
 
     /// Query crt.sh for certificates related to a domain
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
+
+    pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
         // Query for wildcard certificates (%.domain.com)
         let url = format!(
-            "https://crt.sh/?q=%.{}&output=json",
+            "{}/?q=%.{}&output=json",
+            self.base_url,
             urlencoding::encode(domain)
         );
 
@@ -271,12 +281,23 @@ mod tests {
     fn test_ct_log_discovery_new() {
         let disc = CtLogDiscovery::new(Duration::from_secs(30));
         assert_eq!(disc.timeout, Duration::from_secs(30));
+        assert_eq!(disc.base_url, "https://crt.sh");
     }
 
     #[test]
     fn test_ct_log_discovery_new_short_timeout() {
         let disc = CtLogDiscovery::new(Duration::from_millis(100));
         assert_eq!(disc.timeout, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_ct_log_discovery_with_base_url() {
+        let disc = CtLogDiscovery::with_base_url(
+            Duration::from_secs(10),
+            "http://localhost:9999".to_string(),
+        );
+        assert_eq!(disc.timeout, Duration::from_secs(10));
+        assert_eq!(disc.base_url, "http://localhost:9999");
     }
 
     // --- CrtShEntry deserialization ---
@@ -420,7 +441,7 @@ mod tests {
     // since query_crt_sh makes real HTTP calls.
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_extracts_san_domains() {
         // Simulate the processing logic from discover()
         let entries = vec![CrtShEntry {
@@ -466,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_deduplicates_san_domains() {
         let entries = vec![CrtShEntry {
             issuer_ca_id: None,
@@ -510,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_filters_infrastructure_from_sans() {
         let entries = vec![CrtShEntry {
             issuer_ca_id: None,
@@ -556,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_skips_self_references() {
         let entries = vec![CrtShEntry {
             issuer_ca_id: None,
@@ -600,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_common_name_extraction() {
         let entry = CrtShEntry {
             issuer_ca_id: Some(99),
@@ -646,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_common_name_self_reference_skipped() {
         let entry = CrtShEntry {
             issuer_ca_id: None,
@@ -679,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_common_name_infra_skipped() {
         let entry = CrtShEntry {
             issuer_ca_id: None,
@@ -712,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_empty_san_lines_skipped() {
         let entry = CrtShEntry {
             issuer_ca_id: None,
@@ -751,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_san_and_cn_dedup() {
         // When the same domain appears in both SAN and CN, it should only be counted once
         let entry = CrtShEntry {
@@ -878,7 +899,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
-    async fn test_discover_with_mock_server_finds_vendors() {
+    async fn test_discover_via_wiremock_finds_vendors() {
         let mock_server = MockServer::start().await;
 
         let response_body = serde_json::json!([
@@ -901,28 +922,19 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // Create a client that points to our mock server
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
 
-        // We can't easily override the URL in CtLogDiscovery, so test the logic directly
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-        let text = response.text().await.unwrap();
-        let entries: Vec<CrtShEntry> = serde_json::from_str(&text).unwrap();
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].id, 100);
-        assert_eq!(
-            entries[0].name_value,
-            Some("example.com\napi.vendor-a.com\ncdn.vendor-b.io".to_string())
-        );
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert!(domains.contains(&"vendor-a.com"), "Should find vendor-a.com from SAN");
+        assert!(domains.contains(&"vendor-b.io"), "Should find vendor-b.io from SAN");
+        assert!(domains.contains(&"vendor-d.org"), "Should find vendor-d.org from SAN");
+        assert!(domains.contains(&"vendor-c.net"), "Should find vendor-c.net from CN");
+        assert!(!domains.contains(&"example.com"), "Should not include self-reference");
     }
 
     #[tokio::test]
-    async fn test_discover_with_mock_server_empty_response() {
+    async fn test_discover_via_wiremock_empty_response() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -930,21 +942,13 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-        let text = response.text().await.unwrap();
-
-        // Mimics query_crt_sh behavior
-        assert!(text.is_empty() || text == "[]");
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
     }
 
     #[tokio::test]
-    async fn test_discover_with_mock_server_non_success_status() {
+    async fn test_discover_via_wiremock_server_error_returns_empty() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -952,20 +956,13 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-
-        // Should detect non-success status
-        assert!(!response.status().is_success());
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
     }
 
     #[tokio::test]
-    async fn test_discover_with_mock_server_malformed_json() {
+    async fn test_discover_via_wiremock_malformed_json_returns_empty() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -973,22 +970,60 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
 
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-        let text = response.text().await.unwrap();
+    #[tokio::test]
+    async fn test_discover_via_wiremock_filters_infrastructure() {
+        let mock_server = MockServer::start().await;
 
-        // Mimics query_crt_sh behavior: parse failure returns empty
-        let result = serde_json::from_str::<Vec<CrtShEntry>>(&text);
-        assert!(result.is_err());
+        let response_body = serde_json::json!([
+            {
+                "id": 300,
+                "name_value": "cdn.cloudflare.com\ns3.amazonaws.com\nreal-vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "real-vendor.com");
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_deduplicates_domains() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 400,
+                "common_name": "api.vendor.com",
+                "name_value": "cdn.vendor.com\nwww.vendor.com\napi.vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        assert_eq!(results.len(), 1, "All subdomains of vendor.com should deduplicate to one");
+        assert_eq!(results[0].domain, "vendor.com");
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_multiple_certificates() {
         let entries = vec![
             CrtShEntry {
@@ -1140,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_san_with_wildcard_prefix() {
         // Certificates often have *.domain.com entries
         let entry = CrtShEntry {
@@ -1181,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_san_uppercase_normalized() {
         let entry = CrtShEntry {
             issuer_ca_id: None,
@@ -1220,7 +1255,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_common_name_with_issuer() {
         // Full CtDiscoveryResult construction from CN processing
         let entry = CrtShEntry {
@@ -1267,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_full_result_construction_from_san() {
         // Test the full CtDiscoveryResult construction from SAN processing
         let entry = CrtShEntry {
@@ -1320,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_no_entries() {
         // Empty entries list should produce no results
         let entries: Vec<CrtShEntry> = Vec::new();
@@ -1351,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_entry_with_no_san_no_cn() {
         // Entry with neither name_value nor common_name
         let entry = CrtShEntry {
@@ -1425,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_san_all_infrastructure() {
         // All SANs are infrastructure domains
         let entry = CrtShEntry {
@@ -1464,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_discover_logic_common_name_already_seen_from_san() {
         // CN domain was already found in SAN — should be skipped
         let entry = CrtShEntry {
@@ -1521,7 +1556,7 @@ mod tests {
     // --- wiremock tests for query_crt_sh behavior patterns ---
 
     #[tokio::test]
-    async fn test_query_crt_sh_pattern_success_response() {
+    async fn test_query_crt_sh_via_wiremock_success() {
         let mock_server = MockServer::start().await;
 
         let response_body = serde_json::json!([
@@ -1538,16 +1573,8 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
-
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-        assert!(response.status().is_success());
-        let text = response.text().await.unwrap();
-        let entries: Vec<CrtShEntry> = serde_json::from_str(&text).unwrap();
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, 5001);
         let name_value = entries[0].name_value.as_ref().unwrap();
@@ -1556,7 +1583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_crt_sh_pattern_non_json_response() {
+    async fn test_query_crt_sh_via_wiremock_html_response() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -1564,19 +1591,37 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap();
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty(), "Malformed JSON should return empty vec");
+    }
 
-        let url = format!("{}/", mock_server.uri());
-        let response = client.get(&url).send().await.unwrap();
-        let text = response.text().await.unwrap();
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_empty_string() {
+        let mock_server = MockServer::start().await;
 
-        // Mimics query_crt_sh: not empty, not "[]", but invalid JSON
-        assert!(!text.is_empty() && text != "[]");
-        let result = serde_json::from_str::<Vec<CrtShEntry>>(&text);
-        assert!(result.is_err());
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_500_returns_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
     }
 
     #[test]

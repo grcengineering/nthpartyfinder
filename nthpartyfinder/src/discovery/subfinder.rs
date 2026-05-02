@@ -64,7 +64,7 @@ impl SubfinderDiscovery {
         }
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn is_available(&self) -> bool {
         self.get_resolved_binary_path().is_some()
     }
@@ -72,7 +72,7 @@ impl SubfinderDiscovery {
     /// Get the actual binary path to use, checking:
     /// 1. The configured binary_path (if it exists or is in PATH)
     /// 2. The bundled binary location
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn get_resolved_binary_path(&self) -> Option<PathBuf> {
         // Check explicit path first
         if self.binary_path.exists() {
@@ -91,7 +91,7 @@ impl SubfinderDiscovery {
     }
 
     /// Get the path to the bundled subfinder binary in the app's data directory
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn get_bundled_binary_path() -> Option<PathBuf> {
         let binary_name = if cfg!(windows) {
             "subfinder.exe"
@@ -116,7 +116,7 @@ impl SubfinderDiscovery {
     }
 
     /// Get the download URL for subfinder for the current platform
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn get_platform_download_url() -> Option<String> {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
@@ -142,7 +142,7 @@ impl SubfinderDiscovery {
     }
 
     /// Download and install subfinder to the bundled location
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn download_and_install() -> Result<PathBuf> {
         let download_url = Self::get_platform_download_url()
             .ok_or_else(|| anyhow!("Unsupported platform for automatic download"))?;
@@ -241,7 +241,7 @@ impl SubfinderDiscovery {
     }
 
     /// Create a new SubfinderDiscovery using the bundled binary if available
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn with_bundled_or_path(custom_path: Option<PathBuf>, timeout: Duration) -> Self {
         let binary_path = custom_path
             .or_else(|| Self::get_bundled_binary_path().filter(|p| p.exists()))
@@ -257,7 +257,7 @@ impl SubfinderDiscovery {
     }
 
     /// Get installation instructions for subfinder
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn get_installation_instructions() -> String {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
@@ -343,7 +343,7 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Go is installed
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn is_go_installed() -> bool {
         std::process::Command::new("go")
             .arg("version")
@@ -353,7 +353,7 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to install subfinder using `go install`
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn install_via_go() -> Result<bool> {
         if !Self::is_go_installed() {
             return Err(anyhow!("Go is not installed"));
@@ -381,7 +381,7 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Homebrew is installed (macOS/Linux)
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn is_homebrew_installed() -> bool {
         std::process::Command::new("brew")
             .arg("--version")
@@ -391,7 +391,7 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Docker is installed
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn is_docker_installed() -> bool {
         std::process::Command::new("docker")
             .arg("--version")
@@ -401,7 +401,7 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to install subfinder using Homebrew (macOS/Linux)
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn install_via_homebrew() -> Result<bool> {
         if !Self::is_homebrew_installed() {
             return Err(anyhow!("Homebrew is not installed"));
@@ -425,7 +425,7 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to pull subfinder Docker image
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn install_via_docker() -> Result<bool> {
         if !Self::is_docker_installed() {
             return Err(anyhow!("Docker is not installed"));
@@ -456,7 +456,7 @@ impl SubfinderDiscovery {
 
     /// Get available installation options for the current platform
     /// Based on official Project Discovery documentation
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub fn get_available_install_options() -> Vec<InstallOption> {
         let mut options = Vec::new();
 
@@ -487,7 +487,7 @@ impl SubfinderDiscovery {
         options
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     pub async fn discover(&self, domain: &str) -> Result<Vec<SubdomainResult>> {
         let binary_path = match self.get_resolved_binary_path() {
             Some(path) => path,
@@ -827,7 +827,7 @@ garbage
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_bundled_binary_path_returns_some() {
         // On most systems, data_local_dir() should return Some
         let path = SubfinderDiscovery::get_bundled_binary_path();
@@ -845,7 +845,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_bundled_binary_path_contains_bin_dir() {
         if let Some(p) = SubfinderDiscovery::get_bundled_binary_path() {
             let parent = p.parent().unwrap();
@@ -862,7 +862,7 @@ garbage
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_platform_download_url_returns_some_on_supported() {
         // This test runs on a supported platform (macOS/Linux/Windows with x86_64/arm64)
         let url = SubfinderDiscovery::get_platform_download_url();
@@ -877,7 +877,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_platform_download_url_contains_version() {
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             assert!(
@@ -890,7 +890,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_platform_download_url_contains_platform_info() {
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             let os = std::env::consts::OS;
@@ -916,7 +916,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_platform_download_url_contains_arch() {
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             let arch = std::env::consts::ARCH;
@@ -980,7 +980,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_installation_instructions_platform_specific() {
         let instructions = SubfinderDiscovery::get_installation_instructions();
         let os = std::env::consts::OS;
@@ -1267,7 +1267,7 @@ garbage
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_resolved_binary_path_nonexistent() {
         let sf = SubfinderDiscovery::new(
             PathBuf::from("/nonexistent/subfinder_xyz_99999"),
@@ -1354,7 +1354,7 @@ garbage
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_platform_download_url_format() {
         if let Some(url) = SubfinderDiscovery::get_platform_download_url() {
             // Should follow the pattern: .../v{VERSION}/subfinder_{VERSION}_{OS}_{ARCH}.zip
@@ -1382,7 +1382,7 @@ garbage
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_installation_instructions_multiline() {
         let instructions = SubfinderDiscovery::get_installation_instructions();
         let lines: Vec<&str> = instructions.lines().collect();
@@ -1623,7 +1623,7 @@ echo '{"invalid":"missing host field"}'
     }
 
     #[tokio::test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     async fn test_discover_timeout_returns_partial_results() {
         let dir = tempfile::tempdir().unwrap();
         let script_path = dir.path().join("subfinder");
@@ -1726,7 +1726,7 @@ echo '{"host":"never-seen.com","source":"src"}'
     // ──────────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     async fn test_discover_with_fake_binary_returns_error_or_empty() {
         let dir = tempfile::tempdir().unwrap();
         let fake_binary = dir.path().join("subfinder");
@@ -1754,7 +1754,7 @@ echo '{"host":"never-seen.com","source":"src"}'
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
+
     fn test_get_available_install_options_auto_download_on_supported() {
         let options = SubfinderDiscovery::get_available_install_options();
         // On any CI/dev machine (macOS/Linux/Windows with standard arch), AutoDownload should be present
