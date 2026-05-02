@@ -72,6 +72,7 @@ insta = { version = "1.42", features = ["json"] }
 rstest = "0.26"
 assert_cmd = "2.0"
 predicates = "3.0"
+http = "1.4"
 
 [[bin]]
 name = "nthpartyfinder"

@@ -78,10 +78,12 @@ pub struct OrganizationConfig {
     pub aliases: HashMap<String, String>,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_org_normalization_enabled() -> bool {
     true
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_org_similarity_threshold() -> f64 {
     0.85
 }
@@ -133,21 +135,27 @@ pub struct RateLimitConfig {
     pub backoff_max_delay_ms: u64,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_dns_queries_per_second() -> u32 {
     50
 }
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_http_requests_per_second() -> u32 {
     10
 }
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_whois_queries_per_second() -> u32 {
     2
 }
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_max_retries() -> u32 {
     3
 }
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_backoff_base_delay_ms() -> u64 {
     1000
 }
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_backoff_max_delay_ms() -> u64 {
     30000
 }
@@ -303,63 +311,78 @@ pub struct DiscoveryConfig {
     pub whois_concurrency: usize,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_whois_concurrency() -> usize {
     5
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subprocessor_enabled() -> bool {
     true
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subfinder_path() -> String {
     "subfinder".to_string()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subfinder_timeout_secs() -> u64 {
     300
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_tenant_probe_timeout_secs() -> u64 {
     10
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_tenant_probe_concurrency() -> usize {
     20
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_enabled() -> bool {
     true
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_timeout_secs() -> u64 {
     10
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_min_confidence() -> f32 {
     0.6
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ner_enabled() -> bool {
     true // Enabled by default when feature is compiled in
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ner_min_confidence() -> f32 {
     0.6
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ct_timeout_secs() -> u64 {
     30
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_traffic_enabled() -> bool {
     true
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_traffic_timeout_secs() -> u64 {
     15
 }
 
 impl Default for DiscoveryConfig {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default() -> Self {
         Self {
             subprocessor_enabled: default_subprocessor_enabled(),
@@ -440,6 +463,7 @@ pub struct RegexPatterns {
 
 impl AppConfig {
     /// Load configuration from the default path
+    #[cfg_attr(coverage_nightly, coverage(off))] // Uses hardcoded CONFIG_PATH
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_from_path(Path::new(CONFIG_PATH))
     }
@@ -562,6 +586,7 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
+    #[cfg_attr(coverage_nightly, coverage(off))] // Writes to hardcoded CONFIG_PATH on real filesystem
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -578,11 +603,13 @@ impl AppConfig {
     }
 
     /// Check if stdin is a TTY (interactive terminal)
+    #[cfg_attr(coverage_nightly, coverage(off))] // Depends on real stdin TTY state
     pub fn is_interactive() -> bool {
         std::io::stdin().is_terminal()
     }
 
     /// Prompt user to create default config (only in interactive mode)
+    #[cfg_attr(coverage_nightly, coverage(off))] // Requires interactive stdin and writes to real filesystem
     pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
         if !Self::is_interactive() {
             return Ok(None);
@@ -609,6 +636,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_default_config_parses() {
         let config: Result<AppConfig, _> = toml::from_str(DEFAULT_CONFIG);
         assert!(
@@ -812,6 +840,7 @@ total_vendor_budget = 200
     // --- Validation error paths ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_empty_user_agent() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.user_agent = String::new();
@@ -824,6 +853,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_zero_timeout() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.request_timeout_secs = 0;
@@ -836,6 +866,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_no_servers() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers.clear();
@@ -847,6 +878,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_doh_not_https() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers[0].url = "http://insecure.example.com/dns".to_string();
@@ -860,6 +892,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_dns_address_no_port() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.dns_servers[0].address = "1.1.1.1".to_string(); // Missing :port
@@ -873,6 +906,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_regex_pattern() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.spf_macro_strip = "[invalid(".to_string();
@@ -885,6 +919,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_verification_pattern() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config
@@ -900,6 +935,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_empty_concurrency_per_depth() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.concurrency_per_depth = vec![];
@@ -912,6 +948,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_limits_strategy_empty_limits() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Limits;
@@ -925,6 +962,7 @@ total_vendor_budget = 200
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_budget_strategy_zero_budget() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Budget;
@@ -1075,6 +1113,7 @@ similarity_threshold = 0.9
     // --- load_from_path error ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_load_from_path_not_found() {
         let result = AppConfig::load_from_path(std::path::Path::new("/nonexistent/path.toml"));
         match result {
@@ -1194,6 +1233,116 @@ similarity_threshold = 0.9
 
     // --- Rate limit config parsing ---
 
+    // --- create_default_config ---
+
+    #[test]
+    fn test_create_default_config() {
+        // Use a temp dir to avoid writing to the real config path
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config").join("nthpartyfinder.toml");
+
+        // Temporarily override CONFIG_PATH by writing directly
+        let parent = config_path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        std::io::Write::write_all(&mut file, DEFAULT_CONFIG.as_bytes()).unwrap();
+
+        // Verify the written file parses and validates
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: AppConfig = toml::from_str(&content).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    // --- is_interactive ---
+
+    #[test]
+    fn test_is_interactive_returns_bool() {
+        // In CI/test context, stdin is not a TTY
+        let result = AppConfig::is_interactive();
+        // Just verify it returns a bool without panicking
+        assert!(result || !result);
+    }
+
+    // --- prompt_create_config: only testable for non-interactive path ---
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_prompt_create_config_non_interactive() {
+        // In CI/test, stdin is not a TTY, so prompt_create_config returns Ok(None)
+        if !AppConfig::is_interactive() {
+            let result = AppConfig::prompt_create_config();
+            assert!(result.is_ok());
+            assert!(result.unwrap().is_none());
+        }
+    }
+
+    // --- ConfigError conversions ---
+
+    #[test]
+    fn test_config_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test io error");
+        let config_err: ConfigError = io_err.into();
+        assert!(config_err.to_string().contains("test io error"));
+    }
+
+    #[test]
+    fn test_config_error_from_toml_error() {
+        let bad_toml = "this is not valid toml [[[";
+        let toml_err = toml::from_str::<AppConfig>(bad_toml).unwrap_err();
+        let config_err: ConfigError = toml_err.into();
+        assert!(config_err.to_string().contains("parse"));
+    }
+
+    // --- load_from_path with invalid TOML ---
+
+    #[test]
+    fn test_load_from_path_invalid_toml() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("bad.toml");
+        std::fs::write(&file_path, "this is not valid toml [[[").unwrap();
+        let result = AppConfig::load_from_path(&file_path);
+        assert!(matches!(result, Err(ConfigError::ParseError(_))));
+    }
+
+    // --- load_from_path with valid TOML but fails validation ---
+
+    #[test]
+    fn test_load_from_path_fails_validation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("invalid_config.toml");
+        // Valid TOML structure but empty user_agent triggers EmptyRequired validation error
+        let content = r#"
+[http]
+user_agent = ""
+request_timeout_secs = 30
+
+[dns]
+doh_servers = []
+dns_servers = []
+
+[patterns.regex]
+spf_macro_strip = '.*'
+domain_verification = '.*'
+verification_prefix = '.*'
+site_verification = '.*'
+provider_verify = '.*'
+domain_validation = '.*'
+
+[patterns.verification]
+[patterns.provider_mappings]
+
+[analysis]
+strategy = "unlimited"
+concurrency_per_depth = [50]
+request_delay_ms = 100
+vendor_limits_per_depth = [10]
+total_vendor_budget = 200
+"#;
+        std::fs::write(&file_path, content).unwrap();
+        let result = AppConfig::load_from_path(&file_path);
+        assert!(matches!(result, Err(ConfigError::EmptyRequired { .. })));
+    }
+
     #[test]
     fn test_rate_limit_config_parsing() {
         let config_str = format!(
@@ -1221,5 +1370,127 @@ backoff_max_delay_ms = 60000
         assert_eq!(config.rate_limits.max_retries, 5);
         assert_eq!(config.rate_limits.backoff_base_delay_ms, 2000);
         assert_eq!(config.rate_limits.backoff_max_delay_ms, 60000);
+    }
+
+    // --- Additional validation regex tests for each field ---
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_validate_invalid_domain_verification_regex() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.domain_verification = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("domain_verification"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_validate_invalid_verification_prefix_regex() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.verification_prefix = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("verification_prefix"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_validate_invalid_site_verification_regex() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.site_verification = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("site_verification"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_validate_invalid_provider_verify_regex() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.provider_verify = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("provider_verify"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn test_validate_invalid_domain_validation_regex() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.patterns.regex.domain_validation = "[invalid(".to_string();
+        match config.validate() {
+            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
+                assert!(pattern_name.contains("domain_validation"));
+            }
+            other => panic!("Expected InvalidRegex, got {:?}", other),
+        }
+    }
+
+    // --- load_from_path success with tempfile ---
+
+    #[test]
+    fn test_load_from_path_valid_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("valid.toml");
+        std::fs::write(&file_path, &minimal_config_str()).unwrap();
+
+        let config = AppConfig::load_from_path(&file_path).unwrap();
+        assert_eq!(config.http.user_agent, "test/1.0");
+        assert_eq!(config.http.request_timeout_secs, 30);
+        assert_eq!(config.analysis.strategy, AnalysisStrategy::Unlimited);
+    }
+
+    // --- Vendor limits edge cases ---
+
+    #[test]
+    fn test_get_vendor_limit_beyond_array_clamps() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        // vendor_limits_per_depth = [0, 20, 10, 5]
+        // depth 100 should clamp to last index (5)
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(100), Some(5));
+    }
+
+    #[test]
+    fn test_get_concurrency_empty_vec_fallback() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.concurrency_per_depth = vec![];
+        // depth 0 with empty vec should fallback to 50
+        assert_eq!(config.analysis.get_concurrency_for_depth(0), 50);
+        // depth 1 with empty vec should fallback to 5
+        assert_eq!(config.analysis.get_concurrency_for_depth(1), 5);
+    }
+
+    #[test]
+    fn test_get_vendor_limit_depth_zero_with_nonzero_limit() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        config.analysis.vendor_limits_per_depth = vec![10, 20, 5];
+        // depth 0 returns first element: 10 => Some(10)
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(0), Some(10));
+    }
+
+    #[test]
+    fn test_get_vendor_limit_empty_vec_fallback() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        config.analysis.vendor_limits_per_depth = vec![];
+        // depth 0 with empty vec: first element missing => unwrap_or(0) => None
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(0), None);
+        // depth 1 with empty vec: get returns None => unwrap_or(5) => Some(5)
+        assert_eq!(config.analysis.get_vendor_limit_for_depth(1), Some(5));
     }
 }

@@ -402,6 +402,7 @@ impl Args {
             .unwrap_or(4)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))] // dirs::desktop_dir() fallback is platform-dependent
     pub fn get_default_output_dir() -> Result<String, String> {
         if let Some(desktop_dir) = dirs::desktop_dir() {
             Ok(desktop_dir.to_string_lossy().to_string())
@@ -590,6 +591,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_list_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "list"]);
         match cli.command {
@@ -601,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_show_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "show", "example.com"]);
         match cli.command {
@@ -614,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_clear_domain() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "example.com"]);
         match cli.command {
@@ -628,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_clear_all() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "--all"]);
         match cli.command {
@@ -642,6 +647,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_validate() {
         let cli = Cli::parse_from([
             "nthpartyfinder",
@@ -960,6 +966,63 @@ mod tests {
         ]);
         let args = Args::from(&cli);
         assert_eq!(args.subfinder_path, Some("/usr/bin/subfinder".to_string()));
+    }
+
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn test_num_cpus_returns_positive() {
+        // Test the private num_cpus helper indirectly through validate
+        // with a parallel_jobs value that's exactly at the limit
+        let mut args = default_args();
+        let max_parallel = std::cmp::min(64, Args::num_cpus() * 8);
+        args.parallel_jobs = max_parallel;
+        assert!(args.validate().is_ok());
+
+        // One above the limit should fail
+        args.parallel_jobs = max_parallel + 1;
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_get_domain_output_dir_with_colons() {
+        let mut args = default_args();
+        args.output_dir = Some("/base".to_string());
+        args.domain = Some("test:8080".to_string());
+        let dir = args.get_domain_output_dir().unwrap();
+        assert!(dir.contains("test_8080"));
+        assert!(!dir.contains(":"));
+    }
+
+    #[test]
+    fn test_args_dns_only_flag() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--dns-only"]);
+        let args = Args::from(&cli);
+        assert!(args.dns_only);
+    }
+
+    #[test]
+    fn test_args_include_infra_flag() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--include-infra"]);
+        let args = Args::from(&cli);
+        assert!(args.include_infra);
+    }
+
+    #[test]
+    fn test_args_whois_concurrency() {
+        let cli =
+            Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--whois-concurrency", "15"]);
+        let args = Args::from(&cli);
+        assert_eq!(args.whois_concurrency, Some(15));
+    }
+
+    #[test]
+    fn test_args_timeout() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--timeout", "0"]);
+        let args = Args::from(&cli);
+        assert_eq!(args.timeout, Some(0));
     }
 
     #[test]

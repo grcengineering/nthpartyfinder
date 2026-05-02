@@ -317,6 +317,7 @@ pub fn domain_output_filename(domain: &str, format: &str) -> String {
 }
 
 /// Export batch summary to JSON file
+#[cfg_attr(coverage_nightly, coverage(off))] // fs::write error path is I/O-dependent
 pub fn export_batch_summary(summary: &BatchSummary, output_path: &Path) -> Result<()> {
     let json =
         serde_json::to_string_pretty(summary).context("Failed to serialize batch summary")?;
@@ -595,5 +596,190 @@ mod tests {
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.total_relationships, 10);
         assert!(!summary.completed_at.is_empty());
+    }
+
+    // ============ Additional Coverage Tests ============
+
+    #[test]
+    fn test_parse_domain_file_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("domains.csv");
+        std::fs::write(&csv_path, "example.com\ntest.org\n").unwrap();
+        let result = parse_domain_file(&csv_path).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "example.com");
+        assert_eq!(result[1].domain, "test.org");
+    }
+
+    #[test]
+    fn test_parse_domain_file_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("domains.json");
+        std::fs::write(&json_path, r#"["example.com", "test.org"]"#).unwrap();
+        let result = parse_domain_file(&json_path).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_domain_file_unknown_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt_path = dir.path().join("domains.txt");
+        std::fs::write(&txt_path, "example.com\n").unwrap();
+        let result = parse_domain_file(&txt_path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot determine"));
+    }
+
+    #[test]
+    fn test_parse_domain_file_not_found() {
+        let result = parse_domain_file(Path::new("/nonexistent/file.csv"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_domain_entry_new() {
+        let entry = DomainEntry::new("example.com");
+        assert_eq!(entry.domain, "example.com");
+        assert!(entry.label.is_none());
+    }
+
+    #[test]
+    fn test_domain_entry_with_label() {
+        let entry = DomainEntry::with_label("example.com", "Example Inc");
+        assert_eq!(entry.domain, "example.com");
+        assert_eq!(entry.label, Some("Example Inc".to_string()));
+    }
+
+    #[test]
+    fn test_parse_json_domains_field_not_array() {
+        let content = r#"{"domains": "not-an-array"}"#;
+        let result = parse_json_domains(content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an array"));
+    }
+
+    #[test]
+    fn test_parse_json_object_no_domains_key() {
+        let content = r#"{"other": "value"}"#;
+        let result = parse_json_domains(content);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must have a 'domains'"));
+    }
+
+    #[test]
+    fn test_parse_json_bare_value() {
+        let content = r#""just a string""#;
+        let result = parse_json_domains(content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an array"));
+    }
+
+    #[test]
+    fn test_parse_json_array_with_object_missing_domain_key() {
+        let content = r#"[{"name": "not-domain"}]"#;
+        let result = parse_json_domains(content).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_array_with_empty_domain_in_object() {
+        let content = r#"[{"domain": ""}]"#;
+        let result = parse_json_domains(content).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_array_with_empty_string() {
+        let content = r#"["", "  "]"#;
+        let result = parse_json_domains(content).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_object_with_label_empty() {
+        let content = r#"[{"domain": "example.com", "label": ""}]"#;
+        let result = parse_json_domains(content).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].label.is_none()); // empty label filtered
+    }
+
+    #[test]
+    fn test_parse_csv_with_header_empty_domain() {
+        let content = "domain,label\n,Some Label\nexample.com,Good";
+        let result = parse_csv_domains(content).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "example.com");
+    }
+
+    #[test]
+    fn test_parse_csv_with_header_invalid_domain() {
+        let content = "domain,label\ninvalid,No Dot\nexample.com,Good";
+        let result = parse_csv_domains(content).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "example.com");
+    }
+
+    #[test]
+    fn test_parse_csv_with_header_label_empty() {
+        let content = "domain,label\nexample.com,";
+        let result = parse_csv_domains(content).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].label.is_none());
+    }
+
+    #[test]
+    fn test_parse_csv_simple_comma_separated() {
+        let content = "example.com,some extra data\ntest.org,more data";
+        let result = parse_csv_domains(content).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "example.com");
+        assert_eq!(result[1].domain, "test.org");
+    }
+
+    #[test]
+    fn test_is_valid_domain_special_chars() {
+        assert!(!is_valid_domain("example .com"));
+        assert!(!is_valid_domain("exam$ple.com"));
+    }
+
+    #[test]
+    fn test_export_batch_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("summary.json");
+        let mut summary = new_batch_summary();
+        finalize_batch_summary(&mut summary);
+        export_batch_summary(&summary, &output_path).unwrap();
+        let content = std::fs::read_to_string(&output_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["total_domains"], 0);
+    }
+
+    #[test]
+    fn test_new_batch_summary() {
+        let summary = new_batch_summary();
+        assert_eq!(summary.total_domains, 0);
+        assert_eq!(summary.successful, 0);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.total_relationships, 0);
+        assert!(summary.domain_results.is_empty());
+        assert!(!summary.started_at.is_empty());
+        assert!(summary.completed_at.is_empty());
+    }
+
+    #[test]
+    fn test_domain_entry_serde_roundtrip() {
+        let entry = DomainEntry::with_label("test.org", "Test Corp");
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: DomainEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, entry);
+    }
+
+    #[test]
+    fn test_domain_output_filename_with_colon() {
+        let result = domain_output_filename("example.com:8080", "csv");
+        assert_eq!(result, "Nth Party Analysis for example_com_8080.csv");
     }
 }

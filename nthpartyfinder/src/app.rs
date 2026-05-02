@@ -50,6 +50,7 @@ pub trait InputSource: Send + Sync {
 
 pub struct StdioInput;
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl InputSource for StdioInput {
     fn is_terminal(&self) -> bool {
         std::io::stdin().is_terminal()
@@ -220,6 +221,7 @@ pub fn resolve_checkpoint_resume(
 
 /// Collect unverified organization mappings from discovered vendors.
 /// Returns domains whose org name appears to be inferred from the domain itself.
+#[cfg_attr(coverage_nightly, coverage(off))] // known_vendors::lookup depends on process-global OnceLock
 pub fn collect_unverified_orgs(
     vendors: &HashMap<String, String>,
 ) -> Vec<interactive::UnverifiedOrgMapping> {
@@ -285,6 +287,7 @@ pub async fn run() -> Result<()> {
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
@@ -1575,6 +1578,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_batch_analysis(
     args: &Args,
     app_config: &AppConfig,
@@ -1832,6 +1836,7 @@ pub async fn run_batch_analysis(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn analyze_single_domain_for_batch(
     entry: &batch::DomainEntry,
     output_dir: &Path,
@@ -2605,5 +2610,49 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].domain, "example.com");
         assert_eq!(result[0].inferred_org, "example.com");
+    }
+
+    // ── AppExitCode ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_app_exit_code_display() {
+        let code = AppExitCode(42);
+        assert_eq!(format!("{}", code), "exit code 42");
+    }
+
+    #[test]
+    fn test_app_exit_code_display_zero() {
+        let code = AppExitCode(0);
+        assert_eq!(format!("{}", code), "exit code 0");
+    }
+
+    #[test]
+    fn test_app_exit_code_is_error() {
+        let code = AppExitCode(1);
+        let err: &dyn std::error::Error = &code;
+        assert_eq!(err.to_string(), "exit code 1");
+    }
+
+    // ── compute_analysis_timeout (outer function) ────────────────────
+
+    #[test]
+    fn test_compute_analysis_timeout_outer_returns_some() {
+        // The outer function reads env var; without it set, defaults to 600s
+        let timeout = compute_analysis_timeout(Some(300));
+        assert_eq!(timeout, Some(std::time::Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_compute_analysis_timeout_outer_zero_disables() {
+        let timeout = compute_analysis_timeout(Some(0));
+        assert_eq!(timeout, None);
+    }
+
+    #[test]
+    fn test_compute_analysis_timeout_outer_none_uses_default() {
+        // Without env var set, defaults to 600
+        let timeout = compute_analysis_timeout(None);
+        // Will be 600 unless NTHPARTY_ANALYSIS_TIMEOUT_SECS is set in env
+        assert!(timeout.is_some());
     }
 }

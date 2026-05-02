@@ -555,4 +555,49 @@ mod tests {
         let ctx = RateLimitContext::from_config(&config);
         ctx.log_config();
     }
+
+    // --- RateLimiter::acquire async tests ---
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_disabled() {
+        let mut limiter = RateLimiter::new(0);
+        // Should return immediately
+        limiter.acquire().await;
+        assert!(!limiter.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_enabled() {
+        let mut limiter = RateLimiter::new(1000);
+        // High rate, should not wait
+        limiter.acquire().await;
+        limiter.acquire().await;
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_waits_then_succeeds() {
+        let mut limiter = RateLimiter::new(100);
+        // Exhaust all tokens
+        for _ in 0..100 {
+            limiter.try_acquire();
+        }
+        // Next acquire should wait and then succeed
+        limiter.acquire().await;
+        // If we got here, the acquire loop worked
+    }
+
+    // --- log_config with mixed rates ---
+
+    #[test]
+    fn test_rate_limit_context_log_config_mixed() {
+        // Some limited, some unlimited
+        let config = RateLimitConfig {
+            dns_queries_per_second: 50,
+            http_requests_per_second: 0, // unlimited
+            whois_queries_per_second: 2,
+            ..RateLimitConfig::default()
+        };
+        let ctx = RateLimitContext::from_config(&config);
+        ctx.log_config(); // Should not panic
+    }
 }

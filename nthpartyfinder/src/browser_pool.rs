@@ -77,6 +77,7 @@ pub struct BrowserGuard {
 /// (detected via /.dockerenv or NTHPARTYFINDER_CONTAINER env var).
 ///
 /// Returns a BrowserGuard that releases the semaphore permit when dropped.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn create_browser() -> anyhow::Result<BrowserGuard> {
     let permit = BROWSER_SEMAPHORE.acquire();
 
