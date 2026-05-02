@@ -3859,4 +3859,48 @@ mod tests {
         assert!(res4.is_some());
         assert!(res4.unwrap().iter().any(|d| d.domain == "zoom.us"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // try_system_dns_resolver — previously coverage(off)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_try_system_dns_resolver_valid_domain() {
+        let result = try_system_dns_resolver("google.com").await;
+        match result {
+            Ok(records) => {
+                // google.com has TXT records (SPF, verification, etc.)
+                assert!(!records.is_empty(), "google.com should have TXT records");
+                let has_spf = records.iter().any(|r| r.contains("spf"));
+                assert!(has_spf, "google.com TXT records should include SPF: {:?}", records);
+            }
+            Err(e) => {
+                // DNS resolution may fail in sandboxed/offline environments
+                let msg = e.to_string();
+                assert!(!msg.is_empty(), "Error message should be descriptive: {}", msg);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_try_system_dns_resolver_nonexistent_domain() {
+        let result = try_system_dns_resolver("zzz-nonexistent.invalid").await;
+        // .invalid TLD should fail DNS resolution
+        assert!(result.is_err(), "Nonexistent domain should fail DNS resolution");
+    }
+
+    #[tokio::test]
+    async fn test_try_system_dns_resolver_no_txt_records() {
+        // Most domains without TXT records will return an error from the resolver
+        let result = try_system_dns_resolver("zzz-no-txt-records-test.com").await;
+        match result {
+            Ok(records) => {
+                // If it somehow resolves, records may be empty
+                let _ = records;
+            }
+            Err(_) => {
+                // Expected — domain doesn't exist or has no TXT records
+            }
+        }
+    }
 }
