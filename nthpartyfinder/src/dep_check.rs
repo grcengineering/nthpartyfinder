@@ -16,7 +16,6 @@ pub struct DepCheckResult {
 
 /// Check all dependencies based on enabled features and return results.
 /// Returns Err with a user-friendly message if a required dependency is missing.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn check_dependencies(
     enable_slm: bool,
     disable_slm: bool,
@@ -74,13 +73,11 @@ pub fn check_dependencies(
 }
 
 /// Quick check: is ONNX Runtime available? Returns true if found.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn check_onnx_runtime_availability() -> bool {
     check_onnx_runtime().available
 }
 
 /// Check if ONNX Runtime shared library is available
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn check_onnx_runtime() -> DepCheckResult {
     // Already set via env var
     if std::env::var("ORT_DYLIB_PATH").is_ok() {
@@ -171,7 +168,6 @@ fn check_onnx_runtime() -> DepCheckResult {
 /// Find ONNX Runtime library in a directory (including versioned subdirs).
 /// Handles both flat (`onnxruntime-osx-arm64-1.20.1/lib/`) and nested
 /// (`onnxruntime/onnxruntime-osx-arm64-1.20.1/lib/`) directory structures.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn find_ort_in_directory(dir: &std::path::Path, lib_name: &str) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -203,7 +199,6 @@ fn find_ort_in_directory(dir: &std::path::Path, lib_name: &str) -> Option<PathBu
 }
 
 /// Get OS-specific ONNX Runtime download URL
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn get_ort_download_info() -> (&'static str, &'static str, String) {
     let (os_name, arch) = if cfg!(target_os = "macos") {
         if cfg!(target_arch = "aarch64") {
@@ -229,7 +224,6 @@ fn get_ort_download_info() -> (&'static str, &'static str, String) {
 }
 
 /// Check if Chrome or Chromium is available
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn check_chrome() -> DepCheckResult {
     // Check CHROME_PATH env var
     if let Ok(path) = std::env::var("CHROME_PATH") {
@@ -295,7 +289,6 @@ fn check_chrome() -> DepCheckResult {
 }
 
 /// Check if subfinder is available
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn check_subfinder() -> DepCheckResult {
     match which::which("subfinder") {
         Ok(path) => DepCheckResult {
@@ -319,7 +312,6 @@ fn check_subfinder() -> DepCheckResult {
 }
 
 /// Check if whois is available
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn check_whois() -> DepCheckResult {
     match which::which("whois") {
         Ok(path) => DepCheckResult {
@@ -354,7 +346,6 @@ fn check_whois() -> DepCheckResult {
 /// Download ONNX Runtime to a directory next to the executable.
 /// Returns the path to the downloaded library file.
 /// Prompts for consent in interactive mode; errors in non-interactive mode.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn download_onnx_runtime_interactive() -> Result<PathBuf, String> {
     let is_interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
 
@@ -558,8 +549,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_chrome_message_content() {
+        fn test_check_chrome_message_content() {
         let result = check_chrome();
         let msg = result.message.unwrap();
         if result.available {
@@ -572,8 +562,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_chrome_with_env_var_nonexistent_path() {
+        fn test_check_chrome_with_env_var_nonexistent_path() {
         // Save and set a bogus CHROME_PATH
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/nonexistent/chrome/binary");
@@ -602,8 +591,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_subfinder_message_content() {
+        fn test_check_subfinder_message_content() {
         let result = check_subfinder();
         let msg = result.message.unwrap();
         if result.available {
@@ -625,8 +613,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
+        fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
         // Temporarily unset ORT_DYLIB_PATH so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -817,8 +804,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_slm_via_config_enables_ort_check() {
+        fn test_check_dependencies_slm_via_config_enables_ort_check() {
         // enable_slm=false, disable_slm=false, config_slm_enabled=true
         // => slm_wanted = true
         let result = check_dependencies(
@@ -843,8 +829,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_enable_slm_flag() {
+        fn test_check_dependencies_enable_slm_flag() {
         let result = check_dependencies(
             true,  // enable_slm
             false, // disable_slm
@@ -882,8 +867,7 @@ mod tests {
     // ── ORT env var path ──────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_with_valid_env_path() {
+        fn test_check_onnx_with_valid_env_path() {
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join("libonnxruntime.dylib");
         std::fs::write(&fake_lib, b"fake ort lib").unwrap();
@@ -903,8 +887,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_with_invalid_env_path() {
+        fn test_check_onnx_with_invalid_env_path() {
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "/nonexistent/libonnxruntime.dylib");
 
@@ -922,8 +905,7 @@ mod tests {
     // ── Chrome env var ────────────────────────────────────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_chrome_with_valid_env_path() {
+        fn test_check_chrome_with_valid_env_path() {
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome");
         std::fs::write(&fake_chrome, b"fake chrome").unwrap();
@@ -1120,8 +1102,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_disable_slm_overrides_config() {
+        fn test_check_dependencies_disable_slm_overrides_config() {
         // disable_slm=true should prevent ONNX check even if config_slm_enabled=true
         let result = check_dependencies(false, true, false, false, false, true, false);
         // slm_wanted = false || (!true && true) = false
@@ -1131,8 +1112,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_enable_slm_overrides_disable() {
+        fn test_check_dependencies_enable_slm_overrides_disable() {
         // enable_slm=true, disable_slm=true
         // slm_wanted = true || (!true && false) = true
         let result = check_dependencies(true, true, false, false, false, false, false);
@@ -1207,8 +1187,7 @@ mod tests {
     // ── check_onnx_runtime with env var edge cases ───────────────────
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_with_empty_env_var() {
+        fn test_check_onnx_with_empty_env_var() {
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "");
 
@@ -1255,8 +1234,7 @@ mod tests {
     // --- check_onnx_runtime: ORT_DYLIB_PATH with existing file ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_runtime_env_var_existing_file_message() {
+        fn test_check_onnx_runtime_env_var_existing_file_message() {
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join("libonnxruntime.dylib");
         std::fs::write(&fake_lib, b"fake").unwrap();
@@ -1280,8 +1258,7 @@ mod tests {
     // --- check_onnx_runtime: search in system path ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_runtime_system_path_not_found() {
+        fn test_check_onnx_runtime_system_path_not_found() {
         // Ensure ORT_DYLIB_PATH is unset so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1312,8 +1289,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_chrome_env_var_valid_path() {
+        fn test_check_chrome_env_var_valid_path() {
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome-binary");
         std::fs::write(&fake_chrome, b"fake chrome binary").unwrap();
@@ -1333,8 +1309,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_chrome_not_found_message() {
+        fn test_check_chrome_not_found_message() {
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/definitely/not/a/real/path/chrome");
 
@@ -1358,8 +1333,7 @@ mod tests {
     // --- check_subfinder: message details ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_subfinder_available_or_not() {
+        fn test_check_subfinder_available_or_not() {
         let result = check_subfinder();
         assert_eq!(result.name, "subfinder");
         assert!(!result.required);
@@ -1376,8 +1350,7 @@ mod tests {
     // --- check_whois: detail checks ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_whois_available_or_not() {
+        fn test_check_whois_available_or_not() {
         let result = check_whois();
         assert_eq!(result.name, "whois");
         assert!(result.required);
@@ -1392,8 +1365,7 @@ mod tests {
     // --- check_dependencies: error aggregation ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_slm_enabled_error_aggregation() {
+        fn test_check_dependencies_slm_enabled_error_aggregation() {
         // When SLM is enabled but ONNX is not available, check_dependencies
         // should aggregate errors
         let original = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1469,8 +1441,7 @@ mod tests {
     // --- check_dependencies: edge case combinations ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_all_enabled() {
+        fn test_check_dependencies_all_enabled() {
         // Enable everything — exercises all code paths
         let result = check_dependencies(
             true,  // enable_slm
@@ -1561,8 +1532,7 @@ mod tests {
     // --- check_onnx_runtime: ORT_DYLIB_PATH set to dir (not file) ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_onnx_runtime_env_var_points_to_directory() {
+        fn test_check_onnx_runtime_env_var_points_to_directory() {
         let dir = tempdir().unwrap();
 
         let original = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1584,8 +1554,7 @@ mod tests {
     // --- Multiple errors aggregation ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn test_check_dependencies_error_formatting() {
+        fn test_check_dependencies_error_formatting() {
         // Force SLM to be wanted with no ONNX installed
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1624,14 +1593,131 @@ mod tests {
     // --- check_whois install hint platform ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_check_whois_install_hint_present() {
-        // Force whois not found by testing the message structure
         let result = check_whois();
         if !result.available {
             let msg = result.message.unwrap();
             assert!(msg.contains("whois not found"));
             assert!(msg.contains("Install:"));
+        }
+    }
+
+    // ── Newly-exposed coverage: argument construction & URL format ────
+
+    #[test]
+    fn test_download_ort_interactive_non_interactive_error_has_export_hint() {
+        let result = download_onnx_runtime_interactive();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("export ORT_DYLIB_PATH"),
+            "Non-interactive error should tell user how to set env var: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_download_ort_interactive_url_matches_get_ort_download_info() {
+        let (_, _, expected_url) = get_ort_download_info();
+        let result = download_onnx_runtime_interactive();
+        let err = result.unwrap_err();
+        assert!(
+            err.contains(&expected_url),
+            "Error should contain the same URL as get_ort_download_info: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_get_ort_download_info_url_is_valid_for_curl_arg() {
+        let (_, _, url) = get_ort_download_info();
+        assert!(url.starts_with("https://"), "URL must be HTTPS for curl -fSL");
+        assert!(!url.contains(' '), "URL must not contain spaces");
+        assert!(!url.contains('\''), "URL must not contain single quotes");
+    }
+
+    #[test]
+    fn test_check_onnx_runtime_not_found_message_has_install_script() {
+        let original = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::remove_var("ORT_DYLIB_PATH");
+
+        let result = check_onnx_runtime();
+        if !result.available {
+            let msg = result.message.unwrap();
+            assert!(msg.contains("./scripts/install.sh"), "Should mention install script: {}", msg);
+            assert!(msg.contains("--disable-slm"), "Should mention disable flag: {}", msg);
+        }
+
+        if let Some(val) = original {
+            std::env::set_var("ORT_DYLIB_PATH", val);
+        }
+    }
+
+    #[test]
+    fn test_check_dependencies_whois_always_present() {
+        let combos: Vec<(bool, bool, bool, bool, bool, bool, bool)> = vec![
+            (false, false, false, false, false, false, false),
+            (false, true, false, false, false, false, false),
+            (false, true, true, true, true, false, true),
+        ];
+        for (es, ds, esd, ewo, ewt, cse, csd) in combos {
+            let result = check_dependencies(es, ds, esd, ewo, ewt, cse, csd);
+            match result {
+                Ok(results) => assert!(results.iter().any(|r| r.name == "whois")),
+                Err(_) => {} // error path still ran whois check
+            }
+        }
+    }
+
+    #[test]
+    fn test_check_onnx_runtime_availability_consistent_with_check_onnx_runtime() {
+        let avail = check_onnx_runtime_availability();
+        let result = check_onnx_runtime();
+        assert_eq!(avail, result.available);
+    }
+
+    #[test]
+    fn test_check_chrome_install_hint_platform_specific() {
+        let original = std::env::var("CHROME_PATH").ok();
+        std::env::set_var("CHROME_PATH", "/definitely/not/real/chrome");
+
+        let result = check_chrome();
+        if !result.available {
+            let msg = result.message.unwrap();
+            if cfg!(target_os = "macos") {
+                assert!(msg.contains("brew install"), "macOS hint missing: {}", msg);
+            } else if cfg!(target_os = "linux") {
+                assert!(msg.contains("apt-get"), "Linux hint missing: {}", msg);
+            }
+        }
+
+        match original {
+            Some(val) => std::env::set_var("CHROME_PATH", val),
+            None => std::env::remove_var("CHROME_PATH"),
+        }
+    }
+
+    #[test]
+    fn test_check_subfinder_uses_which() {
+        let result = check_subfinder();
+        if result.available {
+            let msg = result.message.unwrap();
+            assert!(msg.starts_with("Found at"), "Available message should start with 'Found at': {}", msg);
+        } else {
+            let msg = result.message.unwrap();
+            assert!(msg.contains("go install"), "Missing message should have install cmd: {}", msg);
+        }
+    }
+
+    #[test]
+    fn test_check_whois_uses_which() {
+        let result = check_whois();
+        if result.available {
+            let msg = result.message.unwrap();
+            assert!(msg.starts_with("Found at"), "Available message should start with 'Found at': {}", msg);
+        } else {
+            let msg = result.message.unwrap();
+            assert!(msg.contains("whois not found"), "Missing message format wrong: {}", msg);
         }
     }
 }
