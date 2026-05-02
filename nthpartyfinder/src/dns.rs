@@ -268,7 +268,6 @@ impl DnsServerPool {
     }
 
     /// Perform DNS over HTTPS lookup for TXT records
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn doh_txt_lookup(&self, domain: &str, server: &DohServerConfig) -> Result<Vec<String>> {
         debug!("DoH lookup for {} using {}", domain, server.name);
 
@@ -311,7 +310,6 @@ impl DnsServerPool {
     }
 
     /// Perform DNS over HTTPS lookup for CNAME records
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn doh_cname_lookup(
         &self,
         domain: &str,
@@ -405,7 +403,6 @@ impl DnsServerPool {
     /// Fast bulk DNS lookup optimized for subdomain scanning.
     /// Uses DoH as primary with a single attempt, then falls back to traditional DNS.
     /// Runs TXT and CNAME lookups concurrently via tokio::join!.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn get_txt_and_cname_fast(&self, domain: &str) -> (Vec<String>, Vec<String>) {
         let (txt_result, cname_result) =
             tokio::join!(self.fast_txt_lookup(domain), self.fast_cname_lookup(domain),);
@@ -416,7 +413,6 @@ impl DnsServerPool {
     }
 
     /// Fast TXT lookup: try one DoH server, then one DNS server. Short timeouts.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fast_txt_lookup(&self, domain: &str) -> Result<Vec<String>> {
         // Try DoH first with a single attempt
         let doh_server = self.next_doh_server();
@@ -448,7 +444,6 @@ impl DnsServerPool {
     }
 
     /// Fast CNAME lookup: single DoH attempt with short timeout, then traditional DNS fallback.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
         let doh_server = self.next_doh_server();
         match tokio::time::timeout(
@@ -488,12 +483,10 @@ impl DnsServerPool {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_txt_records(domain: &str) -> Result<Vec<String>> {
     get_txt_records_with_pool(domain, &DnsServerPool::new()).await
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_txt_records_with_pool(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -505,7 +498,6 @@ pub async fn get_txt_records_with_pool(
 /// Uses concurrent DNS racing: fires DoH + traditional DNS in parallel,
 /// returns the first successful result. This eliminates sequential fallback
 /// latency which could cost 10-20s per domain on failures.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_txt_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -612,7 +604,6 @@ pub async fn get_txt_records_with_rate_limit(
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
     let resolver = TokioResolver::builder_tokio()?.build();
 
@@ -623,7 +614,6 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
 }
 
 /// Get CNAME records for a domain using the DNS pool
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_cname_records_with_pool(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -633,7 +623,6 @@ pub async fn get_cname_records_with_pool(
 
 /// Get CNAME records with optional rate limiting support.
 /// Single-attempt DoH lookup — CNAME absence is normal, so no retries needed.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_cname_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
@@ -809,7 +798,6 @@ fn strip_spf_macros(domain: &str) -> String {
     MACRO_REGEX.replace_all(domain, "").to_string()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // regex capture group else-paths are unreachable with well-formed patterns
 fn extract_from_spf_record(
     record: &str,
     logger: Option<&dyn LogFailure>,
@@ -882,7 +870,6 @@ fn extract_from_spf_record(
 /// those chains to discover the actual mail service providers hidden behind the delegation.
 ///
 /// Respects RFC 7208's 10 DNS-querying mechanism limit to avoid excessive lookups.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn resolve_spf_includes_recursive(
     txt_records: &[String],
     dns_pool: &DnsServerPool,
@@ -957,7 +944,6 @@ pub async fn resolve_spf_includes_recursive(
 /// Note: `exists:` targets are NOT included here because they are macro-expanded IP-check
 /// mechanisms, not SPF delegation. Domain extraction from `exists:` is already handled by
 /// `extract_from_spf_record`.
-#[cfg_attr(coverage_nightly, coverage(off))] // regex capture group else-paths are unreachable with well-formed patterns
 fn collect_spf_targets(
     record_lower: &str,
     to_resolve: &mut Vec<String>,
@@ -978,7 +964,6 @@ fn collect_spf_targets(
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // regex capture group else-paths are unreachable with well-formed patterns
 fn extract_from_dkim_record(
     record: &str,
     _logger: Option<&dyn LogFailure>,
@@ -1018,7 +1003,6 @@ fn extract_from_dkim_record(
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // regex capture group else-paths are unreachable with well-formed patterns
 fn extract_from_dmarc_record(
     record: &str,
     logger: Option<&dyn LogFailure>,
@@ -1315,7 +1299,6 @@ fn try_static_verification_patterns(
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // infer_provider_domain None-paths for unknown providers
 fn try_dynamic_verification_patterns(
     record: &str,
     _logger: Option<&dyn LogFailure>,
@@ -2128,7 +2111,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_is_valid_domain_length_253() {
         // Exactly at the limit
         let label = "a".repeat(60);
@@ -2140,7 +2122,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_is_valid_domain_length_too_long() {
         let label = "a".repeat(63);
         let domain = format!("{}.{}.{}.{}.com", label, label, label, label);
@@ -3403,7 +3384,6 @@ mod tests {
     // --- DnsServerPool from_config test ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_dns_server_pool_from_config() {
         use crate::config::AppConfig;
 

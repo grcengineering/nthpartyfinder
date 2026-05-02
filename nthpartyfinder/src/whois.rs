@@ -43,14 +43,12 @@ impl OrganizationResult {
 }
 
 /// Get organization with verification status
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_status(domain: &str) -> Result<OrganizationResult> {
     get_organization_with_status_and_config(domain, true, 0.6).await
 }
 
 /// Get organization with verification status and optional rate limiting
 /// This is the preferred method when using rate limiting
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_rate_limit(
     domain: &str,
     web_org_enabled: bool,
@@ -160,7 +158,6 @@ pub async fn get_organization_with_rate_limit(
 }
 
 /// Get organization with verification status, with configurable web org lookup
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_status_and_config(
     domain: &str,
     web_org_enabled: bool,
@@ -265,13 +262,11 @@ pub async fn get_organization_with_status_and_config(
     ))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization(domain: &str) -> Result<String> {
     get_organization_with_config(domain, true, 0.6).await
 }
 
 /// Get organization name with configurable web org lookup
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_config(
     domain: &str,
     web_org_enabled: bool,
@@ -342,7 +337,6 @@ pub async fn get_organization_with_config(
     Ok(extract_organization_from_domain(domain))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn try_native_whois(domain: &str) -> Result<String> {
     debug!("Trying whois-rust library lookup for domain: {}", domain);
 
@@ -391,7 +385,6 @@ async fn try_native_whois(domain: &str) -> Result<String> {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn try_system_whois(domain: &str) -> Result<String> {
     let domain_owned = domain.to_string();
 
@@ -408,7 +401,6 @@ async fn try_system_whois(domain: &str) -> Result<String> {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn execute_whois_command(domain: &str) -> Result<String> {
     // Try different whois command locations based on platform
     let whois_commands = if cfg!(windows) {
@@ -447,7 +439,6 @@ fn extract_organization_from_domain(domain: &str) -> String {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // Closing braces of if-let on Regex::new/cap.get(1) are structurally unreachable
 fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
     let organization_patterns = vec![
         r"(?i)Organization:\s*(.+)",
@@ -476,7 +467,6 @@ fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
     extract_registrar_from_whois(whois_data)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // Closing braces of if-let on Regex::new/cap.get(1) are structurally unreachable
 fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
     let registrar_patterns = vec![
         r"(?i)Registrar:\s*(.+)",
@@ -665,7 +655,6 @@ fn clean_organization_name(org: &str) -> String {
 ///
 /// # Returns
 /// A HashMap mapping domain -> OrganizationResult
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn batch_get_organizations(
     domains: Vec<String>,
     web_org_enabled: bool,
@@ -696,7 +685,6 @@ pub async fn batch_get_organizations(
 ///
 /// # Returns
 /// A HashMap mapping domain -> OrganizationResult
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn batch_get_organizations_with_rate_limit(
     domains: Vec<String>,
     web_org_enabled: bool,
@@ -781,7 +769,6 @@ pub async fn batch_get_organizations_with_rate_limit(
 ///
 /// # Returns
 /// A HashMap of newly resolved domain -> organization name mappings
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn prewarm_organization_cache<F>(
     domains: Vec<String>,
     existing_cache: &HashMap<String, String>,
