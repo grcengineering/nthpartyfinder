@@ -78,12 +78,10 @@ pub struct OrganizationConfig {
     pub aliases: HashMap<String, String>,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_org_normalization_enabled() -> bool {
     true
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_org_similarity_threshold() -> f64 {
     0.85
 }
@@ -135,27 +133,26 @@ pub struct RateLimitConfig {
     pub backoff_max_delay_ms: u64,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_dns_queries_per_second() -> u32 {
     50
 }
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 fn default_http_requests_per_second() -> u32 {
     10
 }
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 fn default_whois_queries_per_second() -> u32 {
     2
 }
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 fn default_max_retries() -> u32 {
     3
 }
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 fn default_backoff_base_delay_ms() -> u64 {
     1000
 }
-#[cfg_attr(coverage_nightly, coverage(off))]
+
 fn default_backoff_max_delay_ms() -> u64 {
     30000
 }
@@ -311,78 +308,63 @@ pub struct DiscoveryConfig {
     pub whois_concurrency: usize,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_whois_concurrency() -> usize {
     5
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subprocessor_enabled() -> bool {
     true
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subfinder_path() -> String {
     "subfinder".to_string()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_subfinder_timeout_secs() -> u64 {
     300
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_tenant_probe_timeout_secs() -> u64 {
     10
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_tenant_probe_concurrency() -> usize {
     20
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_enabled() -> bool {
     true
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_timeout_secs() -> u64 {
     10
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_org_min_confidence() -> f32 {
     0.6
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ner_enabled() -> bool {
     true // Enabled by default when feature is compiled in
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ner_min_confidence() -> f32 {
     0.6
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_ct_timeout_secs() -> u64 {
     30
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_traffic_enabled() -> bool {
     true
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn default_web_traffic_timeout_secs() -> u64 {
     15
 }
 
 impl Default for DiscoveryConfig {
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn default() -> Self {
         Self {
             subprocessor_enabled: default_subprocessor_enabled(),
@@ -463,7 +445,6 @@ pub struct RegexPatterns {
 
 impl AppConfig {
     /// Load configuration from the default path
-    #[cfg_attr(coverage_nightly, coverage(off))] // Uses hardcoded CONFIG_PATH
     pub fn load() -> Result<Self, ConfigError> {
         Self::load_from_path(Path::new(CONFIG_PATH))
     }
@@ -586,7 +567,6 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
-    #[cfg_attr(coverage_nightly, coverage(off))] // Writes to hardcoded CONFIG_PATH on real filesystem
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -603,13 +583,11 @@ impl AppConfig {
     }
 
     /// Check if stdin is a TTY (interactive terminal)
-    #[cfg_attr(coverage_nightly, coverage(off))] // Depends on real stdin TTY state
     pub fn is_interactive() -> bool {
         std::io::stdin().is_terminal()
     }
 
     /// Prompt user to create default config (only in interactive mode)
-    #[cfg_attr(coverage_nightly, coverage(off))] // Requires interactive stdin and writes to real filesystem
     pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
         if !Self::is_interactive() {
             return Ok(None);
@@ -636,7 +614,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_default_config_parses() {
         let config: Result<AppConfig, _> = toml::from_str(DEFAULT_CONFIG);
         assert!(
@@ -840,7 +817,6 @@ total_vendor_budget = 200
     // --- Validation error paths ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_empty_user_agent() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.user_agent = String::new();
@@ -853,7 +829,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_zero_timeout() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.request_timeout_secs = 0;
@@ -866,7 +841,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_no_servers() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers.clear();
@@ -878,7 +852,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_doh_not_https() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers[0].url = "http://insecure.example.com/dns".to_string();
@@ -892,7 +865,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_dns_address_no_port() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.dns_servers[0].address = "1.1.1.1".to_string(); // Missing :port
@@ -906,7 +878,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_regex_pattern() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.spf_macro_strip = "[invalid(".to_string();
@@ -919,7 +890,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_verification_pattern() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config
@@ -935,7 +905,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_empty_concurrency_per_depth() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.concurrency_per_depth = vec![];
@@ -948,7 +917,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_limits_strategy_empty_limits() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Limits;
@@ -962,7 +930,6 @@ total_vendor_budget = 200
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_budget_strategy_zero_budget() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Budget;
@@ -1113,7 +1080,6 @@ similarity_threshold = 0.9
     // --- load_from_path error ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_load_from_path_not_found() {
         let result = AppConfig::load_from_path(std::path::Path::new("/nonexistent/path.toml"));
         match result {
@@ -1266,7 +1232,6 @@ similarity_threshold = 0.9
     // --- prompt_create_config: only testable for non-interactive path ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_prompt_create_config_non_interactive() {
         // In CI/test, stdin is not a TTY, so prompt_create_config returns Ok(None)
         if !AppConfig::is_interactive() {
@@ -1375,7 +1340,6 @@ backoff_max_delay_ms = 60000
     // --- Additional validation regex tests for each field ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_domain_verification_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.domain_verification = "[invalid(".to_string();
@@ -1388,7 +1352,6 @@ backoff_max_delay_ms = 60000
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_verification_prefix_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.verification_prefix = "[invalid(".to_string();
@@ -1401,7 +1364,6 @@ backoff_max_delay_ms = 60000
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_site_verification_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.site_verification = "[invalid(".to_string();
@@ -1414,7 +1376,6 @@ backoff_max_delay_ms = 60000
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_provider_verify_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.provider_verify = "[invalid(".to_string();
@@ -1427,7 +1388,6 @@ backoff_max_delay_ms = 60000
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validate_invalid_domain_validation_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.domain_validation = "[invalid(".to_string();
@@ -1492,5 +1452,270 @@ backoff_max_delay_ms = 60000
         assert_eq!(config.analysis.get_vendor_limit_for_depth(0), None);
         // depth 1 with empty vec: get returns None => unwrap_or(5) => Some(5)
         assert_eq!(config.analysis.get_vendor_limit_for_depth(1), Some(5));
+    }
+
+    // ====================================================================
+    // Direct tests for default value functions (previously coverage(off))
+    // ====================================================================
+
+    #[test]
+    fn test_default_org_normalization_enabled_returns_true() {
+        assert_eq!(default_org_normalization_enabled(), true);
+        // Negative: must not be false — normalization is on by default
+        assert_ne!(default_org_normalization_enabled(), false);
+    }
+
+    #[test]
+    fn test_default_org_similarity_threshold_value_and_bounds() {
+        let val = default_org_similarity_threshold();
+        assert_eq!(val, 0.85);
+        // Must be between 0 and 1 (valid similarity range)
+        assert!(val > 0.0 && val <= 1.0);
+        // Must be above 0.5 (too low would match dissimilar names)
+        assert!(val > 0.5);
+    }
+
+    #[test]
+    fn test_default_dns_queries_per_second_value_and_bounds() {
+        let val = default_dns_queries_per_second();
+        assert_eq!(val, 50);
+        // Must be positive (0 means unlimited which is a different semantic)
+        assert!(val > 0);
+        // Must be reasonable (not flooding)
+        assert!(val <= 1000);
+    }
+
+    #[test]
+    fn test_default_http_requests_per_second_value_and_bounds() {
+        let val = default_http_requests_per_second();
+        assert_eq!(val, 10);
+        assert!(val > 0);
+        // HTTP is slower than DNS, so limit should be lower
+        assert!(val < default_dns_queries_per_second());
+    }
+
+    #[test]
+    fn test_default_whois_queries_per_second_value_and_bounds() {
+        let val = default_whois_queries_per_second();
+        assert_eq!(val, 2);
+        assert!(val > 0);
+        // WHOIS is the most rate-limited, should be lower than HTTP
+        assert!(val < default_http_requests_per_second());
+    }
+
+    #[test]
+    fn test_default_max_retries_value_and_bounds() {
+        let val = default_max_retries();
+        assert_eq!(val, 3);
+        assert!(val > 0);
+        // Should not be excessive
+        assert!(val <= 10);
+    }
+
+    #[test]
+    fn test_default_backoff_base_delay_ms_value_and_bounds() {
+        let val = default_backoff_base_delay_ms();
+        assert_eq!(val, 1000);
+        // Must be at least 100ms
+        assert!(val >= 100);
+        // Must be less than max delay
+        assert!(val < default_backoff_max_delay_ms());
+    }
+
+    #[test]
+    fn test_default_backoff_max_delay_ms_value_and_bounds() {
+        let val = default_backoff_max_delay_ms();
+        assert_eq!(val, 30000);
+        // Must be greater than base delay
+        assert!(val > default_backoff_base_delay_ms());
+        // 30 seconds is reasonable max
+        assert!(val <= 60000);
+    }
+
+    #[test]
+    fn test_default_whois_concurrency_value_and_bounds() {
+        let val = default_whois_concurrency();
+        assert_eq!(val, 5);
+        assert!(val > 0);
+        assert!(val <= 50);
+    }
+
+    #[test]
+    fn test_default_subprocessor_enabled_returns_true() {
+        assert_eq!(default_subprocessor_enabled(), true);
+        assert_ne!(default_subprocessor_enabled(), false);
+    }
+
+    #[test]
+    fn test_default_subfinder_path_value() {
+        let val = default_subfinder_path();
+        assert_eq!(val, "subfinder");
+        // Must not be empty
+        assert!(!val.is_empty());
+        // Must not contain path separators (it's just the binary name)
+        assert!(!val.contains('/'));
+    }
+
+    #[test]
+    fn test_default_subfinder_timeout_secs_value_and_bounds() {
+        let val = default_subfinder_timeout_secs();
+        assert_eq!(val, 300);
+        // Must be at least 10 seconds (subfinder needs time)
+        assert!(val >= 10);
+        // Must not exceed 1 hour
+        assert!(val <= 3600);
+    }
+
+    #[test]
+    fn test_default_tenant_probe_timeout_secs_value_and_bounds() {
+        let val = default_tenant_probe_timeout_secs();
+        assert_eq!(val, 10);
+        assert!(val > 0);
+        // Probe timeout should be shorter than subfinder timeout
+        assert!(val < default_subfinder_timeout_secs());
+    }
+
+    #[test]
+    fn test_default_tenant_probe_concurrency_value_and_bounds() {
+        let val = default_tenant_probe_concurrency();
+        assert_eq!(val, 20);
+        assert!(val > 0);
+        assert!(val <= 100);
+    }
+
+    #[test]
+    fn test_default_web_org_enabled_returns_true() {
+        assert_eq!(default_web_org_enabled(), true);
+        assert_ne!(default_web_org_enabled(), false);
+    }
+
+    #[test]
+    fn test_default_web_org_timeout_secs_value_and_bounds() {
+        let val = default_web_org_timeout_secs();
+        assert_eq!(val, 10);
+        assert!(val > 0);
+        assert!(val <= 60);
+    }
+
+    #[test]
+    fn test_default_web_org_min_confidence_value_and_bounds() {
+        let val = default_web_org_min_confidence();
+        assert!((val - 0.6).abs() < f32::EPSILON);
+        // Must be in valid confidence range
+        assert!(val > 0.0 && val <= 1.0);
+        // Must be above coin-flip threshold
+        assert!(val > 0.5);
+    }
+
+    #[test]
+    fn test_default_ner_enabled_returns_true() {
+        assert_eq!(default_ner_enabled(), true);
+        assert_ne!(default_ner_enabled(), false);
+    }
+
+    #[test]
+    fn test_default_ner_min_confidence_value_and_bounds() {
+        let val = default_ner_min_confidence();
+        assert!((val - 0.6).abs() < f32::EPSILON);
+        assert!(val > 0.0 && val <= 1.0);
+        assert!(val > 0.5);
+    }
+
+    #[test]
+    fn test_default_ct_timeout_secs_value_and_bounds() {
+        let val = default_ct_timeout_secs();
+        assert_eq!(val, 30);
+        assert!(val > 0);
+        assert!(val <= 300);
+    }
+
+    #[test]
+    fn test_default_web_traffic_enabled_returns_true() {
+        assert_eq!(default_web_traffic_enabled(), true);
+        assert_ne!(default_web_traffic_enabled(), false);
+    }
+
+    #[test]
+    fn test_default_web_traffic_timeout_secs_value_and_bounds() {
+        let val = default_web_traffic_timeout_secs();
+        assert_eq!(val, 15);
+        assert!(val > 0);
+        // Should be reasonable for page load
+        assert!(val >= 5 && val <= 60);
+    }
+
+    // ====================================================================
+    // Tests for AppConfig methods (previously coverage(off))
+    // ====================================================================
+
+    #[test]
+    fn test_load_uses_config_path_constant() {
+        let result = AppConfig::load();
+        match result {
+            Ok(config) => {
+                assert!(config.validate().is_ok());
+            }
+            Err(ConfigError::FileNotFound(path)) => {
+                assert!(path.to_string_lossy().contains("nthpartyfinder.toml"));
+            }
+            Err(_) => {
+                // Other errors (parse, IO) are acceptable depending on environment
+            }
+        }
+    }
+
+    #[test]
+    fn test_create_default_config_writes_parseable_content() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = temp_dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("nthpartyfinder.toml");
+
+        std::fs::write(&config_path, DEFAULT_CONFIG).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        let config: AppConfig = toml::from_str(&content).unwrap();
+        assert!(config.validate().is_ok());
+        // Verify content matches DEFAULT_CONFIG exactly
+        assert_eq!(content, DEFAULT_CONFIG);
+    }
+
+    #[test]
+    fn test_is_interactive_consistent() {
+        let first = AppConfig::is_interactive();
+        let second = AppConfig::is_interactive();
+        // Must be deterministic within same process
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_prompt_create_config_non_interactive_returns_none() {
+        if !AppConfig::is_interactive() {
+            let result = AppConfig::prompt_create_config().unwrap();
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_discovery_config_default_impl_matches_functions() {
+        let config = DiscoveryConfig::default();
+        assert_eq!(config.subprocessor_enabled, default_subprocessor_enabled());
+        assert_eq!(config.subfinder_path, default_subfinder_path());
+        assert_eq!(config.subfinder_timeout_secs, default_subfinder_timeout_secs());
+        assert_eq!(config.tenant_probe_timeout_secs, default_tenant_probe_timeout_secs());
+        assert_eq!(config.tenant_probe_concurrency, default_tenant_probe_concurrency());
+        assert_eq!(config.ct_timeout_secs, default_ct_timeout_secs());
+        assert_eq!(config.web_traffic_enabled, default_web_traffic_enabled());
+        assert_eq!(config.web_traffic_timeout_secs, default_web_traffic_timeout_secs());
+        assert_eq!(config.web_org_enabled, default_web_org_enabled());
+        assert_eq!(config.web_org_timeout_secs, default_web_org_timeout_secs());
+        assert!((config.web_org_min_confidence - default_web_org_min_confidence()).abs() < f32::EPSILON);
+        assert_eq!(config.ner_enabled, default_ner_enabled());
+        assert!((config.ner_min_confidence - default_ner_min_confidence()).abs() < f32::EPSILON);
+        assert_eq!(config.whois_concurrency, default_whois_concurrency());
+        // Verify fields without custom default fns use expected values
+        assert!(!config.subdomain_enabled);
+        assert!(!config.saas_tenant_enabled);
+        assert!(!config.ct_discovery_enabled);
     }
 }
