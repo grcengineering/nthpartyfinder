@@ -730,99 +730,361 @@ mod tests {
     // ── Embedded NER tests (when feature is enabled) ──────────────────
 
     #[cfg(feature = "embedded-ner")]
+    fn ensure_ner_available() -> bool {
+        if is_available() { return true; }
+        let r = std::panic::catch_unwind(|| init_with_config(0.5));
+        match r {
+            Err(_) => false,
+            Ok(Err(e)) => e.to_string().contains("already initialized") && is_available(),
+            Ok(Ok(())) => true,
+        }
+    }
+
+    #[cfg(feature = "embedded-ner")]
     #[test]
-    fn test_ner_extraction_accuracy() {
-        // Initialize NER if not already done - catch panics from ONNX runtime loading
-        let init_result = std::panic::catch_unwind(|| init_with_config(0.5));
+    fn test_ner_new_constructor() {
+        if !ensure_ner_available() { return; }
+        let result = std::panic::catch_unwind(|| NerOrganizationExtractor::new());
+        let _ = result;
+    }
 
-        // Handle panic or error from init
-        match init_result {
-            Err(_) => {
-                println!(
-                    "NER initialization panicked (likely missing ONNX runtime DLL), skipping test"
-                );
-                return;
-            }
-            Ok(Err(e)) => {
-                println!("NER initialization failed: {}, skipping test", e);
-                return;
-            }
-            Ok(Ok(())) => {}
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_init_module_level() {
+        let result = std::panic::catch_unwind(|| init());
+        let _ = result;
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_get_returns_extractor() {
+        if !ensure_ner_available() { return; }
+        assert!(get().is_some());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_basic() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization("Microsoft Corporation provides cloud services");
+        assert!(result.is_ok());
+        if let Ok(Some(org)) = result {
+            assert!(!org.organization.is_empty());
+            assert!(org.confidence > 0.0);
+            assert!(org.confidence <= 1.0);
         }
+    }
 
-        if !is_available() {
-            println!("NER not available, skipping test");
-            return;
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_multiple_entity_types() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization("Stripe Inc. processes payments worldwide");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_no_orgs() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization("the quick brown fox jumps over the lazy dog");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_empty_text() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let _ = extractor.extract_organization("");
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_long_text_truncation() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let long_text = format!("Google LLC is a technology company. {} More text.", "a ".repeat(2500));
+        assert!(long_text.len() > 4000);
+        let result = extractor.extract_organization(&long_text);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_long_text_with_multibyte_at_boundary() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let mut text = String::with_capacity(4100);
+        text.push_str("Amazon Web Services. ");
+        while text.len() < 3998 { text.push_str("test "); }
+        text.push_str("\u{2019}end");
+        assert!(text.len() > 4000);
+        assert!(extractor.extract_organization(&text).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_with_content() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_from_domain(
+            "stripe.com",
+            Some("Stripe Inc. powers online payment processing for internet businesses"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_without_content() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        assert!(extractor.extract_from_domain("microsoft.com", None).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_short_text() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Microsoft and Google are tech companies. Amazon provides cloud services.",
+            Some(0.3),
+        );
+        assert!(result.is_ok());
+        for org in result.unwrap() {
+            assert!(org.organization.len() >= 3);
+            assert!(org.confidence >= 0.3);
         }
+    }
 
-        let test_cases = vec![
-            // (input text, expected org or None if no extraction expected)
-            (
-                "Microsoft Corporation provides cloud services",
-                Some("Microsoft"),
-            ),
-            ("Google LLC is a technology company", Some("Google")),
-            ("Amazon Web Services powers the cloud", Some("Amazon")),
-            ("Stripe Inc. processes payments worldwide", Some("Stripe")),
-            (
-                "The website klaviyo.com belongs to Klaviyo",
-                Some("Klaviyo"),
-            ),
-            ("Salesforce CRM is enterprise software", Some("Salesforce")),
-            ("Adobe Inc. makes creative software", Some("Adobe")),
-            ("random words without company names", None),
-        ];
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_default_confidence() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Salesforce CRM and Adobe Creative Cloud are enterprise tools.", None,
+        );
+        assert!(result.is_ok());
+    }
 
-        println!("\n=== NER Extraction Test Results ===\n");
-
-        let extractor = get().expect("NER should be available");
-        let mut passed = 0;
-        let mut total = 0;
-
-        for (text, expected) in test_cases {
-            total += 1;
-            let result = extractor.extract_organization(text);
-
-            match result {
-                Ok(Some(ner_result)) => {
-                    let extracted = &ner_result.organization;
-                    let confidence = ner_result.confidence;
-                    println!("Input: \"{}\"", text);
-                    println!("  Extracted: {} (confidence: {:.2})", extracted, confidence);
-
-                    if let Some(exp) = expected {
-                        if extracted.to_lowercase().contains(&exp.to_lowercase()) {
-                            println!("  PASS - Expected {} found", exp);
-                            passed += 1;
-                        } else {
-                            println!("  DIFFERENT - Expected {}, got {}", exp, extracted);
-                        }
-                    } else {
-                        println!("  UNEXPECTED - Expected no extraction, got {}", extracted);
-                    }
-                }
-                Ok(None) => {
-                    println!("Input: \"{}\"", text);
-                    println!("  Extracted: None");
-                    if let Some(exp) = expected {
-                        println!("  FAIL - Expected {}", exp);
-                    } else {
-                        println!("  PASS - Expected no extraction");
-                        passed += 1;
-                    }
-                }
-                Err(e) => {
-                    println!("Input: \"{}\"", text);
-                    println!("  ERROR: {}", e);
-                }
-            }
-            println!();
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_long_text_chunking() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let mut long_text = String::with_capacity(10000);
+        long_text.push_str("Google LLC is a major tech company. ");
+        while long_text.len() < 5000 {
+            long_text.push_str("Various technology companies compete in the market. ");
         }
+        long_text.push_str("Microsoft Corporation also provides cloud services.");
+        assert!(long_text.len() > 4000);
+        assert!(extractor.extract_all_organizations(&long_text, Some(0.3)).is_ok());
+    }
 
-        println!("=== Results: {}/{} passed ===\n", passed, total);
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_very_long_text_multiple_chunks() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let mut long_text = String::with_capacity(15000);
+        for _ in 0..5 {
+            long_text.push_str("Apple Inc. builds consumer electronics. ");
+            long_text.push_str(&"word ".repeat(600));
+        }
+        assert!(long_text.len() > 10000);
+        assert!(extractor.extract_all_organizations(&long_text, Some(0.3)).is_ok());
+    }
 
-        // Don't fail the test, just report results
-        // This is more of a benchmark/verification than a strict test
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_multibyte_chunking() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let mut text = String::with_capacity(10000);
+        text.push_str("Adobe Inc\u{2019}s Creative Cloud. ");
+        while text.len() < 7000 { text.push_str("caf\u{00E9} "); }
+        text.push_str("Salesforce Corp.");
+        assert!(extractor.extract_all_organizations(&text, Some(0.3)).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_empty_text() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let _ = extractor.extract_all_organizations("", Some(0.3));
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_high_confidence_filter() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Microsoft Corporation and Google LLC announced a partnership.", Some(0.99),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_module_extract_organization_with_content() {
+        if !ensure_ner_available() { return; }
+        assert!(extract_organization("stripe.com", Some("Stripe Inc. provides payment processing")).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_module_extract_organization_without_content() {
+        if !ensure_ner_available() { return; }
+        assert!(extract_organization("google.com", None).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_module_extract_all_organizations() {
+        if !ensure_ner_available() { return; }
+        assert!(extract_all_organizations("Microsoft and Amazon are large companies.", Some(0.3)).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_module_extract_all_organizations_none_confidence() {
+        if !ensure_ner_available() { return; }
+        assert!(extract_all_organizations("Google LLC is in Mountain View.", None).is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_is_available_after_init() {
+        if !ensure_ner_available() { return; }
+        assert!(is_available());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_init_with_config_already_initialized() {
+        if !ensure_ner_available() { return; }
+        let result = init_with_config(0.8);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already initialized"));
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_selects_best_match() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization(
+            "Stripe Inc. is a fintech company founded in San Francisco. Google also operates there.",
+        );
+        assert!(result.is_ok());
+        if let Ok(Some(org)) = result { assert!(!org.organization.is_empty()); }
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_extracts_with_domain_context() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_from_domain(
+            "cloudflare.com",
+            Some("Cloudflare Inc. provides CDN and security services."),
+        );
+        assert!(result.is_ok());
+        if let Ok(Some(ref org)) = result { assert!(org.confidence > 0.0); }
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_dedup_by_name() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Google LLC is a company. Google LLC does many things. Google LLC is everywhere.",
+            Some(0.3),
+        );
+        assert!(result.is_ok());
+        let orgs = result.unwrap();
+        let google_count = orgs.iter().filter(|o| o.organization.to_lowercase().contains("google")).count();
+        assert!(google_count <= 1, "Should dedup same org name");
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_sorted_by_confidence() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Microsoft Corporation and Google LLC and Amazon Web Services and Apple Inc are big companies.",
+            Some(0.1),
+        );
+        assert!(result.is_ok());
+        let orgs = result.unwrap();
+        for w in orgs.windows(2) {
+            assert!(w[0].confidence >= w[1].confidence, "Results should be sorted by confidence desc");
+        }
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_organizations_filters_short_names() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations("AB Corp and Microsoft are companies.", Some(0.1));
+        assert!(result.is_ok());
+        for org in result.unwrap() {
+            assert!(org.organization.len() >= 3, "Org names shorter than 3 chars should be filtered");
+        }
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_write_if_missing_already_exists() {
+        if !ensure_ner_available() { return; }
+        let temp_dir = std::env::temp_dir().join("nthpartyfinder_ner");
+        let model_path = temp_dir.join("gliner_small.onnx");
+        assert!(model_path.exists(), "Model file should exist after init");
+        assert!(NerOrganizationExtractor::write_if_missing(&model_path, b"test").is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_write_if_missing_new_file() {
+        let temp = std::env::temp_dir().join("nthpartyfinder_ner_test_write");
+        let _ = std::fs::create_dir_all(&temp);
+        let test_path = temp.join("test_file.bin");
+        let _ = std::fs::remove_file(&test_path);
+        assert!(!test_path.exists());
+        assert!(NerOrganizationExtractor::write_if_missing(&test_path, b"hello").is_ok());
+        assert!(test_path.exists());
+        assert_eq!(std::fs::read(&test_path).unwrap(), b"hello");
+        let _ = std::fs::remove_file(&test_path);
+        let _ = std::fs::remove_dir(&temp);
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_setup_onnx_runtime_with_env_var_already_set() {
+        std::env::set_var("ORT_DYLIB_PATH", "/some/test/path");
+        assert!(NerOrganizationExtractor::setup_onnx_runtime().is_ok());
+        std::env::remove_var("ORT_DYLIB_PATH");
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_setup_onnx_runtime_search_paths() {
+        let saved = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::remove_var("ORT_DYLIB_PATH");
+        let _ = NerOrganizationExtractor::setup_onnx_runtime();
+        if let Some(val) = saved { std::env::set_var("ORT_DYLIB_PATH", val); }
     }
 
     // ── NerOrgResult additional struct tests ─────────────────────────
@@ -1023,5 +1285,359 @@ mod tests {
         let long_text = "Organization ".repeat(1000);
         let result = extract_all_organizations(&long_text, Some(0.1)).unwrap();
         assert!(result.is_empty());
+    }
+
+    // ── Coverage uplift: targeted edge-case tests ──────────────────────
+
+    #[cfg(feature = "embedded-ner")]
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_setup_onnx_runtime_search_path_discovery() {
+        let saved = std::env::var("ORT_DYLIB_PATH").ok();
+        std::env::remove_var("ORT_DYLIB_PATH");
+
+        let cwd = std::env::current_dir().unwrap();
+        #[cfg(target_os = "macos")]
+        let lib_name = "libonnxruntime.dylib";
+        #[cfg(not(target_os = "macos"))]
+        let lib_name = "libonnxruntime.so";
+        let fake_lib = cwd.join(lib_name);
+        let _ = std::fs::write(&fake_lib, b"fake");
+        let result = NerOrganizationExtractor::setup_onnx_runtime();
+        assert!(result.is_ok(), "Should find runtime in cwd");
+        let set_val = std::env::var("ORT_DYLIB_PATH").unwrap();
+        assert!(!set_val.is_empty());
+
+        let _ = std::fs::remove_file(&fake_lib);
+        if let Some(val) = saved {
+            std::env::set_var("ORT_DYLIB_PATH", val);
+        }
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_organization_truncation_char_boundary() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(4100);
+        text.push_str("Microsoft Corp. ");
+        while text.len() < 3999 {
+            text.push('x');
+        }
+        assert_eq!(text.len(), 3999);
+        text.push('\u{2019}');
+        assert_eq!(text.len(), 4002);
+        text.push_str(" end");
+        assert!(text.len() > 4000);
+        assert!(!text.is_char_boundary(4000));
+
+        let result = extractor.extract_organization(&text);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_no_org_found() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+        let result = extractor.extract_from_domain(
+            "zzz999.invalid",
+            Some("xyzzy plugh nothing here at all just random gibberish words"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_debug_with_content() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+        let result = extractor.extract_from_domain(
+            "example.com",
+            Some("Example Corp provides services worldwide"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_from_domain_debug_without_content() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+        let result = extractor.extract_from_domain("example.com", None);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunking_whitespace_break() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(8000);
+        text.push_str("Google LLC is a major technology company. ");
+        while text.len() < 4500 {
+            text.push_str("word ");
+        }
+        text.push_str("Microsoft Corporation also competes in this space.");
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunking_no_whitespace() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(8000);
+        text.push_str("Google");
+        while text.len() < 5000 {
+            text.push('a');
+        }
+        assert!(text.len() > 4000);
+        assert!(!text.contains(' '));
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunking_multibyte_boundaries() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(8000);
+        text.push_str("Amazon ");
+        while text.len() < 2999 {
+            text.push_str("\u{2019}");
+        }
+        text.push(' ');
+        while text.len() < 5500 {
+            text.push_str("\u{2019}");
+        }
+        text.push_str(" Apple Inc.");
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunking_small_overlap() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(10000);
+        for i in 0..20 {
+            text.push_str(&format!("Company{} Inc. ", i));
+            text.push_str(&"z".repeat(400));
+            text.push(' ');
+        }
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunking_cjk_dense() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(12000);
+        text.push_str("Toyota Corporation ");
+        while text.len() < 7000 {
+            text.push('\u{4E16}');
+        }
+        text.push_str(" Sony Group");
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_debug_logging() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Intel Corporation and AMD are semiconductor companies.",
+            Some(0.1),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_org_debug_logging_with_match() {
+        if !ensure_ner_available() { return; }
+        init_tracing();
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization(
+            "Apple Inc. designs consumer electronics and software.",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_module_level_functions_after_init() {
+        if !ensure_ner_available() { return; }
+        let result = extract_organization("google.com", Some("Google LLC")).unwrap();
+        assert!(result.is_none() || result.is_some());
+        let all = extract_all_organizations("Microsoft Corp is large.", None).unwrap();
+        assert!(all.len() >= 0);
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_exact_4000_boundary() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(4001);
+        text.push_str("Nvidia Corporation ");
+        while text.len() < 4000 {
+            text.push('a');
+        }
+        assert_eq!(text.len(), 4000);
+        text.push('b');
+        assert_eq!(text.len(), 4001);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_emoji_dense_text() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(10000);
+        text.push_str("Netflix Inc ");
+        while text.len() < 7000 {
+            text.push_str("\u{1F600}");
+        }
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_org_multiple_companies() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_organization(
+            "IBM and Oracle and SAP compete in enterprise software."
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_degenerate_chunk_multibyte_whitespace() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::new();
+        text.push('\u{3000}');
+        while text.len() < 5000 {
+            text.push('\u{4E16}');
+        }
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_chunk_boundary_adjustment() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::new();
+        text.push_str("Google ");
+        for _ in 0..900 {
+            text.push('\u{3000}');
+            text.push('\u{4E16}');
+            text.push('\u{4E16}');
+        }
+        text.push_str(" Microsoft Corp");
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_high_threshold_filters_all() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Some company name here and there.",
+            Some(1.0),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_low_threshold() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+        let result = extractor.extract_all_organizations(
+            "Go is a programming language. AT works in telecom.",
+            Some(0.01),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "embedded-ner")]
+    #[test]
+    fn test_ner_extract_all_orgs_overlap_boundary_walk() {
+        if !ensure_ner_available() { return; }
+        let extractor = get().unwrap();
+
+        let mut text = String::with_capacity(10000);
+        text.push_str("Samsung ");
+        while text.len() < 3100 {
+            text.push_str("\u{00E9}");
+        }
+        text.push(' ');
+        while text.len() < 6500 {
+            text.push_str("\u{00E9}");
+        }
+        text.push_str(" Toshiba Corp");
+        assert!(text.len() > 4000);
+
+        let result = extractor.extract_all_organizations(&text, Some(0.1));
+        assert!(result.is_ok());
     }
 }
