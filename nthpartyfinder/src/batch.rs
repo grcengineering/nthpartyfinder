@@ -317,7 +317,6 @@ pub fn domain_output_filename(domain: &str, format: &str) -> String {
 }
 
 /// Export batch summary to JSON file
-#[cfg_attr(coverage_nightly, coverage(off))] // fs::write error path is I/O-dependent
 pub fn export_batch_summary(summary: &BatchSummary, output_path: &Path) -> Result<()> {
     let json =
         serde_json::to_string_pretty(summary).context("Failed to serialize batch summary")?;

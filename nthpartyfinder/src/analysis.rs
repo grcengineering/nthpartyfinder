@@ -200,7 +200,6 @@ pub fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
     common_inferred_patterns.contains(&org_lower)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn subprocessor_analysis_with_logging(
     domain: &str,
     verification_logger: &verification_logger::VerificationFailureLogger,
@@ -250,7 +249,6 @@ pub async fn subprocessor_analysis_with_logging(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn discover_nth_parties(
     domain: &str,
     max_depth: Option<u32>,
@@ -1025,7 +1023,6 @@ pub async fn discover_nth_parties(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn process_vendor_domain(
     vendor_domain: String,
     source_type: RecordType,
@@ -1223,7 +1220,6 @@ pub async fn process_vendor_domain(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn discover_nth_parties_minimal(
     domain: &str,
     max_depth: Option<u32>,

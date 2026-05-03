@@ -14,7 +14,6 @@ pub struct UnverifiedOrgMapping {
     pub inferred_org: String,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn confirm_pending_mappings(
     pending: &[subprocessor::PendingOrgMapping],
     analyzer: &subprocessor::SubprocessorAnalyzer,
@@ -172,7 +171,6 @@ pub async fn confirm_pending_mappings(
     Ok(())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn confirm_unverified_organizations(
     unverified: &[UnverifiedOrgMapping],
     discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,

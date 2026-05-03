@@ -38,7 +38,6 @@ impl VerificationFailureLogger {
     }
 
     /// Initialize the log file with header
-    #[cfg_attr(coverage_nightly, coverage(off))] // I/O error paths from writeln!/open are not testable
     pub fn initialize(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             return Ok(());
@@ -62,7 +61,6 @@ impl VerificationFailureLogger {
     }
 
     /// Log a failed verification record inference
-    #[cfg_attr(coverage_nightly, coverage(off))] // I/O write errors and try_lock contention paths are not testable
     pub fn log_failure(
         &self,
         source_domain: &str,
@@ -102,7 +100,6 @@ impl VerificationFailureLogger {
     }
 
     /// Close the log file
-    #[cfg_attr(coverage_nightly, coverage(off))] // lock poisoning path is not testable
     pub fn close(&self) {
         if !self.enabled {
             return;

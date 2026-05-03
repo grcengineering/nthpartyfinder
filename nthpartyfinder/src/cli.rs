@@ -402,7 +402,6 @@ impl Args {
             .unwrap_or(4)
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))] // dirs::desktop_dir() fallback is platform-dependent
     pub fn get_default_output_dir() -> Result<String, String> {
         if let Some(desktop_dir) = dirs::desktop_dir() {
             Ok(desktop_dir.to_string_lossy().to_string())
@@ -591,7 +590,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_list_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "list"]);
         match cli.command {
@@ -603,7 +601,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_show_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "show", "example.com"]);
         match cli.command {
@@ -617,7 +614,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_clear_domain() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "example.com"]);
         match cli.command {
@@ -632,7 +628,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_clear_all() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "--all"]);
         match cli.command {
@@ -647,7 +642,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn cli_parse_cache_validate() {
         let cli = Cli::parse_from([
             "nthpartyfinder",

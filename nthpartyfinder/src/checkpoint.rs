@@ -114,7 +114,6 @@ impl Checkpoint {
 
     /// Load a checkpoint from the given output directory.
     /// Returns an error if the checkpoint version is incompatible (M012 fix).
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load(output_dir: &Path) -> Result<Self> {
         let path = Self::get_checkpoint_path(output_dir);
         let content = std::fs::read_to_string(&path)?;

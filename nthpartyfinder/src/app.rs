@@ -50,7 +50,6 @@ pub trait InputSource: Send + Sync {
 
 pub struct StdioInput;
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl InputSource for StdioInput {
     fn is_terminal(&self) -> bool {
         std::io::stdin().is_terminal()
@@ -221,7 +220,6 @@ pub fn resolve_checkpoint_resume(
 
 /// Collect unverified organization mappings from discovered vendors.
 /// Returns domains whose org name appears to be inferred from the domain itself.
-#[cfg_attr(coverage_nightly, coverage(off))] // known_vendors::lookup depends on process-global OnceLock
 pub fn collect_unverified_orgs(
     vendors: &HashMap<String, String>,
 ) -> Vec<interactive::UnverifiedOrgMapping> {
@@ -240,7 +238,6 @@ pub fn collect_unverified_orgs(
     unverified
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run() -> Result<()> {
     eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("  Parsing arguments...");
@@ -287,7 +284,6 @@ pub async fn run() -> Result<()> {
     }
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
@@ -546,7 +542,6 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     }
 
     ctrlc::set_handler(
-        #[cfg_attr(coverage_nightly, coverage(off))]
         move || {
         analysis::set_interrupted();
         eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
@@ -1578,7 +1573,6 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_batch_analysis(
     args: &Args,
     app_config: &AppConfig,
@@ -1836,7 +1830,6 @@ pub async fn run_batch_analysis(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn analyze_single_domain_for_batch(
     entry: &batch::DomainEntry,
     output_dir: &Path,

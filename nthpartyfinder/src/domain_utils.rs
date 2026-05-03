@@ -1,5 +1,4 @@
 /// Extract the base domain from SPF subdomains and other technical subdomains
-#[cfg_attr(coverage_nightly, coverage(off))] // extract_organizational_domain always returns Some; single-label fallbacks are structurally unreachable
 pub fn extract_base_domain(domain: &str) -> String {
     // Remove common SPF and technical prefixes
     let spf_prefixes = vec![
@@ -127,7 +126,6 @@ pub fn normalize_for_dns_lookup(domain: &str) -> String {
 }
 
 /// Check if a domain is likely an organizational domain vs technical subdomain
-#[cfg_attr(coverage_nightly, coverage(off))] // split('.') always yields >= 1 part; else branch is structurally unreachable
 pub fn is_organizational_domain(domain: &str) -> bool {
     let technical_subdomains = vec![
         "_spf",

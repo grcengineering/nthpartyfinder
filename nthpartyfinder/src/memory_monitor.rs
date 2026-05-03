@@ -49,7 +49,6 @@ impl MemoryMonitor {
 
     /// Check current memory pressure and update effective concurrency.
     /// Returns the current pressure level and effective concurrency.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn check(&mut self) -> (PressureLevel, usize) {
         self.system.refresh_memory();
 
@@ -92,7 +91,6 @@ impl MemoryMonitor {
     }
 
     /// Get current memory usage as a percentage.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn memory_usage_pct(&mut self) -> f64 {
         self.system.refresh_memory();
         let total = self.system.total_memory();
@@ -133,7 +131,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // match arms depend on system memory state
     fn test_check_returns_valid_level() {
         let mut monitor = MemoryMonitor::new(10);
         let (level, concurrency) = monitor.check();
@@ -183,7 +180,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // match arms depend on system memory state
     fn test_base_concurrency_one() {
         let mut monitor = MemoryMonitor::new(1);
         assert_eq!(monitor.base_concurrency(), 1);

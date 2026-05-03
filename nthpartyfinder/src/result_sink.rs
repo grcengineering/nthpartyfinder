@@ -54,7 +54,6 @@ impl ResultSink {
     }
 
     /// Create a ResultSink at a specific path (for testing or explicit path control).
-    #[cfg_attr(coverage_nightly, coverage(off))] // parent() None path is structurally unreachable for valid file paths
     pub fn with_path(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
@@ -188,7 +187,6 @@ impl ResultSink {
     /// Clean up orphaned result sink files from previous runs.
     /// Removes any nthpartyfinder-results-*.jsonl.zst files that don't belong
     /// to a currently running process.
-    #[cfg_attr(coverage_nightly, coverage(off))] // remove_file error path and is_process_running true path are platform-dependent (macOS has no /proc)
     pub fn cleanup_orphans(dir: &Path) -> Result<usize> {
         let mut cleaned = 0;
         let pattern = "nthpartyfinder-results-";
@@ -236,14 +234,12 @@ impl ResultSink {
 }
 
 /// Check if a process with the given PID is currently running.
-#[cfg_attr(coverage_nightly, coverage(off))] // Platform-dependent: uses /proc which doesn't exist on macOS
 fn is_process_running(pid: u32) -> bool {
     // On Unix-like systems (including WSL), check /proc/{pid}
     Path::new(&format!("/proc/{}", pid)).exists()
 }
 
 /// Check available disk space at the given path, returning bytes free.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn check_disk_space(_path: &Path) -> Result<u64> {
     #[cfg(unix)]
     {
