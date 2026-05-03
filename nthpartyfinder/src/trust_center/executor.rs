@@ -19,7 +19,6 @@ use crate::vendor::RecordType;
 ///
 /// This is the single generic entry point. It dispatches on `strategy.strategy_type`
 /// and uses shared JSON navigation/extraction utilities for all strategy types.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn execute_strategy(
     strategy: &TrustCenterStrategy,
     client: &reqwest::Client,
@@ -88,7 +87,6 @@ pub async fn execute_strategy(
 // Strategy type executors
 // ============================================================================
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn execute_graphql(
     client: &reqwest::Client,
     endpoint_url: &str,
@@ -159,7 +157,6 @@ async fn execute_graphql(
     Ok(json)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn execute_rest(
     client: &reqwest::Client,
     endpoint_url: &str,
@@ -291,7 +288,6 @@ fn extract_hydration_data(
 // ============================================================================
 
 /// Extract subprocessor records from a JSON value using the response mapping.
-#[cfg_attr(coverage_nightly, coverage(off))] // debug! macro format closures are not exercised without tracing subscriber
 fn extract_subprocessors_from_json(
     json: &serde_json::Value,
     mapping: &ResponseMapping,
@@ -461,7 +457,6 @@ fn resolve_canonical_asset(
     (name, domain, evidence)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_domain_from_url_text(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {

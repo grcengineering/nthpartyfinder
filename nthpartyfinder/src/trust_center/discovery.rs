@@ -28,7 +28,6 @@ struct InterceptedResponse {
 }
 
 /// Check if HTML content looks like a JavaScript SPA that needs special handling.
-#[cfg_attr(coverage_nightly, coverage(off))] // nested HTML parsing branches
 pub fn is_likely_spa(html: &str) -> bool {
     // Strip HTML tags to get approximate text content length
     let text_len = html
@@ -110,7 +109,6 @@ pub fn is_likely_spa(html: &str) -> bool {
 /// 2. HTML pattern scanning (finds embedded data)
 ///
 /// Returns the best candidate strategy, or None if no strategy was found.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn discover_strategy(
     url: &str,
     static_html: &str,
@@ -174,7 +172,6 @@ pub async fn discover_strategy(
 }
 
 /// Probe 1: Discover strategies by intercepting network traffic during headless page load.
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStrategy>> {
     let responses = Arc::new(Mutex::new(Vec::<InterceptedResponse>::new()));
     let responses_clone = responses.clone();
@@ -370,7 +367,6 @@ fn discover_via_html_patterns(html: &str) -> Result<Vec<CandidateStrategy>> {
 /// SafeBase also supports multi-product trust centers where multiple products
 /// (e.g., "Drata" and "SafeBase") share a single trust center domain.
 /// Product info is at: props.pageProps.orgInfo.sp.products (map of productId → product).
-#[cfg_attr(coverage_nightly, coverage(off))] // complex nested JSON parsing with many early-return branches
 fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     // Quick check: SafeBase pages contain __SB_CONFIG__
     if !html.contains("__SB_CONFIG__") {
@@ -742,7 +738,6 @@ fn probe_next_data(html: &str) -> Option<CandidateStrategy> {
 }
 
 /// Search for <script type="application/json"> tags containing subprocessor data.
-#[cfg_attr(coverage_nightly, coverage(off))] // nested JSON/DOM parsing branches
 fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let document = scraper::Html::parse_document(html);
     let selector = match scraper::Selector::parse(r#"script[type="application/json"]"#) {
@@ -804,7 +799,6 @@ fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for base64-encoded JSON blobs in HTML.
-#[cfg_attr(coverage_nightly, coverage(off))] // nested base64/JSON parsing branches
 fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let patterns = [
         // data attribute with base64 content
@@ -887,7 +881,6 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for JavaScript object assignments like `window.VENDOR_REPORT = {...}`.
-#[cfg_attr(coverage_nightly, coverage(off))] // nested JSON parsing branches
 fn probe_js_object_assignments(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     // Match window.VARIABLE = { ... large JSON ... }
     let pattern = r#"window\.([A-Z_][A-Z_0-9]*)\s*=\s*(\{[\s\S]{200,}?\})(?:\s*;|\s*<)"#;
@@ -1213,7 +1206,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_probe_conveyor_detects_trust_center() {
         let html = r#"<html><body>
             <script>
@@ -1812,7 +1804,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_analyze_intercepted_responses_graphql_url() {
         let body = serde_json::json!({
             "data": {
@@ -2044,7 +2035,6 @@ mod tests {
     // --- probe_base64_blobs: data-attribute pattern ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_probe_base64_blobs_data_attribute_pattern() {
         use base64::Engine;
         let json_data = serde_json::json!({"vendors":[
@@ -2157,7 +2147,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_probe_base64_blobs_multiple_matches() {
         use base64::Engine;
         let json1 = serde_json::json!({"vendors":[
@@ -2194,7 +2183,6 @@ mod tests {
     // --- probe_js_object_assignments: successful match ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_probe_js_object_assignments_with_subprocessors() {
         // Build a JSON blob with subprocessor-like data, > 200 chars, ending with };
         let json_obj = serde_json::json!({
@@ -2297,7 +2285,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_analyze_intercepted_responses_rest_with_request_body() {
         let body = serde_json::json!({
             "vendors": [
@@ -2580,7 +2567,6 @@ mod tests {
     // --- discover_via_html_patterns: all probes run in sequence ---
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_discover_via_html_patterns_conveyor_takes_priority() {
         // Conveyor HTML should be detected by Conveyor probe
         let html = r#"<html><body>
@@ -2675,5 +2661,60 @@ mod tests {
     fn test_extract_slug_from_url_empty_first_segment() {
         // URL like "https://example.com//something" — first segment is empty
         assert_eq!(extract_slug_from_url("https://example.com//something"), None);
+    }
+
+    #[test]
+    fn test_is_likely_spa_empty_html_returns_false() {
+        assert!(!is_likely_spa(""));
+    }
+
+    #[test]
+    fn test_is_likely_spa_framework_marker_react() {
+        let html = r#"<html><head></head><body><div data-reactroot>Loading...</div></body></html>"#;
+        assert!(is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_framework_marker_nuxt() {
+        let html = r#"<html><body><script>window.__nuxt__={config:{}}</script></body></html>"#;
+        assert!(is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_framework_marker_angular() {
+        let html = r#"<html><body ng-app="myApp"><div></div></body></html>"#;
+        assert!(is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_probe_safebase_no_config_exits_early() {
+        let html = r#"<html><body><h1>Regular page</h1></body></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty(), "No __SB_CONFIG__ means no candidates");
+    }
+
+    #[test]
+    fn test_probe_js_object_assignments_no_match() {
+        let html = r#"<html><body><script>var x = 42;</script></body></html>"#;
+        let mut candidates = Vec::new();
+        probe_js_object_assignments(html, &mut candidates);
+        assert!(candidates.is_empty(), "Simple JS assignment should not match");
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_no_base64_content() {
+        let html = r#"<html><body><p>Just a normal page with no base64</p></body></html>"#;
+        let mut candidates = Vec::new();
+        probe_base64_blobs(html, &mut candidates);
+        assert!(candidates.is_empty(), "No base64 content means no candidates");
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_no_json_scripts() {
+        let html = r#"<html><body><script>console.log("hello")</script></body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(candidates.is_empty(), "No application/json scripts means no candidates");
     }
 }

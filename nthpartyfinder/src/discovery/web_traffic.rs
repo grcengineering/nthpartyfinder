@@ -83,7 +83,6 @@ impl WebTrafficDiscovery {
 
     /// Analyze a domain for external vendor relationships via web traffic.
     /// Returns a list of discovered vendor domains with evidence.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn analyze_domain(&self, domain: &str) -> Vec<WebTrafficResult> {
         let url = format!("https://{}", domain);
         let target_base_domain = domain_utils::extract_base_domain(domain);
@@ -145,7 +144,6 @@ impl WebTrafficDiscovery {
     }
 
     /// Phase 2: Load page in headless browser and capture all network requests.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn analyze_network_traffic(
         &self,
         url: &str,
@@ -237,7 +235,6 @@ impl WebTrafficDiscovery {
 }
 
 /// Extract external domains from HTML content by parsing resource-loading elements.
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_external_domains_from_html(
     html: &str,
     target_base_domain: &str,
@@ -854,7 +851,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_mixed_case_urls() {
         let html = r#"<script src="HTTPS://CDN.PENDO.IO/Agent.JS"></script>"#;
         // URL::parse is case-insensitive for scheme, and domain_utils normalizes
@@ -1644,5 +1640,105 @@ mod tests {
         assert_eq!(results[0].vendor_domain, "vendor.com");
         // First match (script src) should be kept
         assert!(results[0].evidence.contains("script src"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_static_html_with_vendors() {
+        let server = wiremock::MockServer::start().await;
+        let html = r#"<html><head>
+            <script src="https://cdn.pendo.io/agent/static/abc.js"></script>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        </head><body>Hello</body></html>"#;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery.analyze_page_source(
+            &format!("http://{}", host),
+            &host,
+        ).await.unwrap();
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(domains.contains(&"pendo.io"), "Should find pendo.io, got: {:?}", domains);
+        assert!(domains.contains(&"segment.io"), "Should find segment.io, got: {:?}", domains);
+        assert_eq!(results.iter().all(|r| r.source == WebTrafficSource::PageSource), true);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_empty_page_returns_empty() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("<html><body></body></html>"))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery.analyze_page_source(
+            &format!("http://{}", host),
+            &host,
+        ).await.unwrap();
+        assert!(results.is_empty(), "Empty page should yield no vendors");
+    }
+
+    #[test]
+    fn test_extract_external_domains_filters_infrastructure_noise() {
+        let html = r#"
+            <script src="https://cdn.pendo.io/agent.js"></script>
+            <script src="https://fonts.googleapis.com/css2"></script>
+            <link href="https://www.w3.org/1999/xhtml" rel="stylesheet">
+            <img src="https://schema.org/logo.png">
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(domains.contains(&"pendo.io"), "Should keep pendo.io");
+        assert!(!domains.contains(&"googleapis.com"), "Should filter googleapis.com");
+        assert!(!domains.contains(&"w3.org"), "Should filter w3.org");
+        assert!(!domains.contains(&"schema.org"), "Should filter schema.org");
+    }
+
+    #[test]
+    fn test_extract_external_domains_social_media_script_vs_link() {
+        let html_script = r#"<script src="https://connect.facebook.net/sdk.js"></script>"#;
+        let results_script = extract_external_domains_from_html(html_script, "example.com");
+        assert_eq!(results_script.len(), 1, "Facebook SDK script should be captured");
+        assert_eq!(results_script[0].vendor_domain, "facebook.net");
+
+        let html_iframe = r#"<iframe src="https://www.youtube.com/embed/abc123"></iframe>"#;
+        let results_iframe = extract_external_domains_from_html(html_iframe, "example.com");
+        assert!(results_iframe.is_empty(), "YouTube iframe embed should be filtered");
+    }
+
+    #[test]
+    fn test_truncate_url_short_minimal() {
+        assert_eq!(truncate_url("https://x.com", 200), "https://x.com");
+    }
+
+    #[test]
+    fn test_truncate_url_long() {
+        let long = format!("https://example.com/{}", "a".repeat(300));
+        let truncated = truncate_url(&long, 100);
+        assert!(truncated.len() <= 103); // 100 chars + "..."
+        assert!(truncated.ends_with("..."));
     }
 }

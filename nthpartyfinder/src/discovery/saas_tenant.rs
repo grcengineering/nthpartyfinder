@@ -97,7 +97,6 @@ impl SaasTenantDiscovery {
 
     /// Load platforms from VendorRegistry (preferred source)
     /// Falls back to empty list if registry not initialized
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_from_vendor_registry(&mut self) {
         let tenants = vendor_registry::get_all_saas_tenants();
         if tenants.is_empty() {
@@ -145,7 +144,6 @@ impl SaasTenantDiscovery {
     }
 
     /// Load platforms from VendorRegistry first, then fallback to file if empty
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_platforms_with_fallback(&mut self, fallback_path: &Path) -> Result<()> {
         self.load_from_vendor_registry();
 
@@ -157,12 +155,10 @@ impl SaasTenantDiscovery {
         Ok(())
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn probe(&self, target_domain: &str) -> Result<Vec<TenantProbeResult>> {
         self.probe_with_logger(target_domain, None).await
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn probe_with_logger(
         &self,
         target_domain: &str,
@@ -338,7 +334,6 @@ pub fn construct_probe_url(pattern: &str, tenant: &str) -> String {
 
 /// Probe a URL with optional baseline comparison for wildcard detection.
 /// If a baseline exists and the response matches it, the probe is downgraded to NotFound.
-#[cfg_attr(coverage_nightly, coverage(off))] // network I/O with HTTP client
 async fn probe_url_with_baseline(
     client: &Client,
     url: &str,
@@ -626,7 +621,6 @@ fn compute_body_hash(body: &str) -> u64 {
 }
 
 /// Probe a platform pattern with a canary tenant name to establish baseline response
-#[cfg_attr(coverage_nightly, coverage(off))]
 async fn probe_baseline(client: &Client, pattern: &str) -> Option<BaselineResponse> {
     let canary_name = "nthparty-canary-8f3a2b";
     let url = construct_probe_url(pattern, canary_name);
@@ -661,7 +655,6 @@ async fn probe_baseline(client: &Client, pattern: &str) -> Option<BaselineRespon
 }
 
 /// Check if a probe response matches the baseline (wildcard detection)
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn matches_baseline(
     status_code: u16,
     body: &str,
@@ -2097,7 +2090,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_load_platforms_with_fallback_missing_file() {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
         let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
@@ -2781,5 +2773,171 @@ mod tests {
         assert_eq!(status, TenantStatus::NotFound);
         assert!(evidence.contains("Wildcard"));
         assert!(evidence.contains("hash match=true"));
+    }
+
+    // --- Additional tests for stripped coverage(off) functions ---
+
+    #[tokio::test]
+    async fn test_probe_url_with_baseline_wildcard_length_tolerance() {
+        let mock_server = MockServer::start().await;
+        let body = "x".repeat(1000);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(&body))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: 99999,
+            body_length: 980,
+            final_url: "https://different.com".to_string(),
+        };
+
+        let (status, evidence) = probe_url_with_baseline(
+            &client,
+            &mock_server.uri(),
+            &detection,
+            "platform.com",
+            Some(&baseline),
+        )
+        .await;
+
+        assert_eq!(status, TenantStatus::NotFound);
+        assert!(evidence.contains("Wildcard"));
+    }
+
+    #[tokio::test]
+    async fn test_probe_url_with_baseline_no_wildcard_different_content() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("Unique tenant-specific content here"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let detection = DetectionConfig {
+            success_indicators: vec![],
+            failure_indicators: vec![],
+            notes: None,
+        };
+
+        let baseline = BaselineResponse {
+            status_code: 404,
+            body_hash: 12345,
+            body_length: 50000,
+            final_url: "https://completely-different.com/404".to_string(),
+        };
+
+        let (status, _evidence) = probe_url_with_baseline(
+            &client,
+            &mock_server.uri(),
+            &detection,
+            "platform.com",
+            Some(&baseline),
+        )
+        .await;
+
+        assert_eq!(status, TenantStatus::Likely);
+    }
+
+    #[tokio::test]
+    async fn test_probe_baseline_with_404_response() {
+        let mock_server = MockServer::start().await;
+        let body = "Page not found";
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(body))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let pattern = &format!("{}/{{tenant}}", mock_server.uri().trim_end_matches('/'));
+        let baseline = probe_baseline(&client, pattern).await;
+
+        assert!(baseline.is_some());
+        let b = baseline.unwrap();
+        assert_eq!(b.status_code, 404);
+        assert_eq!(b.body_length, body.len());
+        assert_eq!(b.body_hash, compute_body_hash(body));
+    }
+
+    #[tokio::test]
+    async fn test_probe_baseline_preserves_final_url() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let pattern = &format!("{}/{{tenant}}", mock_server.uri().trim_end_matches('/'));
+        let baseline = probe_baseline(&client, pattern).await;
+
+        assert!(baseline.is_some());
+        let b = baseline.unwrap();
+        assert!(!b.final_url.is_empty());
+        assert!(b.final_url.starts_with("http"));
+    }
+
+    #[test]
+    fn test_matches_baseline_empty_body_vs_nonempty_baseline() {
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash("non-empty content"),
+            body_length: 17,
+            final_url: "https://example.com/login".to_string(),
+        };
+        assert!(!matches_baseline(200, "", "https://other.com", &baseline));
+    }
+
+    #[test]
+    fn test_matches_baseline_same_status_same_length_different_hash() {
+        let baseline = BaselineResponse {
+            status_code: 200,
+            body_hash: compute_body_hash("aaaa"),
+            body_length: 100,
+            final_url: "https://a.com".to_string(),
+        };
+        let probe_body = "b".repeat(100);
+        assert!(matches_baseline(200, &probe_body, "https://c.com", &baseline));
+    }
+
+    #[test]
+    fn test_matches_baseline_all_criteria_fail() {
+        let baseline = BaselineResponse {
+            status_code: 404,
+            body_hash: compute_body_hash("error page"),
+            body_length: 10,
+            final_url: "https://canary.example.com/404".to_string(),
+        };
+        assert!(!matches_baseline(
+            200,
+            "Welcome to your dashboard - fully authenticated tenant",
+            "https://tenant.example.com/dashboard",
+            &baseline
+        ));
+    }
+
+    #[test]
+    fn test_load_platforms_with_fallback_missing_file_error() {
+        let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
+        let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
+        if disc.platform_count() == 0 {
+            assert!(result.is_err());
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(!err_msg.is_empty());
+        }
     }
 }

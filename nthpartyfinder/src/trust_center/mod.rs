@@ -632,7 +632,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_graphql_serde_roundtrip() {
         let st = StrategyType::GraphqlApi {
             query_template: "query { vendors { name } }".to_string(),
@@ -659,7 +658,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_rest_api_serde_roundtrip() {
         let st = StrategyType::RestApi {
             method: "GET".to_string(),
@@ -675,7 +673,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_rest_api_with_body_serde_roundtrip() {
         let st = StrategyType::RestApi {
             method: "POST".to_string(),
@@ -703,7 +700,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_embedded_base64_serde_roundtrip() {
         let st = StrategyType::EmbeddedBase64Json {
             locator_pattern: r#"data-payload="([A-Za-z0-9+/=]+)""#.to_string(),
@@ -719,7 +715,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_embedded_js_object_serde_roundtrip() {
         let st = StrategyType::EmbeddedJsObject {
             locator_pattern: r#"window\.DATA\s*=\s*(\{.*\})"#.to_string(),
@@ -735,7 +730,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))] // catch-all panic arm is structurally unreachable
     fn test_strategy_type_hydration_data_serde_roundtrip() {
         let st = StrategyType::HydrationData {
             script_selector: "script#__NEXT_DATA__".to_string(),
