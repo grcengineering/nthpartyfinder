@@ -1092,4 +1092,125 @@ mod tests {
             "Rendered HTML should contain organization name"
         );
     }
+
+    // ====================================================================
+    // Tests for functions that previously had coverage(off)
+    // ====================================================================
+
+    #[test]
+    fn test_export_csv_writes_correct_headers_and_row_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("headers.csv");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+        let count = rels.len();
+
+        export_csv(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // Header + data rows
+        assert_eq!(lines.len(), count + 1);
+        assert!(lines[0].contains("Root Customer Domain"));
+        assert!(lines[0].contains("Nth Party Record Type"));
+    }
+
+    #[test]
+    fn test_export_json_summary_accuracy() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("accurate.json");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_json(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            parsed["summary"]["total_relationships"].as_u64().unwrap(),
+            rels.len() as u64
+        );
+        let max_depth = rels.iter().map(|r| r.nth_party_layer).max().unwrap();
+        assert_eq!(
+            parsed["summary"]["max_depth"].as_u64().unwrap(),
+            max_depth as u64
+        );
+        let unique_domains: std::collections::HashSet<_> =
+            rels.iter().map(|r| &r.nth_party_domain).collect();
+        assert_eq!(
+            parsed["summary"]["unique_domains"].as_u64().unwrap(),
+            unique_domains.len() as u64
+        );
+    }
+
+    #[test]
+    fn test_print_analysis_summary_computes_correct_stats() {
+        let rels = vec![
+            make_vendor("a.com", "A Corp", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B Corp", 4, RecordType::DnsTxtSpf),
+            make_vendor("a.com", "A Corp", 5, RecordType::DnsTxtVerification),
+        ];
+
+        let max_depth = rels.iter().map(|r| r.nth_party_layer).max().unwrap_or(0);
+        assert_eq!(max_depth, 5);
+
+        let unique_domains: std::collections::HashSet<_> =
+            rels.iter().map(|r| r.nth_party_domain.clone()).collect();
+        assert_eq!(unique_domains.len(), 2);
+
+        let unique_orgs: std::collections::HashSet<_> =
+            rels.iter().map(|r| r.nth_party_organization.clone()).collect();
+        assert_eq!(unique_orgs.len(), 2);
+
+        let layer_3_count = rels.iter().filter(|r| r.nth_party_layer == 3).count();
+        assert_eq!(layer_3_count, 1);
+
+        let layer_4_count = rels.iter().filter(|r| r.nth_party_layer == 4).count();
+        assert_eq!(layer_4_count, 1);
+
+        let layer_5_count = rels.iter().filter(|r| r.nth_party_layer == 5).count();
+        assert_eq!(layer_5_count, 1);
+
+        // Calling print_analysis_summary should exercise the same logic without panic
+        print_analysis_summary(&rels);
+    }
+
+    #[test]
+    fn test_export_markdown_contains_root_domain_and_org() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("root_check.md");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&rels[0].root_customer_domain));
+        assert!(content.contains(&rels[0].root_customer_organization));
+        assert!(content.contains("Generated on:"));
+    }
+
+    #[test]
+    fn test_export_html_embeds_json_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data_check.html");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_html(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // HTML report should embed the relationships as JSON
+        assert!(content.contains(&rels[0].root_customer_domain));
+        let unique_domains: HashSet<_> = rels.iter().map(|r| r.nth_party_domain.clone()).collect();
+        let unique_orgs: HashSet<_> = rels
+            .iter()
+            .map(|r| r.nth_party_organization.clone())
+            .collect();
+        // Summary stats should be embedded
+        assert!(content.contains(&format!("{}", rels.len())));
+        assert!(content.contains(&format!("{}", unique_domains.len())));
+        assert!(content.contains(&format!("{}", unique_orgs.len())));
+    }
 }

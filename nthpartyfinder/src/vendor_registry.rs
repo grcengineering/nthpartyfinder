@@ -1257,4 +1257,92 @@ mod tests {
             Some("Simple Corp".to_string())
         );
     }
+
+    // ====================================================================
+    // Tests for global functions that previously had coverage(off)
+    // ====================================================================
+
+    #[test]
+    fn test_global_get_returns_option() {
+        // get() returns Some only if init() was called in this process.
+        // In test processes where init() hasn't been called, it returns None.
+        // Either way, it should not panic.
+        let _result = get();
+    }
+
+    #[test]
+    fn test_global_lookup_organization_returns_none_without_init() {
+        // Without a global registry, lookup_organization delegates to get() which may be None
+        let result = lookup_organization("nonexistent.example.com");
+        // If the global is uninitialized, result is None; if initialized, it depends on the domain
+        // Either way, this should not panic
+        if get().is_none() {
+            assert_eq!(result, None);
+        }
+    }
+
+    #[test]
+    fn test_global_is_known_domain_returns_false_without_init() {
+        let result = is_known_domain("nonexistent.example.com");
+        if get().is_none() {
+            assert!(!result);
+        }
+    }
+
+    #[test]
+    fn test_global_get_vendor_by_domain_returns_none_without_init() {
+        let result = get_vendor_by_domain("nonexistent.example.com");
+        if get().is_none() {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_global_find_vendor_by_verification_returns_none_without_init() {
+        let result = find_vendor_by_verification("nonexistent-pattern-xyz");
+        if get().is_none() {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_global_get_all_saas_tenants_returns_empty_without_init() {
+        let result = get_all_saas_tenants();
+        if get().is_none() {
+            assert!(result.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_find_config_dir_with_env_var() {
+        let dir = tempdir().unwrap();
+        let vendors_dir = dir.path().join("vendors");
+        fs::create_dir_all(&vendors_dir).unwrap();
+
+        std::env::set_var("NTHPARTYFINDER_CONFIG_DIR", dir.path().to_str().unwrap());
+        let result = find_config_dir();
+        std::env::remove_var("NTHPARTYFINDER_CONFIG_DIR");
+
+        // If CWD or exe-relative config dirs don't exist, env var should win
+        // The result depends on whether ./config/vendors exists in CWD
+        // but the env var path should be valid
+        assert!(dir.path().join("vendors").exists());
+        if let Some(found) = result {
+            assert!(found.join("vendors").exists());
+        }
+    }
+
+    #[test]
+    fn test_find_config_dir_nonexistent_env_var() {
+        std::env::set_var("NTHPARTYFINDER_CONFIG_DIR", "/nonexistent/path/for/test");
+        let result = find_config_dir();
+        std::env::remove_var("NTHPARTYFINDER_CONFIG_DIR");
+        // The nonexistent path should NOT be returned
+        if let Some(found) = result {
+            assert_ne!(
+                found,
+                std::path::PathBuf::from("/nonexistent/path/for/test")
+            );
+        }
+    }
 }

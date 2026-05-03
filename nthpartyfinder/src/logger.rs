@@ -1549,4 +1549,179 @@ mod tests {
         // File should not be created since we couldn't lock the buffer
         assert!(!log_path.exists());
     }
+
+    // ====================================================================
+    // Tests for functions that previously had coverage(off)
+    // ====================================================================
+
+    #[test]
+    fn test_should_enable_colors_no_color_flag() {
+        assert!(!AnalysisLogger::should_enable_colors(true));
+    }
+
+    #[test]
+    fn test_should_enable_colors_no_color_env() {
+        std::env::set_var("NO_COLOR", "1");
+        let result = AnalysisLogger::should_enable_colors(false);
+        std::env::remove_var("NO_COLOR");
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_should_enable_colors_non_terminal_returns_false() {
+        std::env::remove_var("NO_COLOR");
+        let result = AnalysisLogger::should_enable_colors(false);
+        // In test environments stdout is typically not a terminal
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_configure_colored_enable() {
+        AnalysisLogger::configure_colored(true);
+        // colored crate's control::set_override(true) was called — verify via paint test
+        let painted = format!("{}", "test".red());
+        assert_ne!(painted, "test");
+    }
+
+    #[test]
+    fn test_configure_colored_disable() {
+        AnalysisLogger::configure_colored(false);
+        let painted = format!("{}", "test".red());
+        // With colors disabled, the painted string should equal the raw string
+        assert_eq!(painted, "test");
+        // Restore
+        AnalysisLogger::configure_colored(true);
+    }
+
+    #[tokio::test]
+    async fn test_start_init_progress_sets_phase() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        assert_eq!(*logger.phase.read().await, UiPhase::PreInit);
+
+        logger.start_init_progress(5).await;
+        assert_eq!(*logger.phase.read().await, UiPhase::Initializing);
+
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert!(metadata.start_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_complete_init_step_advances_position() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_init_progress(5).await;
+
+        let pos_before = logger.main_bar.read().await.as_ref().unwrap().position();
+        logger.complete_init_step("Test step").await;
+        let pos_after = logger.main_bar.read().await.as_ref().unwrap().position();
+
+        assert!(pos_after > pos_before);
+        assert!(pos_after <= 10);
+    }
+
+    #[tokio::test]
+    async fn test_finish_init_sets_position_to_10() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_init_progress(5).await;
+        logger.finish_init().await;
+
+        let pos = logger.main_bar.read().await.as_ref().unwrap().position();
+        assert_eq!(pos, 10);
+    }
+
+    #[tokio::test]
+    async fn test_start_scan_progress_sets_scanning_phase() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_init_progress(5).await;
+        logger.finish_init().await;
+        logger.start_scan_progress(100).await;
+
+        assert_eq!(*logger.phase.read().await, UiPhase::Scanning);
+        assert!(logger.detail_bar.read().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_show_sub_progress_updates_detail_bar() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_init_progress(5).await;
+        logger.finish_init().await;
+        logger.start_scan_progress(100).await;
+
+        // Should not panic and the detail bar should exist
+        logger.show_sub_progress("Processing domain X").await;
+        assert!(logger.detail_bar.read().await.is_some());
+    }
+
+    #[test]
+    fn test_print_message_formats_timestamp_and_level() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("format.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Debug,
+            log_path.to_str().unwrap().to_string(),
+        );
+
+        logger.info("hello world");
+        logger.export_logs().unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        // Verify timestamp format [HH:MM:SS.mmm]
+        assert!(content.contains("INFO"));
+        assert!(content.contains("hello world"));
+        // Verify the line matches expected pattern: [timestamp] LEVEL: message
+        let line = content.lines().next().unwrap();
+        assert!(line.starts_with("["));
+        assert!(line.contains("] INFO: hello world"));
+    }
+
+    #[tokio::test]
+    async fn test_start_spinner_creates_bar() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        assert!(logger.main_bar.read().await.is_none());
+
+        logger.start_spinner("Scanning...").await;
+        assert!(logger.main_bar.read().await.is_some());
+
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert!(metadata.start_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_convert_to_progress_replaces_spinner() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.start_spinner("Scanning...").await;
+
+        logger.convert_to_progress(50).await;
+        let bar = logger.main_bar.read().await;
+        let bar = bar.as_ref().unwrap();
+        assert_eq!(bar.length(), Some(50));
+    }
+
+    #[test]
+    fn test_print_final_summary_records_expected_fields() {
+        let logger = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        logger.record_dns_method("doh");
+        logger.record_vendor_relationships(5);
+        logger.record_unique_vendors(3);
+        logger.record_output_file("out.csv");
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            metadata.start_time = Some(SystemTime::now());
+            metadata.end_time = Some(SystemTime::now());
+            metadata.total_domains_processed = 10;
+            metadata.total_txt_records_found = 25;
+            metadata.max_depth_reached = 4;
+        }
+        // Verify metadata is consistent before summary
+        let metadata = logger.analysis_metadata.lock().unwrap();
+        assert_eq!(metadata.dns_method_used, "doh");
+        assert_eq!(metadata.total_vendor_relationships, 5);
+        assert_eq!(metadata.unique_vendors, 3);
+        assert_eq!(metadata.output_file, "out.csv");
+        assert_eq!(metadata.total_domains_processed, 10);
+        assert_eq!(metadata.total_txt_records_found, 25);
+        assert_eq!(metadata.max_depth_reached, 4);
+        drop(metadata);
+        // Should not panic in either colored or non-colored path
+        logger.print_final_summary();
+    }
 }
