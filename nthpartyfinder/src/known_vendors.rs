@@ -25,7 +25,6 @@ pub const KNOWN_VENDORS_PATH: &str = "./config/known_vendors.json";
 pub const LOCAL_OVERRIDES_PATH: &str = "./config/known_vendors_local.json";
 
 /// Find the config directory by checking multiple locations
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
     let cwd_config = PathBuf::from("./config");
@@ -89,7 +88,6 @@ fn find_config_dir() -> Option<PathBuf> {
 }
 
 /// Get the path to the known vendors JSON file
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn get_known_vendors_path() -> PathBuf {
     if let Some(config_dir) = find_config_dir() {
         config_dir.join("known_vendors.json")
@@ -100,7 +98,6 @@ fn get_known_vendors_path() -> PathBuf {
 }
 
 /// Get the path to the local overrides JSON file
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn get_local_overrides_path() -> PathBuf {
     if let Some(config_dir) = find_config_dir() {
         config_dir.join("known_vendors_local.json")
@@ -212,7 +209,6 @@ pub struct KnownVendors {
 
 impl KnownVendors {
     /// Load known vendors from the default paths
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load() -> Result<Self> {
         let base_path = get_known_vendors_path();
         let overrides_path = get_local_overrides_path();
@@ -271,7 +267,6 @@ impl KnownVendors {
 
     /// Look up organization name for a domain
     /// Returns None if domain is not in any database
-    #[cfg_attr(coverage_nightly, coverage(off))] // VendorRegistry branches depend on global OnceLock; RwLock closing braces are poisoned-lock paths
     pub fn lookup(&self, domain: &str) -> Option<KnownVendorResult> {
         let domain_lower = domain.to_lowercase();
 
@@ -382,7 +377,6 @@ impl KnownVendors {
     }
 
     /// Add a local override for a domain
-    #[cfg_attr(coverage_nightly, coverage(off))] // RwLock::write() Err closure is a poisoned-lock path, structurally unreachable in normal operation
     pub fn add_override(&self, domain: &str, organization: &str) -> Result<()> {
         let domain_lower = domain.to_lowercase();
 
@@ -413,7 +407,6 @@ impl KnownVendors {
     }
 
     /// Save local overrides to disk
-    #[cfg_attr(coverage_nightly, coverage(off))] // parent() None path is structurally unreachable for normal file paths
     fn save_overrides(&self) -> Result<()> {
         let overrides = self
             .local_overrides
@@ -437,7 +430,6 @@ impl KnownVendors {
     }
 
     /// Sync with GitHub remote database
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn sync_from_github(&self, url: Option<&str>) -> Result<usize> {
         let url = url.unwrap_or(GITHUB_RAW_URL);
 
@@ -516,7 +508,6 @@ impl KnownVendors {
     }
 
     /// Get the number of vendors in all databases combined (deduplicated)
-    #[cfg_attr(coverage_nightly, coverage(off))] // RwLock::read() Err paths are poisoned-lock branches, structurally unreachable in normal operation
     pub fn total_unique_vendors(&self) -> usize {
         let mut all_domains: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -586,7 +577,6 @@ fn extract_base_domain(domain: &str) -> String {
 static KNOWN_VENDORS: std::sync::OnceLock<KnownVendors> = std::sync::OnceLock::new();
 
 /// Initialize the global known vendors database
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init() -> Result<()> {
     let kv = KnownVendors::load()?;
     let stats = kv.stats();
@@ -607,13 +597,11 @@ pub fn init() -> Result<()> {
 }
 
 /// Get a reference to the global known vendors database
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock
 pub fn get() -> Option<&'static KnownVendors> {
     KNOWN_VENDORS.get()
 }
 
 /// Look up a domain in the global known vendors database
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock and delegates to lookup() which is already coverage(off)
 pub fn lookup(domain: &str) -> Option<KnownVendorResult> {
     KNOWN_VENDORS.get().and_then(|kv| kv.lookup(domain))
 }

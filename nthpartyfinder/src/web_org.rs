@@ -73,7 +73,6 @@ struct SchemaOrgData {
 }
 
 /// Fetch page content from a domain's website
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn fetch_page_content(domain: &str) -> Result<String> {
     let url = format!("https://{}", domain);
 
@@ -113,7 +112,6 @@ pub async fn fetch_page_content(domain: &str) -> Result<String> {
 }
 
 /// Extract organization name from a domain's website
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn extract_organization_from_web(domain: &str) -> Result<Option<WebOrgResult>> {
     let html_content = fetch_page_content(domain).await?;
     extract_organization_from_html(&html_content, domain)
@@ -133,7 +131,6 @@ pub async fn extract_organization_from_web(domain: &str) -> Result<Option<WebOrg
 /// * `Ok(Some(WebOrgResult))` - Successfully extracted organization
 /// * `Ok(None)` - Could not extract organization from either method
 /// * `Err` - Network or browser error
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn extract_organization_with_fallback(
     domain: &str,
     use_headless_only: bool,
@@ -186,7 +183,6 @@ pub async fn extract_organization_with_fallback(
 }
 
 /// Fetch page content using headless Chrome browser (for JavaScript-rendered pages)
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn fetch_page_with_headless(domain: &str) -> Result<String> {
     let url = format!("https://{}", domain);
 
@@ -496,7 +492,6 @@ fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
 }
 
 /// Extract organization from copyright notices
-#[cfg_attr(coverage_nightly, coverage(off))] // Closing braces of if-let on Selector::parse/Regex::new/caps.get(1) are structurally unreachable with hardcoded patterns
 fn extract_from_copyright(document: &Html, html: &str) -> Option<WebOrgResult> {
     // Look for copyright patterns in the HTML
     // © 2024 Company Name, Inc.

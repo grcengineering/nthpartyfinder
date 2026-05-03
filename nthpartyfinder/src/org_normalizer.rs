@@ -598,7 +598,6 @@ use std::sync::OnceLock;
 static ORG_NORMALIZER: OnceLock<Option<OrgNormalizer>> = OnceLock::new();
 
 /// Initialize the global organization normalizer from configuration
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock; test ordering makes this unpredictable
 pub fn init(config: &crate::config::OrganizationConfig) {
     let normalizer = if config.enabled {
         Some(OrgNormalizer::from_app_config(config))
@@ -611,14 +610,12 @@ pub fn init(config: &crate::config::OrganizationConfig) {
 }
 
 /// Get a reference to the global organization normalizer (if enabled)
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock
 pub fn get() -> Option<&'static OrgNormalizer> {
     ORG_NORMALIZER.get().and_then(|opt| opt.as_ref())
 }
 
 /// Normalize an organization name using the global normalizer
 /// If normalization is disabled or not initialized, returns the input unchanged
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock
 pub fn normalize(name: &str) -> String {
     match get() {
         Some(normalizer) => normalizer.normalize(name),
@@ -627,7 +624,6 @@ pub fn normalize(name: &str) -> String {
 }
 
 /// Check if organization normalization is enabled
-#[cfg_attr(coverage_nightly, coverage(off))] // Uses process-global OnceLock
 pub fn is_enabled() -> bool {
     get().is_some()
 }
@@ -985,7 +981,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_find_best_match() {
         let n = normalizer();
 
@@ -1402,7 +1397,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_find_best_match_typo_coverage() {
         // Exercise line 1008: typo match conditional branch
         let n = normalizer();

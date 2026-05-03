@@ -56,7 +56,6 @@ pub struct NerOrganizationExtractor {
 }
 
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl NerOrganizationExtractor {
     /// Create a new NER extractor by writing embedded model files to temp directory
     pub fn new() -> Result<Self> {
@@ -460,14 +459,12 @@ impl NerOrganizationExtractor {
 
 /// Initialize the global NER extractor
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init() -> anyhow::Result<()> {
     init_with_config(0.5)
 }
 
 /// Initialize the global NER extractor with custom minimum confidence
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
     let extractor = NerOrganizationExtractor::with_min_confidence(min_confidence)?;
     NER_EXTRACTOR
@@ -478,21 +475,18 @@ pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
 
 /// Check if NER is available (model loaded successfully)
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn is_available() -> bool {
     NER_EXTRACTOR.get().is_some()
 }
 
 /// Get the global NER extractor
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn get() -> Option<&'static NerOrganizationExtractor> {
     NER_EXTRACTOR.get()
 }
 
 /// Extract organization using the global NER extractor
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_organization(
     domain: &str,
     page_content: Option<&str>,
@@ -506,7 +500,6 @@ pub fn extract_organization(
 /// Extract all organizations from text using the global NER extractor.
 /// Returns all detected organizations above min_confidence threshold.
 #[cfg(feature = "embedded-ner")]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_all_organizations(
     text: &str,
     min_confidence: Option<f32>,
@@ -523,28 +516,24 @@ pub fn extract_all_organizations(
 
 /// Stub: Initialize the global NER extractor (no-op when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init() -> anyhow::Result<()> {
     Ok(())
 }
 
 /// Stub: Initialize with config (no-op when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init_with_config(_min_confidence: f32) -> anyhow::Result<()> {
     Ok(())
 }
 
 /// Stub: Check if NER is available (always false when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn is_available() -> bool {
     false
 }
 
 /// Stub: Extract organization (always returns None when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_organization(
     _domain: &str,
     _page_content: Option<&str>,
@@ -554,7 +543,6 @@ pub fn extract_organization(
 
 /// Stub: Extract all organizations (always returns empty when disabled)
 #[cfg(not(feature = "embedded-ner"))]
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_all_organizations(
     _text: &str,
     _min_confidence: Option<f32>,
@@ -743,7 +731,6 @@ mod tests {
 
     #[cfg(feature = "embedded-ner")]
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_ner_extraction_accuracy() {
         // Initialize NER if not already done - catch panics from ONNX runtime loading
         let init_result = std::panic::catch_unwind(|| init_with_config(0.5));
