@@ -1127,4 +1127,39 @@ mod tests {
         };
         assert_eq!(mapping.domain, long_domain);
     }
+
+    // ── confirm_pending_mappings / confirm_unverified_organizations ──
+
+    #[tokio::test]
+    async fn test_confirm_pending_mappings_empty_is_noop() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_pending_mappings(&[], &analyzer, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_unverified_organizations_empty_is_noop() {
+        let vendors: Arc<Mutex<HashMap<String, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_unverified_organizations(&[], &vendors, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_confirm_unverified_organizations_all_dupes_deduped() {
+        let mappings = vec![
+            UnverifiedOrgMapping {
+                domain: "a.com".to_string(),
+                inferred_org: "A".to_string(),
+            },
+            UnverifiedOrgMapping {
+                domain: "a.com".to_string(),
+                inferred_org: "A".to_string(),
+            },
+        ];
+        let unique = dedup_unverified_orgs(&mappings);
+        assert_eq!(unique.len(), 1);
+    }
 }

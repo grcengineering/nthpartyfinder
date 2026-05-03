@@ -2648,4 +2648,19 @@ mod tests {
         // Will be 600 unless NTHPARTY_ANALYSIS_TIMEOUT_SECS is set in env
         assert!(timeout.is_some());
     }
+
+    // ── StdioInput ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_stdio_input_is_not_terminal_in_tests() {
+        let input = StdioInput;
+        assert!(!input.is_terminal());
+    }
+
+    #[test]
+    fn test_stdio_input_implements_input_source() {
+        fn assert_input_source<T: InputSource>(_: &T) {}
+        let input = StdioInput;
+        assert_input_source(&input);
+    }
 }

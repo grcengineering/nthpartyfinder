@@ -2181,4 +2181,94 @@ mod tests {
         assert_eq!(result.len(), 10);
         assert_eq!(removed, 0);
     }
+
+    // ── discover_nth_parties_minimal early-return paths ───────────────
+
+    #[tokio::test]
+    async fn test_discover_nth_parties_minimal_already_processed() {
+        let mut processed = HashSet::new();
+        processed.insert("example.com".to_string());
+        let processed_domains = Arc::new(tokio::sync::Mutex::new(processed));
+        let discovered_vendors = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let semaphore = Arc::new(Semaphore::new(10));
+        let recursive_semaphore = Arc::new(Semaphore::new(10));
+        let dns_pool = Arc::new(dns::DnsServerPool::new());
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+        let config = make_analysis_config_with_limits(vec![20]);
+
+        let result = discover_nth_parties_minimal(
+            "example.com",
+            Some(3),
+            discovered_vendors,
+            processed_domains,
+            semaphore,
+            1,
+            "root.com",
+            "Root Org",
+            &vl,
+            dns_pool,
+            recursive_semaphore,
+            4,
+            logger,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_empty(), "already-processed domain should return empty");
+    }
+
+    #[tokio::test]
+    async fn test_discover_nth_parties_minimal_depth_exceeded() {
+        let processed_domains = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let discovered_vendors = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let semaphore = Arc::new(Semaphore::new(10));
+        let recursive_semaphore = Arc::new(Semaphore::new(10));
+        let dns_pool = Arc::new(dns::DnsServerPool::new());
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+        let config = make_analysis_config_with_limits(vec![20]);
+
+        let result = discover_nth_parties_minimal(
+            "new-domain.com",
+            Some(2),
+            discovered_vendors,
+            processed_domains,
+            semaphore,
+            5, // current_depth > max_depth (2)
+            "root.com",
+            "Root Org",
+            &vl,
+            dns_pool,
+            recursive_semaphore,
+            4,
+            logger,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_empty(), "depth-exceeded should return empty");
+    }
+
+    // ── subprocessor_analysis_with_logging ────────────────────────────
+
+    #[tokio::test]
+    async fn test_subprocessor_analysis_with_logging_invalid_domain() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+
+        let result = subprocessor_analysis_with_logging(
+            "nonexistent.invalid.domain.test",
+            &vl,
+            logger,
+            &analyzer,
+        )
+        .await;
+
+        // Should return Ok (errors are swallowed) with empty or populated vec
+        assert!(result.is_ok());
+    }
 }
