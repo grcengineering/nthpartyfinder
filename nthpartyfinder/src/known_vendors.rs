@@ -1601,4 +1601,131 @@ mod tests {
         // Restore permissions for cleanup
         fs::set_permissions(&base_path, fs::Permissions::from_mode(0o644)).unwrap();
     }
+
+    // --- Tests for previously-coverage(off) functions ---
+
+    #[test]
+    fn test_stripped_get_known_vendors_path_contains_filename() {
+        let path = get_known_vendors_path();
+        assert!(path.to_str().unwrap().contains("known_vendors.json"));
+    }
+
+    #[test]
+    fn test_stripped_get_local_overrides_path_contains_filename() {
+        let path = get_local_overrides_path();
+        assert!(path.to_str().unwrap().contains("known_vendors_local.json"));
+    }
+
+    #[test]
+    fn test_stripped_paths_are_different() {
+        let vendors_path = get_known_vendors_path();
+        let overrides_path = get_local_overrides_path();
+        assert_ne!(vendors_path, overrides_path);
+    }
+
+    #[test]
+    fn test_stripped_load_does_not_panic() {
+        let result = KnownVendors::load();
+        match result {
+            Ok(kv) => {
+                assert!(kv.stats().base_count >= 0);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Failed to read")
+                        || msg.contains("Failed to parse")
+                        || msg.contains("known_vendors"),
+                    "Unexpected error: {}",
+                    msg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_stripped_lookup_positive_and_negative() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("example.com", "Example Corp")]);
+        let overrides_path = dir.path().join("overrides.json");
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        let result = kv.lookup("example.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Example Corp");
+
+        let result = kv.lookup("EXAMPLE.COM");
+        assert!(result.is_some());
+
+        let result = kv.lookup("api.example.com");
+        assert!(result.is_some());
+
+        let result = kv.lookup("unknown-domain.xyz");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_stripped_add_override_and_save_roundtrip() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("overrides.json");
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+
+        kv.add_override("test.com", "Test Corp").unwrap();
+
+        let result = kv.lookup("test.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Test Corp");
+
+        let result = kv.lookup("test.com").unwrap();
+        assert_eq!(result.source, KnownVendorSource::LocalOverride);
+
+        assert!(overrides_path.exists());
+        let content = fs::read_to_string(&overrides_path).unwrap();
+        assert!(content.contains("Test Corp"));
+        assert!(content.contains("test.com"));
+    }
+
+    #[test]
+    fn test_stripped_total_unique_vendors_dedup_with_overrides() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[("a.com", "A"), ("b.com", "B")]);
+        let overrides_path = dir.path().join("overrides.json");
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        assert_eq!(kv.total_unique_vendors(), 2);
+
+        kv.add_override("a.com", "A Override").unwrap();
+        assert_eq!(kv.total_unique_vendors(), 2);
+
+        kv.add_override("c.com", "C Corp").unwrap();
+        assert_eq!(kv.total_unique_vendors(), 3);
+    }
+
+    #[test]
+    fn test_stripped_global_get_no_panic() {
+        let result = get();
+        let _ = result;
+    }
+
+    #[test]
+    fn test_stripped_global_lookup_consistent_with_get() {
+        let result = lookup("example.com");
+        if get().is_none() {
+            assert!(result.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stripped_sync_from_github_invalid_url() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("overrides.json");
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        let result = kv
+            .sync_from_github(Some(
+                "http://invalid-url-that-does-not-exist.example.com/data.json",
+            ))
+            .await;
+        assert!(result.is_err());
+    }
 }

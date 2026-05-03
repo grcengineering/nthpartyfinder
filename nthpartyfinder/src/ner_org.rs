@@ -965,4 +965,63 @@ mod tests {
             assert!(!is_available());
         }
     }
+
+    // --- Tests for previously-coverage(off) stub functions ---
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stripped_init_returns_ok_and_is_idempotent() {
+        assert!(init().is_ok());
+        assert!(init().is_ok());
+        assert!(init().is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stripped_init_with_config_ignores_all_thresholds() {
+        assert!(init_with_config(0.0).is_ok());
+        assert!(init_with_config(0.5).is_ok());
+        assert!(init_with_config(1.0).is_ok());
+        assert!(init_with_config(-1.0).is_ok());
+        assert!(init_with_config(f32::MAX).is_ok());
+        assert!(init_with_config(f32::NAN).is_ok());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stripped_is_available_always_false_after_init() {
+        let _ = init();
+        assert!(!is_available());
+        let _ = init_with_config(0.9);
+        assert!(!is_available());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stripped_extract_organization_returns_none_for_all_inputs() {
+        let _ = init();
+        let result = extract_organization("google.com", Some("<html>Google LLC</html>")).unwrap();
+        assert!(result.is_none());
+        let result = extract_organization("microsoft.com", None).unwrap();
+        assert!(result.is_none());
+        let result = extract_organization("", Some("content")).unwrap();
+        assert!(result.is_none());
+        let result = extract_organization("例え.jp", Some("会社名")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "embedded-ner"))]
+    #[test]
+    fn test_stripped_extract_all_organizations_returns_empty_for_all_inputs() {
+        let _ = init();
+        let result =
+            extract_all_organizations("Google and Microsoft are tech companies.", None).unwrap();
+        assert!(result.is_empty());
+        assert_eq!(result.len(), 0);
+        let result = extract_all_organizations("", Some(0.5)).unwrap();
+        assert!(result.is_empty());
+        let long_text = "Organization ".repeat(1000);
+        let result = extract_all_organizations(&long_text, Some(0.1)).unwrap();
+        assert!(result.is_empty());
+    }
 }

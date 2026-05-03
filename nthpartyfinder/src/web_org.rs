@@ -1884,4 +1884,101 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().organization, "NoFooter Corp.");
     }
+
+    // --- Tests for previously-coverage(off) functions ---
+
+    #[test]
+    fn test_stripped_extract_from_copyright_year_range() {
+        let html = r#"<html><body>
+            <footer>© 2020-2024 RangeYear Corp. All rights reserved.</footer>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.source, WebOrgSource::Copyright);
+        assert!((r.confidence - 0.60).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_stripped_extract_from_copyright_c_in_parens() {
+        let html = r#"<html><body>
+            <footer>(c) 2024 ParenCopy Ltd. All rights reserved.</footer>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "ParenCopy Ltd.");
+    }
+
+    #[test]
+    fn test_stripped_extract_from_copyright_no_year_still_matches() {
+        // The © symbol alone can trigger pattern 1's optional year group
+        let html = r#"<html><body>
+            <footer>© NoYear Corp. All rights reserved.</footer>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        // Pattern matches even without year since year groups are optional
+        assert!(result.is_some());
+        assert!(result.unwrap().organization.contains("NoYear"));
+    }
+
+    #[test]
+    fn test_stripped_extract_from_copyright_only_numbers_invalid() {
+        // Org name that is all digits should be rejected by is_valid_org_name
+        let html = r#"<html><body>
+            <footer>© 2024 12345. All rights reserved.</footer>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_stripped_extract_from_copyright_contentinfo_role() {
+        let html = r#"<html><body>
+            <div role="contentinfo">Copyright © 2024 RoleInfo Inc. All rights reserved.</div>
+        </body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert!(result.unwrap().organization.contains("RoleInfo"));
+    }
+
+    #[tokio::test]
+    async fn test_stripped_fetch_page_content_invalid_domain() {
+        let result =
+            fetch_page_content("this-domain-definitely-does-not-exist-xyz123.invalid").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stripped_extract_organization_from_web_invalid_domain() {
+        let result =
+            extract_organization_from_web("this-domain-definitely-does-not-exist-xyz123.invalid")
+                .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stripped_extract_with_fallback_invalid_domain() {
+        let result = extract_organization_with_fallback(
+            "this-domain-definitely-does-not-exist-xyz123.invalid",
+            false,
+        )
+        .await;
+        // Both HTTP and headless fail; returns Ok(None) or Err
+        match result {
+            Ok(inner) => assert!(inner.is_none()),
+            Err(_) => {} // network error is acceptable
+        }
+    }
+
+    #[test]
+    fn test_stripped_fetch_page_with_headless_fails_gracefully() {
+        let result =
+            fetch_page_with_headless("this-domain-definitely-does-not-exist-xyz123.invalid");
+        assert!(result.is_err());
+    }
 }

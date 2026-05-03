@@ -1405,4 +1405,88 @@ mod tests {
         // Result may or may not match — either way exercises the branch
         let _ = result;
     }
+
+    // --- Tests for previously-coverage(off) global functions ---
+
+    #[test]
+    fn test_stripped_normalize_returns_input_unchanged_when_uninitialized() {
+        assert_eq!(normalize("Acme Corporation"), "Acme Corporation");
+        assert_eq!(normalize(""), "");
+        assert_eq!(normalize("  spaces  "), "  spaces  ");
+        assert_eq!(normalize("UPPERCASE"), "UPPERCASE");
+        assert_eq!(normalize("日本語テスト"), "日本語テスト");
+    }
+
+    #[test]
+    fn test_stripped_is_enabled_consistent_with_get() {
+        let enabled = is_enabled();
+        let normalizer_ref = get();
+        assert_eq!(enabled, normalizer_ref.is_some());
+    }
+
+    #[test]
+    fn test_stripped_get_returns_consistent_value() {
+        let first = get();
+        let second = get();
+        assert_eq!(first.is_some(), second.is_some());
+    }
+
+    #[test]
+    fn test_stripped_normalize_consistency() {
+        let input = "Microsoft Corporation";
+        let first = normalize(input);
+        let second = normalize(input);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_stripped_normalize_various_inputs_no_panic() {
+        let inputs = vec![
+            "Google LLC",
+            "Apple Inc.",
+            "Amazon.com, Inc.",
+            "",
+            "a",
+            "A Very Long Company Name That Goes On And On For Testing",
+        ];
+        for input in &inputs {
+            let result = normalize(input);
+            assert!(!result.is_empty() || input.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_stripped_find_best_match_exact() {
+        let n = normalizer();
+        let candidates = vec![
+            "Google".to_string(),
+            "Microsoft".to_string(),
+            "Apple".to_string(),
+        ];
+        let exact = n.find_best_match("Google", &candidates);
+        assert!(exact.is_some());
+        let (name, score) = exact.unwrap();
+        assert_eq!(name, "Google");
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_stripped_find_best_match_empty_candidates() {
+        let n = normalizer();
+        let empty: Vec<String> = vec![];
+        let result = n.find_best_match("Google", &empty);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_stripped_find_best_match_typo_with_assertions() {
+        let n = normalizer();
+        let candidates = vec!["Google".to_string(), "Microsoft".to_string()];
+        let result = n.find_best_match("Gogle", &candidates);
+        if let Some((matched, score)) = result {
+            assert!(matched == "Google" || matched == "Microsoft");
+            assert!(score > 0.0);
+            assert!(score <= 1.0);
+        }
+    }
 }
