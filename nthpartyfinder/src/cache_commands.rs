@@ -15,7 +15,6 @@ use crate::subprocessor::{SubprocessorCache, SubprocessorUrlCacheEntry};
 const CACHE_DIR: &str = "cache";
 
 /// List all cached domains
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn list_cached_domains() -> Result<()> {
     let cache_dir = PathBuf::from(CACHE_DIR);
 
@@ -92,7 +91,6 @@ pub async fn list_cached_domains() -> Result<()> {
 }
 
 /// Show detailed cache entry for a specific domain
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn show_cache_entry(domain: &str) -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -231,7 +229,6 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
 }
 
 /// Clear cache for a specific domain
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn clear_domain_cache(domain: &str) -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -252,7 +249,6 @@ pub async fn clear_domain_cache(domain: &str) -> Result<()> {
 }
 
 /// Clear all cached data
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn clear_all_cache() -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -306,7 +302,6 @@ impl std::fmt::Display for ValidationStatus {
 }
 
 /// Validate all cached URLs still work
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Result<()> {
     let cache_dir = PathBuf::from(CACHE_DIR);
 
@@ -516,7 +511,6 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
 }
 
 /// Format a Unix timestamp as a human-readable date string
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn format_timestamp(timestamp: u64) -> String {
     let datetime = UNIX_EPOCH + Duration::from_secs(timestamp);
     if let Ok(system_time) = datetime.duration_since(UNIX_EPOCH) {
@@ -732,7 +726,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validation_result_redirect_status() {
         let result = ValidationResult {
             domain: "old.com".to_string(),
@@ -761,7 +754,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_validation_result_server_error_status() {
         let result = ValidationResult {
             domain: "broken.com".to_string(),
@@ -891,7 +883,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn test_cache_dir_reading_empty_directory() {
         let tmpdir = tempfile::tempdir().unwrap();
         let cache_dir = tmpdir.path().join("cache");
@@ -962,7 +953,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_url_truncation_logic() {
         // Test the URL truncation logic from list_cached_domains
         let short_url = "https://short.com";
@@ -994,7 +984,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_url_truncation_with_unicode() {
         // Ensure char boundary safety with non-ASCII URLs
         let unicode_url = "https://example.com/sub/\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";

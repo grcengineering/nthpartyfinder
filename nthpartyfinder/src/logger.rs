@@ -64,7 +64,6 @@ struct AnalysisMetadata {
 
 impl AnalysisLogger {
     /// Check if colors should be enabled based on environment and settings
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn should_enable_colors(no_color_flag: bool) -> bool {
         // Respect NO_COLOR environment variable (standard convention)
         if std::env::var("NO_COLOR").is_ok() {
@@ -85,7 +84,6 @@ impl AnalysisLogger {
     }
 
     /// Configure the colored crate based on our color settings
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn configure_colored(enabled: bool) {
         if enabled {
             control::set_override(true);
@@ -187,7 +185,6 @@ impl AnalysisLogger {
     /// Start the unified progress bar that runs from initialization through scan completion.
     /// Uses a single 0→100 percentage bar with elapsed timer throughout.
     /// Init steps occupy positions 0→10, scan phases occupy 10→100.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn start_init_progress(&self, _total_steps: u64) {
         if self.verbosity == VerbosityLevel::Silent {
             return;
@@ -229,7 +226,6 @@ impl AnalysisLogger {
     /// and advances within the 0→10 range (each of 6 steps ≈ 1-2 positions).
     /// Includes a brief yield so the terminal can render each step progressively
     /// instead of batching all steps into a single frame.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn complete_init_step(&self, step_name: &str) {
         if self.verbosity == VerbosityLevel::Silent {
             return;
@@ -261,7 +257,6 @@ impl AnalysisLogger {
 
     /// Finish the initialization phase. Prints completion message and transitions
     /// to scanning phase. The bar continues running — no style change or reset.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn finish_init(&self) {
         if self.verbosity == VerbosityLevel::Silent {
             return;
@@ -290,7 +285,6 @@ impl AnalysisLogger {
 
     /// Transition to the scanning phase. The unified bar continues running
     /// (no reset, no style change). Adds a detail bar for sub-progress messages.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn start_scan_progress(&self, _total: u64) {
         if self.verbosity == VerbosityLevel::Silent {
             return;
@@ -352,7 +346,6 @@ impl AnalysisLogger {
 
     /// Show a sub-progress detail line below the main scan bar.
     /// Displayed as: "  ↳ {message}"
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn show_sub_progress(&self, message: &str) {
         if self.verbosity == VerbosityLevel::Silent {
             return;
@@ -411,7 +404,6 @@ impl AnalysisLogger {
         self.print_message("SUCCESS", message);
     }
 
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn print_message(&self, level: &str, message: &str) {
         let timestamp = self.get_timestamp();
 
@@ -535,7 +527,6 @@ impl AnalysisLogger {
     }
 
     /// Start an indeterminate spinner for early scan phases before we know the total work
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn start_spinner(&self, message: &str) {
         let template = if self.color_enabled {
             "[{elapsed_precise}] {spinner:.cyan} {msg}"
@@ -565,7 +556,6 @@ impl AnalysisLogger {
     }
 
     /// Convert spinner to a determinate progress bar when we know the total work
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn convert_to_progress(&self, total_steps: u64) {
         let mut bar_guard = self.main_bar.write().await;
 
@@ -672,7 +662,6 @@ impl AnalysisLogger {
     }
 
     // Final summary message
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn print_final_summary(&self) {
         let metadata = self
             .analysis_metadata

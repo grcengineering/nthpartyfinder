@@ -296,7 +296,6 @@ use std::sync::OnceLock;
 /// Global vendor registry instance
 static VENDOR_REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 /// Find the config directory by checking multiple locations
 fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
@@ -347,7 +346,6 @@ fn find_config_dir() -> Option<PathBuf> {
 }
 
 /// Initialize the global vendor registry
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init() -> Result<()> {
     let config_dir = find_config_dir();
 
@@ -380,32 +378,27 @@ pub fn get() -> Option<&'static VendorRegistry> {
     VENDOR_REGISTRY.get()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // Closure delegates to get_organization() which is fully tested; only unreachable when global OnceLock is unset
 /// Look up organization name for a domain using the global registry
 pub fn lookup_organization(domain: &str) -> Option<String> {
     get().and_then(|r| r.get_organization(domain))
 }
 
 /// Check if a domain is known in the global registry
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn is_known_domain(domain: &str) -> bool {
     get().is_some_and(|r| r.is_known_domain(domain))
 }
 
 /// Get vendor by domain from global registry
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn get_vendor_by_domain(domain: &str) -> Option<Arc<VendorConfig>> {
     get().and_then(|r| r.get_vendor_by_domain(domain))
 }
 
 /// Find vendor by verification pattern from global registry
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn find_vendor_by_verification(txt: &str) -> Option<Arc<VendorConfig>> {
     get().and_then(|r| r.find_vendor_by_verification(txt))
 }
 
 /// Get all SaaS tenants from global registry
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn get_all_saas_tenants() -> Vec<(String, SaasTenant)> {
     get().map_or(Vec::new(), |r| r.get_all_saas_tenants())
 }

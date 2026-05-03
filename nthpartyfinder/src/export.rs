@@ -8,7 +8,6 @@ use std::fs::File;
 use std::io::Write;
 use tracing::{debug, info};
 
-#[cfg_attr(coverage_nightly, coverage(off))] // File I/O and debug! macro arguments
 pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to CSV: {}",
@@ -59,7 +58,6 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
     Ok(())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // File I/O and debug! macro arguments
 pub fn export_json(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to JSON: {}",
@@ -117,7 +115,6 @@ struct ExportSummary {
     unique_organizations: usize,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // stdout printing function
 pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
     if relationships.is_empty() {
         println!("No vendor relationships found.");
@@ -159,7 +156,6 @@ pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
     println!("========================\n");
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // File I/O with fs::write and debug! macro arguments
 pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to Markdown: {}",
@@ -533,7 +529,6 @@ struct HtmlSummary {
     generated_at: String,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to HTML: {}",
