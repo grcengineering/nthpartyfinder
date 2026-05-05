@@ -600,4 +600,33 @@ mod tests {
         let ctx = RateLimitContext::from_config(&config);
         ctx.log_config(); // Should not panic
     }
+
+    #[tokio::test]
+    async fn test_retry_helper_eventual_success() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let config = RateLimitConfig {
+            max_retries: 5,
+            backoff_base_delay_ms: 1,
+            backoff_max_delay_ms: 10,
+            ..RateLimitConfig::default()
+        };
+        let helper = RetryHelper::new(&config);
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        let result: Result<i32, String> = helper
+            .with_retry(|| {
+                let c = counter_clone.clone();
+                async move {
+                    let count = c.fetch_add(1, Ordering::SeqCst);
+                    if count < 2 {
+                        Err("transient error".to_string())
+                    } else {
+                        Ok(42)
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
 }

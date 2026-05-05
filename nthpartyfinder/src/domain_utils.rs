@@ -364,4 +364,28 @@ mod tests {
         assert!(!is_organizational_domain("_spf.mailgun.org"));
         assert!(!is_organizational_domain("spf.mailgun.org"));
     }
+
+    #[test]
+    fn test_extract_base_domain_smtp_underscore_prefix() {
+        assert_eq!(extract_base_domain("_smtp.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_dmarc_no_underscore_prefix() {
+        assert_eq!(extract_base_domain("dmarc.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_compound_tld_only_two_labels() {
+        // "ac.uk" is a compound TLD with only 2 labels — exercises compound_tlds guard at end
+        assert_eq!(extract_base_domain("ac.uk"), "ac.uk");
+        assert_eq!(extract_base_domain("org.uk"), "org.uk");
+        assert_eq!(extract_base_domain("com.au"), "com.au");
+    }
+
+    #[test]
+    fn test_extract_organizational_domain_exactly_three_parts_compound_tld() {
+        // "bbc.co.uk" — exactly 3 parts with compound TLD returns full domain
+        assert_eq!(extract_base_domain("bbc.co.uk"), "bbc.co.uk");
+    }
 }

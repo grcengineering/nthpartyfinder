@@ -2052,4 +2052,78 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].domain, "_org:Vendor Name");
     }
+
+    #[tokio::test]
+    async fn test_execute_graphql_errors_not_array() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({
+            "data": {"vendors": []},
+            "errors": "not an array"
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+        // errors is not an array, so as_array() returns None, no error raised
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_error_without_message_field() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({
+            "data": null,
+            "errors": [{"code": "INTERNAL_ERROR"}]
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown GraphQL error"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_post_without_body() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({"data": []});
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "POST",
+            None, // No body template
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
 }

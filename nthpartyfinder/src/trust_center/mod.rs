@@ -1225,4 +1225,88 @@ mod tests {
         let dbg = format!("{:?}", dfm);
         assert!(dbg.contains("name"));
     }
+
+    #[test]
+    fn test_detect_field_mapping_empty_items() {
+        let items: Vec<serde_json::Value> = vec![];
+        let mapping = detect_field_mapping(&items);
+        assert!(mapping.name_field.is_none());
+        assert!(mapping.url_field.is_none());
+        assert!(mapping.purpose_field.is_none());
+        assert!(mapping.location_field.is_none());
+    }
+
+    #[test]
+    fn test_score_subprocessor_array_purpose_without_name() {
+        let items: Vec<serde_json::Value> = vec![
+            serde_json::json!({"description": "Cloud hosting"}),
+            serde_json::json!({"description": "CDN services"}),
+            serde_json::json!({"description": "Database hosting"}),
+            serde_json::json!({"description": "Email delivery"}),
+            serde_json::json!({"description": "Analytics"}),
+        ];
+        let score = score_subprocessor_array(&items, "services");
+        // Has purpose field (description) but no name field, 5+ items
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_score_subprocessor_array_location_without_name() {
+        let items: Vec<serde_json::Value> = vec![
+            serde_json::json!({"country": "US", "id": 1}),
+            serde_json::json!({"country": "EU", "id": 2}),
+            serde_json::json!({"country": "AP", "id": 3}),
+            serde_json::json!({"country": "US", "id": 4}),
+            serde_json::json!({"country": "EU", "id": 5}),
+        ];
+        let score = score_subprocessor_array(&items, "regions");
+        // Has location field but no name, 5+ items
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_discovery_metadata_is_stale_future_timestamp() {
+        let mut meta = DiscoveryMetadata::new(DiscoveryMethod::Manual, 10, 0.9);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        meta.discovered_at = now + 3600; // Future timestamp
+        // saturating_sub produces 0, so never stale even with 0-day threshold
+        assert!(!meta.is_stale(0));
+    }
+
+    #[test]
+    fn test_find_entity_arrays_deeply_nested() {
+        let json = serde_json::json!({
+            "response": {
+                "data": {
+                    "level3": {
+                        "items": [
+                            {"name": "A"},
+                            {"name": "B"},
+                            {"name": "C"}
+                        ]
+                    }
+                }
+            }
+        });
+        let results = find_entity_arrays(&json, "");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "response.data.level3.items");
+    }
+
+    #[test]
+    fn test_score_subprocessor_array_url_only() {
+        let items: Vec<serde_json::Value> = vec![
+            serde_json::json!({"url": "https://a.com", "id": 1}),
+            serde_json::json!({"url": "https://b.com", "id": 2}),
+            serde_json::json!({"url": "https://c.com", "id": 3}),
+            serde_json::json!({"url": "https://d.com", "id": 4}),
+            serde_json::json!({"url": "https://e.com", "id": 5}),
+        ];
+        let score = score_subprocessor_array(&items, "links");
+        // Has url field but no name, 5+ items
+        assert!(score > 0.0);
+    }
 }

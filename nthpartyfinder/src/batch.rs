@@ -781,4 +781,15 @@ mod tests {
         let result = domain_output_filename("example.com:8080", "csv");
         assert_eq!(result, "Nth Party Analysis for example_com_8080.csv");
     }
+
+    #[test]
+    fn test_export_batch_summary_write_error() {
+        let summary = new_batch_summary();
+        let result = export_batch_summary(&summary, Path::new("/nonexistent/dir/summary.json"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to write batch summary"));
+    }
 }
