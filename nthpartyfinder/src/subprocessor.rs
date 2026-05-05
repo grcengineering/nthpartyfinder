@@ -17923,4 +17923,727 @@ Suite 200</td></tr>
         assert!(domains.contains(&"acme.com"), "Should extract domain from parens: {:?}", domains);
         assert!(domains.contains(&"foobar.io"), "Should extract .io domain from parens: {:?}", domains);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_paragraphs
+    // ═════════════════════════════════════════��════════════════════════════���════
+
+    #[test]
+    fn test_paragraphs_no_subprocessor_context_returns_empty() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <p>Acme Corp, Inc. provides great solutions.</p>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer
+            .extract_from_paragraphs(&document, html_str, "https://example.com", &patterns)
+            .unwrap();
+        assert!(vendors.is_empty(), "No subprocessor context should yield no vendors");
+    }
+
+    #[test]
+    fn test_paragraphs_with_company_inc_suffix() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <h1>Our Sub-Processors</h1>
+            <p>We use the following subprocessors to deliver our services:</p>
+            <p>Mailgun Technologies, Inc. handles email delivery.</p>
+            <p>Snowflake Holdings, Inc. handles data warehousing.</p>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer
+            .extract_from_paragraphs(&document, html_str, "https://example.com/subs", &patterns)
+            .unwrap();
+        let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(!vendors.is_empty(), "Should find at least one vendor: {:?}", domains);
+        assert!(domains.contains(&"mailgun.com"), "Should find Mailgun: {:?}", domains);
+    }
+
+    #[test]
+    fn test_paragraphs_text_line_dash_format() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <h2>Third-Party Sub-Processors</h2>
+            <div>Mailgun Technologies, Inc. – Email delivery platform</div>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer
+            .extract_from_paragraphs(&document, html_str, "https://example.com/legal", &patterns)
+            .unwrap();
+        let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"mailgun.com"), "Dash-separated line should extract: {:?}", domains);
+    }
+
+    #[test]
+    fn test_paragraphs_skips_generic_terms() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <p>Our subprocessors help us deliver services.</p>
+            <p>Our Service Provider handles all aspects.</p>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer
+            .extract_from_paragraphs(&document, html_str, "https://example.com/subs", &patterns)
+            .unwrap();
+        assert!(vendors.is_empty(), "Generic terms should not produce vendors: {:?}", vendors.iter().map(|v| &v.domain).collect::<Vec<_>>());
+    }
+
+    // ═════════════════════════════════════════════════��═════════════════════════
+    // extract_with_custom_rules
+    // ═══════════════════════════════��═════════════════════════════════��═════════
+
+    #[test]
+    fn test_custom_rules_direct_selector_extracts_vendor() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <div class="vendor-name">Cloudflare, Inc.</div>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("cloudflare".to_string(), "cloudflare.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: ".vendor-name".to_string(),
+                attribute: None,
+                transform: Some("trim".to_string()),
+                description: "Vendor names".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"cloudflare.com"), "Direct selector should extract Cloudflare: {:?}", domains);
+    }
+
+    #[test]
+    fn test_custom_rules_exclusion_pattern_filters() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body>
+            <span class="name">Cloudflare</span>
+            <span class="name">Navigation</span>
+        </body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("cloudflare".to_string(), "cloudflare.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "span.name".to_string(),
+                attribute: None,
+                transform: None,
+                description: "Names".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![r"^(?i:navigation)$".to_string()],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"cloudflare.com"));
+        assert!(!domains.iter().any(|d| d.contains("navigation")), "Navigation should be excluded");
+    }
+
+    #[test]
+    fn test_custom_rules_regex_pattern_extracts() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><p>Vendor: Twilio, Inc.</p></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("twilio".to_string(), "twilio.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![],
+            custom_regex_patterns: vec![CustomRegexPattern {
+                pattern: r"Vendor:\s*([^,]+)".to_string(),
+                capture_group: 1,
+                description: "Vendor prefix pattern".to_string(),
+            }],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"twilio.com"), "Regex should extract Twilio: {:?}", domains);
+    }
+
+    #[test]
+    fn test_custom_rules_transform_remove_suffix() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><div class="v">Snowflake Inc</div></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("snowflake".to_string(), "snowflake.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "div.v".to_string(),
+                attribute: None,
+                transform: Some("remove_suffix".to_string()),
+                description: "Remove suffix".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"snowflake.com"), "remove_suffix transform should work: {:?}", domains);
+    }
+
+    #[test]
+    fn test_custom_rules_transform_lowercase() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><div class="v">STRIPE</div></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("stripe".to_string(), "stripe.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "div.v".to_string(),
+                attribute: None,
+                transform: Some("lowercase".to_string()),
+                description: "Lowercase transform".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"stripe.com"), "Lowercase transform should work: {:?}", domains);
+    }
+
+    #[test]
+    fn test_custom_rules_attribute_extraction() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><a class="vendor" data-company="Zendesk">Link</a></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let mut mappings = std::collections::HashMap::new();
+        mappings.insert("zendesk".to_string(), "zendesk.com".to_string());
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "a.vendor".to_string(),
+                attribute: Some("data-company".to_string()),
+                transform: None,
+                description: "Attr extraction".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: Some(SpecialHandling {
+                skip_generic_methods: false,
+                custom_org_to_domain_mapping: Some(mappings),
+                exclusion_patterns: vec![],
+            }),
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        assert!(domains.contains(&"zendesk.com"), "Attribute extraction should work: {:?}", domains);
+    }
+
+    #[test]
+    fn test_custom_rules_fallback_generates_pending_mapping() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><div class="v">Twilio</div></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![DirectSelector {
+                selector: "div.v".to_string(),
+                attribute: None,
+                transform: None,
+                description: "Test".to_string(),
+            }],
+            custom_regex_patterns: vec![],
+            special_handling: None,
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "source.com")
+            .unwrap();
+        if !result.subprocessors.is_empty() {
+            assert!(!result.pending_mappings.is_empty(), "Fallback mapping should be pending");
+            assert_eq!(result.pending_mappings[0].source_domain, "source.com");
+        }
+    }
+
+    #[test]
+    fn test_custom_rules_empty_rules_returns_empty() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><p>Some content</p></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let rules = CustomExtractionRules {
+            direct_selectors: vec![],
+            custom_regex_patterns: vec![],
+            special_handling: None,
+        };
+        let result = analyzer
+            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .unwrap();
+        assert!(result.subprocessors.is_empty());
+        assert!(result.pending_mappings.is_empty());
+    }
+
+    // ═════════════════════════════════════════════════════��═════════════════════
+    // generate_domain_specific_patterns
+    // ═════════════════════════════════════��═════════════════════════════════════
+
+    #[test]
+    fn test_generate_patterns_empty_extractions() {
+        let analyzer = make_test_analyzer();
+        let html_str = "<html><body><p>Hello</p></body></html>";
+        let document = scraper::Html::parse_document(html_str);
+        let result = analyzer.generate_domain_specific_patterns(
+            &document, html_str, &[], "https://example.com",
+        );
+        assert!(result.direct_selectors.is_empty());
+        assert!(result.custom_regex_patterns.is_empty());
+    }
+
+    #[test]
+    fn test_generate_patterns_creates_exclusion_patterns() {
+        let analyzer = make_test_analyzer();
+        let html_str = "<html><body></body></html>";
+        let document = scraper::Html::parse_document(html_str);
+        let result = analyzer.generate_domain_specific_patterns(
+            &document, html_str, &[], "https://klaviyo.com/subs",
+        );
+        assert!(result.special_handling.is_some());
+        let handling = result.special_handling.unwrap();
+        let all_patterns = handling.exclusion_patterns.join(" ");
+        assert!(all_patterns.contains("klaviyo"), "Klaviyo-specific exclusions expected");
+    }
+
+    #[test]
+    fn test_generate_patterns_table_with_extractions() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><table>
+            <tr><td>Amazon Web Services, Inc.</td><td>Cloud</td></tr>
+            <tr><td>Stripe, Inc.</td><td>Payments</td></tr>
+            <tr><td>Twilio, Inc.</td><td>Comms</td></tr>
+            <tr><td>Zendesk, Inc.</td><td>Support</td></tr>
+        </table></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let extractions = vec![
+            SubprocessorDomain {
+                domain: "aws.amazon.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Amazon Web Services, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "stripe.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Stripe, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "twilio.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Twilio, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "zendesk.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Zendesk, Inc.</td>".to_string(),
+            },
+        ];
+        let result = analyzer.generate_domain_specific_patterns(
+            &document, html_str, &extractions, "https://example.com/subs",
+        );
+        assert!(!result.direct_selectors.is_empty(), "Should generate selectors from table");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_from_structured_content (disabled — always returns empty)
+    // ═══════════════════════════════════════════════════════��═══════════════════
+
+    #[test]
+    fn test_structured_content_disabled() {
+        let analyzer = make_test_analyzer();
+        let html_str = r#"<html><body><div class="vendor">Cloudflare</div></body></html>"#;
+        let document = scraper::Html::parse_document(html_str);
+        let vendors = analyzer
+            .extract_from_structured_content(&document, html_str)
+            .unwrap();
+        assert!(vendors.is_empty(), "Structured content extraction is disabled");
+    }
+
+    // ════════════════════════════════════════════════��══════════════════════════
+    // extract_domain_from_entity_name
+    // ════════════════════════════════════════════════════════════════════════��══
+
+    #[test]
+    fn test_entity_name_with_domain_in_parens() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Functional Software (sentry.io)");
+        assert_eq!(result, Some("sentry.io".to_string()));
+    }
+
+    #[test]
+    fn test_entity_name_dba_format() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Sinch Email)");
+        assert!(result.is_some(), "d/b/a format should produce a domain");
+    }
+
+    #[test]
+    fn test_entity_name_known_company() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Amazon Web Services");
+        assert_eq!(result, Some("aws.amazon.com".to_string()));
+    }
+
+    #[test]
+    fn test_entity_name_no_match() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("XY");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_entity_name_company_with_inc() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_entity_name("Twilio, Inc.");
+        assert_eq!(result, Some("twilio.com".to_string()));
+    }
+
+    // ══════════════════════════════════════════════════��════════════════════════
+    // extract_direct_domain_from_text
+    // ══════════════════════════════════════════════���════════════════════════════
+
+    #[test]
+    fn test_direct_domain_valid() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("Visit cloudflare.com for details");
+        assert_eq!(result, Some("cloudflare.com".to_string()));
+    }
+
+    #[test]
+    fn test_direct_domain_io_tld() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("Use sentry.io for errors");
+        assert_eq!(result, Some("sentry.io".to_string()));
+    }
+
+    #[test]
+    fn test_direct_domain_no_domain() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("No domain here");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_direct_domain_rejects_ip_address() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("Connect to 192.168.1.1");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_direct_domain_rejects_invalid_vendor() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_direct_domain_from_text("See example.com for info");
+        assert_eq!(result, None, "example.com is in the invalid patterns list");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // company_name_to_domain
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_company_name_known_mapping_aws() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("Amazon Web Services");
+        assert_eq!(result, Some("aws.amazon.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_known_mapping_twilio() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("Twilio");
+        assert_eq!(result, Some("twilio.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_pattern_inc() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("Datadog, Inc.");
+        assert_eq!(result, Some("datadog.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_pattern_technologies() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("Mailgun Technologies");
+        assert_eq!(result, Some("mailgun.com".to_string()));
+    }
+
+    #[test]
+    fn test_company_name_no_match() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("AB");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_company_name_known_sentry() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.company_name_to_domain("Functional Software");
+        assert_eq!(result, Some("sentry.io".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // extract_domain_from_text (legacy wrapper)
+    // ═══════════════════════════════���══════════════════════════════��════════════
+
+    #[test]
+    fn test_extract_domain_from_text_delegates() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_text("Visit stripe.com today");
+        assert_eq!(result, Some("stripe.com".to_string()));
+    }
+
+    #[test]
+    fn test_extract_domain_from_text_none() {
+        let analyzer = make_test_analyzer();
+        let result = analyzer.extract_domain_from_text("no domains here");
+        assert_eq!(result, None);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // looks_like_vendor_content
+    // ═══════════════════════════════════��═════════════════════════════���═════════
+
+    #[test]
+    fn test_looks_like_vendor_with_keyword_and_domain() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.looks_like_vendor_content("Cloudflare Inc provides hosting at cloudflare.com"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_missing_domain() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.looks_like_vendor_content("Cloudflare Inc provides hosting"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_missing_keyword() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.looks_like_vendor_content("Visit acme.com today for great deals"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_io_tld() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.looks_like_vendor_content("Sentry software platform at sentry.io"));
+    }
+
+    #[test]
+    fn test_looks_like_vendor_multiple_keywords() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.looks_like_vendor_content("Cloud hosting services at provider.com"));
+    }
+
+    // ═══════════════════════════════════════════════════���═══════════════════════
+    // is_valid_vendor_domain
+    // ══════════════════════════════════════════════════════��════════════════════
+
+    #[test]
+    fn test_valid_vendor_domain_standard() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.is_valid_vendor_domain("cloudflare.com"));
+        assert!(analyzer.is_valid_vendor_domain("stripe.com"));
+        assert!(analyzer.is_valid_vendor_domain("sentry.io"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_whitespace() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("cloud flare.com"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_non_ascii() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("münch.com"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_example() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("example.com"));
+        assert!(!analyzer.is_valid_vendor_domain("test.com"));
+        assert!(!analyzer.is_valid_vendor_domain("localhost"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_short_label() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("ab.com"));
+        assert!(!analyzer.is_valid_vendor_domain("x.io"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_underscore_prefix() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("_tracker.com"));
+        assert!(!analyzer.is_valid_vendor_domain("-invalid.com"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_no_dot() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("nodotdomain"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_too_long() {
+        let analyzer = make_test_analyzer();
+        let long_domain = format!("{}.com", "a".repeat(98));
+        assert!(!analyzer.is_valid_vendor_domain(&long_domain));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_invalid_tld() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("domain.123"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_rejects_garbled() {
+        let analyzer = make_test_analyzer();
+        assert!(!analyzer.is_valid_vendor_domain("bxzqf.com"));
+    }
+
+    #[test]
+    fn test_valid_vendor_domain_subdomain_ok() {
+        let analyzer = make_test_analyzer();
+        assert!(analyzer.is_valid_vendor_domain("aws.amazon.com"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // create_enhanced_evidence
+    // ═════════════════════════════════════════════════════════════════��═════════
+
+    #[test]
+    fn test_enhanced_evidence_short_text() {
+        let analyzer = make_test_analyzer();
+        let html = scraper::Html::parse_document("<html><body><p>Cloudflare handles CDN</p></body></html>");
+        let selector = scraper::Selector::parse("p").unwrap();
+        let element = html.select(&selector).next().unwrap();
+        let evidence = analyzer.create_enhanced_evidence(&element, "Cloudflare", "https://example.com/subs");
+        assert!(evidence.contains("Cloudflare"));
+        assert!(evidence.contains("https://example.com/subs#:~:text=Cloudflare"));
+    }
+
+    #[test]
+    fn test_enhanced_evidence_long_text_truncated() {
+        let analyzer = make_test_analyzer();
+        let long_text = "A".repeat(300);
+        let html_str = format!("<html><body><p>{}</p></body></html>", long_text);
+        let html = scraper::Html::parse_document(&html_str);
+        let selector = scraper::Selector::parse("p").unwrap();
+        let element = html.select(&selector).next().unwrap();
+        let evidence = analyzer.create_enhanced_evidence(&element, "Entity", "https://example.com");
+        assert!(evidence.contains("..."), "Long text should be truncated with ellipsis");
+        assert!(evidence.len() < 500, "Evidence should be bounded");
+    }
+
+    // ═════════════════════════════════════════════��═════════════════════════════
+    // create_highlight_url
+    // ═══════════════════════════════════════���═══════════════════════════════════
+
+    #[test]
+    fn test_highlight_url_simple() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com/page", "Cloudflare");
+        assert_eq!(url, "https://example.com/page#:~:text=Cloudflare");
+    }
+
+    #[test]
+    fn test_highlight_url_encodes_spaces() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com", "Amazon Web Services");
+        assert!(url.contains("Amazon%20Web%20Services"));
+    }
+
+    #[test]
+    fn test_highlight_url_encodes_special_chars() {
+        let analyzer = make_test_analyzer();
+        let url = analyzer.create_highlight_url("https://example.com", "Acme, Inc.");
+        assert!(url.contains("%2C"));
+    }
+
+    // ═══════════════════════════════════════════════════���═══════════════════════
+    // create_evidence_excerpt
+    // ═════════════════════════════════��════════════════════════════════���════════
+
+    #[test]
+    fn test_evidence_excerpt_domain_in_text() {
+        let analyzer = make_test_analyzer();
+        let text = "We use cloudflare.com for CDN services to deliver content globally.";
+        let excerpt = analyzer.create_evidence_excerpt(text, "cloudflare.com");
+        assert!(excerpt.contains("cloudflare.com"));
+    }
+
+    #[test]
+    fn test_evidence_excerpt_domain_not_in_text() {
+        let analyzer = make_test_analyzer();
+        let text = "This is some content without the domain.";
+        let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
+        assert_eq!(excerpt, text);
+    }
+
+    #[test]
+    fn test_evidence_excerpt_long_text_truncated() {
+        let analyzer = make_test_analyzer();
+        let prefix = "x".repeat(200);
+        let suffix = "y".repeat(200);
+        let text = format!("{}cloudflare.com{}", prefix, suffix);
+        let excerpt = analyzer.create_evidence_excerpt(&text, "cloudflare.com");
+        assert!(excerpt.len() <= 510, "Excerpt should be bounded");
+        assert!(excerpt.contains("cloudflare.com"));
+    }
+
+    #[test]
+    fn test_evidence_excerpt_very_long_fallback() {
+        let analyzer = make_test_analyzer();
+        let text = "a".repeat(600);
+        let excerpt = analyzer.create_evidence_excerpt(&text, "notfound.com");
+        assert!(excerpt.ends_with("..."));
+        assert!(excerpt.len() <= 504);
+    }
+
+    #[test]
+    fn test_evidence_excerpt_preserves_short_text() {
+        let analyzer = make_test_analyzer();
+        let text = "Short text with stripe.com domain";
+        let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
+        assert_eq!(excerpt, text);
+    }
 }
