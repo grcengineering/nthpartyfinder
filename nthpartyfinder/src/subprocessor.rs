@@ -3321,8 +3321,6 @@ impl SubprocessorAnalyzer {
     }
 
     /// Cache adaptive patterns for future use
-    // coverage(off) justified: requires initialized SubprocessorCache with filesystem; tested via integration in scrape_with_intelligent_analysis
-    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn cache_adaptive_patterns(&self, source_domain: &str, patterns: AdaptivePatterns) {
         let cache = self.cache.write().await;
 
