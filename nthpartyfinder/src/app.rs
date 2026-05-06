@@ -249,6 +249,194 @@ pub fn collect_unverified_orgs_with_lookup(
     unverified
 }
 
+/// Outcome of config loading decision logic.
+#[derive(Debug)]
+pub enum ConfigOutcome {
+    Ready(AppConfig),
+    CreatedNew(PathBuf),
+    Exit { message: String, code: i32 },
+}
+
+/// Process the result of AppConfig::load() and optional interactive prompt.
+/// Separates config-loading decision logic from the I/O calls themselves.
+///
+/// `prompt_result` should be `Some(...)` only when `load_result` was
+/// `Err(ConfigError::FileNotFound(_))` and the caller ran the interactive prompt.
+pub fn process_config_result(
+    load_result: Result<AppConfig, ConfigError>,
+    prompt_result: Option<Result<Option<PathBuf>, String>>,
+) -> ConfigOutcome {
+    match load_result {
+        Ok(cfg) => ConfigOutcome::Ready(cfg),
+        Err(ConfigError::FileNotFound(path)) => match prompt_result {
+            Some(Ok(Some(created_path))) => ConfigOutcome::CreatedNew(created_path),
+            Some(Ok(None)) => ConfigOutcome::Exit {
+                message: format!(
+                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
+                    path.display()
+                ),
+                code: 1,
+            },
+            Some(Err(e)) => ConfigOutcome::Exit {
+                message: format!("Failed to create configuration file: {}", e),
+                code: 1,
+            },
+            None => ConfigOutcome::Exit {
+                message: format!(
+                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
+                    path.display()
+                ),
+                code: 1,
+            },
+        },
+        Err(e) => ConfigOutcome::Exit {
+            message: format!("Configuration error: {}", e),
+            code: 1,
+        },
+    }
+}
+
+/// Extract warning messages from dependency check results.
+/// Returns the message string for each unavailable dependency.
+pub fn format_dep_check_warnings(results: &[dep_check::DepCheckResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter(|r| !r.available)
+        .filter_map(|r| r.message.clone())
+        .collect()
+}
+
+/// Build CLI argument vector for a batch-mode subprocess invocation.
+pub fn build_batch_domain_args(
+    domain: &str,
+    format: &str,
+    depth: Option<u32>,
+    dns_only: bool,
+    batch_combined: bool,
+    output_base: &Path,
+) -> Vec<String> {
+    let mut cmd_args = vec![
+        "nthpartyfinder".to_string(),
+        "-d".to_string(),
+        domain.to_string(),
+        "-f".to_string(),
+        format.to_string(),
+    ];
+    if let Some(d) = depth {
+        cmd_args.push("-r".to_string());
+        cmd_args.push(d.to_string());
+    }
+    if dns_only {
+        cmd_args.push("--dns-only".to_string());
+    }
+    if !batch_combined {
+        let domain_dir = output_base.join(domain.replace('.', "_"));
+        cmd_args.push("--output-dir".to_string());
+        cmd_args.push(domain_dir.to_string_lossy().to_string());
+    }
+    cmd_args
+}
+
+/// Resolve the final output path from a computed default and optional user
+/// override. If `user_input` (trimmed) is empty, use `computed_path`. Otherwise,
+/// treat `user_input` as a directory and join with `output_filename`.
+pub fn resolve_final_output_path(
+    computed_path: &str,
+    output_filename: &str,
+    user_input: &str,
+) -> String {
+    if user_input.is_empty() {
+        computed_path.to_string()
+    } else {
+        let custom_path = Path::new(user_input).join(output_filename);
+        custom_path.to_string_lossy().to_string()
+    }
+}
+
+/// Combined results from new + resumed analysis, deduplicated and filtered.
+#[derive(Debug)]
+pub struct AssembledResults {
+    pub results: Vec<VendorRelationship>,
+    pub raw_count: usize,
+    pub dedup_count: usize,
+    pub infra_removed: usize,
+}
+
+/// Combine new and resumed results, deduplicate, and optionally filter infra.
+pub fn assemble_and_filter_results(
+    new_results: Vec<VendorRelationship>,
+    resumed_results: Vec<VendorRelationship>,
+    include_infra: bool,
+) -> AssembledResults {
+    let mut all_results = resumed_results;
+    all_results.extend(new_results);
+    let (deduped, raw_count) = deduplicate_results(all_results);
+    let dedup_count = deduped.len();
+    let (filtered, infra_removed) = filter_infra_providers(deduped, include_infra);
+    AssembledResults {
+        results: filtered,
+        raw_count,
+        dedup_count,
+        infra_removed,
+    }
+}
+
+/// Dispatch export to the appropriate format handler.
+pub fn dispatch_export(
+    results: &[VendorRelationship],
+    format: &str,
+    output_path: &str,
+) -> Result<()> {
+    match format {
+        "json" => export::export_json(results, output_path),
+        "markdown" => export::export_markdown(results, output_path),
+        "html" => export::export_html(results, output_path),
+        _ => export::export_csv(results, output_path),
+    }
+}
+
+/// State restored from a checkpoint for resuming an analysis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoredCheckpointState {
+    pub discovered_vendors: HashMap<String, String>,
+    pub completed_domains: HashSet<String>,
+    pub results_file: Option<String>,
+    pub results_count: usize,
+    pub pending_count: usize,
+}
+
+/// Extract resumable state from a checkpoint. Returns None if the checkpoint
+/// has no completed work (fresh checkpoint).
+pub fn extract_checkpoint_state(
+    checkpoint: &crate::checkpoint::Checkpoint,
+) -> Option<RestoredCheckpointState> {
+    if checkpoint.completed_domains.is_empty() {
+        None
+    } else {
+        let results_file = if !checkpoint.results_file.is_empty() {
+            Some(checkpoint.results_file.clone())
+        } else {
+            None
+        };
+        Some(RestoredCheckpointState {
+            discovered_vendors: checkpoint.discovered_vendors.clone(),
+            completed_domains: checkpoint.completed_domains.clone(),
+            results_file,
+            results_count: checkpoint.results_count,
+            pending_count: checkpoint.pending_domains.len(),
+        })
+    }
+}
+
+/// Count unique vendor organizations in a results set.
+pub fn count_unique_vendors(results: &[VendorRelationship]) -> usize {
+    results
+        .iter()
+        .map(|r| &r.nth_party_organization)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
 // coverage(off): CLI entry point — calls Cli::parse() (reads process args via std::env::args)
 // and std::process::exit(); both are process-level operations untestable in unit tests.
 // Delegates to run_inner() which has all pure logic extracted and tested.
@@ -299,14 +487,14 @@ pub async fn run() -> Result<()> {
     }
 }
 
-// coverage(off): integration orchestrator (~1300 lines) — sequences real config loading
-// (filesystem), dependency checking (system binaries), DNS/WHOIS lookups (network), vendor
-// registry initialization (global state), NER model loading (ONNX runtime), signal handlers
-// (ctrlc), memory monitoring (sysinfo), analysis execution (network+filesystem), result sink
-// (compressed disk I/O), and interactive prompts (stdin/stdout). All pure logic extracted into
-// individually-tested functions: compute_feature_flags, build_output_filename, deduplicate_results,
+// coverage(off): integration orchestrator — sequences I/O operations (filesystem, network,
+// stdin/stdout, system binaries, signal handlers, ONNX runtime, sysinfo). All branching/decision
+// logic extracted into individually-tested phase functions: process_config_result,
+// format_dep_check_warnings, compute_feature_flags, build_output_filename, build_batch_domain_args,
+// resolve_final_output_path, resolve_checkpoint_resume, extract_checkpoint_state,
+// assemble_and_filter_results, dispatch_export, count_unique_vendors, deduplicate_results,
 // filter_infra_providers, compute_analysis_timeout, build_full_output_path,
-// resolve_checkpoint_resume, collect_unverified_orgs.
+// collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
@@ -332,30 +520,26 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     }
 
     eprintln!("  Loading configuration...");
-    let _app_config = match AppConfig::load() {
-        Ok(cfg) => cfg,
-        Err(ConfigError::FileNotFound(path)) => match AppConfig::prompt_create_config() {
-            Ok(Some(created_path)) => {
-                println!(
-                    "✅ Created default configuration file at: {}",
-                    created_path.display()
-                );
-                println!("   Edit this file to customize settings, then run nthpartyfinder again.");
-                return Ok(());
-            }
-            Ok(None) => {
-                eprintln!("❌ Configuration file not found at: {}", path.display());
-                eprintln!("   Run with --init to create a default configuration file.");
-                bail!(AppExitCode(1));
-            }
-            Err(e) => {
-                eprintln!("❌ Failed to create configuration file: {}", e);
-                bail!(AppExitCode(1));
-            }
-        },
-        Err(e) => {
-            eprintln!("❌ Configuration error: {}", e);
-            bail!(AppExitCode(1));
+    let load_result = AppConfig::load();
+    let prompt_result = match &load_result {
+        Err(ConfigError::FileNotFound(_)) => {
+            Some(AppConfig::prompt_create_config().map_err(|e| e.to_string()))
+        }
+        _ => None,
+    };
+    let _app_config = match process_config_result(load_result, prompt_result) {
+        ConfigOutcome::Ready(cfg) => cfg,
+        ConfigOutcome::CreatedNew(path) => {
+            println!(
+                "✅ Created default configuration file at: {}",
+                path.display()
+            );
+            println!("   Edit this file to customize settings, then run nthpartyfinder again.");
+            return Ok(());
+        }
+        ConfigOutcome::Exit { message, code } => {
+            eprintln!("❌ {}", message);
+            bail!(AppExitCode(code));
         }
     };
 
@@ -388,12 +572,8 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
         _app_config.discovery.subdomain_enabled,
     ) {
         Ok(results) => {
-            for result in &results {
-                if !result.available {
-                    if let Some(msg) = &result.message {
-                        eprintln!("⚠️  {}", msg);
-                    }
-                }
+            for msg in format_dep_check_warnings(&results) {
+                eprintln!("⚠️  {}", msg);
             }
         }
         Err(e) => {
@@ -635,25 +815,12 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
 
                 logger.info(&format!("Batch: starting analysis of {}", domain));
 
-                let mut cmd_args = vec![
-                    "nthpartyfinder".to_string(),
-                    "-d".to_string(),
-                    domain.clone(),
-                    "-f".to_string(),
-                    format.clone(),
-                ];
-                if let Some(d) = depth {
-                    cmd_args.push("-r".to_string());
-                    cmd_args.push(d.to_string());
-                }
-                if dns_only {
-                    cmd_args.push("--dns-only".to_string());
-                }
+                let cmd_args = build_batch_domain_args(
+                    &domain, &format, depth, dns_only, batch_combined, &output_base,
+                );
                 if !batch_combined {
                     let domain_dir = output_base.join(domain.replace('.', "_"));
                     let _ = std::fs::create_dir_all(&domain_dir);
-                    cmd_args.push("--output-dir".to_string());
-                    cmd_args.push(domain_dir.to_string_lossy().to_string());
                 }
 
                 let output = tokio::process::Command::new(std::env::current_exe().unwrap())
@@ -796,13 +963,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 );
             }
             let user_input = user_input.trim();
-
-            if user_input.is_empty() {
-                output_path_str.to_string()
-            } else {
-                let custom_path = Path::new(user_input).join(&output_filename);
-                custom_path.to_string_lossy().to_string()
-            }
+            resolve_final_output_path(&output_path_str, &output_filename, user_input)
         })
     } else {
         logger.info(&format!("Output file: {}", output_path_str));
@@ -959,25 +1120,21 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
 
     let (mut discovered_vendors, processed_domains_set, resumed_results_file) = {
         let cp = checkpoint.lock().await;
-        if !cp.completed_domains.is_empty() {
-            let results_file = if !cp.results_file.is_empty() {
-                Some(cp.results_file.clone())
-            } else {
-                None
-            };
-            logger.info(&format!(
-                "Restoring state: {} completed domains, {} pending, {} results on disk",
-                cp.completed_domains.len(),
-                cp.pending_domains.len(),
-                cp.results_count
-            ));
-            (
-                cp.discovered_vendors.clone(),
-                cp.completed_domains.clone(),
-                results_file,
-            )
-        } else {
-            (HashMap::new(), HashSet::new(), None)
+        match extract_checkpoint_state(&cp) {
+            Some(state) => {
+                logger.info(&format!(
+                    "Restoring state: {} completed domains, {} pending, {} results on disk",
+                    state.completed_domains.len(),
+                    state.pending_count,
+                    state.results_count
+                ));
+                (
+                    state.discovered_vendors,
+                    state.completed_domains,
+                    state.results_file,
+                )
+            }
+            None => (HashMap::new(), HashSet::new(), None),
         }
     };
 
@@ -1484,36 +1641,22 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
         Vec::new()
     };
 
-    let results: Vec<VendorRelationship> = {
-        let mut all_results = resumed_results;
-        all_results.extend(new_results);
-        let (deduped, raw_count) = deduplicate_results(all_results);
-        if deduped.len() < raw_count {
-            logger.info(&format!(
-                "{} raw relationships deduplicated to {} unique",
-                raw_count,
-                deduped.len()
-            ));
-        }
-        deduped
-    };
+    let assembled = assemble_and_filter_results(new_results, resumed_results, args.include_infra);
+    if assembled.dedup_count < assembled.raw_count {
+        logger.info(&format!(
+            "{} raw relationships deduplicated to {} unique",
+            assembled.raw_count, assembled.dedup_count
+        ));
+    }
+    if assembled.infra_removed > 0 {
+        logger.info(&format!(
+            "Filtered {} common infra provider entries (use --include-infra to include)",
+            assembled.infra_removed
+        ));
+    }
+    let results = assembled.results;
 
-    let results: Vec<VendorRelationship> = {
-        let (filtered, removed) = filter_infra_providers(results, args.include_infra);
-        if removed > 0 {
-            logger.info(&format!(
-                "Filtered {} common infra provider entries (use --include-infra to include)",
-                removed
-            ));
-        }
-        filtered
-    };
-
-    let unique_vendors = results
-        .iter()
-        .map(|r| &r.nth_party_organization)
-        .collect::<HashSet<_>>()
-        .len();
+    let unique_vendors = count_unique_vendors(&results);
 
     logger.record_vendor_relationships(results.len());
     logger.record_unique_vendors(unique_vendors);
@@ -1529,12 +1672,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.log_export_start(&args.output_format);
 
-    match args.output_format.as_str() {
-        "json" => export::export_json(&results, &final_output_path)?,
-        "markdown" => export::export_markdown(&results, &final_output_path)?,
-        "html" => export::export_html(&results, &final_output_path)?,
-        _ => export::export_csv(&results, &final_output_path)?,
-    }
+    dispatch_export(&results, &args.output_format, &final_output_path)?;
 
     logger.log_export_success(&final_output_path);
 
@@ -1597,10 +1735,9 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     Ok(())
 }
 
-// coverage(off): batch-mode integration orchestrator — spawns concurrent domain analyses via
-// analyze_single_domain_for_batch, each performing real WHOIS lookups (network) and DNS analysis.
-// Reads interactive input (stdin), writes batch summaries to filesystem. Component logic tested
-// in batch module (parse_domain_file, finalize_batch_summary, export_batch_summary).
+// coverage(off): batch-mode I/O orchestrator — spawns concurrent domain analyses via subprocess,
+// reads stdin, writes batch summaries to filesystem. Export dispatch delegated to tested
+// dispatch_export(). Component logic tested in batch module.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_batch_analysis(
     args: &Args,
@@ -1821,14 +1958,11 @@ pub async fn run_batch_analysis(
                 .collect()
         };
 
-        match args.output_format.as_str() {
-            "json" => export::export_json(&export_relationships, &combined_path.to_string_lossy())?,
-            "markdown" => {
-                export::export_markdown(&export_relationships, &combined_path.to_string_lossy())?
-            }
-            "html" => export::export_html(&export_relationships, &combined_path.to_string_lossy())?,
-            _ => export::export_csv(&export_relationships, &combined_path.to_string_lossy())?,
-        }
+        dispatch_export(
+            &export_relationships,
+            &args.output_format,
+            &combined_path.to_string_lossy(),
+        )?;
 
         println!("Combined report: {}", combined_path.display());
     }
@@ -1858,9 +1992,8 @@ pub async fn run_batch_analysis(
     Ok(())
 }
 
-// coverage(off): per-domain integration helper — calls real whois::get_organization_with_status_and_config
-// (network), analysis::discover_nth_parties_minimal (DNS+network), and export functions (filesystem).
-// Each component is tested individually in its own module.
+// coverage(off): per-domain I/O helper — calls real WHOIS (network), DNS analysis (network), and
+// dispatch_export (tested). Each component tested individually in its own module.
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 async fn analyze_single_domain_for_batch(
@@ -1927,13 +2060,7 @@ async fn analyze_single_domain_for_batch(
         std::fs::create_dir_all(&domain_dir)?;
         let output_path = domain_dir.join(&filename);
 
-        match output_format {
-            "json" => export::export_json(&results, &output_path.to_string_lossy())?,
-            "markdown" => export::export_markdown(&results, &output_path.to_string_lossy())?,
-            "html" => export::export_html(&results, &output_path.to_string_lossy())?,
-            _ => export::export_csv(&results, &output_path.to_string_lossy())?,
-        }
-
+        dispatch_export(&results, output_format, &output_path.to_string_lossy())?;
         Some(output_path.to_string_lossy().to_string())
     } else {
         None
@@ -1947,6 +2074,22 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_CONFIG;
     use crate::vendor::RecordType;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unwrap_config_exit(outcome: ConfigOutcome) -> (String, i32) {
+        match outcome {
+            ConfigOutcome::Exit { message, code } => (message, code),
+            other => panic!("Expected Exit, got {:?}", other),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn unwrap_config_created(outcome: ConfigOutcome) -> PathBuf {
+        match outcome {
+            ConfigOutcome::CreatedNew(p) => p,
+            other => panic!("Expected CreatedNew, got {:?}", other),
+        }
+    }
 
     /// Helper: build a default Args with all fields zeroed/false.
     fn default_args() -> Args {
@@ -2727,5 +2870,367 @@ mod tests {
         fn assert_input_source<T: InputSource>(_: &T) {}
         let input = StdioInput;
         assert_input_source(&input);
+    }
+
+    // ── process_config_result ────────────────────────────────────────
+
+    #[test]
+    fn test_process_config_result_ok() {
+        let config: AppConfig = toml::from_str(DEFAULT_CONFIG).unwrap();
+        let result = process_config_result(Ok(config), None);
+        #[cfg_attr(coverage_nightly, coverage(off))]
+        fn is_ready(o: &ConfigOutcome) -> bool {
+            matches!(o, ConfigOutcome::Ready(_))
+        }
+        assert!(is_ready(&result));
+    }
+
+    #[test]
+    fn test_process_config_result_file_not_found_created() {
+        let path = PathBuf::from("/tmp/created.toml");
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from("/missing"))),
+            Some(Ok(Some(path.clone()))),
+        );
+        assert_eq!(unwrap_config_created(result), path);
+    }
+
+    #[test]
+    fn test_process_config_result_file_not_found_declined() {
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from("/etc/config.toml"))),
+            Some(Ok(None)),
+        );
+        let (message, code) = unwrap_config_exit(result);
+        assert_eq!(code, 1);
+        assert!(message.contains("not found"));
+        assert!(message.contains("--init"));
+    }
+
+    #[test]
+    fn test_process_config_result_file_not_found_prompt_error() {
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from("/missing"))),
+            Some(Err("permission denied".to_string())),
+        );
+        let (message, code) = unwrap_config_exit(result);
+        assert_eq!(code, 1);
+        assert!(message.contains("permission denied"));
+    }
+
+    #[test]
+    fn test_process_config_result_file_not_found_no_prompt() {
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from("/conf"))),
+            None,
+        );
+        let (message, code) = unwrap_config_exit(result);
+        assert_eq!(code, 1);
+        assert!(message.contains("not found"));
+    }
+
+    #[test]
+    fn test_process_config_result_other_error() {
+        let result = process_config_result(
+            Err(ConfigError::EmptyRequired {
+                field: "http.user_agent".to_string(),
+            }),
+            None,
+        );
+        let (message, code) = unwrap_config_exit(result);
+        assert_eq!(code, 1);
+        assert!(message.contains("Configuration error"));
+    }
+
+    // ── format_dep_check_warnings ────────────────────────────────────
+
+    #[test]
+    fn test_format_dep_check_warnings_all_available() {
+        let results = vec![
+            dep_check::DepCheckResult {
+                name: "curl",
+                available: true,
+                required: true,
+                message: None,
+            },
+            dep_check::DepCheckResult {
+                name: "subfinder",
+                available: true,
+                required: false,
+                message: None,
+            },
+        ];
+        assert!(format_dep_check_warnings(&results).is_empty());
+    }
+
+    #[test]
+    fn test_format_dep_check_warnings_some_unavailable() {
+        let results = vec![
+            dep_check::DepCheckResult {
+                name: "curl",
+                available: true,
+                required: true,
+                message: None,
+            },
+            dep_check::DepCheckResult {
+                name: "subfinder",
+                available: false,
+                required: false,
+                message: Some("subfinder not found in PATH".to_string()),
+            },
+            dep_check::DepCheckResult {
+                name: "go",
+                available: false,
+                required: false,
+                message: None,
+            },
+        ];
+        let warnings = format_dep_check_warnings(&results);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0], "subfinder not found in PATH");
+    }
+
+    #[test]
+    fn test_format_dep_check_warnings_empty() {
+        let results: Vec<dep_check::DepCheckResult> = vec![];
+        assert!(format_dep_check_warnings(&results).is_empty());
+    }
+
+    // ── build_batch_domain_args ──────────────────────────────────────
+
+    #[test]
+    fn test_build_batch_domain_args_basic() {
+        let args = build_batch_domain_args(
+            "example.com",
+            "csv",
+            None,
+            false,
+            true, // batch_combined = true → no --output-dir
+            Path::new("/tmp/output"),
+        );
+        assert_eq!(
+            args,
+            vec!["nthpartyfinder", "-d", "example.com", "-f", "csv"]
+        );
+    }
+
+    #[test]
+    fn test_build_batch_domain_args_with_depth_and_dns_only() {
+        let args = build_batch_domain_args(
+            "test.org",
+            "json",
+            Some(3),
+            true,
+            true,
+            Path::new("/out"),
+        );
+        assert_eq!(
+            args,
+            vec!["nthpartyfinder", "-d", "test.org", "-f", "json", "-r", "3", "--dns-only"]
+        );
+    }
+
+    #[test]
+    fn test_build_batch_domain_args_not_combined_adds_output_dir() {
+        let args = build_batch_domain_args(
+            "sub.example.com",
+            "html",
+            None,
+            false,
+            false, // not combined → adds --output-dir
+            Path::new("/reports"),
+        );
+        assert!(args.contains(&"--output-dir".to_string()));
+        let idx = args.iter().position(|a| a == "--output-dir").unwrap();
+        assert!(args[idx + 1].contains("sub_example_com"));
+    }
+
+    // ── resolve_final_output_path ────────────────────────────────────
+
+    #[test]
+    fn test_resolve_final_output_path_empty_uses_default() {
+        let result = resolve_final_output_path("/tmp/default.csv", "report.csv", "");
+        assert_eq!(result, "/tmp/default.csv");
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_custom_dir() {
+        let result = resolve_final_output_path(
+            "/tmp/default.csv",
+            "report.csv",
+            "/home/user/reports",
+        );
+        assert_eq!(result, "/home/user/reports/report.csv");
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_whitespace_only_uses_default() {
+        let result = resolve_final_output_path("/tmp/out.json", "out.json", "");
+        assert_eq!(result, "/tmp/out.json");
+    }
+
+    // ── assemble_and_filter_results ──────────────────────────────────
+
+    #[test]
+    fn test_assemble_and_filter_results_new_only() {
+        let new = vec![
+            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev"),
+        ];
+        let assembled = assemble_and_filter_results(new, vec![], false);
+        assert_eq!(assembled.results.len(), 1);
+        assert_eq!(assembled.raw_count, 1);
+        assert_eq!(assembled.dedup_count, 1);
+        assert_eq!(assembled.infra_removed, 0);
+    }
+
+    #[test]
+    fn test_assemble_and_filter_results_with_resumed_and_dedup() {
+        let resumed = vec![
+            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev-old"),
+        ];
+        let new = vec![
+            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev-new"),
+            make_relationship("pendo.io", "Pendo", "e.com", RecordType::DnsTxtSpf, "ev2"),
+        ];
+        let assembled = assemble_and_filter_results(new, resumed, false);
+        assert_eq!(assembled.raw_count, 3);
+        assert_eq!(assembled.dedup_count, 2);
+        assert_eq!(assembled.results.len(), 2);
+    }
+
+    #[test]
+    fn test_assemble_and_filter_results_filters_infra() {
+        let new = vec![
+            make_relationship("amazonaws.com", "AWS", "e.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev"),
+        ];
+        let assembled = assemble_and_filter_results(new, vec![], false);
+        assert_eq!(assembled.results.len(), 1);
+        assert_eq!(assembled.infra_removed, 1);
+        assert_eq!(assembled.results[0].nth_party_domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_assemble_and_filter_results_include_infra() {
+        let new = vec![
+            make_relationship("amazonaws.com", "AWS", "e.com", RecordType::DnsTxtSpf, "ev"),
+            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev"),
+        ];
+        let assembled = assemble_and_filter_results(new, vec![], true);
+        assert_eq!(assembled.results.len(), 2);
+        assert_eq!(assembled.infra_removed, 0);
+    }
+
+    // ── dispatch_export ──────────────────────────────────────────────
+
+    #[test]
+    fn test_dispatch_export_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.csv");
+        let results = vec![
+            make_relationship("s.com", "S", "e.com", RecordType::DnsTxtSpf, "ev"),
+        ];
+        dispatch_export(&results, "csv", &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_dispatch_export_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        let results = vec![
+            make_relationship("s.com", "S", "e.com", RecordType::DnsTxtSpf, "ev"),
+        ];
+        dispatch_export(&results, "json", &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("s.com"));
+    }
+
+    #[test]
+    fn test_dispatch_export_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.md");
+        dispatch_export(&[], "markdown", &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_dispatch_export_html() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.html");
+        dispatch_export(&[], "html", &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_dispatch_export_unknown_falls_to_csv() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.xml");
+        dispatch_export(&[], "xml", &path.to_string_lossy()).unwrap();
+        assert!(path.exists());
+    }
+
+    // ── extract_checkpoint_state ─────────────────────────────────────
+
+    #[test]
+    fn test_extract_checkpoint_state_fresh() {
+        let cp = Checkpoint::new("example.com".to_string(), None, Some(2), "hash".to_string());
+        let state = extract_checkpoint_state(&cp);
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn test_extract_checkpoint_state_with_progress() {
+        let mut cp = Checkpoint::new("test.com".to_string(), None, Some(1), "h".to_string());
+        cp.completed_domains.insert("a.com".to_string());
+        cp.completed_domains.insert("b.com".to_string());
+        cp.discovered_vendors
+            .insert("a.com".to_string(), "Acme".to_string());
+        cp.results_count = 5;
+        cp.results_file = "/tmp/sink.zst".to_string();
+
+        let state = extract_checkpoint_state(&cp).unwrap();
+        assert_eq!(state.completed_domains.len(), 2);
+        assert_eq!(state.discovered_vendors.get("a.com").unwrap(), "Acme");
+        assert_eq!(state.results_count, 5);
+        assert_eq!(state.results_file, Some("/tmp/sink.zst".to_string()));
+        assert_eq!(state.pending_count, 0);
+    }
+
+    #[test]
+    fn test_extract_checkpoint_state_empty_results_file() {
+        let mut cp = Checkpoint::new("x.com".to_string(), None, None, "h".to_string());
+        cp.completed_domains.insert("y.com".to_string());
+        // results_file is empty string by default
+        let state = extract_checkpoint_state(&cp).unwrap();
+        assert_eq!(state.results_file, None);
+    }
+
+    // ── count_unique_vendors ─────────────────────────────────────────
+
+    #[test]
+    fn test_count_unique_vendors_empty() {
+        assert_eq!(count_unique_vendors(&[]), 0);
+    }
+
+    #[test]
+    fn test_count_unique_vendors_with_duplicates() {
+        let results = vec![
+            make_relationship("a.com", "Acme", "e.com", RecordType::DnsTxtSpf, "ev1"),
+            make_relationship("b.com", "Acme", "e.com", RecordType::DnsTxtSpf, "ev2"),
+            make_relationship("c.com", "Beta Corp", "e.com", RecordType::DnsTxtSpf, "ev3"),
+        ];
+        assert_eq!(count_unique_vendors(&results), 2);
+    }
+
+    #[test]
+    fn test_count_unique_vendors_all_unique() {
+        let results = vec![
+            make_relationship("a.com", "Alpha", "e.com", RecordType::DnsTxtSpf, "ev1"),
+            make_relationship("b.com", "Beta", "e.com", RecordType::DnsTxtSpf, "ev2"),
+            make_relationship("c.com", "Gamma", "e.com", RecordType::DnsTxtSpf, "ev3"),
+        ];
+        assert_eq!(count_unique_vendors(&results), 3);
     }
 }
