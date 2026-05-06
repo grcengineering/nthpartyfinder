@@ -44,6 +44,142 @@ pub struct NerOrgResult {
     pub confidence: f32,
 }
 
+// ============================================================================
+// Pure logic functions — testable without ONNX runtime
+// ============================================================================
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn truncate_text(text: &str, max_len: usize) -> &str {
+    if text.len() <= max_len {
+        return text;
+    }
+    let mut end = max_len;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn build_domain_context(domain: &str, page_content: Option<&str>) -> String {
+    match page_content {
+        Some(content) => format!("Website: {}. {}", domain, content),
+        None => format!("Website: {}", domain),
+    }
+}
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn is_org_entity_type(entity_type: &str) -> bool {
+    matches!(
+        entity_type.to_lowercase().as_str(),
+        "organization" | "company" | "product" | "brand"
+    )
+}
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn select_best_org(
+    candidates: &[(String, String, f32)],
+    min_confidence: f32,
+) -> Option<NerOrgResult> {
+    let mut best: Option<NerOrgResult> = None;
+    for (entity_type, org_name, confidence) in candidates {
+        if is_org_entity_type(entity_type)
+            && *confidence >= min_confidence
+            && (best.is_none() || *confidence > best.as_ref().unwrap().confidence)
+        {
+            let trimmed = org_name.trim();
+            if !trimmed.is_empty() {
+                best = Some(NerOrgResult {
+                    organization: trimmed.to_string(),
+                    confidence: *confidence,
+                });
+            }
+        }
+    }
+    best
+}
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn chunk_text<'a>(
+    text: &'a str,
+    max_single_len: usize,
+    chunk_size: usize,
+    overlap: usize,
+) -> Vec<&'a str> {
+    if text.len() <= max_single_len {
+        return vec![text];
+    }
+    let mut result = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let end = std::cmp::min(start + chunk_size, text.len());
+        let mut safe_end = end;
+        while safe_end > start && !text.is_char_boundary(safe_end) {
+            safe_end -= 1;
+        }
+        let actual_end = if safe_end < text.len() {
+            text[start..safe_end]
+                .rfind(char::is_whitespace)
+                .map(|pos| start + pos + 1)
+                .unwrap_or(safe_end)
+        } else {
+            safe_end
+        };
+        let mut final_end = actual_end;
+        while final_end > start && !text.is_char_boundary(final_end) {
+            final_end -= 1;
+        }
+        if final_end <= start {
+            start = safe_end;
+            continue;
+        }
+        result.push(&text[start..final_end]);
+        let overlap_start = if final_end > start + overlap {
+            final_end - overlap
+        } else {
+            final_end
+        };
+        let mut safe_overlap = overlap_start;
+        while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
+            safe_overlap -= 1;
+        }
+        if safe_overlap <= start {
+            start = final_end;
+        } else {
+            start = safe_overlap;
+        }
+    }
+    result
+}
+
+#[cfg(any(feature = "embedded-ner", test))]
+fn dedup_filter_sort_orgs(orgs: Vec<(String, f32)>, min_name_len: usize) -> Vec<NerOrgResult> {
+    let mut map: std::collections::HashMap<String, NerOrgResult> =
+        std::collections::HashMap::new();
+    for (name, confidence) in orgs {
+        if name.len() >= min_name_len {
+            let key = name.to_lowercase();
+            let existing = map.get(&key);
+            if existing.is_none() || existing.unwrap().confidence < confidence {
+                map.insert(
+                    key,
+                    NerOrgResult {
+                        organization: name,
+                        confidence,
+                    },
+                );
+            }
+        }
+    }
+    let mut results: Vec<NerOrgResult> = map.into_values().collect();
+    results.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results
+}
+
 /// Global NER extractor instance
 #[cfg(feature = "embedded-ner")]
 static NER_EXTRACTOR: OnceLock<NerOrganizationExtractor> = OnceLock::new();
@@ -226,6 +362,31 @@ impl NerOrganizationExtractor {
         .map_err(|e| anyhow!("Failed to initialize GLiNER model: {}", e))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_inference(
+        &self,
+        text: &str,
+        entity_types: &[&str],
+    ) -> Result<Vec<(String, String, f32)>> {
+        let input = TextInput::from_str(&[text], entity_types)
+            .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+        let output = self
+            .model
+            .inference(input)
+            .map_err(|e| anyhow!("NER inference failed: {}", e))?;
+        let mut candidates = Vec::new();
+        for spans in &output.spans {
+            for span in spans {
+                candidates.push((
+                    span.class().to_lowercase(),
+                    span.text().to_string(),
+                    span.probability(),
+                ));
+            }
+        }
+        Ok(candidates)
+    }
+
     /// Write bytes to file if it doesn't already exist
     fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         if !path.exists() {
@@ -237,73 +398,18 @@ impl NerOrganizationExtractor {
     }
 
     /// Extract organization name from text content
-    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: third-party behavior + LLVM artifact — GLiNER never returns "brand" entity type; closing brace is instrumentation artifact
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_organization(&self, text: &str) -> Result<Option<NerOrgResult>> {
-        // Truncate text if too long to avoid performance issues
-        // Use floor_char_boundary to avoid panicking on multi-byte UTF-8 characters
-        let text = if text.len() > 4000 {
-            let mut end = 4000;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            &text[..end]
-        } else {
-            text
-        };
-
-        // Create input for organization entity extraction
-        // Include "product" and "brand" to catch SaaS sites that use company names as products
-        let input = TextInput::from_str(&[text], &["organization", "company", "product", "brand"])
-            .map_err(
-                #[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible third-party closure — TextInput::from_str always succeeds with valid string slices
-                |e| anyhow!("Failed to create TextInput: {}", e),
-            )?;
-
-        // Run inference
-        let output = self
-            .model
-            .inference(input)
-            .map_err(
-                #[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible third-party closure — inference always succeeds with valid model and input
-                |e| anyhow!("NER inference failed: {}", e),
-            )?;
-
-        // Find the highest confidence organization entity
-        let mut best_match: Option<NerOrgResult> = None;
-
-        for spans in &output.spans {
-            for span in spans {
-                let entity_type = span.class().to_lowercase();
-                // Accept organization, company, product, and brand entity types
-                if entity_type == "organization"
-                    || entity_type == "company"
-                    || entity_type == "product"
-                    || entity_type == "brand"
-                {
-                    let confidence = span.probability();
-                    if confidence >= self.min_confidence
-                        && (best_match.is_none()
-                            || confidence > best_match.as_ref().unwrap().confidence)
-                    {
-                        let org_name = span.text().trim().to_string();
-                        if !org_name.is_empty() {
-                            best_match = Some(NerOrgResult {
-                                organization: org_name,
-                                confidence,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
+        let text = truncate_text(text, 4000);
+        let candidates =
+            self.run_inference(text, &["organization", "company", "product", "brand"])?;
+        let best_match = select_best_org(&candidates, self.min_confidence);
         if let Some(ref result) = best_match {
             debug!(
                 "NER extracted organization: {} (confidence: {:.2})",
                 result.organization, result.confidence
             );
         }
-
         Ok(best_match)
     }
 
@@ -318,17 +424,15 @@ impl NerOrganizationExtractor {
             domain
         );
 
-        // Build context text for NER
-        let text = if let Some(content) = page_content {
+        if let Some(content) = page_content {
             debug!(
                 "NER: Using page content ({} chars) for extraction",
                 content.len()
             );
-            format!("Website: {}. {}", domain, content)
         } else {
             debug!("NER: No page content available, using domain only");
-            format!("Website: {}", domain)
-        };
+        }
+        let text = build_domain_context(domain, page_content);
 
         let result = self.extract_organization(&text);
 
@@ -356,109 +460,24 @@ impl NerOrganizationExtractor {
         min_confidence: Option<f32>,
     ) -> Result<Vec<NerOrgResult>> {
         let threshold = min_confidence.unwrap_or(self.min_confidence);
+        let chunks = chunk_text(text, 4000, 3000, 500);
 
-        // GLiNER truncates at ~4000 chars, so chunk long text
-        // All byte offsets must land on valid UTF-8 char boundaries to avoid panics
-        // on multi-byte characters (e.g., right single quotation mark U+2019 = 3 bytes)
-        let chunks: Vec<&str> = if text.len() <= 4000 {
-            vec![text]
-        } else {
-            // Split into ~3000 char chunks with overlap for boundary entities
-            let mut result = Vec::new();
-            let mut start = 0;
-            while start < text.len() {
-                let end = std::cmp::min(start + 3000, text.len());
-                // Ensure 'end' falls on a char boundary
-                let mut safe_end = end;
-                while safe_end > start && !text.is_char_boundary(safe_end) {
-                    safe_end -= 1;
-                }
-                // Try to break at a whitespace boundary within the safe range
-                let actual_end = if safe_end < text.len() {
-                    text[start..safe_end]
-                        .rfind(char::is_whitespace)
-                        .map(|pos| start + pos + 1)
-                        .unwrap_or(safe_end)
-                } else {
-                    safe_end
-                };
-                // Ensure actual_end is also on a char boundary (whitespace pos+1 could land mid-char)
-                let mut final_end = actual_end;
-                while final_end > start && !text.is_char_boundary(final_end) {
-                    final_end -= 1;
-                }
-                if final_end <= start {
-                    // Degenerate case: skip forward to next char boundary
-                    start = safe_end;
-                    continue;
-                }
-                result.push(&text[start..final_end]);
-                // 500 byte overlap — ensure overlap start is on a char boundary
-                let overlap_start = if final_end > start + 500 {
-                    final_end - 500
-                } else {
-                    final_end
-                };
-                let mut safe_overlap = overlap_start;
-                while safe_overlap > 0 && !text.is_char_boundary(safe_overlap) {
-                    safe_overlap -= 1;
-                }
-                // Ensure forward progress: char-boundary walk-back on multi-byte text
-                // (CJK, emoji) can land at or before current start, causing infinite loop.
-                if safe_overlap <= start {
-                    start = final_end;
-                } else {
-                    start = safe_overlap;
-                }
-            }
-            result
-        };
-
-        let mut all_orgs: std::collections::HashMap<String, NerOrgResult> =
-            std::collections::HashMap::new();
-
+        let mut all_candidates: Vec<(String, f32)> = Vec::new();
         for chunk in &chunks {
-            let input = TextInput::from_str(&[*chunk], &["organization", "company"])
-                .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
-
-            let output = self
-                .model
-                .inference(input)
-                .map_err(|e| anyhow!("NER inference failed: {}", e))?;
-
-            for spans in &output.spans {
-                for span in spans {
-                    let entity_type = span.class().to_lowercase();
-                    if entity_type == "organization" || entity_type == "company" {
-                        let confidence = span.probability();
-                        if confidence >= threshold {
-                            let org_name = span.text().trim().to_string();
-                            if org_name.len() >= 3 {
-                                let key = org_name.to_lowercase();
-                                let existing = all_orgs.get(&key);
-                                if existing.is_none() || existing.unwrap().confidence < confidence {
-                                    all_orgs.insert(
-                                        key,
-                                        NerOrgResult {
-                                            organization: org_name,
-                                            confidence,
-                                        },
-                                    );
-                                }
-                            }
-                        }
+            let candidates = self.run_inference(chunk, &["organization", "company"])?;
+            for (entity_type, org_name, confidence) in candidates {
+                if (entity_type == "organization" || entity_type == "company")
+                    && confidence >= threshold
+                {
+                    let trimmed = org_name.trim().to_string();
+                    if !trimmed.is_empty() {
+                        all_candidates.push((trimmed, confidence));
                     }
                 }
             }
         }
 
-        let mut results: Vec<NerOrgResult> = all_orgs.into_values().collect();
-        results.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
+        let results = dedup_filter_sort_orgs(all_candidates, 3);
         debug!(
             "NER extracted {} organizations from {} chars of text",
             results.len(),
@@ -1656,5 +1675,124 @@ mod tests {
 
         let result = extractor.extract_all_organizations(&text, Some(0.1));
         assert!(result.is_ok());
+    }
+
+    // ── Pure function tests (no ONNX runtime required) ─────────────
+
+    #[test]
+    fn test_pure_truncate_text_within_limit() {
+        assert_eq!(truncate_text("hello", 10), "hello");
+        assert_eq!(truncate_text("", 100), "");
+        assert_eq!(truncate_text("exact", 5), "exact");
+    }
+
+    #[test]
+    fn test_pure_truncate_text_at_multibyte_boundary() {
+        let text = "abc\u{2019}def";
+        assert_eq!(truncate_text(text, 4), "abc");
+        assert_eq!(truncate_text(text, 5), "abc");
+        assert_eq!(truncate_text(text, 6), "abc\u{2019}");
+        assert_eq!(truncate_text(text, 100), text);
+    }
+
+    #[test]
+    fn test_pure_build_domain_context() {
+        assert_eq!(
+            build_domain_context("example.com", Some("Page content")),
+            "Website: example.com. Page content"
+        );
+        assert_eq!(
+            build_domain_context("example.com", None),
+            "Website: example.com"
+        );
+        assert_eq!(build_domain_context("", Some("")), "Website: . ");
+    }
+
+    #[test]
+    fn test_pure_is_org_entity_type() {
+        assert!(is_org_entity_type("organization"));
+        assert!(is_org_entity_type("Organization"));
+        assert!(is_org_entity_type("ORGANIZATION"));
+        assert!(is_org_entity_type("company"));
+        assert!(is_org_entity_type("product"));
+        assert!(is_org_entity_type("brand"));
+        assert!(!is_org_entity_type("person"));
+        assert!(!is_org_entity_type("location"));
+        assert!(!is_org_entity_type(""));
+    }
+
+    #[test]
+    fn test_pure_select_best_org_picks_highest() {
+        let candidates = vec![
+            ("organization".into(), "Acme Corp".into(), 0.7),
+            ("company".into(), "Beta Inc".into(), 0.9),
+            ("person".into(), "John Doe".into(), 0.95),
+            ("organization".into(), "  ".into(), 0.99),
+        ];
+        let result = select_best_org(&candidates, 0.5);
+        assert!(result.is_some());
+        let org = result.unwrap();
+        assert_eq!(org.organization, "Beta Inc");
+        assert!((org.confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_pure_select_best_org_respects_threshold() {
+        let candidates = vec![
+            ("organization".into(), "Low Corp".into(), 0.3),
+            ("company".into(), "Med Inc".into(), 0.4),
+        ];
+        assert!(select_best_org(&candidates, 0.5).is_none());
+        assert!(select_best_org(&[], 0.5).is_none());
+    }
+
+    #[test]
+    fn test_pure_chunk_text_short_returns_single() {
+        let text = "Short text";
+        let chunks = chunk_text(text, 4000, 3000, 500);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_pure_chunk_text_long_produces_multiple() {
+        let text = "word ".repeat(2000);
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(
+            chunks.len() > 1,
+            "10000-byte text should produce multiple chunks"
+        );
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_pure_chunk_text_multibyte_safe() {
+        let mut text = String::new();
+        while text.len() < 6000 {
+            text.push('\u{2019}');
+        }
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_pure_dedup_filter_sort_orgs() {
+        let orgs = vec![
+            ("Google LLC".into(), 0.9),
+            ("google llc".into(), 0.7),
+            ("Microsoft".into(), 0.8),
+            ("AB".into(), 0.95),
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].organization, "Google LLC");
+        assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
+        assert_eq!(results[1].organization, "Microsoft");
+        assert!(dedup_filter_sort_orgs(vec![], 3).is_empty());
     }
 }
