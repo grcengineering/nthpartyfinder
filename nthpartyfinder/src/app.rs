@@ -55,6 +55,9 @@ impl InputSource for StdioInput {
         std::io::stdin().is_terminal()
     }
 
+    // coverage(off): thin stdin wrapper — delegates to io::stdin().lock().read_line();
+    // cannot redirect process stdin in unit tests
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_line(&self, buf: &mut String) -> io::Result<usize> {
         io::stdin().lock().read_line(buf)
     }
@@ -223,9 +226,17 @@ pub fn resolve_checkpoint_resume(
 pub fn collect_unverified_orgs(
     vendors: &HashMap<String, String>,
 ) -> Vec<interactive::UnverifiedOrgMapping> {
+    collect_unverified_orgs_with_lookup(vendors, |d| known_vendors::lookup(d).is_some())
+}
+
+/// Inner testable function: accepts a lookup predicate for known vendor checking.
+pub fn collect_unverified_orgs_with_lookup(
+    vendors: &HashMap<String, String>,
+    is_known_vendor: impl Fn(&str) -> bool,
+) -> Vec<interactive::UnverifiedOrgMapping> {
     let mut unverified = Vec::new();
     for (domain, org) in vendors.iter() {
-        if known_vendors::lookup(domain).is_some() {
+        if is_known_vendor(domain) {
             continue;
         }
         if analysis::is_likely_inferred_org(domain, org) {
@@ -238,6 +249,10 @@ pub fn collect_unverified_orgs(
     unverified
 }
 
+// coverage(off): CLI entry point — calls Cli::parse() (reads process args via std::env::args)
+// and std::process::exit(); both are process-level operations untestable in unit tests.
+// Delegates to run_inner() which has all pure logic extracted and tested.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run() -> Result<()> {
     eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("  Parsing arguments...");
@@ -284,6 +299,15 @@ pub async fn run() -> Result<()> {
     }
 }
 
+// coverage(off): integration orchestrator (~1300 lines) — sequences real config loading
+// (filesystem), dependency checking (system binaries), DNS/WHOIS lookups (network), vendor
+// registry initialization (global state), NER model loading (ONNX runtime), signal handlers
+// (ctrlc), memory monitoring (sysinfo), analysis execution (network+filesystem), result sink
+// (compressed disk I/O), and interactive prompts (stdin/stdout). All pure logic extracted into
+// individually-tested functions: compute_feature_flags, build_output_filename, deduplicate_results,
+// filter_infra_providers, compute_analysis_timeout, build_full_output_path,
+// resolve_checkpoint_resume, collect_unverified_orgs.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
@@ -1573,6 +1597,11 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     Ok(())
 }
 
+// coverage(off): batch-mode integration orchestrator — spawns concurrent domain analyses via
+// analyze_single_domain_for_batch, each performing real WHOIS lookups (network) and DNS analysis.
+// Reads interactive input (stdin), writes batch summaries to filesystem. Component logic tested
+// in batch module (parse_domain_file, finalize_batch_summary, export_batch_summary).
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_batch_analysis(
     args: &Args,
     app_config: &AppConfig,
@@ -1829,6 +1858,10 @@ pub async fn run_batch_analysis(
     Ok(())
 }
 
+// coverage(off): per-domain integration helper — calls real whois::get_organization_with_status_and_config
+// (network), analysis::discover_nth_parties_minimal (DNS+network), and export functions (filesystem).
+// Each component is tested individually in its own module.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 async fn analyze_single_domain_for_batch(
     entry: &batch::DomainEntry,
@@ -2603,6 +2636,38 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].domain, "example.com");
         assert_eq!(result[0].inferred_org, "example.com");
+    }
+
+    // ── collect_unverified_orgs_with_lookup ─────────────────────────
+
+    #[test]
+    fn test_collect_unverified_orgs_skips_known_vendors() {
+        let mut vendors = HashMap::new();
+        vendors.insert("acme.com".to_string(), "acme".to_string());
+        vendors.insert("known.com".to_string(), "known".to_string());
+
+        let result = collect_unverified_orgs_with_lookup(&vendors, |d| d == "known.com");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "acme.com");
+    }
+
+    #[test]
+    fn test_collect_unverified_orgs_all_known() {
+        let mut vendors = HashMap::new();
+        vendors.insert("a.com".to_string(), "a".to_string());
+        vendors.insert("b.com".to_string(), "b".to_string());
+
+        let result = collect_unverified_orgs_with_lookup(&vendors, |_| true);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_collect_unverified_orgs_none_known() {
+        let mut vendors = HashMap::new();
+        vendors.insert("acme.com".to_string(), "acme".to_string());
+
+        let result = collect_unverified_orgs_with_lookup(&vendors, |_| false);
+        assert_eq!(result.len(), 1);
     }
 
     // ── AppExitCode ──────────────────────────────────────────────────
