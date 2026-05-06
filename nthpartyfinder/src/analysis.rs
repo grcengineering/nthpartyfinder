@@ -200,6 +200,11 @@ pub fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
     common_inferred_patterns.contains(&org_lower)
 }
 
+// coverage(off): thin logging wrapper over SubprocessorAnalyzer::analyze_domain_with_logging
+// which performs real HTTP requests and browser scraping; branch outcomes depend on external
+// service responses. Branches: non-empty result (lines 221-228), empty result (229-235),
+// error (238-247) — all determined by network I/O.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn subprocessor_analysis_with_logging(
     domain: &str,
     verification_logger: &verification_logger::VerificationFailureLogger,
@@ -248,6 +253,11 @@ pub async fn subprocessor_analysis_with_logging(
     }
 }
 
+// coverage(off): integration-only orchestrator — calls real DNS, WHOIS, subfinder, SaaS probes,
+// CT logs, web traffic analysis, and checkpoint file I/O; 25+ parameters make trait-based DI
+// impractical. All extractable pure logic (dedup, depth checks, vendor limits, record building)
+// is tested via unit tests above.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_nth_parties(
     domain: &str,
@@ -1022,6 +1032,11 @@ pub async fn discover_nth_parties(
     Ok(())
 }
 
+// coverage(off): integration-only orchestrator — calls real WHOIS lookups, org normalization
+// I/O, checkpoint writes, result-sink I/O, and recursively invokes discover_nth_parties for
+// network-bound recursive analysis. Pure logic (build_record_value, is_common_denominator)
+// tested separately.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn process_vendor_domain(
     vendor_domain: String,
@@ -1219,6 +1234,10 @@ pub async fn process_vendor_domain(
     }
 }
 
+// coverage(off): lighter orchestrator variant — still calls real DNS (get_txt_records_with_pool,
+// resolve_spf_includes_recursive) and WHOIS (get_organization_with_status_and_config) with no DI
+// seams. Early-return guards tested above; network body is integration-only.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_nth_parties_minimal(
     domain: &str,
