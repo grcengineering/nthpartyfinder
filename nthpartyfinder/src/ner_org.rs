@@ -198,28 +198,7 @@ impl NerOrganizationExtractor {
 
         debug!("Model files written to {:?}", temp_dir);
 
-        // Initialize GLiNER model
-        // GLiNER models can be SpanMode or TokenMode - using SpanMode for small model
-        let model = GLiNER::<SpanMode>::new(
-            Parameters::default(),
-            RuntimeParameters::default(),
-            tokenizer_path
-                .to_str()
-                .ok_or_else(
-                    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible third-party closure — temp path is always valid UTF-8
-                    || anyhow!("Invalid tokenizer path"),
-                )?,
-            model_path
-                .to_str()
-                .ok_or_else(
-                    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible third-party closure — temp path is always valid UTF-8
-                    || anyhow!("Invalid model path"),
-                )?,
-        )
-        .map_err(
-            #[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible third-party closure — GLiNER::new always succeeds with valid model files
-            |e| anyhow!("Failed to initialize GLiNER model: {}", e),
-        )?;
+        let model = Self::create_model(&tokenizer_path, &model_path)?;
 
         info!("NER model initialized successfully");
 
@@ -227,6 +206,24 @@ impl NerOrganizationExtractor {
             model,
             min_confidence,
         })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: third-party model init — infallible error paths on temp-dir UTF-8 and valid embedded model
+    fn create_model(
+        tokenizer_path: &std::path::Path,
+        model_path: &std::path::Path,
+    ) -> Result<GLiNER<SpanMode>> {
+        GLiNER::<SpanMode>::new(
+            Parameters::default(),
+            RuntimeParameters::default(),
+            tokenizer_path
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid tokenizer path"))?,
+            model_path
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid model path"))?,
+        )
+        .map_err(|e| anyhow!("Failed to initialize GLiNER model: {}", e))
     }
 
     /// Write bytes to file if it doesn't already exist
@@ -1338,9 +1335,7 @@ mod tests {
         assert!(!set_val.is_empty());
 
         let _ = std::fs::remove_file(&fake_lib);
-        if let Some(val) = saved {
-            std::env::set_var("ORT_DYLIB_PATH", val);
-        }
+        if let Some(val) = saved { std::env::set_var("ORT_DYLIB_PATH", val); }
     }
 
     #[cfg(feature = "embedded-ner")]
