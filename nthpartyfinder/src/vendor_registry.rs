@@ -93,6 +93,19 @@ pub struct VendorRegistry {
     config_dir: PathBuf,
 }
 
+/// Filter directory entries to valid vendor JSON file paths.
+fn filter_vendor_path(entry: std::io::Result<std::fs::DirEntry>) -> Option<PathBuf> {
+    let entry = entry.ok()?;
+    let path = entry.path();
+    if path.extension().is_none_or(|e| e != "json") {
+        return None;
+    }
+    if path.file_name().is_some_and(|n| n == "_schema.json") {
+        return None;
+    }
+    Some(path)
+}
+
 impl VendorRegistry {
     pub fn new() -> Self {
         Self {
@@ -116,17 +129,7 @@ impl VendorRegistry {
         // Collect all JSON file paths first
         let json_files: Vec<PathBuf> = std::fs::read_dir(&vendors_dir)
             .with_context(|| format!("Failed to read: {:?}", vendors_dir))?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().is_none_or(|e| e != "json") {
-                    return None;
-                }
-                if path.file_name().is_some_and(|n| n == "_schema.json") {
-                    return None;
-                }
-                Some(path)
-            })
+            .filter_map(filter_vendor_path)
             .collect();
 
         // Read and parse all files in parallel using rayon
@@ -296,20 +299,24 @@ use std::sync::OnceLock;
 /// Global vendor registry instance
 static VENDOR_REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
 
-/// Find the config directory by checking multiple locations
-fn find_config_dir() -> Option<PathBuf> {
+/// Testable core of config-directory search. Accepts pre-resolved inputs
+/// so tests can exercise every branch without filesystem or env-var side effects.
+fn find_config_dir_inner(
+    cwd_config: &Path,
+    exe_path: Option<PathBuf>,
+    env_config: Option<String>,
+) -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
-    let cwd_config = PathBuf::from("./config");
     if cwd_config.exists() && cwd_config.is_dir() && cwd_config.join("vendors").exists() {
         debug!(
             "Found config directory at: {:?}",
-            cwd_config.canonicalize().unwrap_or(cwd_config.clone())
+            cwd_config.canonicalize().unwrap_or(cwd_config.to_path_buf())
         );
-        return Some(cwd_config);
+        return Some(cwd_config.to_path_buf());
     }
 
     // Priority 2: Relative to executable directory
-    if let Ok(exe_path) = std::env::current_exe() {
+    if let Some(exe_path) = exe_path {
         if let Some(exe_dir) = exe_path.parent() {
             let exe_config = exe_dir.join("config");
             if exe_config.exists() && exe_config.join("vendors").exists() {
@@ -335,7 +342,7 @@ fn find_config_dir() -> Option<PathBuf> {
     }
 
     // Priority 3: Env var
-    if let Ok(env_config) = std::env::var("NTHPARTYFINDER_CONFIG_DIR") {
+    if let Some(env_config) = env_config {
         let env_path = PathBuf::from(&env_config);
         if env_path.exists() && env_path.join("vendors").exists() {
             return Some(env_path);
@@ -345,7 +352,19 @@ fn find_config_dir() -> Option<PathBuf> {
     None
 }
 
-/// Initialize the global vendor registry
+// coverage(off): thin wrapper gathering real env/filesystem inputs — all logic tested via find_config_dir_inner
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn find_config_dir() -> Option<PathBuf> {
+    find_config_dir_inner(
+        &PathBuf::from("./config"),
+        std::env::current_exe().ok(),
+        std::env::var("NTHPARTYFINDER_CONFIG_DIR").ok(),
+    )
+}
+
+// coverage(off): global OnceLock initializer — can only run once per process; all logic
+// (load_from_directory, find_config_dir_inner) is tested independently
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init() -> Result<()> {
     let config_dir = find_config_dir();
 
@@ -1264,85 +1283,333 @@ mod tests {
 
     #[test]
     fn test_global_get_returns_option() {
-        // get() returns Some only if init() was called in this process.
-        // In test processes where init() hasn't been called, it returns None.
-        // Either way, it should not panic.
         let _result = get();
     }
 
     #[test]
-    fn test_global_lookup_organization_returns_none_without_init() {
-        // Without a global registry, lookup_organization delegates to get() which may be None
+    fn test_global_lookup_organization_returns_none_for_unknown() {
+        // Domain never registered, so None regardless of init state
         let result = lookup_organization("nonexistent.example.com");
-        // If the global is uninitialized, result is None; if initialized, it depends on the domain
-        // Either way, this should not panic
-        if get().is_none() {
-            assert_eq!(result, None);
-        }
+        assert_eq!(result, None);
     }
 
     #[test]
-    fn test_global_is_known_domain_returns_false_without_init() {
+    fn test_global_is_known_domain_returns_false_for_unknown() {
         let result = is_known_domain("nonexistent.example.com");
-        if get().is_none() {
-            assert!(!result);
-        }
+        assert!(!result);
     }
 
     #[test]
-    fn test_global_get_vendor_by_domain_returns_none_without_init() {
+    fn test_global_get_vendor_by_domain_returns_none_for_unknown() {
         let result = get_vendor_by_domain("nonexistent.example.com");
-        if get().is_none() {
-            assert!(result.is_none());
-        }
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_global_find_vendor_by_verification_returns_none_without_init() {
+    fn test_global_find_vendor_by_verification_returns_none_for_unknown() {
         let result = find_vendor_by_verification("nonexistent-pattern-xyz");
-        if get().is_none() {
-            assert!(result.is_none());
-        }
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_global_get_all_saas_tenants_returns_empty_without_init() {
-        let result = get_all_saas_tenants();
-        if get().is_none() {
-            assert!(result.is_empty());
-        }
+    fn test_global_get_all_saas_tenants_does_not_panic() {
+        let _result = get_all_saas_tenants();
     }
 
+    // ---- find_config_dir_inner ----
+
     #[test]
-    fn test_find_config_dir_with_env_var() {
+    fn find_config_dir_inner_cwd_config_found() {
         let dir = tempdir().unwrap();
-        let vendors_dir = dir.path().join("vendors");
-        fs::create_dir_all(&vendors_dir).unwrap();
+        let cwd_config = dir.path().join("config");
+        fs::create_dir_all(cwd_config.join("vendors")).unwrap();
 
-        std::env::set_var("NTHPARTYFINDER_CONFIG_DIR", dir.path().to_str().unwrap());
-        let result = find_config_dir();
-        std::env::remove_var("NTHPARTYFINDER_CONFIG_DIR");
-
-        // If CWD or exe-relative config dirs don't exist, env var should win
-        // The result depends on whether ./config/vendors exists in CWD
-        // but the env var path should be valid
-        assert!(dir.path().join("vendors").exists());
-        if let Some(found) = result {
-            assert!(found.join("vendors").exists());
-        }
+        let result = find_config_dir_inner(&cwd_config, None, None);
+        assert_eq!(result, Some(cwd_config));
     }
 
     #[test]
-    fn test_find_config_dir_nonexistent_env_var() {
-        std::env::set_var("NTHPARTYFINDER_CONFIG_DIR", "/nonexistent/path/for/test");
-        let result = find_config_dir();
-        std::env::remove_var("NTHPARTYFINDER_CONFIG_DIR");
-        // The nonexistent path should NOT be returned
-        if let Some(found) = result {
-            assert_ne!(
-                found,
-                std::path::PathBuf::from("/nonexistent/path/for/test")
-            );
-        }
+    fn find_config_dir_inner_cwd_no_vendors_subdir() {
+        let dir = tempdir().unwrap();
+        let cwd_config = dir.path().join("config");
+        fs::create_dir_all(&cwd_config).unwrap();
+        // config/ exists but has no vendors/ subdirectory
+
+        let result = find_config_dir_inner(&cwd_config, None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_cwd_is_file_not_dir() {
+        let dir = tempdir().unwrap();
+        let cwd_config = dir.path().join("config");
+        fs::write(&cwd_config, "not a directory").unwrap();
+
+        let result = find_config_dir_inner(&cwd_config, None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_dir_config() {
+        let dir = tempdir().unwrap();
+        // Simulate exe at dir/bin/exe — config should be dir/bin/config/vendors
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(bin_dir.join("config").join("vendors")).unwrap();
+        let exe_path = bin_dir.join("myexe");
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(exe_path),
+            None,
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().join("vendors").exists());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_parent_config() {
+        let dir = tempdir().unwrap();
+        // exe at dir/target/debug/exe — config at dir/target/config/vendors
+        let debug_dir = dir.path().join("target").join("debug");
+        fs::create_dir_all(&debug_dir).unwrap();
+        let target_dir = dir.path().join("target");
+        fs::create_dir_all(target_dir.join("config").join("vendors")).unwrap();
+        let exe_path = debug_dir.join("myexe");
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(exe_path),
+            None,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_grandparent_config() {
+        let dir = tempdir().unwrap();
+        // exe at dir/a/b/c/exe — config at dir/a/config/vendors
+        let c_dir = dir.path().join("a").join("b").join("c");
+        fs::create_dir_all(&c_dir).unwrap();
+        fs::create_dir_all(dir.path().join("a").join("config").join("vendors")).unwrap();
+        let exe_path = c_dir.join("myexe");
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(exe_path),
+            None,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_no_config_anywhere() {
+        let dir = tempdir().unwrap();
+        let exe_path = dir.path().join("myexe");
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(exe_path),
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_env_var_found() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendors")).unwrap();
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            None,
+            Some(dir.path().to_str().unwrap().to_string()),
+        );
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), dir.path());
+    }
+
+    #[test]
+    fn find_config_dir_inner_env_var_nonexistent() {
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            None,
+            Some("/nonexistent/path".to_string()),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_env_var_no_vendors() {
+        let dir = tempdir().unwrap();
+        // dir exists but has no vendors/ subdirectory
+
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            None,
+            Some(dir.path().to_str().unwrap().to_string()),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_priority_order() {
+        let cwd_dir = tempdir().unwrap();
+        let env_dir = tempdir().unwrap();
+        fs::create_dir_all(cwd_dir.path().join("vendors")).unwrap();
+        fs::create_dir_all(env_dir.path().join("vendors")).unwrap();
+
+        // CWD should win over env var
+        let result = find_config_dir_inner(
+            cwd_dir.path(),
+            None,
+            Some(env_dir.path().to_str().unwrap().to_string()),
+        );
+        assert_eq!(result, Some(cwd_dir.path().to_path_buf()));
+    }
+
+    #[test]
+    fn find_config_dir_inner_none_inputs_returns_none() {
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            None,
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_none_parent() {
+        // Edge: exe_path is "/" so parent() returns None for parent-of-root
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(PathBuf::from("/")),
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_no_grandparent() {
+        // exe at /a/exe → exe_dir=/a, parent=/, grandparent=None
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(PathBuf::from("/a/exe")),
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_dir_is_root() {
+        // exe at /myexe → exe_dir=/, exe_dir.parent()=None
+        let result = find_config_dir_inner(
+            Path::new("/nonexistent"),
+            Some(PathBuf::from("/myexe")),
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_config_dir_inner_cwd_with_debug_tracing() {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dir = tempdir().unwrap();
+        let cwd_config = dir.path().join("config");
+        fs::create_dir_all(cwd_config.join("vendors")).unwrap();
+
+        let result = find_config_dir_inner(&cwd_config, None, None);
+        assert_eq!(result, Some(cwd_config));
+    }
+
+    #[test]
+    fn find_config_dir_inner_exe_config_with_debug_tracing() {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dir = tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(bin_dir.join("config").join("vendors")).unwrap();
+        let exe_path = bin_dir.join("myexe");
+
+        let result = find_config_dir_inner(Path::new("/nonexistent"), Some(exe_path), None);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn get_all_domain_mappings_skips_orphaned_domain() {
+        let mut reg = VendorRegistry::new();
+        reg.domain_to_vendor
+            .insert("orphan.com".to_string(), "nonexistent-vendor".to_string());
+        let mappings = reg.get_all_domain_mappings();
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn filter_vendor_path_io_error() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test");
+        let result = filter_vendor_path(Err(err));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn filter_vendor_path_valid_json() {
+        let dir = tempdir().unwrap();
+        let json_path = dir.path().join("vendor.json");
+        fs::write(&json_path, "{}").unwrap();
+
+        let entry = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap();
+        let result = filter_vendor_path(entry);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn filter_vendor_path_non_json() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("readme.txt"), "text").unwrap();
+
+        let entry = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap();
+        let result = filter_vendor_path(entry);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn filter_vendor_path_schema_json() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("_schema.json"), "{}").unwrap();
+
+        let entry = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap();
+        let result = filter_vendor_path(entry);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn global_functions_with_initialized_registry() {
+        // Try to initialize with an empty registry; may fail if another test already did
+        let _ = VENDOR_REGISTRY.set(VendorRegistry::new());
+
+        // Now get() returns Some, exercising the closure bodies of global functions
+        assert!(lookup_organization("nonexistent.example.com").is_none());
+        assert!(!is_known_domain("nonexistent.example.com"));
+        assert!(get_vendor_by_domain("nonexistent.example.com").is_none());
+        assert!(find_vendor_by_verification("nonexistent").is_none());
+        let tenants = get_all_saas_tenants();
+        assert!(tenants.is_empty());
     }
 }

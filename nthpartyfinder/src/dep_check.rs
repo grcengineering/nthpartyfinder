@@ -461,7 +461,12 @@ fn download_non_interactive_error() -> Result<PathBuf, String> {
     ))
 }
 
+// coverage(off): #[cfg(not(test))] — this entire function is compiled out during tests;
+// interactive I/O (stdin prompt, curl download, tar extraction) is genuinely untestable.
+// All extractable logic (is_download_consent, find_ort_after_download, get_ort_download_info,
+// download_non_interactive_error) is tested independently.
 #[cfg(not(test))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn download_onnx_runtime_interactive_impl() -> Result<PathBuf, String> {
     let is_interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
 

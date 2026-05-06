@@ -70,6 +70,87 @@ pub struct BrowserGuard {
     _permit: BrowserPermit<'static>,
 }
 
+/// Check if running inside a container (Docker, CI, etc.)
+fn is_container_env() -> bool {
+    is_container_env_inner(
+        std::env::var("NTHPARTYFINDER_CONTAINER").is_ok(),
+        std::path::Path::new("/.dockerenv").exists(),
+    )
+}
+
+fn is_container_env_inner(env_var_set: bool, dockerenv_exists: bool) -> bool {
+    env_var_set || dockerenv_exists
+}
+
+/// Find Chrome/Chromium binary path from env var or well-known locations.
+fn find_chrome_binary() -> Option<std::path::PathBuf> {
+    find_chrome_binary_inner(
+        std::env::var("CHROME_PATH").ok(),
+        std::path::Path::new("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"),
+    )
+}
+
+fn find_chrome_binary_inner(
+    env_path: Option<String>,
+    wsl_path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    env_path
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            if wsl_path.exists() {
+                Some(wsl_path.to_path_buf())
+            } else {
+                None
+            }
+        })
+}
+
+/// Atomic counter for assigning unique debug ports to Chrome instances.
+static PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(9222);
+
+fn next_debug_port() -> u16 {
+    let port = PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if port > 9322 {
+        PORT_COUNTER.store(9222, std::sync::atomic::Ordering::Relaxed);
+    }
+    port
+}
+
+/// Build Chrome launch options from the resolved parameters.
+fn build_launch_options(
+    is_container: bool,
+    chrome_path: Option<&std::path::Path>,
+    debug_port: u16,
+) -> anyhow::Result<headless_chrome::LaunchOptions> {
+    // coverage(off): default_builder().build() always succeeds — error path unreachable
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn map_build_err(e: impl std::fmt::Display) -> anyhow::Error {
+        anyhow::anyhow!("Failed to build Chrome launch options: {}", e)
+    }
+    match (is_container, chrome_path) {
+        (true, Some(path)) => headless_chrome::LaunchOptions::default_builder()
+            .sandbox(false)
+            .path(Some(path.to_path_buf()))
+            .port(Some(debug_port))
+            .build()
+            .map_err(map_build_err),
+        (true, None) => headless_chrome::LaunchOptions::default_builder()
+            .sandbox(false)
+            .port(Some(debug_port))
+            .build()
+            .map_err(map_build_err),
+        (false, Some(path)) => headless_chrome::LaunchOptions::default_builder()
+            .path(Some(path.to_path_buf()))
+            .port(Some(debug_port))
+            .build()
+            .map_err(map_build_err),
+        (false, None) => headless_chrome::LaunchOptions::default_builder()
+            .port(Some(debug_port))
+            .build()
+            .map_err(map_build_err),
+    }
+}
+
 /// Create a headless Chrome browser instance, gated by a global semaphore.
 /// At most MAX_BROWSER_INSTANCES Chrome processes can exist simultaneously.
 /// Blocks until a permit is available.
@@ -77,67 +158,22 @@ pub struct BrowserGuard {
 /// (detected via /.dockerenv or NTHPARTYFINDER_CONTAINER env var).
 ///
 /// Returns a BrowserGuard that releases the semaphore permit when dropped.
+// coverage(off): launches real Chrome processes — all preparation logic is tested via
+// is_container_env_inner, find_chrome_binary_inner, next_debug_port, build_launch_options
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn create_browser() -> anyhow::Result<BrowserGuard> {
     let permit = BROWSER_SEMAPHORE.acquire();
+    let is_container = is_container_env();
+    let chrome_path = find_chrome_binary();
+    let debug_port = next_debug_port();
 
-    let is_container = std::env::var("NTHPARTYFINDER_CONTAINER").is_ok()
-        || std::path::Path::new("/.dockerenv").exists();
-
-    // Try to find Chrome binary: check env var, then well-known paths
-    let chrome_path: Option<std::path::PathBuf> = std::env::var("CHROME_PATH")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            // WSL: Windows Chrome installation
-            let wsl_path =
-                std::path::Path::new("/mnt/c/Program Files/Google/Chrome/Application/chrome.exe");
-            if wsl_path.exists() {
-                Some(wsl_path.to_path_buf())
-            } else {
-                None
-            }
-        });
-
-    // Assign a unique debug port per browser instance to avoid port conflicts.
-    // Uses an atomic counter starting at 9222 (Chrome's default debug port).
-    static PORT_COUNTER: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(9222);
-    let debug_port = PORT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Wrap around if we exceed reasonable range
-    if debug_port > 9322 {
-        PORT_COUNTER.store(9222, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    let browser = match (is_container, &chrome_path) {
-        (true, Some(path)) => {
-            let options = headless_chrome::LaunchOptions::default_builder()
-                .sandbox(false)
-                .path(Some(path.clone()))
-                .port(Some(debug_port))
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-            headless_chrome::Browser::new(options)
-                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
-        }
-        (true, None) => {
-            let options = headless_chrome::LaunchOptions::default_builder()
-                .sandbox(false)
-                .port(Some(debug_port))
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-            headless_chrome::Browser::new(options)
-                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
-        }
-        (false, Some(path)) => {
-            let options = headless_chrome::LaunchOptions::default_builder()
-                .path(Some(path.clone()))
-                .port(Some(debug_port))
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build Chrome launch options: {}", e))?;
-            headless_chrome::Browser::new(options)
-                .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
-        }
-        (false, None) => headless_chrome::Browser::default()
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?,
+    let browser = if is_container || chrome_path.is_some() {
+        let options = build_launch_options(is_container, chrome_path.as_deref(), debug_port)?;
+        headless_chrome::Browser::new(options)
+            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+    } else {
+        headless_chrome::Browser::default()
+            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
     };
 
     Ok(BrowserGuard {
@@ -314,5 +350,147 @@ mod tests {
     fn test_global_semaphore_exists() {
         // Verify the lazy static is accessible without panicking
         let _ = &*BROWSER_SEMAPHORE;
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // is_container_env_inner
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_container_env_inner_both_false() {
+        assert!(!is_container_env_inner(false, false));
+    }
+
+    #[test]
+    fn test_is_container_env_inner_env_var_set() {
+        assert!(is_container_env_inner(true, false));
+    }
+
+    #[test]
+    fn test_is_container_env_inner_dockerenv_exists() {
+        assert!(is_container_env_inner(false, true));
+    }
+
+    #[test]
+    fn test_is_container_env_inner_both_true() {
+        assert!(is_container_env_inner(true, true));
+    }
+
+    #[test]
+    fn test_is_container_env_returns_bool() {
+        // On a dev machine, should be false; in CI/Docker, true.
+        // Either way, should not panic.
+        let _result = is_container_env();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // find_chrome_binary_inner
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_find_chrome_binary_inner_env_path() {
+        let result = find_chrome_binary_inner(
+            Some("/usr/bin/chrome".to_string()),
+            std::path::Path::new("/nonexistent"),
+        );
+        assert_eq!(result, Some(std::path::PathBuf::from("/usr/bin/chrome")));
+    }
+
+    #[test]
+    fn test_find_chrome_binary_inner_no_env_wsl_missing() {
+        let result = find_chrome_binary_inner(
+            None,
+            std::path::Path::new("/nonexistent/wsl/chrome.exe"),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_chrome_binary_inner_no_env_wsl_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_wsl = dir.path().join("chrome.exe");
+        std::fs::write(&fake_wsl, b"fake").unwrap();
+
+        let result = find_chrome_binary_inner(None, &fake_wsl);
+        assert_eq!(result, Some(fake_wsl));
+    }
+
+    #[test]
+    fn test_find_chrome_binary_inner_env_takes_priority_over_wsl() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_wsl = dir.path().join("chrome.exe");
+        std::fs::write(&fake_wsl, b"fake").unwrap();
+
+        let result = find_chrome_binary_inner(
+            Some("/custom/chrome".to_string()),
+            &fake_wsl,
+        );
+        // env var path wins (even if WSL path exists)
+        assert_eq!(result, Some(std::path::PathBuf::from("/custom/chrome")));
+    }
+
+    #[test]
+    fn test_find_chrome_binary_returns_option() {
+        let _result = find_chrome_binary();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // next_debug_port
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_next_debug_port_increments() {
+        let p1 = next_debug_port();
+        let p2 = next_debug_port();
+        // Ports should differ (monotonic increment, ignoring wraparound)
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn test_next_debug_port_wraparound() {
+        // Force the counter to 9323 (above threshold)
+        PORT_COUNTER.store(9323, std::sync::atomic::Ordering::Relaxed);
+        let port = next_debug_port();
+        // fetch_add returns 9323, which is > 9322, so store(9222) fires
+        assert_eq!(port, 9323);
+        // Counter was reset to 9222; next call returns 9222
+        let port2 = next_debug_port();
+        assert_eq!(port2, 9222);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // build_launch_options
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_launch_options_no_container_no_path() {
+        let opts = build_launch_options(false, None, 9222);
+        assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn test_build_launch_options_container_no_path() {
+        let opts = build_launch_options(true, None, 9250);
+        assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn test_build_launch_options_no_container_with_path() {
+        let opts = build_launch_options(
+            false,
+            Some(std::path::Path::new("/usr/bin/chrome")),
+            9260,
+        );
+        assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn test_build_launch_options_container_with_path() {
+        let opts = build_launch_options(
+            true,
+            Some(std::path::Path::new("/usr/bin/chrome")),
+            9270,
+        );
+        assert!(opts.is_ok());
     }
 }
