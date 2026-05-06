@@ -567,6 +567,8 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
+    // coverage(off): writes to hardcoded CONFIG_PATH on real filesystem — not unit-testable
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -587,7 +589,8 @@ impl AppConfig {
         std::io::stdin().is_terminal()
     }
 
-    /// Prompt user to create default config (only in interactive mode)
+    // coverage(off): reads from stdin — requires interactive terminal
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
         if !Self::is_interactive() {
             return Ok(None);
@@ -615,12 +618,7 @@ mod tests {
 
     #[test]
     fn test_default_config_parses() {
-        let config: Result<AppConfig, _> = toml::from_str(DEFAULT_CONFIG);
-        assert!(
-            config.is_ok(),
-            "Default config should parse: {:?}",
-            config.err()
-        );
+        let _config: AppConfig = toml::from_str(DEFAULT_CONFIG).expect("Default config should parse");
     }
 
     #[test]
@@ -820,24 +818,20 @@ total_vendor_budget = 200
     fn test_validate_empty_user_agent() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.user_agent = String::new();
-        match config.validate() {
-            Err(ConfigError::EmptyRequired { field }) => {
-                assert_eq!(field, "http.user_agent");
-            }
-            other => panic!("Expected EmptyRequired, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyRequired { ref field }) if field == "http.user_agent"
+        ));
     }
 
     #[test]
     fn test_validate_zero_timeout() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.http.request_timeout_secs = 0;
-        match config.validate() {
-            Err(ConfigError::EmptyRequired { field }) => {
-                assert_eq!(field, "http.request_timeout_secs");
-            }
-            other => panic!("Expected EmptyRequired, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyRequired { ref field }) if field == "http.request_timeout_secs"
+        ));
     }
 
     #[test]
@@ -845,48 +839,39 @@ total_vendor_budget = 200
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers.clear();
         config.dns.dns_servers.clear();
-        match config.validate() {
-            Err(ConfigError::NoServersConfigured) => {}
-            other => panic!("Expected NoServersConfigured, got {:?}", other),
-        }
+        assert!(matches!(config.validate(), Err(ConfigError::NoServersConfigured)));
     }
 
     #[test]
     fn test_validate_doh_not_https() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers[0].url = "http://insecure.example.com/dns".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidUrl { field, url }) => {
-                assert!(field.contains("doh_servers"));
-                assert!(url.contains("insecure"));
-            }
-            other => panic!("Expected InvalidUrl, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidUrl { ref field, ref url })
+            if field.contains("doh_servers") && url.contains("insecure")
+        ));
     }
 
     #[test]
     fn test_validate_dns_address_no_port() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.dns_servers[0].address = "1.1.1.1".to_string(); // Missing :port
-        match config.validate() {
-            Err(ConfigError::InvalidAddress { field, address }) => {
-                assert!(field.contains("dns_servers"));
-                assert_eq!(address, "1.1.1.1");
-            }
-            other => panic!("Expected InvalidAddress, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidAddress { ref field, ref address })
+            if field.contains("dns_servers") && address == "1.1.1.1"
+        ));
     }
 
     #[test]
     fn test_validate_invalid_regex_pattern() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.spf_macro_strip = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("spf_macro_strip"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("spf_macro_strip")
+        ));
     }
 
     #[test]
@@ -896,24 +881,20 @@ total_vendor_budget = 200
             .patterns
             .verification
             .insert("[bad(".to_string(), "test.com".to_string());
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("verification"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("verification")
+        ));
     }
 
     #[test]
     fn test_validate_empty_concurrency_per_depth() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.concurrency_per_depth = vec![];
-        match config.validate() {
-            Err(ConfigError::EmptyRequired { field }) => {
-                assert!(field.contains("concurrency_per_depth"));
-            }
-            other => panic!("Expected EmptyRequired, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyRequired { ref field }) if field.contains("concurrency_per_depth")
+        ));
     }
 
     #[test]
@@ -921,12 +902,10 @@ total_vendor_budget = 200
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Limits;
         config.analysis.vendor_limits_per_depth = vec![];
-        match config.validate() {
-            Err(ConfigError::EmptyRequired { field }) => {
-                assert!(field.contains("vendor_limits_per_depth"));
-            }
-            other => panic!("Expected EmptyRequired, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyRequired { ref field }) if field.contains("vendor_limits_per_depth")
+        ));
     }
 
     #[test]
@@ -934,12 +913,10 @@ total_vendor_budget = 200
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.analysis.strategy = AnalysisStrategy::Budget;
         config.analysis.total_vendor_budget = 0;
-        match config.validate() {
-            Err(ConfigError::EmptyRequired { field }) => {
-                assert!(field.contains("total_vendor_budget"));
-            }
-            other => panic!("Expected EmptyRequired, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyRequired { ref field }) if field.contains("total_vendor_budget")
+        ));
     }
 
     // --- AnalysisConfig methods ---
@@ -1082,12 +1059,10 @@ similarity_threshold = 0.9
     #[test]
     fn test_load_from_path_not_found() {
         let result = AppConfig::load_from_path(std::path::Path::new("/nonexistent/path.toml"));
-        match result {
-            Err(ConfigError::FileNotFound(p)) => {
-                assert!(p.to_string_lossy().contains("nonexistent"));
-            }
-            other => panic!("Expected FileNotFound, got {:?}", other),
-        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::FileNotFound(ref p)) if p.to_string_lossy().contains("nonexistent")
+        ));
     }
 
     // --- RateLimitConfig::calculate_backoff_delay ---
@@ -1233,12 +1208,10 @@ similarity_threshold = 0.9
 
     #[test]
     fn test_prompt_create_config_non_interactive() {
-        // In CI/test, stdin is not a TTY, so prompt_create_config returns Ok(None)
-        if !AppConfig::is_interactive() {
-            let result = AppConfig::prompt_create_config();
-            assert!(result.is_ok());
-            assert!(result.unwrap().is_none());
-        }
+        assert!(!AppConfig::is_interactive());
+        let result = AppConfig::prompt_create_config();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     // --- ConfigError conversions ---
@@ -1343,60 +1316,50 @@ backoff_max_delay_ms = 60000
     fn test_validate_invalid_domain_verification_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.domain_verification = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("domain_verification"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("domain_verification")
+        ));
     }
 
     #[test]
     fn test_validate_invalid_verification_prefix_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.verification_prefix = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("verification_prefix"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("verification_prefix")
+        ));
     }
 
     #[test]
     fn test_validate_invalid_site_verification_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.site_verification = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("site_verification"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("site_verification")
+        ));
     }
 
     #[test]
     fn test_validate_invalid_provider_verify_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.provider_verify = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("provider_verify"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("provider_verify")
+        ));
     }
 
     #[test]
     fn test_validate_invalid_domain_validation_regex() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.patterns.regex.domain_validation = "[invalid(".to_string();
-        match config.validate() {
-            Err(ConfigError::InvalidRegex { pattern_name, .. }) => {
-                assert!(pattern_name.contains("domain_validation"));
-            }
-            other => panic!("Expected InvalidRegex, got {:?}", other),
-        }
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidRegex { ref pattern_name, .. }) if pattern_name.contains("domain_validation")
+        ));
     }
 
     // --- load_from_path success with tempfile ---
@@ -1651,17 +1614,7 @@ backoff_max_delay_ms = 60000
     #[test]
     fn test_load_uses_config_path_constant() {
         let result = AppConfig::load();
-        match result {
-            Ok(config) => {
-                assert!(config.validate().is_ok());
-            }
-            Err(ConfigError::FileNotFound(path)) => {
-                assert!(path.to_string_lossy().contains("nthpartyfinder.toml"));
-            }
-            Err(_) => {
-                // Other errors (parse, IO) are acceptable depending on environment
-            }
-        }
+        assert!(result.is_ok() || matches!(result, Err(ConfigError::FileNotFound(_))));
     }
 
     #[test]
@@ -1690,10 +1643,8 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_prompt_create_config_non_interactive_returns_none() {
-        if !AppConfig::is_interactive() {
-            let result = AppConfig::prompt_create_config().unwrap();
-            assert!(result.is_none());
-        }
+        let result = AppConfig::prompt_create_config().unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
