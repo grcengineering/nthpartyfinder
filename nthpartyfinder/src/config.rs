@@ -1658,6 +1658,57 @@ backoff_max_delay_ms = 60000
     }
 
     #[test]
+    fn test_config_error_debug_format() {
+        let err = ConfigError::FileNotFound(std::path::PathBuf::from("/test"));
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("FileNotFound"));
+
+        let err = ConfigError::NoServersConfigured;
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("NoServersConfigured"));
+    }
+
+    #[test]
+    fn test_validate_multiple_doh_servers_second_invalid() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.dns.doh_servers.push(DohServerConfig {
+            name: "Bad DoH".to_string(),
+            url: "http://not-https.example.com/dns".to_string(),
+            timeout_secs: 3,
+        });
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidUrl { ref field, .. }) if field.contains("[1]")));
+    }
+
+    #[test]
+    fn test_validate_multiple_dns_servers_second_invalid() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.dns.dns_servers.push(DnsServerConfig {
+            name: "Bad DNS".to_string(),
+            address: "1.1.1.1".to_string(),
+            timeout_secs: 2,
+        });
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidAddress { ref field, .. }) if field.contains("[1]")));
+    }
+
+    #[test]
+    fn test_get_vendor_limit_depth_beyond_array() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.strategy = AnalysisStrategy::Limits;
+        let result = config.analysis.get_vendor_limit_for_depth(100);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_get_concurrency_for_depth_empty_array() {
+        let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
+        config.analysis.concurrency_per_depth = vec![];
+        assert_eq!(config.analysis.get_concurrency_for_depth(0), 50);
+        assert_eq!(config.analysis.get_concurrency_for_depth(1), 5);
+    }
+
+    #[test]
     fn test_discovery_config_default_impl_matches_functions() {
         let config = DiscoveryConfig::default();
         assert_eq!(config.subprocessor_enabled, default_subprocessor_enabled());

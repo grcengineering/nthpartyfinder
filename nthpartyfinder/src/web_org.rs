@@ -1994,4 +1994,148 @@ mod tests {
             fetch_page_with_headless("this-domain-definitely-does-not-exist-xyz123.invalid");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_extract_from_title_colon_separator() {
+        let html = r#"<html><head><title>Acme Corp: Product Page</title></head><body></body></html>"#;
+        let result = extract_organization_from_html(html, "acme.com").unwrap();
+        assert!(result.is_some());
+        let org = result.unwrap();
+        assert_eq!(org.organization, "Acme Corp");
+        assert_eq!(org.source, WebOrgSource::TitleTag);
+    }
+
+    #[test]
+    fn test_extract_from_title_dash_separator() {
+        let html =
+            r#"<html><head><title>Product Name - Widget Corp</title></head><body></body></html>"#;
+        let result = extract_organization_from_html(html, "widget.com").unwrap();
+        assert!(result.is_some());
+        let org = result.unwrap();
+        assert_eq!(org.organization, "Widget Corp");
+        assert_eq!(org.source, WebOrgSource::TitleTag);
+    }
+
+    #[test]
+    fn test_extract_from_title_short_standalone() {
+        let html = r#"<html><head><title>Anthropic</title></head><body></body></html>"#;
+        let result = extract_organization_from_html(html, "anthropic.com").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Anthropic");
+    }
+
+    #[test]
+    fn test_extract_from_title_too_short() {
+        let html = r#"<html><head><title>AB</title></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_title(&doc, "ab.com");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_title_empty() {
+        let html = r#"<html><head><title></title></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_title(&doc, "test.com");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_copyright_in_body_no_footer() {
+        let html = r#"<html><body>© 2024 Bodytext Corp. All rights reserved.</body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Bodytext Corp.");
+    }
+
+    #[test]
+    fn test_extract_from_copyright_copyright_word() {
+        let html =
+            r#"<html><body><footer>Copyright © 2024 Legal Corp. All rights reserved.</footer></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Legal Corp.");
+    }
+
+    #[test]
+    fn test_get_meta_property_found() {
+        let html = r#"<html><head><meta property="og:site_name" content="Found"></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = get_meta_property(&doc, "og:site_name");
+        assert_eq!(result, Some("Found".to_string()));
+    }
+
+    #[test]
+    fn test_get_meta_property_not_found() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = get_meta_property(&doc, "og:site_name");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_meta_name_found() {
+        let html = r#"<html><head><meta name="author" content="Auth Corp"></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = get_meta_name(&doc, "author");
+        assert_eq!(result, Some("Auth Corp".to_string()));
+    }
+
+    #[test]
+    fn test_get_meta_name_not_found() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = get_meta_name(&doc, "author");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_schema_org_no_scripts() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_schema_org(&doc);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_schema_org_invalid_json() {
+        let html = r#"<html><head><script type="application/ld+json">not json</script></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_schema_org(&doc);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_copyright_no_match() {
+        let html = r#"<html><body><footer>No copyright here</footer></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_copyright(&doc, html);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_opengraph_no_tags() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_opengraph(&doc);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_from_meta_tags_none() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_meta_tags(&doc);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_no_title_tag() {
+        let html = r#"<html><head></head><body></body></html>"#;
+        let doc = Html::parse_document(html);
+        let result = extract_from_title(&doc, "test.com");
+        assert!(result.is_none());
+    }
 }

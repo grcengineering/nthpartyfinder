@@ -1246,6 +1246,38 @@ mod tests {
     }
 
     #[test]
+    fn test_html_template_trait_constants() {
+        use askama::Template;
+        assert_eq!(HtmlReportTemplate::EXTENSION, Some("html"));
+        assert_eq!(HtmlReportTemplate::MIME_TYPE, "text/html; charset=utf-8");
+        let _ = HtmlReportTemplate::SIZE_HINT;
+    }
+
+    #[test]
+    fn test_html_template_render_into_directly() {
+        use askama::Template;
+        let template = HtmlReportTemplate {
+            summary: HtmlSummary {
+                root_domain: "test.com".to_string(),
+                root_organization: "Test Org".to_string(),
+                total_relationships: 0,
+                max_depth: 0,
+                unique_domains: 0,
+                unique_organizations: 0,
+                generated_at: "2024-01-01".to_string(),
+            },
+            relationships: Vec::new(),
+            relationships_json: "[]".to_string(),
+            summary_json: "{}".to_string(),
+            vendor_graph_js: VENDOR_GRAPH_JS,
+            vendor_graph_css: VENDOR_GRAPH_CSS,
+        };
+        let mut buf = String::new();
+        template.render_into(&mut buf).unwrap();
+        assert!(buf.contains("<html"));
+    }
+
+    #[test]
     fn test_export_all_formats_with_tracing_enabled() {
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()

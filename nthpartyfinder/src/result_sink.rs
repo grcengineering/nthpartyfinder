@@ -857,10 +857,37 @@ mod tests {
 
     #[test]
     fn test_with_path_no_parent() {
-        // Path with no parent (root-like) — exercises the closing brace of parent check
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.jsonl.zst");
         let result = ResultSink::with_path(&path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_disk_space_returns_ok() {
+        let dir = TempDir::new().unwrap();
+        let result = check_disk_space(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_orphans_non_numeric_pid() {
+        let tmp = TempDir::new().unwrap();
+        let bad_name = tmp
+            .path()
+            .join("nthpartyfinder-results-notanumber.jsonl.zst");
+        std::fs::write(&bad_name, b"data").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0);
+        assert!(bad_name.exists());
+    }
+
+    #[test]
+    fn test_cleanup_orphans_empty_pid() {
+        let tmp = TempDir::new().unwrap();
+        let bad_name = tmp.path().join("nthpartyfinder-results-.jsonl.zst");
+        std::fs::write(&bad_name, b"data").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0);
     }
 }

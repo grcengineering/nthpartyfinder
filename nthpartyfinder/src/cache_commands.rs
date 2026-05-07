@@ -2239,4 +2239,43 @@ mod tests {
 
         std::env::set_current_dir(&original_dir).unwrap();
     }
+
+    #[test]
+    fn test_validation_status_debug_all_variants() {
+        let variants: Vec<ValidationStatus> = vec![
+            ValidationStatus::Ok,
+            ValidationStatus::Redirect("https://x.com".to_string()),
+            ValidationStatus::NotFound,
+            ValidationStatus::ServerError(418),
+            ValidationStatus::Timeout,
+            ValidationStatus::NetworkError,
+        ];
+        for v in &variants {
+            let d = format!("{:?}", v);
+            assert!(!d.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_validation_result_all_fields_debug() {
+        let result = ValidationResult {
+            domain: "d.com".to_string(),
+            url: "https://d.com/s".to_string(),
+            status: ValidationStatus::Redirect("https://new.com".to_string()),
+            response_time_ms: Some(42),
+            error_message: Some("redirect".to_string()),
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("d.com"));
+        assert!(debug.contains("42"));
+        assert!(debug.contains("redirect"));
+    }
+
+    #[test]
+    fn test_format_timestamp_mid_day() {
+        let ts = 1704110400; // 2024-01-01 12:00:00 UTC
+        let formatted = format_timestamp(ts);
+        assert!(formatted.contains("12:00:00"));
+        assert!(formatted.ends_with("UTC"));
+    }
 }

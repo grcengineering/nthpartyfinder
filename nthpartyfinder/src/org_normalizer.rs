@@ -1492,4 +1492,41 @@ mod tests {
         let _ = get();
         let _ = is_enabled();
     }
+
+    #[test]
+    fn test_from_app_config_with_custom_aliases() {
+        let app_config = crate::config::OrganizationConfig {
+            enabled: true,
+            similarity_threshold: 0.9,
+            aliases: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("custom-alias".to_string(), "Custom Corp".to_string());
+                m
+            },
+        };
+        let n = OrgNormalizer::from_app_config(&app_config);
+        assert_eq!(n.normalize("custom-alias"), "Custom Corp");
+        assert!((n.similarity_threshold - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_with_threshold_clamping_edges() {
+        let n = OrgNormalizer::new().with_threshold(1.5);
+        assert!((n.similarity_threshold - 1.0).abs() < f64::EPSILON);
+        let n2 = OrgNormalizer::new().with_threshold(-0.5);
+        assert!((n2.similarity_threshold - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_add_alias() {
+        let mut n = normalizer();
+        n.add_alias("my-custom", "My Custom Corp");
+        assert_eq!(n.normalize("my-custom"), "My Custom Corp");
+    }
+
+    #[test]
+    fn test_module_normalize_fn() {
+        let result = normalize("anything");
+        assert!(!result.is_empty());
+    }
 }

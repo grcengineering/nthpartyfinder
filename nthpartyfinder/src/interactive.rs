@@ -1691,4 +1691,92 @@ mod tests {
         let v = vendors.lock().await;
         assert_eq!(v.get("x.com").unwrap(), "Real X");
     }
+
+    #[test]
+    fn test_plural_suffix_singular() {
+        assert_eq!(plural_suffix(1), "");
+    }
+
+    #[test]
+    fn test_plural_suffix_plural_values() {
+        assert_eq!(plural_suffix(0), "s");
+        assert_eq!(plural_suffix(2), "s");
+        assert_eq!(plural_suffix(100), "s");
+    }
+
+    #[test]
+    fn test_stdio_input_coverage_stub() {
+        let input = StdioInput;
+        let result = input.read_line();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_pending_mappings_empty_delegates() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_pending_mappings(&[], &analyzer, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_unverified_empty_delegates() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_unverified_organizations(&[], &vendors, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_custom_domain_empty_skips() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Org", "org.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result =
+            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_skip_choice() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("s.com", "S")];
+        let mock = MockInput::new(vec!["R", "S"]);
+        let result = confirm_unverified_organizations_with_input(
+            &unverified, &vendors, &logger, &mock,
+        )
+        .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert!(v.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_accept_choice() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("y.com", "Y")];
+        let mock = MockInput::new(vec!["R", "Y"]);
+        let result = confirm_unverified_organizations_with_input(
+            &unverified, &vendors, &logger, &mock,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_custom_empty_skips() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("z.com", "Z")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result = confirm_unverified_organizations_with_input(
+            &unverified, &vendors, &logger, &mock,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
 }
