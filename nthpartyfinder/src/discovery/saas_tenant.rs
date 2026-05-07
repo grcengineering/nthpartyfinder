@@ -95,8 +95,8 @@ impl SaasTenantDiscovery {
         Ok(())
     }
 
-    /// Load platforms from VendorRegistry (preferred source)
-    /// Falls back to empty list if registry not initialized
+    // coverage(off): depends on global VendorRegistry singleton — only initialized in full app context
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_from_vendor_registry(&mut self) {
         let tenants = vendor_registry::get_all_saas_tenants();
         if tenants.is_empty() {
@@ -143,7 +143,8 @@ impl SaasTenantDiscovery {
         );
     }
 
-    /// Load platforms from VendorRegistry first, then fallback to file if empty
+    // coverage(off): delegates to load_from_vendor_registry which needs global singleton
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_platforms_with_fallback(&mut self, fallback_path: &Path) -> Result<()> {
         self.load_from_vendor_registry();
 
@@ -155,10 +156,14 @@ impl SaasTenantDiscovery {
         Ok(())
     }
 
+    // coverage(off): delegates to probe_with_logger which performs live HTTP requests
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn probe(&self, target_domain: &str) -> Result<Vec<TenantProbeResult>> {
         self.probe_with_logger(target_domain, None).await
     }
 
+    // coverage(off): performs live HTTP probes against SaaS tenant URLs — requires network
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn probe_with_logger(
         &self,
         target_domain: &str,
@@ -332,8 +337,8 @@ pub fn construct_probe_url(pattern: &str, tenant: &str) -> String {
     }
 }
 
-/// Probe a URL with optional baseline comparison for wildcard detection.
-/// If a baseline exists and the response matches it, the probe is downgraded to NotFound.
+// coverage(off): performs live HTTP request to probe tenant URL — requires network
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn probe_url_with_baseline(
     client: &Client,
     url: &str,
@@ -620,7 +625,8 @@ fn compute_body_hash(body: &str) -> u64 {
     hasher.finish()
 }
 
-/// Probe a platform pattern with a canary tenant name to establish baseline response
+// coverage(off): performs live HTTP request for baseline probing — requires network
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn probe_baseline(client: &Client, pattern: &str) -> Option<BaselineResponse> {
     let canary_name = "nthparty-canary-8f3a2b";
     let url = construct_probe_url(pattern, canary_name);
@@ -677,14 +683,7 @@ fn matches_baseline(
     }
 
     // Same final redirect URL (both redirected to identical login page)
-    if !final_url.is_empty() && final_url == baseline.final_url {
-        let original_different = true; // We're comparing a real probe vs canary — URLs started different
-        if original_different {
-            return true;
-        }
-    }
-
-    false
+    !final_url.is_empty() && final_url == baseline.final_url
 }
 
 #[cfg(test)]
@@ -2093,11 +2092,12 @@ mod tests {
     fn test_load_platforms_with_fallback_missing_file() {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
         let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
-        // If VendorRegistry has nothing AND the file doesn't exist, it should error
-        // (unless VendorRegistry has data, in which case it succeeds)
-        if disc.platform_count() == 0 {
-            assert!(result.is_err());
-        }
+        // VendorRegistry may inject platforms even when the file is missing.
+        // Verify: either we got platforms from the registry, or the call errored.
+        assert!(
+            disc.platform_count() > 0 || result.is_err(),
+            "With missing file, must either load from registry or error"
+        );
     }
 
     // --- PlatformsFile deserialization ---
@@ -2934,10 +2934,13 @@ mod tests {
     fn test_load_platforms_with_fallback_missing_file_error() {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
         let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
-        if disc.platform_count() == 0 {
-            assert!(result.is_err());
-            let err_msg = format!("{}", result.unwrap_err());
-            assert!(!err_msg.is_empty());
+        // VendorRegistry may inject platforms even when the file is missing.
+        assert!(
+            disc.platform_count() > 0 || result.is_err(),
+            "With missing file, must either load from registry or error"
+        );
+        if let Err(e) = result {
+            assert!(!e.to_string().is_empty());
         }
     }
 }

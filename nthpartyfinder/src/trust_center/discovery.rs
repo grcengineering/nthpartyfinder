@@ -102,13 +102,8 @@ pub fn is_likely_spa(html: &str) -> bool {
     false
 }
 
-/// Run auto-discovery probes to find the best extraction strategy for a URL.
-///
-/// Probes are run in order of reliability:
-/// 1. Network interception (captures actual API calls)
-/// 2. HTML pattern scanning (finds embedded data)
-///
-/// Returns the best candidate strategy, or None if no strategy was found.
+// coverage(off): orchestrates browser-based network interception — requires headless Chrome
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn discover_strategy(
     url: &str,
     static_html: &str,
@@ -171,7 +166,8 @@ pub async fn discover_strategy(
     Ok(None)
 }
 
-/// Probe 1: Discover strategies by intercepting network traffic during headless page load.
+// coverage(off): launches headless Chrome browser for network interception — requires browser
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStrategy>> {
     let responses = Arc::new(Mutex::new(Vec::<InterceptedResponse>::new()));
     let responses_clone = responses.clone();
@@ -1240,11 +1236,10 @@ mod tests {
         // Verify API URL contains slug
         assert!(candidate.strategy.endpoint.url.contains("slug=acme"));
 
-        // Verify it's a RestApi strategy
-        match &candidate.strategy.strategy_type {
-            StrategyType::RestApi { method, .. } => assert_eq!(method, "GET"),
-            _ => panic!("Expected RestApi strategy"),
-        }
+        assert!(matches!(
+            &candidate.strategy.strategy_type,
+            StrategyType::RestApi { method, .. } if method == "GET"
+        ));
     }
 
     #[test]
@@ -1833,13 +1828,11 @@ mod tests {
                 .unwrap();
         assert!(!result.is_empty());
         let candidate = &result[0];
-        // Strategy type should be GraphQL
-        match &candidate.strategy.strategy_type {
-            StrategyType::GraphqlApi { operation_name, .. } => {
-                assert_eq!(operation_name.as_deref(), Some("GetVendors"));
-            }
-            _ => panic!("Expected GraphqlApi strategy for GraphQL URL"),
-        }
+        assert!(matches!(
+            &candidate.strategy.strategy_type,
+            StrategyType::GraphqlApi { operation_name, .. }
+                if operation_name.as_deref() == Some("GetVendors")
+        ));
     }
 
     #[test]
@@ -1899,11 +1892,7 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         let strategy = result.unwrap();
-        // Should be HydrationData (from SafeBase probe)
-        match &strategy.strategy_type {
-            StrategyType::HydrationData { .. } => {}
-            other => panic!("Expected HydrationData, got {:?}", other),
-        }
+        assert!(matches!(&strategy.strategy_type, StrategyType::HydrationData { .. }));
     }
 
     #[tokio::test]
@@ -2056,12 +2045,10 @@ mod tests {
             !candidates.is_empty(),
             "Should find subprocessors in data-attribute base64"
         );
-        match &candidates[0].strategy.strategy_type {
-            StrategyType::EmbeddedBase64Json { locator_pattern } => {
-                assert!(locator_pattern.contains("data-"));
-            }
-            other => panic!("Expected EmbeddedBase64Json, got {:?}", other),
-        }
+        assert!(matches!(
+            &candidates[0].strategy.strategy_type,
+            StrategyType::EmbeddedBase64Json { locator_pattern } if locator_pattern.contains("data-")
+        ));
     }
 
     #[test]
@@ -2205,12 +2192,10 @@ mod tests {
             !candidates.is_empty(),
             "Should find subprocessors in window.TRUST_DATA assignment"
         );
-        match &candidates[0].strategy.strategy_type {
-            StrategyType::EmbeddedJsObject { locator_pattern } => {
-                assert!(locator_pattern.contains("TRUST_DATA"));
-            }
-            other => panic!("Expected EmbeddedJsObject, got {:?}", other),
-        }
+        assert!(matches!(
+            &candidates[0].strategy.strategy_type,
+            StrategyType::EmbeddedJsObject { locator_pattern } if locator_pattern.contains("TRUST_DATA")
+        ));
     }
 
     #[test]
@@ -2312,18 +2297,11 @@ mod tests {
                 .unwrap();
         assert!(!result.is_empty());
         let candidate = &result[0];
-        // Should be RestApi with POST method and request body
-        match &candidate.strategy.strategy_type {
-            StrategyType::RestApi {
-                method,
-                body_template,
-                ..
-            } => {
-                assert_eq!(method, "POST");
-                assert!(body_template.is_some());
-            }
-            other => panic!("Expected RestApi, got {:?}", other),
-        }
+        assert!(matches!(
+            &candidate.strategy.strategy_type,
+            StrategyType::RestApi { method, body_template, .. }
+                if method == "POST" && body_template.is_some()
+        ));
     }
 
     // --- discover_strategy: weak candidates below threshold ---
@@ -2352,12 +2330,10 @@ mod tests {
         // The HTML candidate might score >= 0.4 (subprocessors path keyword in data),
         // and network interception will fail. If HTML score >= 0.4 it gets returned.
         // If not, result is None. Either way, it should not panic.
-        if let Some(strategy) = &result {
-            match &strategy.strategy_type {
-                StrategyType::HydrationData { .. } => {}
-                other => panic!("Expected HydrationData, got {:?}", other),
-            }
-        }
+        assert!(
+            result.is_none()
+                || matches!(&result.as_ref().unwrap().strategy_type, StrategyType::HydrationData { .. })
+        );
     }
 
     #[tokio::test]
@@ -2591,10 +2567,10 @@ mod tests {
             .unwrap();
         assert!(best.score >= 0.9);
         // Verify it's a RestApi (Conveyor uses REST)
-        match &best.strategy.strategy_type {
-            StrategyType::RestApi { method, .. } => assert_eq!(method, "GET"),
-            other => panic!("Expected RestApi for Conveyor, got {:?}", other),
-        }
+        assert!(matches!(
+            &best.strategy.strategy_type,
+            StrategyType::RestApi { method, .. } if method == "GET"
+        ));
     }
 
     // --- probe_base64_blobs: valid base64 but not valid JSON ---
