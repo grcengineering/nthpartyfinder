@@ -949,21 +949,34 @@ mod tests {
 
         assert!(short_url.len() <= 40, "short URL should not need truncation");
         assert!(long_url.len() > 40, "long URL should need truncation");
-        let mut end = 37;
-        while end > 0 && !long_url.is_char_boundary(end) {
-            end -= 1;
-        }
-        let long_display = format!("{}...", &long_url[..end]);
+        assert!(long_url.is_char_boundary(37), "ASCII URL: byte 37 is always a boundary");
+        let long_display = format!("{}...", &long_url[..37]);
         assert!(long_display.ends_with("..."));
         assert!(long_display.len() <= 40);
 
-        // Multi-byte char at boundary position 37 forces the while-loop to retreat
-        let multibyte_url = "https://example.com/longpath/\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}abc";
+        // Verify char boundary retreat with a URL that has a multibyte char at byte 37
+        let retreat_url = "https://domain-with-lots-of-char\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
+        assert!(retreat_url.len() > 40);
+        let mut end_r = 37;
+        assert!(!retreat_url.is_char_boundary(end_r), "byte 37 should be mid-char");
+        while end_r > 0 && !retreat_url.is_char_boundary(end_r) {
+            end_r -= 1;
+        }
+        assert_eq!(end_r, 36, "should retreat to byte 36");
+        let retreat_display = format!("{}...", &retreat_url[..end_r]);
+        assert!(retreat_display.ends_with("..."));
+
+        // Multi-byte char straddling byte 37 forces the while-loop to retreat.
+        // Prefix is exactly 36 ASCII bytes so the 2-byte é starts at byte 36,
+        // making byte 37 a UTF-8 continuation byte (not a char boundary).
+        let multibyte_url = "https://example.com/longpath/1234567\u{00e9}\u{00e9}\u{00e9}abc";
         assert!(multibyte_url.len() > 40);
         let mut end2 = 37;
+        assert!(!multibyte_url.is_char_boundary(end2), "byte 37 should be mid-char");
         while end2 > 0 && !multibyte_url.is_char_boundary(end2) {
             end2 -= 1;
         }
+        assert_eq!(end2, 36, "should retreat to byte 36");
         let mb_display = format!("{}...", &multibyte_url[..end2]);
         assert!(mb_display.ends_with("..."));
         assert!(multibyte_url.is_char_boundary(end2));

@@ -832,31 +832,29 @@ fn extract_from_spf_record(
     ];
 
     for re in spf_regexes {
-        for cap in re.captures_iter(&record_lower) {
-            if let Some(domain_match) = cap.get(1) {
-                let raw_domain = domain_match.as_str();
+        for domain_match in re.captures_iter(&record_lower).filter_map(|c| c.get(1)) {
+            let raw_domain = domain_match.as_str();
 
-                // Strip SPF macros to get the actual domain (e.g., %{ir}.%{v}.%{d}.spf.has.pphosted.com -> spf.has.pphosted.com)
-                let cleaned_domain = strip_spf_macros(raw_domain);
+            // Strip SPF macros to get the actual domain (e.g., %{ir}.%{v}.%{d}.spf.has.pphosted.com -> spf.has.pphosted.com)
+            let cleaned_domain = strip_spf_macros(raw_domain);
 
-                if is_valid_domain(&cleaned_domain) {
-                    // Extract base domain from SPF subdomains (e.g., _spf.google.com -> google.com)
-                    let base_domain = domain_utils::extract_base_domain(&cleaned_domain);
+            if is_valid_domain(&cleaned_domain) {
+                // Extract base domain from SPF subdomains (e.g., _spf.google.com -> google.com)
+                let base_domain = domain_utils::extract_base_domain(&cleaned_domain);
 
-                    domains.push(VendorDomain {
-                        domain: base_domain,
-                        source_type: RecordType::DnsTxtSpf,
-                        raw_record: raw_record.to_string(),
-                    });
-                } else if let Some(logger) = logger {
-                    logger.log_failure(
-                        source_domain,
-                        "SPF",
-                        raw_record,
-                        Some(raw_domain),
-                        "Invalid domain format",
-                    );
-                }
+                domains.push(VendorDomain {
+                    domain: base_domain,
+                    source_type: RecordType::DnsTxtSpf,
+                    raw_record: raw_record.to_string(),
+                });
+            } else if let Some(logger) = logger {
+                logger.log_failure(
+                    source_domain,
+                    "SPF",
+                    raw_record,
+                    Some(raw_domain),
+                    "Invalid domain format",
+                );
             }
         }
     }
@@ -951,14 +949,12 @@ fn collect_spf_targets(
 ) {
     let target_regexes: &[&Lazy<Regex>] = &[&SPF_INCLUDE_REGEX, &SPF_REDIRECT_REGEX];
     for re in target_regexes {
-        for cap in re.captures_iter(record_lower) {
-            if let Some(m) = cap.get(1) {
-                let raw_target = m.as_str();
-                // Strip SPF macros (e.g., %{i}._spf.mta.salesforce.com -> _spf.mta.salesforce.com)
-                let cleaned = strip_spf_macros(raw_target);
-                if is_valid_domain(&cleaned) && visited.insert(cleaned.clone()) {
-                    to_resolve.push(cleaned);
-                }
+        for m in re.captures_iter(record_lower).filter_map(|c| c.get(1)) {
+            let raw_target = m.as_str();
+            // Strip SPF macros (e.g., %{i}._spf.mta.salesforce.com -> _spf.mta.salesforce.com)
+            let cleaned = strip_spf_macros(raw_target);
+            if is_valid_domain(&cleaned) && visited.insert(cleaned.clone()) {
+                to_resolve.push(cleaned);
             }
         }
     }
@@ -980,18 +976,14 @@ fn extract_from_dkim_record(
     let dkim_regexes: &[&Lazy<Regex>] = &[&DKIM_P_REGEX, &DKIM_H_REGEX, &DKIM_S_REGEX];
 
     for re in dkim_regexes {
-        for cap in re.captures_iter(record) {
-            if let Some(value_match) = cap.get(1) {
-                let value = value_match.as_str();
-                // DKIM records usually don't contain direct domain references
-                // This is a simplified extraction that may need refinement
-                if value.contains('.') && is_valid_domain(value) {
-                    domains.push(VendorDomain {
-                        domain: value.to_string(),
-                        source_type: RecordType::DnsTxtDkim,
-                        raw_record: raw_record.to_string(),
-                    });
-                }
+        for value_match in re.captures_iter(record).filter_map(|c| c.get(1)) {
+            let value = value_match.as_str();
+            if value.contains('.') && is_valid_domain(value) {
+                domains.push(VendorDomain {
+                    domain: value.to_string(),
+                    source_type: RecordType::DnsTxtDkim,
+                    raw_record: raw_record.to_string(),
+                });
             }
         }
     }
@@ -1034,24 +1026,22 @@ fn extract_from_dmarc_record(
 
             // Extract all mailto: addresses (comma-separated)
             // Pattern: mailto:localpart@domain or mailto:domain
-            for cap in MAILTO_REGEX.captures_iter(tag_value) {
-                if let Some(domain_match) = cap.get(2) {
-                    let domain = domain_match.as_str();
-                    if is_valid_domain(domain) {
-                        domains.push(VendorDomain {
-                            domain: domain.to_string(),
-                            source_type: RecordType::DnsTxtDmarc,
-                            raw_record: raw_record.to_string(),
-                        });
-                    } else if let Some(logger) = logger {
-                        logger.log_failure(
-                            source_domain,
-                            "DMARC",
-                            raw_record,
-                            Some(tag),
-                            "Invalid domain format",
-                        );
-                    }
+            for domain_match in MAILTO_REGEX.captures_iter(tag_value).filter_map(|c| c.get(2)) {
+                let domain = domain_match.as_str();
+                if is_valid_domain(domain) {
+                    domains.push(VendorDomain {
+                        domain: domain.to_string(),
+                        source_type: RecordType::DnsTxtDmarc,
+                        raw_record: raw_record.to_string(),
+                    });
+                } else if let Some(logger) = logger {
+                    logger.log_failure(
+                        source_domain,
+                        "DMARC",
+                        raw_record,
+                        Some(tag),
+                        "Invalid domain format",
+                    );
                 }
             }
         }
@@ -1307,55 +1297,14 @@ fn try_dynamic_verification_patterns(
 ) -> Option<Vec<VendorDomain>> {
     let mut domains = Vec::new();
 
-    // Dynamic pattern 1: "*-verification=" or "*-domain-verification="
-    // Use pre-compiled regex for performance (B020 fix)
-    for cap in DOMAIN_VERIFICATION_REGEX.captures_iter(record) {
-        if let Some(provider_match) = cap.get(1) {
-            let provider_name = provider_match.as_str().to_lowercase();
-            if let Some(domain) = infer_provider_domain(&provider_name) {
-                domains.push(VendorDomain {
-                    domain,
-                    source_type: RecordType::DnsTxtVerification,
-                    raw_record: raw_record.to_string(),
-                });
-            }
-        }
-    }
-
-    // Dynamic pattern 2: "verification-*="
-    // Use pre-compiled regex for performance (B020 fix)
-    for cap in VERIFICATION_PREFIX_REGEX.captures_iter(record) {
-        if let Some(provider_match) = cap.get(1) {
-            let provider_name = provider_match.as_str().to_lowercase();
-            if let Some(domain) = infer_provider_domain(&provider_name) {
-                domains.push(VendorDomain {
-                    domain,
-                    source_type: RecordType::DnsTxtVerification,
-                    raw_record: raw_record.to_string(),
-                });
-            }
-        }
-    }
-
-    // Dynamic pattern 3: "*-site-verification="
-    // Use pre-compiled regex for performance (B020 fix)
-    for cap in SITE_VERIFICATION_REGEX.captures_iter(record) {
-        if let Some(provider_match) = cap.get(1) {
-            let provider_name = provider_match.as_str().to_lowercase();
-            if let Some(domain) = infer_provider_domain(&provider_name) {
-                domains.push(VendorDomain {
-                    domain,
-                    source_type: RecordType::DnsTxtVerification,
-                    raw_record: raw_record.to_string(),
-                });
-            }
-        }
-    }
-
-    // Dynamic pattern 4: "PROVIDER_verify_" (like ZOOM_verify_)
-    // Use pre-compiled regex for performance (B020 fix)
-    for cap in PROVIDER_VERIFY_REGEX.captures_iter(record) {
-        if let Some(provider_match) = cap.get(1) {
+    let verification_regexes: &[&Lazy<Regex>] = &[
+        &DOMAIN_VERIFICATION_REGEX,
+        &VERIFICATION_PREFIX_REGEX,
+        &SITE_VERIFICATION_REGEX,
+        &PROVIDER_VERIFY_REGEX,
+    ];
+    for re in verification_regexes {
+        for provider_match in re.captures_iter(record).filter_map(|c| c.get(1)) {
             let provider_name = provider_match.as_str().to_lowercase();
             if let Some(domain) = infer_provider_domain(&provider_name) {
                 domains.push(VendorDomain {
@@ -3543,11 +3492,7 @@ mod tests {
         let result = extract_from_dmarc_record(record, Some(&logger), "test.com", record);
         // "a" is not a valid domain (too short, no dot), so logger should capture failure
         let _failures = logger.failures.lock().unwrap();
-        if result.is_none() {
-            // Either no matches or all were invalid
-            // Check if logger recorded anything (it should for invalid domains)
-            // The failure is only logged when is_valid_domain fails
-        }
+        assert!(result.is_none(), "invalid domain should yield no results");
     }
 
     // --- SPF with logger for invalid domain ---

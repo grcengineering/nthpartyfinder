@@ -2939,8 +2939,6 @@ mod tests {
             disc.platform_count() > 0 || result.is_err(),
             "With missing file, must either load from registry or error"
         );
-        if let Err(e) = result {
-            assert!(!e.to_string().is_empty());
-        }
+        result.as_ref().err().inspect(|e| assert!(!e.to_string().is_empty()));
     }
 }
