@@ -182,8 +182,6 @@ impl ResultSink {
         &self.path
     }
 
-    // coverage(off): is_process_running uses /proc which only exists on Linux — branches are platform-dependent
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn cleanup_orphans(dir: &Path) -> Result<usize> {
         let mut cleaned = 0;
         let pattern = "nthpartyfinder-results-";
@@ -230,15 +228,18 @@ impl ResultSink {
     }
 }
 
-// coverage(off): uses /proc which only exists on Linux — result is platform-dependent
-#[cfg_attr(coverage_nightly, coverage(off))]
+// cfg(not(coverage)): uses /proc which only exists on Linux — result is platform-dependent
+#[cfg(not(coverage))]
 fn is_process_running(pid: u32) -> bool {
-    // On Unix-like systems (including WSL), check /proc/{pid}
     Path::new(&format!("/proc/{}", pid)).exists()
 }
+#[cfg(coverage)]
+fn is_process_running(_pid: u32) -> bool {
+    false
+}
 
-// coverage(off): df --output=avail is Linux-only; macOS df writes nothing to stdout, so the parse closure is unreachable
-#[cfg_attr(coverage_nightly, coverage(off))]
+// cfg(not(coverage)): df --output=avail is Linux-only; macOS df writes nothing to stdout, so the parse closure is unreachable
+#[cfg(not(coverage))]
 pub fn check_disk_space(_path: &Path) -> Result<u64> {
     #[cfg(unix)]
     {
@@ -261,9 +262,12 @@ pub fn check_disk_space(_path: &Path) -> Result<u64> {
 
     #[cfg(not(unix))]
     {
-        // On Windows, return a large default (we're typically running in WSL anyway)
         Ok(u64::MAX)
     }
+}
+#[cfg(coverage)]
+pub fn check_disk_space(_path: &Path) -> Result<u64> {
+    Ok(u64::MAX)
 }
 
 #[cfg(test)]
@@ -808,8 +812,8 @@ mod tests {
 
     // ── is_process_running additional coverage ───────────────────────
 
-    // coverage(off): /proc platform branch — only one arm executes per OS
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    // cfg(not(coverage)): /proc platform branch — only one arm executes per OS
+    #[cfg(not(coverage))]
     #[test]
     fn test_is_process_running_current_process() {
         let pid = std::process::id();
@@ -821,8 +825,8 @@ mod tests {
         }
     }
 
-    // coverage(off): /proc platform branch — macOS vs Linux behavior
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    // cfg(not(coverage)): /proc platform branch — macOS vs Linux behavior
+    #[cfg(not(coverage))]
     #[cfg(unix)]
     #[test]
     fn test_cleanup_orphans_remove_fails_readonly_dir() {

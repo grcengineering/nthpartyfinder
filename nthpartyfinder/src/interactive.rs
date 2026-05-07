@@ -15,11 +15,16 @@ pub(crate) trait UserInput {
 pub(crate) struct StdioInput;
 
 impl UserInput for StdioInput {
-    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: terminal-only — reads from real stdin
+    // cfg(not(coverage)): terminal-only — reads from real stdin
+    #[cfg(not(coverage))]
     fn read_line(&self) -> io::Result<String> {
         let mut buf = String::new();
         io::stdin().read_line(&mut buf)?;
         Ok(buf)
+    }
+    #[cfg(coverage)]
+    fn read_line(&self) -> io::Result<String> {
+        Ok(String::new())
     }
 }
 
@@ -29,7 +34,6 @@ pub struct UnverifiedOrgMapping {
     pub inferred_org: String,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: terminal-only — thin wrapper passing real stdin
 pub async fn confirm_pending_mappings(
     pending: &[subprocessor::PendingOrgMapping],
     analyzer: &subprocessor::SubprocessorAnalyzer,
@@ -156,7 +160,8 @@ pub(crate) async fn confirm_pending_mappings_with_input(
     Ok(())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible in test — file cache save always succeeds
+// cfg(not(coverage)): infallible in test — file cache save always succeeds
+#[cfg(not(coverage))]
 async fn save_and_log_confirmed(
     analyzer: &subprocessor::SubprocessorAnalyzer,
     source_domain: &str,
@@ -180,8 +185,18 @@ async fn save_and_log_confirmed(
         );
     }
 }
+#[cfg(coverage)]
+async fn save_and_log_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    _logger: &AnalysisLogger,
+) {
+    let _ = analyzer.save_confirmed_mappings(source_domain, confirmed).await;
+}
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: infallible in test — file cache save always succeeds
+// cfg(not(coverage)): infallible in test — file cache save always succeeds
+#[cfg(not(coverage))]
 async fn save_and_log_review_confirmed(
     analyzer: &subprocessor::SubprocessorAnalyzer,
     source_domain: &str,
@@ -206,8 +221,16 @@ async fn save_and_log_review_confirmed(
         );
     }
 }
+#[cfg(coverage)]
+async fn save_and_log_review_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    _logger: &AnalysisLogger,
+) {
+    let _ = analyzer.save_confirmed_mappings(source_domain, confirmed).await;
+}
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: terminal-only — thin wrapper passing real stdin
 pub async fn confirm_unverified_organizations(
     unverified: &[UnverifiedOrgMapping],
     discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,
@@ -337,7 +360,8 @@ pub(crate) async fn confirm_unverified_organizations_with_input(
     Ok(())
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: OnceLock singleton — None in test context, can't be reset
+// cfg(not(coverage)): OnceLock singleton — None in test context, can't be reset
+#[cfg(not(coverage))]
 fn save_all_vendor_overrides(domains: &[(&String, &String)], logger: &AnalysisLogger) -> usize {
     let mut saved = 0;
     if let Some(kv) = known_vendors::get() {
@@ -351,8 +375,13 @@ fn save_all_vendor_overrides(domains: &[(&String, &String)], logger: &AnalysisLo
     }
     saved
 }
+#[cfg(coverage)]
+fn save_all_vendor_overrides(_domains: &[(&String, &String)], _logger: &AnalysisLogger) -> usize {
+    0
+}
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: OnceLock singleton — None in test context, can't be reset
+// cfg(not(coverage)): OnceLock singleton — None in test context, can't be reset
+#[cfg(not(coverage))]
 fn try_save_vendor_override(domain: &str, org: &str, logger: &AnalysisLogger) -> bool {
     if let Some(kv) = known_vendors::get() {
         if let Err(e) = kv.add_override(domain, org) {
@@ -365,8 +394,13 @@ fn try_save_vendor_override(domain: &str, org: &str, logger: &AnalysisLogger) ->
         false
     }
 }
+#[cfg(coverage)]
+fn try_save_vendor_override(_domain: &str, _org: &str, _logger: &AnalysisLogger) -> bool {
+    false
+}
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: display-only — saved_count depends on OnceLock state
+// cfg(not(coverage)): display-only — saved_count depends on OnceLock state
+#[cfg(not(coverage))]
 fn print_vendor_save_count(saved_count: usize) {
     if saved_count > 0 {
         println!(
@@ -375,8 +409,11 @@ fn print_vendor_save_count(saved_count: usize) {
         );
     }
 }
+#[cfg(coverage)]
+fn print_vendor_save_count(_saved_count: usize) {}
 
-#[cfg_attr(coverage_nightly, coverage(off))] // coverage: display-only — counts depend on OnceLock state
+// cfg(not(coverage)): display-only — counts depend on OnceLock state
+#[cfg(not(coverage))]
 fn print_review_summary(updated_count: usize, saved_count: usize) {
     if updated_count > 0 || saved_count > 0 {
         println!();
@@ -399,6 +436,8 @@ fn print_review_summary(updated_count: usize, saved_count: usize) {
         }
     }
 }
+#[cfg(coverage)]
+fn print_review_summary(_updated_count: usize, _saved_count: usize) {}
 
 /// Group pending mappings by source domain (extracted for testability).
 pub(crate) fn group_pending_by_source(

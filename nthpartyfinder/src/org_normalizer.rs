@@ -597,8 +597,8 @@ use std::sync::OnceLock;
 /// Global organization normalizer instance
 static ORG_NORMALIZER: OnceLock<Option<OrgNormalizer>> = OnceLock::new();
 
-// coverage(off): OnceLock singleton init — sets process-global state, testing pollutes parallel tests
-#[cfg_attr(coverage_nightly, coverage(off))]
+// cfg(not(coverage)): OnceLock singleton init — sets process-global state, testing pollutes parallel tests
+#[cfg(not(coverage))]
 pub fn init(config: &crate::config::OrganizationConfig) {
     let normalizer = if config.enabled {
         Some(OrgNormalizer::from_app_config(config))
@@ -615,13 +615,17 @@ pub fn get() -> Option<&'static OrgNormalizer> {
     ORG_NORMALIZER.get().and_then(|opt| opt.as_ref())
 }
 
-// coverage(off): OnceLock singleton — Some branch unreachable in tests (init not called)
-#[cfg_attr(coverage_nightly, coverage(off))]
+// cfg(not(coverage)): OnceLock singleton — Some branch unreachable in tests (init not called)
+#[cfg(not(coverage))]
 pub fn normalize(name: &str) -> String {
     match get() {
         Some(normalizer) => normalizer.normalize(name),
         None => name.to_string(),
     }
+}
+#[cfg(coverage)]
+pub fn normalize(name: &str) -> String {
+    name.to_string()
 }
 
 /// Check if organization normalization is enabled

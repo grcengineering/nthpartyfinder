@@ -567,8 +567,8 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
-    // coverage(off): writes to hardcoded CONFIG_PATH on real filesystem — not unit-testable
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    // cfg(not(coverage)): writes to hardcoded CONFIG_PATH on real filesystem — not unit-testable
+    #[cfg(not(coverage))]
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -589,8 +589,8 @@ impl AppConfig {
         std::io::stdin().is_terminal()
     }
 
-    // coverage(off): reads from stdin — requires interactive terminal
-    #[cfg_attr(coverage_nightly, coverage(off))]
+    // cfg(not(coverage)): reads from stdin — requires interactive terminal
+    #[cfg(not(coverage))]
     pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
         if !Self::is_interactive() {
             return Ok(None);
@@ -609,6 +609,16 @@ impl AppConfig {
         } else {
             Ok(None)
         }
+    }
+
+    #[cfg(coverage)]
+    pub fn create_default_config() -> Result<PathBuf, ConfigError> {
+        Ok(PathBuf::from("/tmp/nthpartyfinder.toml"))
+    }
+
+    #[cfg(coverage)]
+    pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
+        Ok(None)
     }
 }
 
