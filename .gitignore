@@ -52,6 +52,22 @@ coverage.html
 coverage.out
 lcov.info
 cobertura.xml
+*.profraw
+
+# --- Runtime / Binary Artifacts ---
+onnxruntime/
+test-output/
+
+# --- Browser Automation Artifacts ---
+.playwright-mcp/
+
+# --- Package Manager Lock Files (Rust project, not Node) ---
+package.json
+package-lock.json
+pnpm-lock.yaml
+
+# --- Agent Orchestrator Config ---
+agent-orchestrator.yaml
 
 # --- OS & IDE ---
 .DS_Store
