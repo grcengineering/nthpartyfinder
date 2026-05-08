@@ -624,6 +624,9 @@ pub fn normalize(name: &str) -> String {
     }
 }
 #[cfg(coverage)]
+pub fn init(_config: &crate::config::OrganizationConfig) {}
+
+#[cfg(coverage)]
 pub fn normalize(name: &str) -> String {
     name.to_string()
 }

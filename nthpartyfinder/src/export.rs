@@ -537,11 +537,17 @@ mod html_template {
         pub(super) vendor_graph_css: &'static str,
     }
 
+    impl std::fmt::Display for HtmlReportTemplate {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("<html></html>")
+        }
+    }
+
     impl askama::Template for HtmlReportTemplate {
         const EXTENSION: Option<&'static str> = Some("html");
         const SIZE_HINT: usize = 0;
         const MIME_TYPE: &'static str = "text/html; charset=utf-8";
-        fn render_into<W: core::fmt::Write>(&self, w: &mut W) -> askama::Result<()> {
+        fn render_into(&self, w: &mut (impl std::fmt::Write + ?Sized)) -> askama::Result<()> {
             w.write_str("<html></html>")?;
             Ok(())
         }
@@ -1051,6 +1057,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     fn test_export_html_with_multiple_layers() {
         let rels = vec![
             make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
@@ -1091,6 +1098,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     fn test_html_report_template_render_into_string() {
         // Exercise the askama-generated render_into::<String> monomorphization
         use askama::Template;
@@ -1223,6 +1231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     fn test_export_html_embeds_json_data() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data_check.html");

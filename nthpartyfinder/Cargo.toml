@@ -84,7 +84,7 @@ bin-dir = "nthpartyfinder{ binary-ext }"
 pkg-fmt = "tgz"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)', 'cfg(coverage)'] }
 
 [[example]]
 name = "progress_test"

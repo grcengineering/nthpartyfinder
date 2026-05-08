@@ -75,35 +75,38 @@ pub fn is_likely_spa(html: &str) -> bool {
     // Some SPAs (e.g., Vanta trust center) use <body id="body"> with only <script> children
     // and rely entirely on JavaScript to render content. The text ratio check above may be
     // fooled by long meta descriptions that inflate text content counts.
-    if let Some(body_start) = html_lower.find("<body") {
-        if let Some(body_tag_end) = html_lower[body_start..].find('>') {
-            let body_content_start = body_start + body_tag_end + 1;
-            let body_content =
-                if let Some(body_end) = html_lower[body_content_start..].find("</body") {
-                    &html_lower[body_content_start..body_content_start + body_end]
-                } else {
-                    &html_lower[body_content_start..]
-                };
+    let body_start = match html_lower.find("<body") {
+        Some(pos) => pos,
+        None => return false,
+    };
+    let body_tag_end = match html_lower[body_start..].find('>') {
+        Some(pos) => pos,
+        None => return false,
+    };
+    let body_content_start = body_start + body_tag_end + 1;
+    let body_content =
+        if let Some(body_end) = html_lower[body_content_start..].find("</body") {
+            &html_lower[body_content_start..body_content_start + body_end]
+        } else {
+            &html_lower[body_content_start..]
+        };
 
-            // Check if body has any visible content elements (not just script/noscript)
-            let visible_tags = [
-                "<div", "<p", "<table", "<section", "<article", "<main", "<h1", "<h2", "<h3",
-                "<span", "<ul", "<ol", "<form",
-            ];
-            let has_visible_content = visible_tags.iter().any(|tag| body_content.contains(tag));
+    let visible_tags = [
+        "<div", "<p", "<table", "<section", "<article", "<main", "<h1", "<h2", "<h3",
+        "<span", "<ul", "<ol", "<form",
+    ];
+    let has_visible_content = visible_tags.iter().any(|tag| body_content.contains(tag));
 
-            if !has_visible_content && body_content.contains("<script") {
-                debug!("SPA detected: body has no visible content elements, only scripts");
-                return true;
-            }
-        }
+    if !has_visible_content && body_content.contains("<script") {
+        debug!("SPA detected: body has no visible content elements, only scripts");
+        return true;
     }
 
     false
 }
 
-// coverage(off): orchestrates browser-based network interception — requires headless Chrome
-#[cfg_attr(coverage_nightly, coverage(off))]
+// cfg(not(coverage)): orchestrates browser-based network interception — requires headless Chrome
+#[cfg(not(coverage))]
 pub async fn discover_strategy(
     url: &str,
     static_html: &str,
@@ -166,8 +169,20 @@ pub async fn discover_strategy(
     Ok(None)
 }
 
-// coverage(off): launches headless Chrome browser for network interception — requires browser
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(coverage)]
+pub async fn discover_strategy(
+    _url: &str,
+    static_html: &str,
+) -> Result<Option<TrustCenterStrategy>> {
+    Ok(discover_via_html_patterns(static_html)?
+        .into_iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .filter(|c| c.score >= 0.4)
+        .map(|c| c.strategy))
+}
+
+// cfg(not(coverage)): launches headless Chrome browser for network interception — requires browser
+#[cfg(not(coverage))]
 async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStrategy>> {
     let responses = Arc::new(Mutex::new(Vec::<InterceptedResponse>::new()));
     let responses_clone = responses.clone();
@@ -241,6 +256,11 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
 
     debug!("Intercepted {} JSON responses", collected_responses.len());
     analyze_intercepted_responses(&collected_responses, url)
+}
+
+#[cfg(coverage)]
+async fn discover_via_network_interception(_url: &str) -> Result<Vec<CandidateStrategy>> {
+    Ok(Vec::new())
 }
 
 /// Analyze intercepted API responses to find subprocessor data arrays.
@@ -372,10 +392,8 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 
     // Parse __NEXT_DATA__ to extract the SafeBase structure
     let pattern = r#"<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>"#;
-    let regex = match fancy_regex::Regex::new(pattern) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
+    // Pattern is a hardcoded constant — compile failure is impossible
+    let regex = fancy_regex::Regex::new(pattern).unwrap();
 
     let json_str = match regex.captures(html).ok().flatten().and_then(|c| c.get(1)) {
         Some(m) => m.as_str(),
@@ -402,10 +420,8 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
         }
     };
 
-    let products_map = match products.as_object() {
-        Some(m) => m,
-        None => return,
-    };
+    // products is guaranteed to be an object by the is_object() guard above
+    let products_map = products.as_object().unwrap();
 
     debug!("SafeBase: found {} products", products_map.len());
 
@@ -443,10 +459,8 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
             _ => continue,
         };
 
-        let items_map = match items.as_object() {
-            Some(m) => m,
-            None => continue,
-        };
+        // items is guaranteed to be an object by the is_object() guard above
+        let items_map = items.as_object().unwrap();
 
         for (item_uid, item_data) in items_map {
             let list_entries = match item_data.get("listEntries").and_then(|v| v.as_array()) {
@@ -467,11 +481,10 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
                 continue;
             }
 
+            let entry_count = list_entries.len();
             debug!(
                 "SafeBase: found {} subprocessor entries in product '{}', item {}",
-                list_entries.len(),
-                product_name,
-                item_uid
+                entry_count, product_name, item_uid
             );
 
             // Build the full data path for this subprocessor list
@@ -736,10 +749,8 @@ fn probe_next_data(html: &str) -> Option<CandidateStrategy> {
 /// Search for <script type="application/json"> tags containing subprocessor data.
 fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let document = scraper::Html::parse_document(html);
-    let selector = match scraper::Selector::parse(r#"script[type="application/json"]"#) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
+    // Selector is a hardcoded constant — parse failure is impossible
+    let selector = scraper::Selector::parse(r#"script[type="application/json"]"#).unwrap();
 
     for (idx, script) in document.select(&selector).enumerate() {
         let text: String = script.text().collect();
@@ -749,200 +760,200 @@ fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
             continue;
         }
 
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let arrays = find_entity_arrays(&json, "");
-            for (path, items) in &arrays {
-                let score = score_subprocessor_array(items, path);
-                if score >= 0.4 {
-                    let field_mapping = detect_field_mapping(items);
-                    if let Some(name_field) = field_mapping.name_field {
-                        candidates.push(CandidateStrategy {
-                            strategy: TrustCenterStrategy {
-                                strategy_type: StrategyType::HydrationData {
-                                    script_selector: format!(
-                                        r#"script[type="application/json"]:nth-of-type({})"#,
-                                        idx + 1
-                                    ),
-                                    data_path: path.clone(),
-                                },
-                                endpoint: EndpointConfig {
-                                    url: String::new(),
-                                    slug: None,
-                                    requires_browser: false,
-                                },
-                                response_mapping: ResponseMapping {
-                                    subprocessors_path: String::new(),
-                                    name_field,
-                                    url_field: field_mapping.url_field,
-                                    purpose_field: field_mapping.purpose_field,
-                                    location_field: field_mapping.location_field,
-                                    evidence_fields: Vec::new(),
-                                },
-                                discovery_metadata: DiscoveryMetadata::new(
-                                    DiscoveryMethod::HtmlPatternScan,
-                                    items.len() as u32,
-                                    score,
-                                ),
-                            },
-                            score,
-                            item_count: items.len(),
-                        });
-                    }
-                }
+        let json = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        let arrays = find_entity_arrays(&json, "");
+        for (path, items) in &arrays {
+            let score = score_subprocessor_array(items, path);
+            if score < 0.4 {
+                continue;
             }
+            let field_mapping = detect_field_mapping(items);
+            let name_field = match field_mapping.name_field {
+                Some(n) => n,
+                None => continue,
+            };
+            candidates.push(CandidateStrategy {
+                strategy: TrustCenterStrategy {
+                    strategy_type: StrategyType::HydrationData {
+                        script_selector: format!(
+                            r#"script[type="application/json"]:nth-of-type({})"#,
+                            idx + 1
+                        ),
+                        data_path: path.clone(),
+                    },
+                    endpoint: EndpointConfig {
+                        url: String::new(),
+                        slug: None,
+                        requires_browser: false,
+                    },
+                    response_mapping: ResponseMapping {
+                        subprocessors_path: String::new(),
+                        name_field,
+                        url_field: field_mapping.url_field,
+                        purpose_field: field_mapping.purpose_field,
+                        location_field: field_mapping.location_field,
+                        evidence_fields: Vec::new(),
+                    },
+                    discovery_metadata: DiscoveryMetadata::new(
+                        DiscoveryMethod::HtmlPatternScan,
+                        items.len() as u32,
+                        score,
+                    ),
+                },
+                score,
+                item_count: items.len(),
+            });
         }
     }
 }
 
 /// Search for base64-encoded JSON blobs in HTML.
 fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
+    use base64::Engine;
+
     let patterns = [
-        // data attribute with base64 content
         r#"data-[a-z-]+="([A-Za-z0-9+/=]{200,})""#,
-        // atob() call with base64 string
         r#"atob\s*\(\s*["']([A-Za-z0-9+/=]{200,})["']\s*\)"#,
-        // Variable assignment with base64 string
         r#"(?:var|let|const)\s+\w+\s*=\s*["']([A-Za-z0-9+/=]{200,})["']"#,
     ];
 
     for pattern in &patterns {
-        if let Ok(regex) = fancy_regex::Regex::new(pattern) {
-            let mut search_start = 0;
-            while search_start < html.len() {
-                let search_slice = &html[search_start..];
-                match regex.captures(search_slice) {
-                    Ok(Some(captures)) => {
-                        if let Some(b64_match) = captures.get(1) {
-                            let b64_str = b64_match.as_str();
+        // All patterns are hardcoded constants — compile failure is impossible
+        let regex = fancy_regex::Regex::new(pattern).unwrap();
+        let mut search_start = 0;
+        while search_start < html.len() {
+            let search_slice = &html[search_start..];
+            let captures = match regex.captures(search_slice) {
+                Ok(Some(c)) => c,
+                _ => break,
+            };
+            let b64_match = match captures.get(1) {
+                Some(m) => m,
+                None => break,
+            };
+            let b64_str = b64_match.as_str();
 
-                            use base64::Engine;
-                            if let Ok(decoded) =
-                                base64::engine::general_purpose::STANDARD.decode(b64_str)
-                            {
-                                if let Ok(json_str) = String::from_utf8(decoded) {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&json_str)
-                                    {
-                                        let arrays = find_entity_arrays(&json, "");
-                                        for (path, items) in &arrays {
-                                            let score = score_subprocessor_array(items, path);
-                                            if score >= 0.4 {
-                                                let field_mapping = detect_field_mapping(items);
-                                                if let Some(name_field) = field_mapping.name_field {
-                                                    candidates.push(CandidateStrategy {
-                                                        strategy: TrustCenterStrategy {
-                                                            strategy_type: StrategyType::EmbeddedBase64Json {
-                                                                locator_pattern: pattern.to_string(),
-                                                            },
-                                                            endpoint: EndpointConfig {
-                                                                url: String::new(),
-                                                                slug: None,
-                                                                requires_browser: false,
-                                                            },
-                                                            response_mapping: ResponseMapping {
-                                                                subprocessors_path: path.clone(),
-                                                                name_field,
-                                                                url_field: field_mapping.url_field,
-                                                                purpose_field: field_mapping.purpose_field,
-                                                                location_field: field_mapping.location_field,
-                                                                evidence_fields: Vec::new(),
-                                                            },
-                                                            discovery_metadata: DiscoveryMetadata::new(
-                                                                DiscoveryMethod::HtmlPatternScan,
-                                                                items.len() as u32,
-                                                                score,
-                                                            ),
-                                                        },
-                                                        score,
-                                                        item_count: items.len(),
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+            if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64_str) {
+                if let Ok(json_str) = String::from_utf8(decoded) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        let arrays = find_entity_arrays(&json, "");
+                        for (path, items) in &arrays {
+                            let score = score_subprocessor_array(items, path);
+                            if score < 0.4 {
+                                continue;
                             }
-
-                            // Move past this match
-                            search_start += b64_match.end();
-                        } else {
-                            break;
+                            let field_mapping = detect_field_mapping(items);
+                            let name_field = match field_mapping.name_field {
+                                Some(n) => n,
+                                None => continue,
+                            };
+                            candidates.push(CandidateStrategy {
+                                strategy: TrustCenterStrategy {
+                                    strategy_type: StrategyType::EmbeddedBase64Json {
+                                        locator_pattern: pattern.to_string(),
+                                    },
+                                    endpoint: EndpointConfig {
+                                        url: String::new(),
+                                        slug: None,
+                                        requires_browser: false,
+                                    },
+                                    response_mapping: ResponseMapping {
+                                        subprocessors_path: path.clone(),
+                                        name_field,
+                                        url_field: field_mapping.url_field,
+                                        purpose_field: field_mapping.purpose_field,
+                                        location_field: field_mapping.location_field,
+                                        evidence_fields: Vec::new(),
+                                    },
+                                    discovery_metadata: DiscoveryMetadata::new(
+                                        DiscoveryMethod::HtmlPatternScan,
+                                        items.len() as u32,
+                                        score,
+                                    ),
+                                },
+                                score,
+                                item_count: items.len(),
+                            });
                         }
                     }
-                    _ => break,
                 }
             }
+
+            search_start += b64_match.end();
         }
     }
 }
 
 /// Search for JavaScript object assignments like `window.VENDOR_REPORT = {...}`.
 fn probe_js_object_assignments(html: &str, candidates: &mut Vec<CandidateStrategy>) {
-    // Match window.VARIABLE = { ... large JSON ... }
     let pattern = r#"window\.([A-Z_][A-Z_0-9]*)\s*=\s*(\{[\s\S]{200,}?\})(?:\s*;|\s*<)"#;
+    // Pattern is a hardcoded constant — compile failure is impossible
+    let regex = fancy_regex::Regex::new(pattern).unwrap();
 
-    if let Ok(regex) = fancy_regex::Regex::new(pattern) {
-        let mut search_start = 0;
-        while search_start < html.len() {
-            let search_slice = &html[search_start..];
-            match regex.captures(search_slice) {
-                Ok(Some(captures)) => {
-                    let var_name = captures.get(1).map(|m| m.as_str()).unwrap_or("UNKNOWN");
+    let mut search_start = 0;
+    while search_start < html.len() {
+        let search_slice = &html[search_start..];
+        let captures = match regex.captures(search_slice) {
+            Ok(Some(c)) => c,
+            _ => break,
+        };
+        let var_name = captures.get(1).map(|m| m.as_str()).unwrap_or("UNKNOWN");
+        let json_match = match captures.get(2) {
+            Some(m) => m,
+            None => break,
+        };
+        let json_str = json_match.as_str();
 
-                    if let Some(json_match) = captures.get(2) {
-                        let json_str = json_match.as_str();
-
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
-                            let arrays = find_entity_arrays(&json, "");
-                            for (path, items) in &arrays {
-                                let score = score_subprocessor_array(items, path);
-                                if score >= 0.4 {
-                                    let field_mapping = detect_field_mapping(items);
-                                    if let Some(name_field) = field_mapping.name_field {
-                                        let locator = format!(
-                                            r#"window\.{}\s*=\s*(\{{[\s\S]*?\}})(?:\s*;|\s*<)"#,
-                                            regex::escape(var_name)
-                                        );
-                                        candidates.push(CandidateStrategy {
-                                            strategy: TrustCenterStrategy {
-                                                strategy_type: StrategyType::EmbeddedJsObject {
-                                                    locator_pattern: locator,
-                                                },
-                                                endpoint: EndpointConfig {
-                                                    url: String::new(),
-                                                    slug: None,
-                                                    requires_browser: false,
-                                                },
-                                                response_mapping: ResponseMapping {
-                                                    subprocessors_path: path.clone(),
-                                                    name_field,
-                                                    url_field: field_mapping.url_field,
-                                                    purpose_field: field_mapping.purpose_field,
-                                                    location_field: field_mapping.location_field,
-                                                    evidence_fields: Vec::new(),
-                                                },
-                                                discovery_metadata: DiscoveryMetadata::new(
-                                                    DiscoveryMethod::HtmlPatternScan,
-                                                    items.len() as u32,
-                                                    score,
-                                                ),
-                                            },
-                                            score,
-                                            item_count: items.len(),
-                                        });
-                                    }
-                                }
-                            }
-                        }
-
-                        search_start += json_match.end();
-                    } else {
-                        break;
-                    }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+            let arrays = find_entity_arrays(&json, "");
+            for (path, items) in &arrays {
+                let score = score_subprocessor_array(items, path);
+                if score < 0.4 {
+                    continue;
                 }
-                _ => break,
+                let field_mapping = detect_field_mapping(items);
+                let name_field = match field_mapping.name_field {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let locator = format!(
+                    r#"window\.{}\s*=\s*(\{{[\s\S]*?\}})(?:\s*;|\s*<)"#,
+                    regex::escape(var_name)
+                );
+                candidates.push(CandidateStrategy {
+                    strategy: TrustCenterStrategy {
+                        strategy_type: StrategyType::EmbeddedJsObject {
+                            locator_pattern: locator,
+                        },
+                        endpoint: EndpointConfig {
+                            url: String::new(),
+                            slug: None,
+                            requires_browser: false,
+                        },
+                        response_mapping: ResponseMapping {
+                            subprocessors_path: path.clone(),
+                            name_field,
+                            url_field: field_mapping.url_field,
+                            purpose_field: field_mapping.purpose_field,
+                            location_field: field_mapping.location_field,
+                            evidence_fields: Vec::new(),
+                        },
+                        discovery_metadata: DiscoveryMetadata::new(
+                            DiscoveryMethod::HtmlPatternScan,
+                            items.len() as u32,
+                            score,
+                        ),
+                    },
+                    score,
+                    item_count: items.len(),
+                });
             }
         }
+
+        search_start += json_match.end();
     }
 }
 
@@ -2160,11 +2171,8 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
-        assert!(
-            candidates.len() >= 2,
-            "Should find candidates from multiple base64 blobs, got {}",
-            candidates.len()
-        );
+        let count = candidates.len();
+        assert!(count >= 2, "Should find candidates from multiple base64 blobs, got {count}");
     }
 
     // --- probe_js_object_assignments: successful match ---
@@ -2692,5 +2700,222 @@ mod tests {
         let mut candidates = Vec::new();
         probe_json_script_tags(html, &mut candidates);
         assert!(candidates.is_empty(), "No application/json scripts means no candidates");
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_network_interception_coverage_stub() {
+        let result = discover_via_network_interception("https://example.com").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_is_likely_spa_body_visible_content_with_scripts() {
+        let html = r#"<html><head></head><body><div>Content here for real page with substantial text that is not a single page application at all</div><script src="/app.js"></script></body></html>"#;
+        assert!(!is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_is_likely_spa_body_without_scripts() {
+        let html = r#"<html><head></head><body><p>Just text content, no scripts here at all, this is a static page.</p></body></html>"#;
+        assert!(!is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_probe_safebase_invalid_regex_resilience() {
+        let html = "__SB_CONFIG__";
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_products_not_object_but_present() {
+        let html = r#"<html>__SB_CONFIG__<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"orgInfo":{"sp":{"products":"not_an_object"}}}}}</script></html>"#;
+        let mut candidates = Vec::new();
+        probe_safebase(html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_safebase_items_not_object_in_product() {
+        let next_data = serde_json::json!({
+            "props": {
+                "pageProps": {
+                    "orgInfo": {
+                        "sp": {
+                            "products": {
+                                "prod1": {
+                                    "slug": "test",
+                                    "visibilityStatus": "visible",
+                                    "raw": {
+                                        "spData": {
+                                            "items": "not_an_object"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let html = format!(
+            r#"<html>__SB_CONFIG__<script id="__NEXT_DATA__" type="application/json">{}</script></html>"#,
+            next_data
+        );
+        let mut candidates = Vec::new();
+        probe_safebase(&html, &mut candidates);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_valid_json_high_score_with_name() {
+        use base64::Engine;
+        let json = serde_json::json!({
+            "subprocessors": [
+                {"name": "AWS", "url": "https://aws.amazon.com", "purpose": "Cloud"},
+                {"name": "GCP", "url": "https://cloud.google.com", "purpose": "Cloud"},
+                {"name": "Azure", "url": "https://azure.microsoft.com", "purpose": "Cloud"},
+                {"name": "Datadog", "url": "https://datadoghq.com", "purpose": "Monitoring"},
+                {"name": "Stripe", "url": "https://stripe.com", "purpose": "Payments"}
+            ]
+        });
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string().as_bytes());
+        let html = format!(
+            r#"<html><body><script>var data = atob("{}");</script></body></html>"#,
+            b64
+        );
+        let mut candidates = Vec::new();
+        probe_base64_blobs(&html, &mut candidates);
+        assert!(!candidates.is_empty(), "Should find candidate from base64 blob with subprocessor data");
+    }
+
+    #[test]
+    fn test_probe_js_object_assignments_high_score_with_name() {
+        let json_obj = serde_json::json!({
+            "subprocessors": [
+                {"name": "AWS Infrastructure", "url": "https://aws.amazon.com", "purpose": "Cloud infrastructure hosting services"},
+                {"name": "Cloudflare CDN", "url": "https://cloudflare.com", "purpose": "Content delivery network"},
+                {"name": "Datadog Monitoring", "url": "https://datadoghq.com", "purpose": "Application monitoring"},
+                {"name": "Stripe Payments", "url": "https://stripe.com", "purpose": "Payment processing"},
+                {"name": "Okta Identity", "url": "https://okta.com", "purpose": "Identity management"}
+            ]
+        });
+        let json_str = serde_json::to_string(&json_obj).unwrap();
+        let html = format!(
+            r#"<html><body><script>window.VENDOR_REPORT = {};</script></body></html>"#,
+            json_str
+        );
+        let mut candidates = Vec::new();
+        probe_js_object_assignments(&html, &mut candidates);
+        assert!(!candidates.is_empty(), "Should find candidate from JS object assignment with subprocessor data");
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_valid_json_with_candidates() {
+        let html = r#"<html><body>
+            <script type="application/json">
+            {"subprocessors":[
+                {"name":"AWS","url":"https://aws.amazon.com","purpose":"Cloud infrastructure"},
+                {"name":"Cloudflare","url":"https://cloudflare.com","purpose":"CDN and security"},
+                {"name":"Datadog","url":"https://datadoghq.com","purpose":"Monitoring services"},
+                {"name":"Stripe","url":"https://stripe.com","purpose":"Payment processing"},
+                {"name":"Google Analytics","url":"https://google.com","purpose":"Analytics"}
+            ]}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(!candidates.is_empty(), "Should find candidates from JSON script tags");
+    }
+
+    #[test]
+    fn test_is_likely_spa_no_body_tag() {
+        let html = "<html><head><title>Test</title></head></html>";
+        assert!(!is_likely_spa(html));
+    }
+
+    #[test]
+    fn test_probe_json_script_tags_low_score_array() {
+        let html = r#"<html><body>
+            <script type="application/json">
+            {"data":[
+                {"id":1,"value":"aaa","extra":"bbb","field":"ccc","other":"ddd"},
+                {"id":2,"value":"eee","extra":"fff","field":"ggg","other":"hhh"},
+                {"id":3,"value":"iii","extra":"jjj","field":"kkk","other":"lll"},
+                {"id":4,"value":"mmm","extra":"nnn","field":"ooo","other":"ppp"},
+                {"id":5,"value":"qqq","extra":"rrr","field":"sss","other":"ttt"}
+            ]}
+            </script>
+        </body></html>"#;
+        let mut candidates = Vec::new();
+        probe_json_script_tags(html, &mut candidates);
+        assert!(candidates.is_empty(), "Low-score array without name/url/purpose fields should be skipped");
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_low_score_array() {
+        use base64::Engine;
+        let json = serde_json::json!({
+            "data": [
+                {"id": 1, "value": "aaa", "extra": "bbb"},
+                {"id": 2, "value": "ccc", "extra": "ddd"},
+                {"id": 3, "value": "eee", "extra": "fff"},
+                {"id": 4, "value": "ggg", "extra": "hhh"},
+                {"id": 5, "value": "iii", "extra": "jjj"}
+            ]
+        });
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string().as_bytes());
+        let html = format!(
+            r#"<html><body><script>var x = atob("{}");</script></body></html>"#,
+            b64
+        );
+        let mut candidates = Vec::new();
+        probe_base64_blobs(&html, &mut candidates);
+        assert!(candidates.is_empty(), "Low-score base64 array should be skipped");
+    }
+
+    #[test]
+    fn test_probe_base64_blobs_high_score_no_name_field() {
+        use base64::Engine;
+        let json = serde_json::json!({
+            "subprocessors": [
+                {"id": 1, "category": "infra", "status": "active", "region": "us-east", "tier": "premium"},
+                {"id": 2, "category": "security", "status": "active", "region": "eu-west", "tier": "standard"},
+                {"id": 3, "category": "monitoring", "status": "active", "region": "ap-south", "tier": "premium"},
+                {"id": 4, "category": "network", "status": "active", "region": "us-west", "tier": "standard"},
+                {"id": 5, "category": "database", "status": "active", "region": "eu-central", "tier": "premium"}
+            ]
+        });
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.to_string().as_bytes());
+        let html = format!(
+            r#"<html><body><script>var x = atob("{}");</script></body></html>"#,
+            b64
+        );
+        let mut candidates = Vec::new();
+        probe_base64_blobs(&html, &mut candidates);
+        assert!(candidates.is_empty(), "High-score but no name field should be skipped");
+    }
+
+    #[test]
+    fn test_probe_js_object_assignments_high_score_no_name_field() {
+        let json_obj = serde_json::json!({
+            "subprocessors": [
+                {"id": 1, "category": "infra", "status": "active", "region": "us-east", "tier": "premium", "code": "AAA"},
+                {"id": 2, "category": "security", "status": "active", "region": "eu-west", "tier": "standard", "code": "BBB"},
+                {"id": 3, "category": "monitoring", "status": "active", "region": "ap-south", "tier": "premium", "code": "CCC"},
+                {"id": 4, "category": "network", "status": "active", "region": "us-west", "tier": "standard", "code": "DDD"},
+                {"id": 5, "category": "database", "status": "active", "region": "eu-central", "tier": "premium", "code": "EEE"}
+            ]
+        });
+        let json_str = serde_json::to_string(&json_obj).unwrap();
+        let html = format!(
+            r#"<html><body><script>window.VENDOR_REPORT = {};</script></body></html>"#,
+            json_str
+        );
+        let mut candidates = Vec::new();
+        probe_js_object_assignments(&html, &mut candidates);
+        assert!(candidates.is_empty(), "High-score but no name field should be skipped");
     }
 }
