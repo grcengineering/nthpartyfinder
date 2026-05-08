@@ -121,7 +121,7 @@ fn build_launch_options(
     is_container: bool,
     chrome_path: Option<&std::path::Path>,
     debug_port: u16,
-) -> anyhow::Result<headless_chrome::LaunchOptions> {
+) -> anyhow::Result<headless_chrome::LaunchOptions<'_>> {
     // coverage(off): default_builder().build() always succeeds — error path unreachable
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn map_build_err(e: impl std::fmt::Display) -> anyhow::Error {

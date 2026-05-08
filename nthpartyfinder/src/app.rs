@@ -252,7 +252,7 @@ pub fn collect_unverified_orgs_with_lookup(
 /// Outcome of config loading decision logic.
 #[derive(Debug)]
 pub enum ConfigOutcome {
-    Ready(AppConfig),
+    Ready(Box<AppConfig>),
     CreatedNew(PathBuf),
     Exit { message: String, code: i32 },
 }
@@ -267,7 +267,7 @@ pub fn process_config_result(
     prompt_result: Option<Result<Option<PathBuf>, String>>,
 ) -> ConfigOutcome {
     match load_result {
-        Ok(cfg) => ConfigOutcome::Ready(cfg),
+        Ok(cfg) => ConfigOutcome::Ready(Box::new(cfg)),
         Err(ConfigError::FileNotFound(path)) => match prompt_result {
             Some(Ok(Some(created_path))) => ConfigOutcome::CreatedNew(created_path),
             Some(Ok(None)) => ConfigOutcome::Exit {
@@ -528,7 +528,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
         _ => None,
     };
     let _app_config = match process_config_result(load_result, prompt_result) {
-        ConfigOutcome::Ready(cfg) => cfg,
+        ConfigOutcome::Ready(cfg) => *cfg,
         ConfigOutcome::CreatedNew(path) => {
             println!(
                 "✅ Created default configuration file at: {}",

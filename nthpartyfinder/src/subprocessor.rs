@@ -973,7 +973,7 @@ impl SubprocessorAnalyzer {
             }
 
             let gql_data: serde_json::Value = gql_resp.json().await.ok()?;
-            return self.parse_vanta_graphql_response(&gql_data);
+            self.parse_vanta_graphql_response(&gql_data)
         }
 
         #[cfg(test)]

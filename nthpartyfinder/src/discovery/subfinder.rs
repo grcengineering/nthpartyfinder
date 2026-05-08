@@ -75,7 +75,6 @@ impl SubfinderDiscovery {
     /// Get the actual binary path to use, checking:
     /// 1. The configured binary_path (if it exists or is in PATH)
     /// 2. The bundled binary location
-
     fn get_resolved_binary_path(&self) -> Option<PathBuf> {
         if self.binary_path.exists() {
             return Some(self.binary_path.clone());
@@ -96,7 +95,6 @@ impl SubfinderDiscovery {
     }
 
     /// Get the path to the bundled subfinder binary in the app's data directory
-
     pub fn get_bundled_binary_path() -> Option<PathBuf> {
         #[cfg(windows)]
         let binary_name = "subfinder.exe";
@@ -120,7 +118,6 @@ impl SubfinderDiscovery {
     }
 
     /// Get the download URL for subfinder for the current platform
-
     pub fn get_platform_download_url() -> Option<String> {
         Self::get_download_url_for_platform(std::env::consts::OS, std::env::consts::ARCH)
     }
@@ -147,7 +144,6 @@ impl SubfinderDiscovery {
     }
 
     /// Download and install subfinder to the bundled location
-
     #[cfg(not(test))] // real network I/O — downloads binary from GitHub releases and extracts zip
     pub async fn download_and_install() -> Result<PathBuf> {
         let download_url = Self::get_platform_download_url()
@@ -252,7 +248,6 @@ impl SubfinderDiscovery {
     }
 
     /// Create a new SubfinderDiscovery using the bundled binary if available
-
     pub fn with_bundled_or_path(custom_path: Option<PathBuf>, timeout: Duration) -> Self {
         #[cfg(windows)]
         let default_name = "subfinder.exe";
@@ -267,7 +262,6 @@ impl SubfinderDiscovery {
     }
 
     /// Get installation instructions for subfinder
-
     pub fn get_installation_instructions() -> String {
         Self::get_installation_instructions_for_platform(
             std::env::consts::OS,
@@ -357,7 +351,6 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Go is installed
-
     #[cfg(not(test))] // probes system PATH for `go` binary — result depends on host environment
     pub fn is_go_installed() -> bool {
         match std::process::Command::new("go").arg("version").output() {
@@ -372,7 +365,6 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to install subfinder using `go install`
-
     #[cfg(not(test))] // spawns real `go install` process — requires Go toolchain
     pub async fn install_via_go() -> Result<bool> {
         if !Self::is_go_installed() {
@@ -406,7 +398,6 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Homebrew is installed (macOS/Linux)
-
     #[cfg(not(test))] // probes system PATH for `brew` binary — result depends on host environment
     pub fn is_homebrew_installed() -> bool {
         match std::process::Command::new("brew").arg("--version").output() {
@@ -421,7 +412,6 @@ impl SubfinderDiscovery {
     }
 
     /// Check if Docker is installed
-
     #[cfg(not(test))] // probes system PATH for `docker` binary — result depends on host environment
     pub fn is_docker_installed() -> bool {
         match std::process::Command::new("docker").arg("--version").output() {
@@ -436,7 +426,6 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to install subfinder using Homebrew (macOS/Linux)
-
     #[cfg(not(test))] // spawns real `brew install` process — requires Homebrew + network
     pub async fn install_via_homebrew() -> Result<bool> {
         if !Self::is_homebrew_installed() {
@@ -466,7 +455,6 @@ impl SubfinderDiscovery {
     }
 
     /// Attempt to pull subfinder Docker image
-
     #[cfg(not(test))] // spawns real `docker pull` process — requires Docker daemon
     pub async fn install_via_docker() -> Result<bool> {
         if !Self::is_docker_installed() {
@@ -503,7 +491,6 @@ impl SubfinderDiscovery {
 
     /// Get available installation options for the current platform
     /// Based on official Project Discovery documentation
-
     pub fn get_available_install_options() -> Vec<InstallOption> {
         Self::build_install_options(
             Self::get_platform_download_url().is_some(),

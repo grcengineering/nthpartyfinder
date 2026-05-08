@@ -232,6 +232,7 @@ pub fn convert_subprocessor_domains(
 
 /// Filter subfinder subdomain results: keep only vendors whose base domain differs from
 /// the target domain_base. Returns (new vendor domains, txt_count, cname_count).
+#[allow(clippy::type_complexity)]
 pub fn filter_subfinder_results(
     subdomain_results: Vec<(String, String, Vec<dns::VendorDomain>, Vec<(String, String)>)>,
     domain_base: &str,
@@ -329,7 +330,7 @@ pub fn compute_progress_position(index: usize, total_vendors: usize) -> u64 {
 
 /// Determine whether a periodic checkpoint should be saved.
 pub fn should_checkpoint(processed_count: usize, vendor_count: usize) -> bool {
-    processed_count % 5 == 0 || processed_count == vendor_count
+    processed_count.is_multiple_of(5) || processed_count == vendor_count
 }
 
 /// Map memory pressure level to a delay in milliseconds.

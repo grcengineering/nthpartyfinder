@@ -100,12 +100,12 @@ fn select_best_org(
 }
 
 #[cfg(any(feature = "embedded-ner", test))]
-fn chunk_text<'a>(
-    text: &'a str,
+fn chunk_text(
+    text: &str,
     max_single_len: usize,
     chunk_size: usize,
     overlap: usize,
-) -> Vec<&'a str> {
+) -> Vec<&str> {
     if text.len() <= max_single_len {
         return vec![text];
     }

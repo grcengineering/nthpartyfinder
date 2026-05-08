@@ -71,7 +71,6 @@ impl CtLogDiscovery {
     }
 
     /// Discover vendors from CT logs for a domain
-
     pub async fn discover(&self, domain: &str) -> Result<Vec<CtDiscoveryResult>> {
         info!("Querying CT logs for certificates related to {}", domain);
 
@@ -164,7 +163,6 @@ impl CtLogDiscovery {
     }
 
     /// Query crt.sh for certificates related to a domain
-
     pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
         // Query for wildcard certificates (%.domain.com)
         let url = format!(
