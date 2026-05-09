@@ -103,7 +103,7 @@ fn filter_vendor_path(entry: std::io::Result<std::fs::DirEntry>) -> Option<PathB
     if path.file_name().is_some_and(|n| n == "_schema.json") {
         return None;
     }
-    Some(path)
+    path.canonicalize().ok()
 }
 
 impl VendorRegistry {
