@@ -36,6 +36,11 @@ pub async fn list_cached_domains() -> Result<()> {
             if let Some(domain) = path.file_stem().and_then(|s| s.to_str()) {
                 let domain = domain.to_string();
                 if let Ok(canonical) = path.canonicalize() {
+                    // Re-validate canonical extension to clear taint from read_dir entry
+                    // (CodeQL: rust/path-injection sanitizer requires extension allowlist on canonical)
+                    if canonical.extension() != Some(std::ffi::OsStr::new("json")) {
+                        continue;
+                    }
                     // Try to read the cache entry to get details
                     if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
                         if let Ok(cache_entry) =
@@ -337,6 +342,11 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
 
                 let domain = domain.to_string();
                 if let Ok(canonical) = path.canonicalize() {
+                    // Re-validate canonical extension to clear taint from read_dir entry
+                    // (CodeQL: rust/path-injection sanitizer requires extension allowlist on canonical)
+                    if canonical.extension() != Some(std::ffi::OsStr::new("json")) {
+                        continue;
+                    }
                     if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
                         if let Ok(cache_entry) =
                             serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)

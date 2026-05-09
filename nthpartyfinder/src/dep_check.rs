@@ -205,17 +205,25 @@ fn find_ort_library(
             .map(|n| n == lib_name)
             .unwrap_or(false);
 
-        if candidate.is_absolute()
-            && !has_parent_component
-            && filename_matches
-            && candidate.exists()
-        {
-            return DepCheckResult {
-                name: "ONNX Runtime",
-                available: true,
-                required: true,
-                message: Some(format!("Found at ORT_DYLIB_PATH={}", path)),
-            };
+        if candidate.is_absolute() && !has_parent_component && filename_matches {
+            // Canonicalize and re-verify filename on the canonical value to clear taint
+            // (CodeQL: rust/path-injection sanitizer requires allowlist comparison on canonical).
+            // canonicalize() also implicitly checks existence — Ok means the file exists.
+            if let Ok(canonical) = candidate.canonicalize() {
+                let canonical_filename_matches = canonical
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n == lib_name)
+                    .unwrap_or(false);
+                if canonical_filename_matches && canonical.exists() {
+                    return DepCheckResult {
+                        name: "ONNX Runtime",
+                        available: true,
+                        required: true,
+                        message: Some(format!("Found at ORT_DYLIB_PATH={}", path)),
+                    };
+                }
+            }
         }
     }
 
@@ -336,13 +344,24 @@ fn check_chrome_inner(
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir));
 
-        if is_non_empty && !has_parent_traversal && candidate.exists() {
-            return DepCheckResult {
-                name: "Chrome/Chromium",
-                available: true,
-                required: false,
-                message: Some(format!("Found at CHROME_PATH={}", path)),
-            };
+        if is_non_empty && !has_parent_traversal {
+            // Canonicalize and re-verify safety on the canonical value to clear taint
+            // (CodeQL: rust/path-injection sanitizer requires re-validation on canonical).
+            // canonicalize() implicitly checks existence — Ok means the path exists.
+            if let Ok(canonical) = candidate.canonicalize() {
+                let canonical_has_parent_traversal = canonical
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir));
+                if canonical.is_absolute() && !canonical_has_parent_traversal && canonical.exists()
+                {
+                    return DepCheckResult {
+                        name: "Chrome/Chromium",
+                        available: true,
+                        required: false,
+                        message: Some(format!("Found at CHROME_PATH={}", path)),
+                    };
+                }
+            }
         }
     }
 
