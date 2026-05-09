@@ -55,9 +55,8 @@ impl ResultSink {
 
     pub fn with_path(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create parent directory: {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
 
         let file = File::create(path)
             .with_context(|| format!("Failed to create result sink file: {}", path.display()))?;
@@ -658,7 +657,8 @@ mod tests {
                 .open(&path)
                 .unwrap();
             // Write bytes that look like a new zstd frame header but are truncated
-            file.write_all(&[0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00]).unwrap();
+            file.write_all(&[0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00])
+                .unwrap();
         }
 
         let results = ResultSink::read_results(&path).unwrap();
@@ -673,7 +673,8 @@ mod tests {
         let result = ResultSink::new(std::path::Path::new("/dev/null/impossible/dir"));
         let err = result.err().expect("Expected error for invalid directory");
         assert!(
-            err.to_string().contains("Failed to create output directory"),
+            err.to_string()
+                .contains("Failed to create output directory"),
             "Unexpected error: {}",
             err
         );

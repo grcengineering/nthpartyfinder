@@ -84,16 +84,15 @@ pub fn is_likely_spa(html: &str) -> bool {
         None => return false,
     };
     let body_content_start = body_start + body_tag_end + 1;
-    let body_content =
-        if let Some(body_end) = html_lower[body_content_start..].find("</body") {
-            &html_lower[body_content_start..body_content_start + body_end]
-        } else {
-            &html_lower[body_content_start..]
-        };
+    let body_content = if let Some(body_end) = html_lower[body_content_start..].find("</body") {
+        &html_lower[body_content_start..body_content_start + body_end]
+    } else {
+        &html_lower[body_content_start..]
+    };
 
     let visible_tags = [
-        "<div", "<p", "<table", "<section", "<article", "<main", "<h1", "<h2", "<h3",
-        "<span", "<ul", "<ol", "<form",
+        "<div", "<p", "<table", "<section", "<article", "<main", "<h1", "<h2", "<h3", "<span",
+        "<ul", "<ol", "<form",
     ];
     let has_visible_content = visible_tags.iter().any(|tag| body_content.contains(tag));
 
@@ -176,7 +175,11 @@ pub async fn discover_strategy(
 ) -> Result<Option<TrustCenterStrategy>> {
     Ok(discover_via_html_patterns(static_html)?
         .into_iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .filter(|c| c.score >= 0.4)
         .map(|c| c.strategy))
 }
@@ -1903,7 +1906,10 @@ mod tests {
             .unwrap();
         assert!(result.is_some());
         let strategy = result.unwrap();
-        assert!(matches!(&strategy.strategy_type, StrategyType::HydrationData { .. }));
+        assert!(matches!(
+            &strategy.strategy_type,
+            StrategyType::HydrationData { .. }
+        ));
     }
 
     #[tokio::test]
@@ -2090,7 +2096,12 @@ mod tests {
     fn test_probe_base64_blobs_non_utf8_decoded() {
         use base64::Engine;
         // Valid base64 that decodes to non-UTF8 bytes
-        let non_utf8: Vec<u8> = [0xFF, 0xFE, 0xFD].iter().copied().cycle().take(300).collect();
+        let non_utf8: Vec<u8> = [0xFF, 0xFE, 0xFD]
+            .iter()
+            .copied()
+            .cycle()
+            .take(300)
+            .collect();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&non_utf8);
         let html = format!(
             r#"<html><body><script>var x = atob("{}");</script></body></html>"#,
@@ -2098,7 +2109,10 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
-        assert!(candidates.is_empty(), "Non-UTF8 decoded base64 should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "Non-UTF8 decoded base64 should be skipped"
+        );
     }
 
     #[test]
@@ -2161,10 +2175,8 @@ mod tests {
             {"name":"D2","url":"https://d2.io","purpose":"Service D2 provides storage"},
             {"name":"E2","url":"https://e2.io","purpose":"Service E2 provides storage"}
         ]});
-        let b64_1 =
-            base64::engine::general_purpose::STANDARD.encode(json1.to_string().as_bytes());
-        let b64_2 =
-            base64::engine::general_purpose::STANDARD.encode(json2.to_string().as_bytes());
+        let b64_1 = base64::engine::general_purpose::STANDARD.encode(json1.to_string().as_bytes());
+        let b64_2 = base64::engine::general_purpose::STANDARD.encode(json2.to_string().as_bytes());
         let html = format!(
             r#"<html><body><script>var first = atob("{}"); var second = atob("{}");</script></body></html>"#,
             b64_1, b64_2
@@ -2172,7 +2184,10 @@ mod tests {
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
         let count = candidates.len();
-        assert!(count >= 2, "Should find candidates from multiple base64 blobs, got {count}");
+        assert!(
+            count >= 2,
+            "Should find candidates from multiple base64 blobs, got {count}"
+        );
     }
 
     // --- probe_js_object_assignments: successful match ---
@@ -2340,7 +2355,10 @@ mod tests {
         // If not, result is None. Either way, it should not panic.
         assert!(
             result.is_none()
-                || matches!(&result.as_ref().unwrap().strategy_type, StrategyType::HydrationData { .. })
+                || matches!(
+                    &result.as_ref().unwrap().strategy_type,
+                    StrategyType::HydrationData { .. }
+                )
         );
     }
 
@@ -2619,7 +2637,10 @@ mod tests {
         </body></html>"#;
         let mut candidates = Vec::new();
         probe_json_script_tags(html, &mut candidates);
-        assert!(!candidates.is_empty(), "Should find data in second script tag");
+        assert!(
+            !candidates.is_empty(),
+            "Should find data in second script tag"
+        );
     }
 
     // --- extract_graphql_operation: URL with other query params ---
@@ -2644,7 +2665,10 @@ mod tests {
     #[test]
     fn test_extract_slug_from_url_empty_first_segment() {
         // URL like "https://example.com//something" — first segment is empty
-        assert_eq!(extract_slug_from_url("https://example.com//something"), None);
+        assert_eq!(
+            extract_slug_from_url("https://example.com//something"),
+            None
+        );
     }
 
     #[test]
@@ -2675,7 +2699,10 @@ mod tests {
         let html = r#"<html><body><h1>Regular page</h1></body></html>"#;
         let mut candidates = Vec::new();
         probe_safebase(html, &mut candidates);
-        assert!(candidates.is_empty(), "No __SB_CONFIG__ means no candidates");
+        assert!(
+            candidates.is_empty(),
+            "No __SB_CONFIG__ means no candidates"
+        );
     }
 
     #[test]
@@ -2683,7 +2710,10 @@ mod tests {
         let html = r#"<html><body><script>var x = 42;</script></body></html>"#;
         let mut candidates = Vec::new();
         probe_js_object_assignments(html, &mut candidates);
-        assert!(candidates.is_empty(), "Simple JS assignment should not match");
+        assert!(
+            candidates.is_empty(),
+            "Simple JS assignment should not match"
+        );
     }
 
     #[test]
@@ -2691,7 +2721,10 @@ mod tests {
         let html = r#"<html><body><p>Just a normal page with no base64</p></body></html>"#;
         let mut candidates = Vec::new();
         probe_base64_blobs(html, &mut candidates);
-        assert!(candidates.is_empty(), "No base64 content means no candidates");
+        assert!(
+            candidates.is_empty(),
+            "No base64 content means no candidates"
+        );
     }
 
     #[test]
@@ -2699,7 +2732,10 @@ mod tests {
         let html = r#"<html><body><script>console.log("hello")</script></body></html>"#;
         let mut candidates = Vec::new();
         probe_json_script_tags(html, &mut candidates);
-        assert!(candidates.is_empty(), "No application/json scripts means no candidates");
+        assert!(
+            candidates.is_empty(),
+            "No application/json scripts means no candidates"
+        );
     }
 
     #[tokio::test]
@@ -2788,7 +2824,10 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
-        assert!(!candidates.is_empty(), "Should find candidate from base64 blob with subprocessor data");
+        assert!(
+            !candidates.is_empty(),
+            "Should find candidate from base64 blob with subprocessor data"
+        );
     }
 
     #[test]
@@ -2809,7 +2848,10 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_js_object_assignments(&html, &mut candidates);
-        assert!(!candidates.is_empty(), "Should find candidate from JS object assignment with subprocessor data");
+        assert!(
+            !candidates.is_empty(),
+            "Should find candidate from JS object assignment with subprocessor data"
+        );
     }
 
     #[test]
@@ -2827,7 +2869,10 @@ mod tests {
         </body></html>"#;
         let mut candidates = Vec::new();
         probe_json_script_tags(html, &mut candidates);
-        assert!(!candidates.is_empty(), "Should find candidates from JSON script tags");
+        assert!(
+            !candidates.is_empty(),
+            "Should find candidates from JSON script tags"
+        );
     }
 
     #[test]
@@ -2851,7 +2896,10 @@ mod tests {
         </body></html>"#;
         let mut candidates = Vec::new();
         probe_json_script_tags(html, &mut candidates);
-        assert!(candidates.is_empty(), "Low-score array without name/url/purpose fields should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "Low-score array without name/url/purpose fields should be skipped"
+        );
     }
 
     #[test]
@@ -2873,7 +2921,10 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
-        assert!(candidates.is_empty(), "Low-score base64 array should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "Low-score base64 array should be skipped"
+        );
     }
 
     #[test]
@@ -2895,7 +2946,10 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_base64_blobs(&html, &mut candidates);
-        assert!(candidates.is_empty(), "High-score but no name field should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "High-score but no name field should be skipped"
+        );
     }
 
     #[test]
@@ -2916,6 +2970,9 @@ mod tests {
         );
         let mut candidates = Vec::new();
         probe_js_object_assignments(&html, &mut candidates);
-        assert!(candidates.is_empty(), "High-score but no name field should be skipped");
+        assert!(
+            candidates.is_empty(),
+            "High-score but no name field should be skipped"
+        );
     }
 }

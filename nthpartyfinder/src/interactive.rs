@@ -192,7 +192,9 @@ async fn save_and_log_confirmed(
     confirmed: &[(String, String)],
     _logger: &AnalysisLogger,
 ) {
-    let _ = analyzer.save_confirmed_mappings(source_domain, confirmed).await;
+    let _ = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await;
 }
 
 // cfg(not(coverage)): infallible in test — file cache save always succeeds
@@ -228,7 +230,9 @@ async fn save_and_log_review_confirmed(
     confirmed: &[(String, String)],
     _logger: &AnalysisLogger,
 ) {
-    let _ = analyzer.save_confirmed_mappings(source_domain, confirmed).await;
+    let _ = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await;
 }
 
 pub async fn confirm_unverified_organizations(
@@ -1231,8 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_unverified_organizations_empty_is_noop() {
-        let vendors: Arc<Mutex<HashMap<String, String>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let vendors: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let result = confirm_unverified_organizations(&[], &vendors, &logger).await;
         assert!(result.is_ok());
@@ -1292,8 +1295,7 @@ mod tests {
         let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let mock = MockInput::new(vec![]);
-        let result =
-            confirm_pending_mappings_with_input(&[], &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&[], &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1303,8 +1305,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["A"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1317,8 +1318,7 @@ mod tests {
             make_pending("Beta", "beta.io", "src2.com"),
         ];
         let mock = MockInput::new(vec!["A"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1328,8 +1328,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["S"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1339,8 +1338,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["X"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1350,8 +1348,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["R", "Y"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1361,8 +1358,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["R", "N"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1372,8 +1368,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["R", "C", "custom.org"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1383,8 +1378,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["R", "C", ""]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1398,8 +1392,7 @@ mod tests {
         ];
         // R -> review; first mapping Y accept, second mapping N reject
         let mock = MockInput::new(vec!["R", "Y", "N"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1409,8 +1402,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Solo", "solo.com", "src.com")];
         let mock = MockInput::new(vec!["A"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1420,8 +1412,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["a"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1434,8 +1425,7 @@ mod tests {
             make_pending("B", "b.com", "s.com"),
         ];
         let mock = MockInput::new(vec!["R", "N", "N"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1466,10 +1456,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["A"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1482,10 +1471,9 @@ mod tests {
             make_unverified("beta.com", "Beta Corp"),
         ];
         let mock = MockInput::new(vec!["A"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1495,10 +1483,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["S"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1508,10 +1495,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["Z"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1521,10 +1507,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["R", "Y"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1535,10 +1520,9 @@ mod tests {
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         // Empty string maps to "" which after trim().to_uppercase() matches "" in "Y" | ""
         let mock = MockInput::new(vec!["R", ""]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1548,10 +1532,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["R", "C", "Alpha Corporation"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert_eq!(v.get("alpha.com").unwrap(), "Alpha Corporation");
@@ -1563,10 +1546,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["R", "C", ""]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert!(v.get("alpha.com").is_none());
@@ -1578,10 +1560,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
         let mock = MockInput::new(vec!["R", "S"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1596,10 +1577,9 @@ mod tests {
         ];
         // R=review, then: Y accept alpha, C custom for beta, S skip gamma
         let mock = MockInput::new(vec!["R", "Y", "C", "Real Beta", "S"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert_eq!(v.get("beta.com").unwrap(), "Real Beta");
@@ -1609,15 +1589,11 @@ mod tests {
     async fn test_unverified_review_all_custom_triggers_update_count() {
         let vendors = Arc::new(Mutex::new(HashMap::new()));
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
-        let unverified = vec![
-            make_unverified("a.com", "A"),
-            make_unverified("b.com", "B"),
-        ];
+        let unverified = vec![make_unverified("a.com", "A"), make_unverified("b.com", "B")];
         let mock = MockInput::new(vec!["R", "C", "Real A", "C", "Real B"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert_eq!(v.len(), 2);
@@ -1631,10 +1607,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("a.com", "A")];
         let mock = MockInput::new(vec!["R", "S"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1644,10 +1619,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("alpha.com", "Alpha")];
         let mock = MockInput::new(vec!["a"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1657,8 +1631,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Acme", "acme.com", "src.com")];
         let mock = MockInput::new(vec!["R", "C", "CUSTOM.ORG"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1672,8 +1645,7 @@ mod tests {
         ];
         // Review: accept first, reject second -> only one saved
         let mock = MockInput::new(vec!["R", "Y", "N"]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1683,10 +1655,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("x.com", "X")];
         let mock = MockInput::new(vec!["R", "C", "Real X"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert_eq!(v.get("x.com").unwrap(), "Real X");
@@ -1734,8 +1705,7 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let pending = vec![make_pending("Org", "org.com", "src.com")];
         let mock = MockInput::new(vec!["R", "C", ""]);
-        let result =
-            confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
         assert!(result.is_ok());
     }
 
@@ -1745,10 +1715,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("s.com", "S")];
         let mock = MockInput::new(vec!["R", "S"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
         let v = vendors.lock().await;
         assert!(v.is_empty());
@@ -1760,10 +1729,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("y.com", "Y")];
         let mock = MockInput::new(vec!["R", "Y"]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 
@@ -1773,10 +1741,9 @@ mod tests {
         let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let unverified = vec![make_unverified("z.com", "Z")];
         let mock = MockInput::new(vec!["R", "C", ""]);
-        let result = confirm_unverified_organizations_with_input(
-            &unverified, &vendors, &logger, &mock,
-        )
-        .await;
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
         assert!(result.is_ok());
     }
 }

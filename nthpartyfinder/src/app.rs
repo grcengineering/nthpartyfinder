@@ -816,7 +816,12 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 logger.info(&format!("Batch: starting analysis of {}", domain));
 
                 let cmd_args = build_batch_domain_args(
-                    &domain, &format, depth, dns_only, batch_combined, &output_base,
+                    &domain,
+                    &format,
+                    depth,
+                    dns_only,
+                    batch_combined,
+                    &output_base,
                 );
                 if !batch_combined {
                     let domain_dir = output_base.join(domain.replace('.', "_"));
@@ -2920,10 +2925,8 @@ mod tests {
 
     #[test]
     fn test_process_config_result_file_not_found_no_prompt() {
-        let result = process_config_result(
-            Err(ConfigError::FileNotFound(PathBuf::from("/conf"))),
-            None,
-        );
+        let result =
+            process_config_result(Err(ConfigError::FileNotFound(PathBuf::from("/conf"))), None);
         let (message, code) = unwrap_config_exit(result);
         assert_eq!(code, 1);
         assert!(message.contains("not found"));
@@ -3016,17 +3019,20 @@ mod tests {
 
     #[test]
     fn test_build_batch_domain_args_with_depth_and_dns_only() {
-        let args = build_batch_domain_args(
-            "test.org",
-            "json",
-            Some(3),
-            true,
-            true,
-            Path::new("/out"),
-        );
+        let args =
+            build_batch_domain_args("test.org", "json", Some(3), true, true, Path::new("/out"));
         assert_eq!(
             args,
-            vec!["nthpartyfinder", "-d", "test.org", "-f", "json", "-r", "3", "--dns-only"]
+            vec![
+                "nthpartyfinder",
+                "-d",
+                "test.org",
+                "-f",
+                "json",
+                "-r",
+                "3",
+                "--dns-only"
+            ]
         );
     }
 
@@ -3055,11 +3061,8 @@ mod tests {
 
     #[test]
     fn test_resolve_final_output_path_custom_dir() {
-        let result = resolve_final_output_path(
-            "/tmp/default.csv",
-            "report.csv",
-            "/home/user/reports",
-        );
+        let result =
+            resolve_final_output_path("/tmp/default.csv", "report.csv", "/home/user/reports");
         assert_eq!(result, "/home/user/reports/report.csv");
     }
 
@@ -3073,9 +3076,13 @@ mod tests {
 
     #[test]
     fn test_assemble_and_filter_results_new_only() {
-        let new = vec![
-            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev"),
-        ];
+        let new = vec![make_relationship(
+            "stripe.com",
+            "Stripe",
+            "e.com",
+            RecordType::DnsTxtSpf,
+            "ev",
+        )];
         let assembled = assemble_and_filter_results(new, vec![], false);
         assert_eq!(assembled.results.len(), 1);
         assert_eq!(assembled.raw_count, 1);
@@ -3085,11 +3092,21 @@ mod tests {
 
     #[test]
     fn test_assemble_and_filter_results_with_resumed_and_dedup() {
-        let resumed = vec![
-            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev-old"),
-        ];
+        let resumed = vec![make_relationship(
+            "stripe.com",
+            "Stripe",
+            "e.com",
+            RecordType::DnsTxtSpf,
+            "ev-old",
+        )];
         let new = vec![
-            make_relationship("stripe.com", "Stripe", "e.com", RecordType::DnsTxtSpf, "ev-new"),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "e.com",
+                RecordType::DnsTxtSpf,
+                "ev-new",
+            ),
             make_relationship("pendo.io", "Pendo", "e.com", RecordType::DnsTxtSpf, "ev2"),
         ];
         let assembled = assemble_and_filter_results(new, resumed, false);
@@ -3127,9 +3144,13 @@ mod tests {
     fn test_dispatch_export_csv() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.csv");
-        let results = vec![
-            make_relationship("s.com", "S", "e.com", RecordType::DnsTxtSpf, "ev"),
-        ];
+        let results = vec![make_relationship(
+            "s.com",
+            "S",
+            "e.com",
+            RecordType::DnsTxtSpf,
+            "ev",
+        )];
         dispatch_export(&results, "csv", &path.to_string_lossy()).unwrap();
         assert!(path.exists());
     }
@@ -3138,9 +3159,13 @@ mod tests {
     fn test_dispatch_export_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
-        let results = vec![
-            make_relationship("s.com", "S", "e.com", RecordType::DnsTxtSpf, "ev"),
-        ];
+        let results = vec![make_relationship(
+            "s.com",
+            "S",
+            "e.com",
+            RecordType::DnsTxtSpf,
+            "ev",
+        )];
         dispatch_export(&results, "json", &path.to_string_lossy()).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();

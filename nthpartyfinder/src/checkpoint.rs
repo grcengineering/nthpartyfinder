@@ -535,12 +535,8 @@ mod tests {
 
     #[test]
     fn test_checkpoint_summary_display() {
-        let mut checkpoint = Checkpoint::new(
-            "example.com".to_string(),
-            None,
-            Some(5),
-            "hash".to_string(),
-        );
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, Some(5), "hash".to_string());
         checkpoint.mark_completed("d1.com");
         checkpoint.mark_completed("d2.com");
         checkpoint.add_pending(PendingDomain {
@@ -582,8 +578,7 @@ mod tests {
         let output_dir = temp_dir.path();
 
         // Create a checkpoint, then manually modify its version
-        let checkpoint =
-            Checkpoint::new("example.com".to_string(), None, None, "hash".to_string());
+        let checkpoint = Checkpoint::new("example.com".to_string(), None, None, "hash".to_string());
         checkpoint.save(output_dir).unwrap();
 
         // Read, modify version, and write back
@@ -624,9 +619,7 @@ mod tests {
     #[test]
     fn test_checkpoint_get_checkpoint_path() {
         let path = Checkpoint::get_checkpoint_path(std::path::Path::new("/tmp/test"));
-        assert!(path
-            .to_string_lossy()
-            .contains(CHECKPOINT_FILENAME));
+        assert!(path.to_string_lossy().contains(CHECKPOINT_FILENAME));
     }
 
     #[test]

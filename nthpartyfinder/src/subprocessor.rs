@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use fancy_regex::Regex;
 // rayon available if needed for parallel processing
@@ -804,7 +804,10 @@ impl SubprocessorAnalyzer {
     }
 
     #[cfg(test)]
-    fn with_client_and_cache(client: reqwest::Client, cache: Arc<RwLock<SubprocessorCache>>) -> Self {
+    fn with_client_and_cache(
+        client: reqwest::Client,
+        cache: Arc<RwLock<SubprocessorCache>>,
+    ) -> Self {
         Self {
             client,
             cache,
@@ -2032,7 +2035,7 @@ impl SubprocessorAnalyzer {
     pub async fn scrape_subprocessor_page_with_retry(
         &self,
         url: &str,
-        logger: Option<&dyn LogFailure>,
+        _logger: Option<&dyn LogFailure>,
         source_domain: &str,
         rate_limit_ctx: Option<&RateLimitContext>,
     ) -> Result<Vec<SubprocessorDomain>> {
@@ -2432,7 +2435,7 @@ impl SubprocessorAnalyzer {
                                 < metadata.successful_extractions as usize
                                 && metadata.successful_extractions > 0
                             {
-                                warn!("Subprocessor extraction for {} found {} vendors, but cache records {} successful extractions. \
+                                tracing::warn!("Subprocessor extraction for {} found {} vendors, but cache records {} successful extractions. \
                                        Page content may have changed or extraction patterns may need updating.",
                                       source_domain, extraction_result.subprocessors.len(), metadata.successful_extractions);
                                 // Log which vendors were found to help debug
@@ -2547,8 +2550,11 @@ impl SubprocessorAnalyzer {
                 // Create fresh extraction metadata for domain-specific patterns
                 let domain_metadata = ExtractionMetadata {
                     successful_extractions: vendors.len() as u32,
-                    successful_entity_column_index: extraction_metadata.successful_entity_column_index,
-                    successful_header_pattern: extraction_metadata.successful_header_pattern.clone(),
+                    successful_entity_column_index: extraction_metadata
+                        .successful_entity_column_index,
+                    successful_header_pattern: extraction_metadata
+                        .successful_header_pattern
+                        .clone(),
                     last_extraction_time: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -2558,7 +2564,11 @@ impl SubprocessorAnalyzer {
 
                 let cache = self.cache.write().await;
                 if let Err(e) = cache
-                    .update_extraction_info(source_domain, domain_specific_patterns, domain_metadata)
+                    .update_extraction_info(
+                        source_domain,
+                        domain_specific_patterns,
+                        domain_metadata,
+                    )
                     .await
                 {
                     debug!(
@@ -2652,7 +2662,7 @@ impl SubprocessorAnalyzer {
 
             // Try headless browser scraping as final fallback
             match self
-                .scrape_with_headless_browser(url, logger, source_domain)
+                .scrape_with_headless_browser(url, _logger, source_domain)
                 .await
             {
                 Ok(headless_vendors) => {
@@ -7950,8 +7960,14 @@ mod tests {
         );
         assert!(result.is_ok());
         let extraction = result.unwrap();
-        let has_stripe = extraction.subprocessors.iter().any(|v| v.domain.contains("stripe"));
-        assert!(extraction.subprocessors.is_empty() || has_stripe, "if results found, should include stripe");
+        let has_stripe = extraction
+            .subprocessors
+            .iter()
+            .any(|v| v.domain.contains("stripe"));
+        assert!(
+            extraction.subprocessors.is_empty() || has_stripe,
+            "if results found, should include stripe"
+        );
     }
 
     // --- extract_from_tables_with_patterns (basic HTML table) ---
@@ -8193,10 +8209,7 @@ mod tests {
     async fn test_read_response_body_capped_within_limit() {
         // Build a response with a small body (well under limit)
         let body = "Hello, world!";
-        let response = http::Response::builder()
-            .status(200)
-            .body(body)
-            .unwrap();
+        let response = http::Response::builder().status(200).body(body).unwrap();
         let reqwest_resp = reqwest::Response::from(response);
         let result = read_response_body_capped(reqwest_resp, 1024).await.unwrap();
         assert_eq!(result, "Hello, world!");
@@ -8204,10 +8217,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_response_body_capped_empty() {
-        let response = http::Response::builder()
-            .status(200)
-            .body("")
-            .unwrap();
+        let response = http::Response::builder().status(200).body("").unwrap();
         let reqwest_resp = reqwest::Response::from(response);
         let result = read_response_body_capped(reqwest_resp, 1024).await.unwrap();
         assert_eq!(result, "");
@@ -8241,10 +8251,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_response_body_capped_zero_limit() {
         let body = "some content";
-        let response = http::Response::builder()
-            .status(200)
-            .body(body)
-            .unwrap();
+        let response = http::Response::builder().status(200).body(body).unwrap();
         let reqwest_resp = reqwest::Response::from(response);
         let result = read_response_body_capped(reqwest_resp, 0).await.unwrap();
         assert_eq!(result, "");
@@ -8265,10 +8272,7 @@ mod tests {
         ]);
 
         let body = reqwest::Body::wrap_stream(error_stream);
-        let http_resp = http::Response::builder()
-            .status(200)
-            .body(body)
-            .unwrap();
+        let http_resp = http::Response::builder().status(200).body(body).unwrap();
         let reqwest_resp = reqwest::Response::from(http_resp);
         let result = read_response_body_capped(reqwest_resp, 1024).await;
         assert!(result.is_err(), "Expected error from stream failure");
@@ -8399,10 +8403,7 @@ mod tests {
         let entry = cache.get_cached_entry("preserve.com").await.unwrap();
         assert!(entry.extraction_patterns.is_some());
         assert!(entry.extraction_metadata.is_some());
-        assert_eq!(
-            entry.working_subprocessor_url,
-            "https://preserve.com/subs"
-        );
+        assert_eq!(entry.working_subprocessor_url, "https://preserve.com/subs");
     }
 
     #[tokio::test]
@@ -8642,9 +8643,7 @@ mod tests {
     fn test_extract_domain_from_entity_name_with_patterns_regex_match() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns {
-            domain_extraction_patterns: vec![
-                r"\(([^)]+\.(com|org|io|net|co))\)".to_string(),
-            ],
+            domain_extraction_patterns: vec![r"\(([^)]+\.(com|org|io|net|co))\)".to_string()],
             ..ExtractionPatterns::default()
         };
         let result = analyzer
@@ -8659,8 +8658,8 @@ mod tests {
             domain_extraction_patterns: vec![], // No regex patterns
             ..ExtractionPatterns::default()
         };
-        let result = analyzer
-            .extract_domain_from_entity_name_with_patterns("Cloudflare, Inc.", &patterns);
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("Cloudflare, Inc.", &patterns);
         // Should find via map_organization_to_domain
         assert_eq!(result, Some("cloudflare.com".to_string()));
     }
@@ -8673,8 +8672,10 @@ mod tests {
             ..ExtractionPatterns::default()
         };
         // "sentry.io" should be extracted from parentheses via extract_domain_from_entity_name
-        let result = analyzer
-            .extract_domain_from_entity_name_with_patterns("Functional Software (sentry.io)", &patterns);
+        let result = analyzer.extract_domain_from_entity_name_with_patterns(
+            "Functional Software (sentry.io)",
+            &patterns,
+        );
         assert_eq!(result, Some("sentry.io".to_string()));
     }
 
@@ -8685,7 +8686,8 @@ mod tests {
     #[test]
     fn test_extract_with_custom_rules_attribute_extraction() {
         let analyzer = make_test_analyzer();
-        let html = r#"<html><body><div class="vendor" data-company="stripe.com">Text</div></body></html>"#;
+        let html =
+            r#"<html><body><div class="vendor" data-company="stripe.com">Text</div></body></html>"#;
         let document = Html::parse_document(html);
         let custom_rules = CustomExtractionRules {
             direct_selectors: vec![DirectSelector {
@@ -8698,9 +8700,21 @@ mod tests {
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
-        assert!(result.subprocessors.is_empty() || result.subprocessors.iter().any(|v| v.domain.contains("stripe")));
+        assert!(
+            result.subprocessors.is_empty()
+                || result
+                    .subprocessors
+                    .iter()
+                    .any(|v| v.domain.contains("stripe"))
+        );
     }
 
     #[test]
@@ -8729,7 +8743,13 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules_trim, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules_trim,
+                "test.com",
+            )
             .unwrap();
         assert!(!result.subprocessors.is_empty());
     }
@@ -8758,7 +8778,13 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
         assert!(!result.subprocessors.is_empty());
     }
@@ -8787,7 +8813,13 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
         assert!(!result.subprocessors.is_empty());
     }
@@ -8819,13 +8851,16 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
         // NavigationTerm should be excluded
-        assert!(result
-            .subprocessors
-            .iter()
-            .all(|v| v.domain != "nav.com"));
+        assert!(result.subprocessors.iter().all(|v| v.domain != "nav.com"));
     }
 
     #[test]
@@ -8851,10 +8886,19 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
         assert!(!result.subprocessors.is_empty());
-        assert!(result.subprocessors.iter().any(|v| v.domain == "stripe.com"));
+        assert!(result
+            .subprocessors
+            .iter()
+            .any(|v| v.domain == "stripe.com"));
     }
 
     #[test]
@@ -8878,10 +8922,16 @@ mod tests {
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
-            // Should have pending mappings since it fell back to generic
-            assert!(result.subprocessors.is_empty() || !result.pending_mappings.is_empty());
+        // Should have pending mappings since it fell back to generic
+        assert!(result.subprocessors.is_empty() || !result.pending_mappings.is_empty());
     }
 
     #[test]
@@ -8900,7 +8950,13 @@ mod tests {
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://test.com", &custom_rules, "test.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://test.com",
+                &custom_rules,
+                "test.com",
+            )
             .unwrap();
         // "AB" is too short (< 3 chars) so should be rejected
         assert!(result.subprocessors.is_empty());
@@ -8920,7 +8976,12 @@ mod tests {
         let patterns = ExtractionPatterns::default();
         // URL doesn't suggest subprocessor page either
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/about", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/about",
+                &patterns,
+            )
             .unwrap();
         assert!(result.0.is_empty());
     }
@@ -8936,7 +8997,12 @@ mod tests {
         let patterns = ExtractionPatterns::default();
         // URL contains "subprocessor" which triggers URL-based context
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://acme.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://acme.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         // Should process the table even without paragraph context
         // since URL suggests subprocessor page
@@ -8996,7 +9062,12 @@ mod tests {
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://test.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://test.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         // Should skip header row (has <th>) and process data row
         // Company header should match "company" pattern and set column 0
@@ -9011,7 +9082,8 @@ mod tests {
             <table><tr><td>Stripe, Inc.</td></tr></table>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let result = analyzer.extract_from_tables(&document, html, "https://test.com/subprocessors");
+        let result =
+            analyzer.extract_from_tables(&document, html, "https://test.com/subprocessors");
         assert!(result.is_ok());
     }
 
@@ -9143,7 +9215,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let confidence =
             analyzer.calculate_organization_confidence("Google Cloud Platform", "Some context");
-        assert!(confidence > 0.7, "Known company should have high confidence: {}", confidence);
+        assert!(
+            confidence > 0.7,
+            "Known company should have high confidence: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -9151,14 +9227,22 @@ mod tests {
         let analyzer = make_test_analyzer();
         let confidence =
             analyzer.calculate_organization_confidence("Random Corp LLC", "Some context");
-        assert!(confidence > 0.6, "Company with suffix should get boost: {}", confidence);
+        assert!(
+            confidence > 0.6,
+            "Company with suffix should get boost: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_organization_confidence_short_name() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("AB", "context");
-        assert!(confidence < 0.5, "Very short name should get penalty: {}", confidence);
+        assert!(
+            confidence < 0.5,
+            "Very short name should get penalty: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -9166,17 +9250,19 @@ mod tests {
         let analyzer = make_test_analyzer();
         let long_name = "A".repeat(60);
         let confidence = analyzer.calculate_organization_confidence(&long_name, "context");
-        assert!(confidence < 0.5, "Very long name should get penalty: {}", confidence);
+        assert!(
+            confidence < 0.5,
+            "Very long name should get penalty: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_organization_confidence_clamped() {
         let analyzer = make_test_analyzer();
         // Known company + suffix should still be clamped to 1.0
-        let confidence = analyzer.calculate_organization_confidence(
-            "Google Inc",
-            "context with <td>table</td>",
-        );
+        let confidence =
+            analyzer.calculate_organization_confidence("Google Inc", "context with <td>table</td>");
         assert!(confidence <= 1.0);
         assert!(confidence >= 0.0);
     }
@@ -9188,7 +9274,8 @@ mod tests {
     #[test]
     fn test_extract_dom_context_basic() {
         let analyzer = make_test_analyzer();
-        let html = r#"<html><body><div class="vendors"><p id="test">Hello World</p></div></body></html>"#;
+        let html =
+            r#"<html><body><div class="vendors"><p id="test">Hello World</p></div></body></html>"#;
         let document = Html::parse_document(html);
         let selector = Selector::parse("p").unwrap();
         let element = document.select(&selector).next().unwrap();
@@ -9489,7 +9576,11 @@ mod tests {
         ];
         let org_refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         let consistency = analyzer.calculate_selector_consistency(&org_refs);
-        assert!(consistency > 0.8, "Identical patterns should have high consistency: {}", consistency);
+        assert!(
+            consistency > 0.8,
+            "Identical patterns should have high consistency: {}",
+            consistency
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -9569,7 +9660,8 @@ mod tests {
             confidence: 0.9,
             sample_matches: vec!["Stripe".to_string()],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&document, &selector, "https://test.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&document, &selector, "https://test.com");
         // Should find stripe.com since it has both vendor keyword (Inc) and domain (.com)
         let _ = &vendors;
     }
@@ -9585,7 +9677,8 @@ mod tests {
             confidence: 0.5,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&document, &selector, "https://test.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&document, &selector, "https://test.com");
         assert!(vendors.is_empty());
     }
 
@@ -9601,10 +9694,7 @@ mod tests {
             <tr><td>Stripe, Inc.</td><td>Payments</td></tr>
         </table></body></html>"#;
         let document = Html::parse_document(html);
-        let extractions = vec![
-            make_domain("cloudflare.com"),
-            make_domain("stripe.com"),
-        ];
+        let extractions = vec![make_domain("cloudflare.com"), make_domain("stripe.com")];
         let rules = analyzer.generate_domain_specific_patterns(
             &document,
             html,
@@ -9643,7 +9733,9 @@ mod tests {
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         // With 6+ extractions, should add the capitalized company pattern
-        assert!(patterns.iter().any(|p| p.description.contains("capitalized")));
+        assert!(patterns
+            .iter()
+            .any(|p| p.description.contains("capitalized")));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -9670,7 +9762,8 @@ mod tests {
         let document = Html::parse_document(html);
         let selector = Selector::parse("td").unwrap();
         let element = document.select(&selector).next().unwrap();
-        let evidence = analyzer.create_enhanced_evidence(&element, "Stripe Inc", "https://test.com/subs");
+        let evidence =
+            analyzer.create_enhanced_evidence(&element, "Stripe Inc", "https://test.com/subs");
         assert!(evidence.contains("Stripe Inc"));
         assert!(evidence.contains("https://test.com/subs"));
     }
@@ -9775,7 +9868,9 @@ mod tests {
             <main><p>We work with Google, Microsoft, and Amazon for cloud services.</p></main>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // Should detect known companies
         let names: Vec<&str> = orgs.iter().map(|o| o.name.as_str()).collect();
         assert!(
@@ -9788,9 +9883,12 @@ mod tests {
     #[tokio::test]
     async fn test_detect_organizations_with_suffix_pattern() {
         let analyzer = make_test_analyzer();
-        let html = r#"<html><body><main><p>Acme Corp Inc. provides services</p></main></body></html>"#;
+        let html =
+            r#"<html><body><main><p>Acme Corp Inc. provides services</p></main></body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // Should detect company with suffix pattern
         assert!(!orgs.is_empty(), "Expected at least one detected org");
         let has_acme = orgs.iter().any(|o| o.name.contains("Acme"));
@@ -9805,11 +9903,17 @@ mod tests {
             <main><p>We use Stripe Inc for payments</p></main>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // Should prefer content from main, not nav
-        let nav_orgs: Vec<&DetectedOrganization> = orgs.iter().filter(|o| o.name.contains("Google Maps")).collect();
+        let nav_orgs: Vec<&DetectedOrganization> = orgs
+            .iter()
+            .filter(|o| o.name.contains("Google Maps"))
+            .collect();
         // Navigation items may or may not be detected but content should be found
-        let main_orgs: Vec<&DetectedOrganization> = orgs.iter().filter(|o| o.name.contains("Stripe")).collect();
+        let main_orgs: Vec<&DetectedOrganization> =
+            orgs.iter().filter(|o| o.name.contains("Stripe")).collect();
         // Main content org should ideally be found
         let _ = (&main_orgs, &nav_orgs, &orgs);
     }
@@ -9824,10 +9928,19 @@ mod tests {
             </main>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // Should deduplicate same org name (keep highest confidence)
-        let google_count = orgs.iter().filter(|o| o.name.to_lowercase().contains("google")).count();
-        assert!(google_count <= 1, "Should deduplicate: found {} Google entries", google_count);
+        let google_count = orgs
+            .iter()
+            .filter(|o| o.name.to_lowercase().contains("google"))
+            .count();
+        assert!(
+            google_count <= 1,
+            "Should deduplicate: found {} Google entries",
+            google_count
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -9935,14 +10048,18 @@ mod tests {
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
         let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
-        let pdf_content = "Some PDF text\nCloudflare Inc provides CDN services\nStripe Corp handles payments\n";
+        let pdf_content =
+            "Some PDF text\nCloudflare Inc provides CDN services\nStripe Corp handles payments\n";
         let result = analyzer
             .extract_from_pdf_content(pdf_content, "https://test.com/doc.pdf", "test.com")
             .await
             .unwrap();
         // Should find companies with business suffixes
         let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
-        assert!(!domains.is_empty(), "Expected at least one extracted vendor");
+        assert!(
+            !domains.is_empty(),
+            "Expected at least one extracted vendor"
+        );
         assert!(
             domains.contains(&"cloudflare.com"),
             "Should find cloudflare.com; got: {:?}",
@@ -9981,13 +10098,21 @@ mod tests {
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
         let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
-        let pdf_content = "cloudflare.com is great\nCloudflare Inc provides CDN\ncloudflare.com again\n";
+        let pdf_content =
+            "cloudflare.com is great\nCloudflare Inc provides CDN\ncloudflare.com again\n";
         let result = analyzer
             .extract_from_pdf_content(pdf_content, "https://test.com/doc.pdf", "test.com")
             .await
             .unwrap();
-        let cloudflare_count = result.iter().filter(|v| v.domain == "cloudflare.com").count();
-        assert!(cloudflare_count <= 1, "Should deduplicate: found {} instances", cloudflare_count);
+        let cloudflare_count = result
+            .iter()
+            .filter(|v| v.domain == "cloudflare.com")
+            .count();
+        assert!(
+            cloudflare_count <= 1,
+            "Should deduplicate: found {} instances",
+            cloudflare_count
+        );
     }
 
     #[tokio::test]
@@ -10061,7 +10186,9 @@ mod tests {
 
     #[test]
     fn test_is_valid_org_name_description_of_processing() {
-        assert!(!is_valid_org_name("Some description of processing activities"));
+        assert!(!is_valid_org_name(
+            "Some description of processing activities"
+        ));
     }
 
     #[test]
@@ -10141,8 +10268,8 @@ mod tests {
     fn test_filter_org_prefix_with_ner_false_positive_and_invalid_name() {
         let vendors = vec![
             make_domain("_org:soc2_report"), // snake_case NER false positive
-            make_domain("_org:en-us"),        // locale NER false positive
-            make_domain("_org:AB"),            // Too short org name
+            make_domain("_org:en-us"),       // locale NER false positive
+            make_domain("_org:AB"),          // Too short org name
         ];
         let result = filter_subprocessor_results(vendors);
         assert!(result.is_empty());
@@ -10481,9 +10608,8 @@ mod tests {
     #[test]
     fn test_looks_like_vendor_content_multiple_keywords() {
         let analyzer = make_test_analyzer();
-        assert!(analyzer.looks_like_vendor_content(
-            "Stripe Inc provides payment platform at stripe.com"
-        ));
+        assert!(analyzer
+            .looks_like_vendor_content("Stripe Inc provides payment platform at stripe.com"));
     }
 
     #[test]
@@ -10679,16 +10805,14 @@ mod tests {
     #[test]
     fn test_extract_domain_from_entity_name_dba_with_known_mapping() {
         let analyzer = make_test_analyzer();
-        let result =
-            analyzer.extract_domain_from_entity_name("Some Co (d/b/a Sendgrid)");
+        let result = analyzer.extract_domain_from_entity_name("Some Co (d/b/a Sendgrid)");
         assert_eq!(result, Some("sendgrid.com".to_string()));
     }
 
     #[test]
     fn test_extract_domain_from_entity_name_domain_in_parentheses() {
         let analyzer = make_test_analyzer();
-        let result =
-            analyzer.extract_domain_from_entity_name("Stripe (stripe.com)");
+        let result = analyzer.extract_domain_from_entity_name("Stripe (stripe.com)");
         assert_eq!(result, Some("stripe.com".to_string()));
     }
 
@@ -10779,7 +10903,11 @@ mod tests {
         };
         let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
         let result = analyzer
-            .scrape_with_intelligent_analysis("https://test.com", "<html><body></body></html>", "test.com")
+            .scrape_with_intelligent_analysis(
+                "https://test.com",
+                "<html><body></body></html>",
+                "test.com",
+            )
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -10831,28 +10959,45 @@ mod tests {
     fn test_calculate_org_confidence_known_company() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("Google Cloud", "some context");
-        assert!(confidence >= 0.8, "Known company should get high confidence: {}", confidence);
+        assert!(
+            confidence >= 0.8,
+            "Known company should get high confidence: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_org_confidence_with_suffix() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("Acme Inc", "some context");
-        assert!(confidence >= 0.7, "Company with Inc suffix should get boosted confidence: {}", confidence);
+        assert!(
+            confidence >= 0.7,
+            "Company with Inc suffix should get boosted confidence: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_org_confidence_in_table_context() {
         let analyzer = make_test_analyzer();
-        let confidence = analyzer.calculate_organization_confidence("SomeCompany", "found in <td>cell</td>");
-        assert!(confidence > 0.5, "Table context should boost confidence: {}", confidence);
+        let confidence =
+            analyzer.calculate_organization_confidence("SomeCompany", "found in <td>cell</td>");
+        assert!(
+            confidence > 0.5,
+            "Table context should boost confidence: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_org_confidence_short_name() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("AB", "some context");
-        assert!(confidence <= 0.5, "Very short name should get penalized: {}", confidence);
+        assert!(
+            confidence <= 0.5,
+            "Very short name should get penalized: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -10860,7 +11005,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let long_name = "A".repeat(60);
         let confidence = analyzer.calculate_organization_confidence(&long_name, "some context");
-        assert!(confidence <= 0.5, "Very long name should get penalized: {}", confidence);
+        assert!(
+            confidence <= 0.5,
+            "Very long name should get penalized: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -10868,8 +11017,16 @@ mod tests {
         let analyzer = make_test_analyzer();
         // Known company + Inc suffix + table context = might exceed 1.0 before clamping
         let confidence = analyzer.calculate_organization_confidence("Google Inc", "<td>data</td>");
-        assert!(confidence <= 1.0, "Confidence should be clamped to 1.0: {}", confidence);
-        assert!(confidence >= 0.0, "Confidence should be >= 0.0: {}", confidence);
+        assert!(
+            confidence <= 1.0,
+            "Confidence should be clamped to 1.0: {}",
+            confidence
+        );
+        assert!(
+            confidence >= 0.0,
+            "Confidence should be >= 0.0: {}",
+            confidence
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -10885,7 +11042,14 @@ mod tests {
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
+            .unwrap();
         // The function should succeed and return a valid result set
         let _ = result; // result type verified by successful unwrap above
     }
@@ -10934,7 +11098,10 @@ mod tests {
             .unwrap();
 
         let cache_file = cache.get_cache_file_path("example.com");
-        assert!(cache_file.exists(), "Cache file should exist after update_extraction_info");
+        assert!(
+            cache_file.exists(),
+            "Cache file should exist after update_extraction_info"
+        );
 
         let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
         let entry: SubprocessorUrlCacheEntry = serde_json::from_str(&content).unwrap();
@@ -11033,7 +11200,10 @@ mod tests {
 
         let entry = cache.get_cached_entry("test.org").await.unwrap();
         let ep = entry.extraction_patterns.unwrap();
-        assert_eq!(ep.entity_column_selectors, vec!["custom_selector".to_string()]);
+        assert_eq!(
+            ep.entity_column_selectors,
+            vec!["custom_selector".to_string()]
+        );
         let em = entry.extraction_metadata.unwrap();
         assert_eq!(em.successful_extractions, 20);
         assert_eq!(em.successful_entity_column_index, Some(2));
@@ -11053,9 +11223,15 @@ mod tests {
         };
 
         // Create some JSON cache files
-        tokio::fs::write(tmp.path().join("domain1.json"), "{}").await.unwrap();
-        tokio::fs::write(tmp.path().join("domain2.json"), "{}").await.unwrap();
-        tokio::fs::write(tmp.path().join("domain3.json"), "{}").await.unwrap();
+        tokio::fs::write(tmp.path().join("domain1.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("domain2.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("domain3.json"), "{}")
+            .await
+            .unwrap();
 
         let count = cache.clear_all_cache().await.unwrap();
         assert_eq!(count, 3, "Should have removed 3 json files");
@@ -11075,9 +11251,15 @@ mod tests {
         };
 
         // Create a mix of JSON and non-JSON files
-        tokio::fs::write(tmp.path().join("domain.json"), "{}").await.unwrap();
-        tokio::fs::write(tmp.path().join("readme.txt"), "hello").await.unwrap();
-        tokio::fs::write(tmp.path().join("data.csv"), "a,b").await.unwrap();
+        tokio::fs::write(tmp.path().join("domain.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("readme.txt"), "hello")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("data.csv"), "a,b")
+            .await
+            .unwrap();
 
         let count = cache.clear_all_cache().await.unwrap();
         assert_eq!(count, 1, "Should only remove .json files");
@@ -11280,7 +11462,10 @@ mod tests {
     async fn test_get_pending_mappings_initially_empty() {
         let analyzer = make_test_analyzer();
         let pending = analyzer.get_pending_mappings().await;
-        assert!(pending.is_empty(), "Pending mappings should be empty initially");
+        assert!(
+            pending.is_empty(),
+            "Pending mappings should be empty initially"
+        );
     }
 
     #[tokio::test]
@@ -11373,8 +11558,7 @@ mod tests {
             cache_dir: tmp.path().to_path_buf(),
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         let mappings = vec![("Acme".to_string(), "acme.com".to_string())];
         analyzer
@@ -11400,8 +11584,7 @@ mod tests {
             cache_dir: tmp.path().to_path_buf(),
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         analyzer
             .save_confirmed_mappings("vendor.com", &[])
@@ -11432,8 +11615,7 @@ mod tests {
             .unwrap();
         assert!(cache.get_cache_file_path("target.com").exists());
 
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         let cleared = analyzer.clear_organization_cache("target.com").await;
         assert!(cleared, "Should return true when cache file existed");
@@ -11449,14 +11631,10 @@ mod tests {
             cache_dir: tmp.path().to_path_buf(),
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         let cleared = analyzer.clear_organization_cache("nonexistent.com").await;
-        assert!(
-            !cleared,
-            "Should return false when no cache file existed"
-        );
+        assert!(!cleared, "Should return false when no cache file existed");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -11481,8 +11659,7 @@ mod tests {
             .await
             .unwrap();
 
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         analyzer.clear_all_cache().await;
 
@@ -11498,8 +11675,7 @@ mod tests {
             cache_dir: tmp.path().to_path_buf(),
             cache_version: SubprocessorCache::CACHE_VERSION,
         };
-        let analyzer =
-            SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
+        let analyzer = SubprocessorAnalyzer::with_cache(Arc::new(RwLock::new(cache)));
 
         // Should not panic on empty directory
         analyzer.clear_all_cache().await;
@@ -11532,8 +11708,7 @@ mod tests {
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new();
         let shared_cache = Arc::new(RwLock::new(cache));
-        let analyzer =
-            SubprocessorAnalyzer::with_client_and_cache(client, shared_cache.clone());
+        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, shared_cache.clone());
 
         // Verify the analyzer uses the provided cache
         let returned_cache = analyzer.get_cache();
@@ -11568,7 +11743,10 @@ mod tests {
         });
         let result = analyzer.parse_vanta_graphql_response(&data);
         // Subprocessor with no "name" field should be filtered out by filter_map
-        assert!(result.is_none(), "Subprocessor without name should be filtered out");
+        assert!(
+            result.is_none(),
+            "Subprocessor without name should be filtered out"
+        );
     }
 
     #[test]
@@ -11640,7 +11818,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let html = r#"<html><head><link rel="preload" as="fetch" href="https://other.com/some-file.json"></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, None, "Link without signature-manifest should not match");
+        assert_eq!(
+            result, None,
+            "Link without signature-manifest should not match"
+        );
     }
 
     #[test]
@@ -11656,12 +11837,15 @@ mod tests {
     #[test]
     fn test_calculate_org_confidence_list_context() {
         let analyzer = make_test_analyzer();
-        let confidence_without = analyzer.calculate_organization_confidence("SomeCompany", "plain text");
-        let confidence_with = analyzer.calculate_organization_confidence("SomeCompany", "found in <li>list</li>");
+        let confidence_without =
+            analyzer.calculate_organization_confidence("SomeCompany", "plain text");
+        let confidence_with =
+            analyzer.calculate_organization_confidence("SomeCompany", "found in <li>list</li>");
         assert!(
             confidence_with > confidence_without,
             "List context should boost confidence: with={} without={}",
-            confidence_with, confidence_without
+            confidence_with,
+            confidence_without
         );
     }
 
@@ -11669,14 +11853,22 @@ mod tests {
     fn test_calculate_org_confidence_llc_suffix() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("Random LLC", "context");
-        assert!(confidence >= 0.7, "LLC suffix should get boosted: {}", confidence);
+        assert!(
+            confidence >= 0.7,
+            "LLC suffix should get boosted: {}",
+            confidence
+        );
     }
 
     #[test]
     fn test_calculate_org_confidence_corp_suffix() {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("Random Corp", "context");
-        assert!(confidence >= 0.7, "Corp suffix should get boosted: {}", confidence);
+        assert!(
+            confidence >= 0.7,
+            "Corp suffix should get boosted: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -11684,7 +11876,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let confidence = analyzer.calculate_organization_confidence("AWS", "context");
         // 3 chars is within valid range (3..=50), no penalty
-        assert!(confidence >= 0.5, "3-char name should not be penalized: {}", confidence);
+        assert!(
+            confidence >= 0.5,
+            "3-char name should not be penalized: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -11693,7 +11889,11 @@ mod tests {
         let name = "A".repeat(50);
         let confidence = analyzer.calculate_organization_confidence(&name, "context");
         // 50 chars is within valid range (3..=50), no penalty
-        assert!(confidence >= 0.5, "50-char name should not be penalized: {}", confidence);
+        assert!(
+            confidence >= 0.5,
+            "50-char name should not be penalized: {}",
+            confidence
+        );
     }
 
     #[test]
@@ -11702,7 +11902,11 @@ mod tests {
         let name = "A".repeat(51);
         let confidence = analyzer.calculate_organization_confidence(&name, "context");
         // 51 chars is outside valid range, gets -0.2 penalty
-        assert!(confidence < 0.5, "51-char name should be penalized: {}", confidence);
+        assert!(
+            confidence < 0.5,
+            "51-char name should be penalized: {}",
+            confidence
+        );
     }
 
     // --- looks_like_organization_name: more edge cases ---
@@ -11797,7 +12001,9 @@ mod tests {
     fn test_looks_like_organization_name_six_word_max() {
         let analyzer = make_test_analyzer();
         // 6 words is the max for multi-word check
-        assert!(analyzer.looks_like_organization_name("Acme Cloud Platform Digital Security Analytics"));
+        assert!(
+            analyzer.looks_like_organization_name("Acme Cloud Platform Digital Security Analytics")
+        );
     }
 
     #[test]
@@ -11805,7 +12011,8 @@ mod tests {
         let analyzer = make_test_analyzer();
         // 7 words exceeds the 2..=6 range for multi-word capitalized check
         // Unless one of the words matches an org pattern
-        let result = analyzer.looks_like_organization_name("Acme Cloud Platform Digital Security Analytics Corp");
+        let result = analyzer
+            .looks_like_organization_name("Acme Cloud Platform Digital Security Analytics Corp");
         // Contains "corp" in org patterns, so should still match
         assert!(result);
     }
@@ -11870,7 +12077,10 @@ mod tests {
         let extractions: Vec<SubprocessorDomain> = vec![];
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
-        assert!(patterns.is_empty(), "No extractions should produce no patterns");
+        assert!(
+            patterns.is_empty(),
+            "No extractions should produce no patterns"
+        );
     }
 
     #[test]
@@ -11893,14 +12103,14 @@ mod tests {
     fn test_analyze_html_patterns_td_pattern_only_added_once() {
         let analyzer = make_test_analyzer();
         let html = "<td>vendor1.com</td><td>vendor2.com</td>";
-        let extractions = vec![
-            make_domain("vendor1.com"),
-            make_domain("vendor2.com"),
-        ];
+        let extractions = vec![make_domain("vendor1.com"), make_domain("vendor2.com")];
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         // Should only add the td pattern once (due to break)
-        let td_patterns: Vec<_> = patterns.iter().filter(|p| p.pattern.contains("<td>")).collect();
+        let td_patterns: Vec<_> = patterns
+            .iter()
+            .filter(|p| p.pattern.contains("<td>"))
+            .collect();
         assert_eq!(td_patterns.len(), 1, "TD pattern should only be added once");
     }
 
@@ -11911,7 +12121,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let patterns = analyzer.generate_exclusion_patterns("https://generic.com/page");
         // Should have exactly 6 base patterns for generic URLs
-        assert_eq!(patterns.len(), 6, "Generic URL should have 6 base exclusion patterns");
+        assert_eq!(
+            patterns.len(),
+            6,
+            "Generic URL should have 6 base exclusion patterns"
+        );
     }
 
     #[test]
@@ -11919,7 +12133,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let patterns = analyzer.generate_exclusion_patterns("https://klaviyo.com/subs");
         // Should have 6 base + 1 klaviyo-specific = 7
-        assert_eq!(patterns.len(), 7, "Klaviyo URL should have 7 exclusion patterns");
+        assert_eq!(
+            patterns.len(),
+            7,
+            "Klaviyo URL should have 7 exclusion patterns"
+        );
     }
 
     #[test]
@@ -11927,7 +12145,11 @@ mod tests {
         let analyzer = make_test_analyzer();
         let patterns = analyzer.generate_exclusion_patterns("https://stripe.com/subs");
         // Should have 6 base + 1 stripe-specific = 7
-        assert_eq!(patterns.len(), 7, "Stripe URL should have 7 exclusion patterns");
+        assert_eq!(
+            patterns.len(),
+            7,
+            "Stripe URL should have 7 exclusion patterns"
+        );
         let joined = patterns.join(" ");
         assert!(joined.contains("payments"));
     }
@@ -11943,8 +12165,13 @@ mod tests {
             <div class="vendor">Datadog</div>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let result = analyzer.extract_from_structured_content(&document, html).unwrap();
-        assert!(result.is_empty(), "Structured content extraction should always return empty (disabled)");
+        let result = analyzer
+            .extract_from_structured_content(&document, html)
+            .unwrap();
+        assert!(
+            result.is_empty(),
+            "Structured content extraction should always return empty (disabled)"
+        );
     }
 
     // --- company_name_to_domain: technology company pattern ---
@@ -12058,7 +12285,11 @@ mod tests {
         let text = extract_text_from_html(html);
         // "Short" is < 200 chars, so all content selectors should be skipped
         // and we should fall back to body text
-        assert!(text.contains("Short") || text.contains("body content"), "text: {}", &text[..text.len().min(100)]);
+        assert!(
+            text.contains("Short") || text.contains("body content"),
+            "text: {}",
+            &text[..text.len().min(100)]
+        );
     }
 
     #[test]
@@ -12087,7 +12318,8 @@ mod tests {
 
     #[test]
     fn test_validate_and_compile_regex_complex_valid_pattern() {
-        let result = validate_and_compile_regex(r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+Inc\.?");
+        let result =
+            validate_and_compile_regex(r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+Inc\.?");
         assert!(result.is_some(), "Complex valid pattern should compile");
         let regex = result.unwrap();
         assert!(regex.is_match("Cloudflare, Inc."));
@@ -12158,7 +12390,10 @@ mod tests {
         let result = analyzer
             .extract_domain_from_organization_name("Acme Corp", &custom_rules)
             .unwrap();
-        assert_eq!(result.domain, "acme-long.com", "Should prefer longest match when position is tied");
+        assert_eq!(
+            result.domain, "acme-long.com",
+            "Should prefer longest match when position is tied"
+        );
     }
 
     // --- generate_domain_specific_patterns: empty extractions ---
@@ -12195,7 +12430,10 @@ mod tests {
         );
         let handling = rules.special_handling.unwrap();
         let joined = handling.exclusion_patterns.join(" ");
-        assert!(joined.contains("klaviyo"), "Klaviyo-specific exclusion pattern should be present");
+        assert!(
+            joined.contains("klaviyo"),
+            "Klaviyo-specific exclusion pattern should be present"
+        );
     }
 
     // --- create_evidence_excerpt: case insensitive matching ---
@@ -12205,7 +12443,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let text = "We use STRIPE.COM for payment processing.";
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
-        assert!(excerpt.contains("STRIPE.COM"), "Should find domain case-insensitively");
+        assert!(
+            excerpt.contains("STRIPE.COM"),
+            "Should find domain case-insensitively"
+        );
     }
 
     #[test]
@@ -12215,7 +12456,10 @@ mod tests {
         let suffix = "y".repeat(200);
         let text = format!("{} stripe.com {}", prefix, suffix);
         let excerpt = analyzer.create_evidence_excerpt(&text, "stripe.com");
-        assert!(excerpt.contains("stripe.com"), "Should find domain in middle of long text");
+        assert!(
+            excerpt.contains("stripe.com"),
+            "Should find domain in middle of long text"
+        );
         // Should have ellipsis since we're truncating from both sides
         assert!(excerpt.starts_with("..."), "Should have prefix ellipsis");
         assert!(excerpt.ends_with("..."), "Should have suffix ellipsis");
@@ -12227,7 +12471,10 @@ mod tests {
         let text = "a".repeat(1000);
         let excerpt = analyzer.create_evidence_excerpt(&text, "notfound.com");
         assert!(excerpt.len() <= 510);
-        assert!(excerpt.ends_with("..."), "Long truncated text should end with ellipsis");
+        assert!(
+            excerpt.ends_with("..."),
+            "Long truncated text should end with ellipsis"
+        );
     }
 
     #[test]
@@ -12235,7 +12482,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let text = "stripe.com is great for payments";
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
-        assert!(!excerpt.starts_with("..."), "Domain at start should not have prefix ellipsis");
+        assert!(
+            !excerpt.starts_with("..."),
+            "Domain at start should not have prefix ellipsis"
+        );
     }
 
     #[test]
@@ -12243,7 +12493,10 @@ mod tests {
         let analyzer = make_test_analyzer();
         let text = "We use stripe.com";
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
-        assert!(!excerpt.ends_with("..."), "Domain at end should not have suffix ellipsis");
+        assert!(
+            !excerpt.ends_with("..."),
+            "Domain at end should not have suffix ellipsis"
+        );
     }
 
     // --- extract_from_paragraphs: verify company pattern matching ---
@@ -12303,7 +12556,8 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_string("<html><body>Not a Vanta page</body></html>"),
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_string("<html><body>Not a Vanta page</body></html>"),
             )
             .mount(&server)
             .await;
@@ -12342,7 +12596,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_vanta_graphql_from_html_no_manifest() {
-        let html = r#"<html><head data-slugid="test-slug"></head><body>assets.vanta.com</body></html>"#;
+        let html =
+            r#"<html><head data-slugid="test-slug"></head><body>assets.vanta.com</body></html>"#;
         let analyzer = SubprocessorAnalyzer::new().await;
         let result = analyzer.try_vanta_graphql_from_html(html).await;
         assert!(result.is_none(), "Missing manifest URL should return None");
@@ -12361,10 +12616,7 @@ mod tests {
             </table>
         </body></html>"#;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
@@ -12383,8 +12635,7 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw("{}", "application/json"),
+                wiremock::ResponseTemplate::new(200).set_body_raw("{}", "application/json"),
             )
             .mount(&server)
             .await;
@@ -12398,7 +12649,11 @@ mod tests {
             .await;
         assert!(result.is_err(), "Non-HTML/PDF content type should error");
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Invalid content type"), "Error should mention content type: {}", err_msg);
+        assert!(
+            err_msg.contains("Invalid content type"),
+            "Error should mention content type: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -12437,17 +12692,20 @@ mod tests {
         let result = analyzer
             .scrape_subprocessor_page(&url, None, "example.com")
             .await;
-        assert!(result.is_ok(), "scrape_subprocessor_page should delegate to with_retry");
+        assert!(
+            result.is_ok(),
+            "scrape_subprocessor_page should delegate to with_retry"
+        );
     }
 
     #[tokio::test]
     async fn test_scrape_subprocessor_page_pdf_content_type() {
         let server = wiremock::MockServer::start().await;
-        let pdf_content = "Some PDF Text Content\nCloudflare Inc provides CDN\nstripe.com handles payments";
+        let pdf_content =
+            "Some PDF Text Content\nCloudflare Inc provides CDN\nstripe.com handles payments";
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(pdf_content, "application/pdf"),
+                wiremock::ResponseTemplate::new(200).set_body_raw(pdf_content, "application/pdf"),
             )
             .mount(&server)
             .await;
@@ -12552,7 +12810,10 @@ mod tests {
             .extract_from_pdf_content(content, "https://example.com/subs.pdf", "example.com")
             .await
             .unwrap();
-        assert!(!result.is_empty(), "Should extract domains from PDF-like content");
+        assert!(
+            !result.is_empty(),
+            "Should extract domains from PDF-like content"
+        );
     }
 
     #[tokio::test]
@@ -12575,7 +12836,10 @@ mod tests {
             .unwrap();
         // Should filter out things with "pdf", "page", "document"
         for v in &result {
-            assert!(!v.raw_record.to_lowercase().contains("pdf document"), "PDF artifacts should be filtered");
+            assert!(
+                !v.raw_record.to_lowercase().contains("pdf document"),
+                "PDF artifacts should be filtered"
+            );
         }
     }
 
@@ -12584,7 +12848,8 @@ mod tests {
     #[tokio::test]
     async fn test_extract_vendor_domains_with_analyzer_delegates() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let result = extract_vendor_domains_with_analyzer(&analyzer, "nonexistent.test", None).await;
+        let result =
+            extract_vendor_domains_with_analyzer(&analyzer, "nonexistent.test", None).await;
         let _ = &result;
     }
 
@@ -12592,9 +12857,13 @@ mod tests {
     async fn test_extract_vendor_domains_with_analyzer_and_logging_delegates() {
         let logger = crate::logger::AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
         let analyzer = SubprocessorAnalyzer::new().await;
-        let result =
-            extract_vendor_domains_with_analyzer_and_logging(&analyzer, "nonexistent.test", None, &logger)
-                .await;
+        let result = extract_vendor_domains_with_analyzer_and_logging(
+            &analyzer,
+            "nonexistent.test",
+            None,
+            &logger,
+        )
+        .await;
         let _ = &result;
     }
 
@@ -12609,7 +12878,10 @@ mod tests {
         let sel = scraper::Selector::parse("td").unwrap();
         let elem = doc.select(&sel).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&elem, "Cloudflare");
-        assert!(evidence.contains("Cloudflare"), "Evidence should contain entity name");
+        assert!(
+            evidence.contains("Cloudflare"),
+            "Evidence should contain entity name"
+        );
     }
 
     #[test]
@@ -12625,7 +12897,10 @@ mod tests {
         let sel = scraper::Selector::parse("div").unwrap();
         let elem = doc.select(&sel).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&elem, "Cloudflare");
-        assert!(evidence.contains("Cloudflare"), "Should find inner element with entity name");
+        assert!(
+            evidence.contains("Cloudflare"),
+            "Should find inner element with entity name"
+        );
     }
 
     #[test]
@@ -12633,15 +12908,15 @@ mod tests {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let long_text = "x".repeat(500);
-        let html = format!(
-            r#"<html><body><div>{}</div></body></html>"#,
-            long_text
-        );
+        let html = format!(r#"<html><body><div>{}</div></body></html>"#, long_text);
         let doc = scraper::Html::parse_document(&html);
         let sel = scraper::Selector::parse("div").unwrap();
         let elem = doc.select(&sel).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&elem, "NotInContent");
-        assert!(evidence.contains("NotInContent"), "Fallback should use entity name");
+        assert!(
+            evidence.contains("NotInContent"),
+            "Fallback should use entity name"
+        );
     }
 
     // === create_evidence_excerpt tests ===
@@ -12652,7 +12927,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let text = "Some context before cloudflare.com and some context after";
         let excerpt = analyzer.create_evidence_excerpt(text, "cloudflare.com");
-        assert!(excerpt.contains("cloudflare.com"), "Excerpt should contain domain");
+        assert!(
+            excerpt.contains("cloudflare.com"),
+            "Excerpt should contain domain"
+        );
     }
 
     #[test]
@@ -12661,7 +12939,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let text = "Some content without the target domain";
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
-        assert_eq!(excerpt, text, "Should return full text when domain not found");
+        assert_eq!(
+            excerpt, text,
+            "Should return full text when domain not found"
+        );
     }
 
     #[test]
@@ -12703,7 +12984,10 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let orgs: Vec<DetectedOrganization> = vec![];
         let patterns = analyzer.derive_extraction_patterns(&orgs, &doc).await;
-        assert!(patterns.discovered_selectors.is_empty(), "No orgs = no patterns");
+        assert!(
+            patterns.discovered_selectors.is_empty(),
+            "No orgs = no patterns"
+        );
     }
 
     #[tokio::test]
@@ -12753,7 +13037,10 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let sel = scraper::Selector::parse("a").unwrap();
         let elem = doc.select(&sel).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&elem), "Element in nav should be detected as navigation");
+        assert!(
+            analyzer.is_in_navigation_container(&elem),
+            "Element in nav should be detected as navigation"
+        );
     }
 
     #[test]
@@ -12764,7 +13051,10 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let sel = scraper::Selector::parse("p").unwrap();
         let elem = doc.select(&sel).next().unwrap();
-        assert!(!analyzer.is_in_navigation_container(&elem), "Element in main should not be navigation");
+        assert!(
+            !analyzer.is_in_navigation_container(&elem),
+            "Element in main should not be navigation"
+        );
     }
 
     #[test]
@@ -12775,7 +13065,10 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let sel = scraper::Selector::parse("span").unwrap();
         let elem = doc.select(&sel).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&elem), "Element in .navbar should be navigation");
+        assert!(
+            analyzer.is_in_navigation_container(&elem),
+            "Element in .navbar should be navigation"
+        );
     }
 
     // === extract_dom_context tests ===
@@ -12784,12 +13077,16 @@ mod tests {
     fn test_extract_dom_context_basic_v2() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let html = r#"<html><body><table><tr><td class="vendor">Stripe</td></tr></table></body></html>"#;
+        let html =
+            r#"<html><body><table><tr><td class="vendor">Stripe</td></tr></table></body></html>"#;
         let doc = scraper::Html::parse_document(html);
         let sel = scraper::Selector::parse("td").unwrap();
         let elem = doc.select(&sel).next().unwrap();
         let ctx = analyzer.extract_dom_context(&elem);
-        assert!(ctx.css_classes.contains(&"vendor".to_string()), "Should capture CSS classes");
+        assert!(
+            ctx.css_classes.contains(&"vendor".to_string()),
+            "Should capture CSS classes"
+        );
         assert!(!ctx.text_content.is_empty(), "Should capture text content");
     }
 
@@ -12799,22 +13096,23 @@ mod tests {
     fn test_generate_selector_from_pattern_v2() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let orgs = vec![
-            DetectedOrganization {
-                name: "Stripe".to_string(),
-                confidence: 0.9,
-                dom_context: DomContext {
-                    parent_tags: vec!["table".to_string(), "tr".to_string()],
-                    sibling_count: 1,
-                    css_classes: vec!["vendor".to_string()],
-                    text_content: "Stripe".to_string(),
-                    xpath_like: "td".to_string(),
-                },
+        let orgs = vec![DetectedOrganization {
+            name: "Stripe".to_string(),
+            confidence: 0.9,
+            dom_context: DomContext {
+                parent_tags: vec!["table".to_string(), "tr".to_string()],
+                sibling_count: 1,
+                css_classes: vec!["vendor".to_string()],
+                text_content: "Stripe".to_string(),
+                xpath_like: "td".to_string(),
             },
-        ];
+        }];
         let refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         let selector = analyzer.generate_selector_from_pattern("table>tr>td", &refs);
-        assert!(!selector.selector.is_empty(), "Selector should be non-empty");
+        assert!(
+            !selector.selector.is_empty(),
+            "Selector should be non-empty"
+        );
     }
 
     // === calculate_selector_consistency tests ===
@@ -12849,7 +13147,11 @@ mod tests {
         ];
         let refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         let score = analyzer.calculate_selector_consistency(&refs);
-        assert!(score > 0.7, "All same tag should have high consistency: {}", score);
+        assert!(
+            score > 0.7,
+            "All same tag should have high consistency: {}",
+            score
+        );
     }
 
     // === calculate_pattern_confidence tests ===
@@ -12858,21 +13160,20 @@ mod tests {
     fn test_calculate_pattern_confidence() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let orgs = vec![
-            DetectedOrganization {
-                name: "Stripe".to_string(),
-                confidence: 0.95,
-                dom_context: DomContext {
-                    parent_tags: vec!["tr".to_string()],
-                    sibling_count: 1,
-                    css_classes: vec!["vendor".to_string()],
-                    text_content: String::new(),
-                    xpath_like: "td".to_string(),
-                },
+        let orgs = vec![DetectedOrganization {
+            name: "Stripe".to_string(),
+            confidence: 0.95,
+            dom_context: DomContext {
+                parent_tags: vec!["tr".to_string()],
+                sibling_count: 1,
+                css_classes: vec!["vendor".to_string()],
+                text_content: String::new(),
+                xpath_like: "td".to_string(),
             },
-        ];
+        }];
         let refs: Vec<&DetectedOrganization> = orgs.iter().collect();
-        let html_str = r#"<html><body><table><tr><td class="vendor">Stripe</td></tr></table></body></html>"#;
+        let html_str =
+            r#"<html><body><table><tr><td class="vendor">Stripe</td></tr></table></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
         let selector = DomSelector {
             selector: "td.vendor".to_string(),
@@ -12881,7 +13182,11 @@ mod tests {
             sample_matches: vec!["Stripe".to_string()],
         };
         let confidence = analyzer.calculate_pattern_confidence(&refs, &document, &selector);
-        assert!(confidence > 0.0, "Should calculate positive confidence: {}", confidence);
+        assert!(
+            confidence > 0.0,
+            "Should calculate positive confidence: {}",
+            confidence
+        );
     }
 
     // === extract_using_adaptive_selector tests ===
@@ -12898,9 +13203,10 @@ mod tests {
             confidence: 0.9,
             sample_matches: vec!["cloudflare.com".to_string()],
         };
-        let results = analyzer.extract_using_adaptive_selector(&doc, &selector, "https://example.com");
+        let results =
+            analyzer.extract_using_adaptive_selector(&doc, &selector, "https://example.com");
         // May or may not find vendors depending on domain validation
-        assert!(results.len() >= 0, "Should return a result vector");
+        let _ = results;
     }
 
     // === SubprocessorCache tests for update_extraction_info, clear_all_cache, add_confirmed_mappings ===
@@ -12917,24 +13223,39 @@ mod tests {
             last_extraction_time: 12345,
             adaptive_patterns: None,
         };
-        cache.update_extraction_info("example.com", patterns, metadata).await.unwrap();
+        cache
+            .update_extraction_info("example.com", patterns, metadata)
+            .await
+            .unwrap();
         let cache_file = cache.get_cache_file_path("example.com");
         assert!(cache_file.exists(), "Cache file should be created");
         let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
-        assert!(content.contains("example.com"), "Cache file should contain domain");
+        assert!(
+            content.contains("example.com"),
+            "Cache file should contain domain"
+        );
     }
 
     #[tokio::test]
     async fn test_cache_clear_all_removes_json_files() {
         let tmp = tempfile::tempdir().unwrap();
-        tokio::fs::write(tmp.path().join("a.json"), "{}").await.unwrap();
-        tokio::fs::write(tmp.path().join("b.json"), "{}").await.unwrap();
-        tokio::fs::write(tmp.path().join("c.txt"), "not json").await.unwrap();
+        tokio::fs::write(tmp.path().join("a.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("b.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("c.txt"), "not json")
+            .await
+            .unwrap();
 
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
         let count = cache.clear_all_cache().await.unwrap();
         assert_eq!(count, 2, "Should remove exactly 2 JSON files");
-        assert!(tmp.path().join("c.txt").exists(), "Non-JSON file should remain");
+        assert!(
+            tmp.path().join("c.txt").exists(),
+            "Non-JSON file should remain"
+        );
     }
 
     #[tokio::test]
@@ -12945,21 +13266,39 @@ mod tests {
             ("Cloudflare Inc".to_string(), "cloudflare.com".to_string()),
             ("Stripe".to_string(), "stripe.com".to_string()),
         ];
-        cache.add_confirmed_mappings("example.com", &mappings).await.unwrap();
+        cache
+            .add_confirmed_mappings("example.com", &mappings)
+            .await
+            .unwrap();
         let cache_file = cache.get_cache_file_path("example.com");
-        assert!(cache_file.exists(), "Cache file should be created with mappings");
+        assert!(
+            cache_file.exists(),
+            "Cache file should be created with mappings"
+        );
         let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
-        assert!(content.contains("cloudflare.com"), "Should contain cloudflare mapping");
-        assert!(content.contains("stripe.com"), "Should contain stripe mapping");
+        assert!(
+            content.contains("cloudflare.com"),
+            "Should contain cloudflare mapping"
+        );
+        assert!(
+            content.contains("stripe.com"),
+            "Should contain stripe mapping"
+        );
     }
 
     #[tokio::test]
     async fn test_cache_add_confirmed_mappings_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
-        cache.add_confirmed_mappings("example.com", &[]).await.unwrap();
+        cache
+            .add_confirmed_mappings("example.com", &[])
+            .await
+            .unwrap();
         let cache_file = cache.get_cache_file_path("example.com");
-        assert!(!cache_file.exists(), "Empty mappings should not create file");
+        assert!(
+            !cache_file.exists(),
+            "Empty mappings should not create file"
+        );
     }
 
     // === Analyzer-level cache delegation tests ===
@@ -12969,14 +13308,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
         // Write a cache file
-        tokio::fs::write(tmp.path().join("test.json"), "{}").await.unwrap();
+        tokio::fs::write(tmp.path().join("test.json"), "{}")
+            .await
+            .unwrap();
 
         let cache_arc = Arc::new(RwLock::new(cache));
         let analyzer = SubprocessorAnalyzer::with_cache(cache_arc);
 
         // clear_all_cache should delegate
         analyzer.clear_all_cache().await;
-        assert!(!tmp.path().join("test.json").exists(), "Cache file should be cleared");
+        assert!(
+            !tmp.path().join("test.json").exists(),
+            "Cache file should be cleared"
+        );
     }
 
     #[tokio::test]
@@ -13036,7 +13380,10 @@ mod tests {
             .unwrap();
 
         let cache_file_path = tmp.path().join("test-domain.com.json");
-        assert!(cache_file_path.exists(), "Confirmed mappings should be persisted");
+        assert!(
+            cache_file_path.exists(),
+            "Confirmed mappings should be persisted"
+        );
     }
 
     // === Lazy static selector coverage helpers ===
@@ -13058,7 +13405,10 @@ mod tests {
         let divs: Vec<_> = html.select(&DIV_SELECTOR).collect();
         assert!(!divs.is_empty(), "DIV_SELECTOR should match");
         let all: Vec<_> = html.select(&ALL_ELEMENTS_SELECTOR).collect();
-        assert!(all.len() > 3, "ALL_ELEMENTS_SELECTOR should match many elements");
+        assert!(
+            all.len() > 3,
+            "ALL_ELEMENTS_SELECTOR should match many elements"
+        );
     }
 
     // === extract_text_from_html ===
@@ -13129,7 +13479,10 @@ mod tests {
             special_handling: None,
         };
         let result = analyzer.extract_domain_from_organization_name("Cloudflare", &rules);
-        assert!(result.is_none() || result.as_ref().unwrap().is_fallback, "Generic mapping should be marked as fallback");
+        assert!(
+            result.is_none() || result.as_ref().unwrap().is_fallback,
+            "Generic mapping should be marked as fallback"
+        );
     }
 
     // === cache_adaptive_patterns ===
@@ -13169,8 +13522,13 @@ mod tests {
             context_patterns: vec!["subprocessor".to_string()],
             ..Default::default()
         };
-        let result = analyzer.extract_from_paragraphs(&doc, html, "https://example.com", &patterns).unwrap();
-        assert!(result.is_empty(), "No subprocessor context in content = no results");
+        let result = analyzer
+            .extract_from_paragraphs(&doc, html, "https://example.com", &patterns)
+            .unwrap();
+        assert!(
+            result.is_empty(),
+            "No subprocessor context in content = no results"
+        );
     }
 
     #[test]
@@ -13186,9 +13544,11 @@ mod tests {
             context_patterns: vec!["subprocessor".to_string()],
             ..Default::default()
         };
-        let result = analyzer.extract_from_paragraphs(&doc, html, "https://example.com", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(&doc, html, "https://example.com", &patterns)
+            .unwrap();
         // May or may not find Cloudflare depending on domain lookup
-        assert!(result.len() >= 0, "Should process paragraphs with context");
+        let _ = result;
     }
 
     // === company_name_to_domain additional ===
@@ -13232,10 +13592,19 @@ mod tests {
         let cache_file = tmp.path().join("example.com.json");
         assert!(cache_file.exists(), "Cache file should be created");
         let content = tokio::fs::read_to_string(&cache_file).await.unwrap();
-        assert!(content.contains("cloudflare.com"), "Cache should contain cloudflare mapping");
-        assert!(content.contains("stripe.com"), "Cache should contain stripe mapping");
+        assert!(
+            content.contains("cloudflare.com"),
+            "Cache should contain cloudflare mapping"
+        );
+        assert!(
+            content.contains("stripe.com"),
+            "Cache should contain stripe mapping"
+        );
         // Verify suffix stripping: "cloudflare, inc." → base "cloudflare" also mapped
-        assert!(content.contains("\"cloudflare\""), "Should strip Inc. suffix to create base mapping");
+        assert!(
+            content.contains("\"cloudflare\""),
+            "Should strip Inc. suffix to create base mapping"
+        );
     }
 
     #[tokio::test]
@@ -13271,10 +13640,18 @@ mod tests {
             trust_center_strategy: None,
         };
         let content = serde_json::to_string_pretty(&entry).unwrap();
-        tokio::fs::write(tmp.path().join("test.com.json"), &content).await.unwrap();
+        tokio::fs::write(tmp.path().join("test.com.json"), &content)
+            .await
+            .unwrap();
         let patterns = cache.get_extraction_patterns("test.com").await;
-        assert!(patterns.is_domain_specific, "Should return cached domain-specific patterns");
-        assert_eq!(patterns.entity_column_selectors, vec!["td:first-child".to_string()]);
+        assert!(
+            patterns.is_domain_specific,
+            "Should return cached domain-specific patterns"
+        );
+        assert_eq!(
+            patterns.entity_column_selectors,
+            vec!["td:first-child".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -13283,7 +13660,9 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let mappings = vec![("Stripe".to_string(), "stripe.com".to_string())];
-        let result = analyzer.save_confirmed_mappings("example.com", &mappings).await;
+        let result = analyzer
+            .save_confirmed_mappings("example.com", &mappings)
+            .await;
         assert!(result.is_ok(), "save_confirmed_mappings should succeed");
     }
 
@@ -13293,11 +13672,13 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         assert!(analyzer.get_pending_mappings().await.is_empty());
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "Acme Corp".to_string(),
-            inferred_domain: "acme.com".to_string(),
-            source_domain: "example.com".to_string(),
-        }).await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "Acme Corp".to_string(),
+                inferred_domain: "acme.com".to_string(),
+                source_domain: "example.com".to_string(),
+            })
+            .await;
         assert_eq!(analyzer.get_pending_mappings().await.len(), 1);
         analyzer.clear_pending_mappings().await;
         assert!(analyzer.get_pending_mappings().await.is_empty());
@@ -13353,10 +13734,10 @@ mod tests {
             }
         });
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(serde_json::to_string(&manifest_json).unwrap(), "application/json"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                serde_json::to_string(&manifest_json).unwrap(),
+                "application/json",
+            ))
             .mount(&server)
             .await;
 
@@ -13370,7 +13751,10 @@ mod tests {
         let result = analyzer.try_vanta_graphql_from_html(&html).await;
         // GraphQL POST to app.vanta.com will fail in test env, so result is None
         // but this exercises lines 863-942 (slugId extraction, manifest fetch, manifest parse, GraphQL attempt)
-        assert!(result.is_none(), "GraphQL call to external URL should fail gracefully");
+        assert!(
+            result.is_none(),
+            "GraphQL call to external URL should fail gracefully"
+        );
     }
 
     #[tokio::test]
@@ -13425,10 +13809,10 @@ mod tests {
             "operations": {}
         });
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(serde_json::to_string(&manifest_json).unwrap(), "application/json"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(
+                serde_json::to_string(&manifest_json).unwrap(),
+                "application/json",
+            ))
             .mount(&server)
             .await;
 
@@ -13440,7 +13824,10 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer.try_vanta_graphql_from_html(&html).await;
-        assert!(result.is_none(), "Missing GraphQL operations should return None");
+        assert!(
+            result.is_none(),
+            "Missing GraphQL operations should return None"
+        );
     }
 
     // === Coverage gap tests: extract_vanta_manifest_url ===
@@ -13451,7 +13838,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let html = r#"<html data-signature-manifest-url="https://assets.vanta.com/static/signature-manifest.abc.json"><head></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.abc.json".to_string())
+        );
     }
 
     #[test]
@@ -13460,7 +13850,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let html = r#"<html><head><link rel="preload" as="fetch" href="https://assets.vanta.com/static/signature-manifest.def456.json"></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string())
+        );
     }
 
     #[test]
@@ -13469,7 +13862,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let html = r#"<html><head></head><body>some content with https://assets.vanta.com/static/signature-manifest.abc123def.json embedded</body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc123def.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.abc123def.json".to_string())
+        );
     }
 
     #[test]
@@ -13491,10 +13887,7 @@ mod tests {
             <div>trust center content</div>
         </body></html>"#;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
@@ -13503,7 +13896,9 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         // This exercises the Vanta detection branch (line 2060) within scrape_subprocessor_page_with_retry
-        let result = analyzer.scrape_subprocessor_page_with_retry(&url, None, "example.com", None).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .await;
         // Vanta GraphQL call will fail (external URL), so it falls through to generic extraction
         assert!(result.is_ok());
     }
@@ -13526,10 +13921,7 @@ mod tests {
             </table>
         </body></html>"#;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
@@ -13537,7 +13929,9 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
-        let result = analyzer.scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None)
+            .await;
         assert!(result.is_ok());
         // Exercises the full table extraction + pattern generation code path (lines 2411-2478)
         // Actual vendor count depends on domain resolution in test environment
@@ -13557,9 +13951,14 @@ mod tests {
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
-        let result = analyzer.scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None)
+            .await;
         assert!(result.is_ok());
-        assert!(result.unwrap().is_empty(), "Empty page should return no vendors");
+        assert!(
+            result.unwrap().is_empty(),
+            "Empty page should return no vendors"
+        );
     }
 
     // === Coverage gap tests: extract_with_custom_rules ===
@@ -13585,10 +13984,19 @@ mod tests {
             custom_regex_patterns: vec![],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&doc, html, "https://example.com", &custom_rules, "example.com");
+        let result = analyzer.extract_with_custom_rules(
+            &doc,
+            html,
+            "https://example.com",
+            &custom_rules,
+            "example.com",
+        );
         assert!(result.is_ok());
         let extraction = result.unwrap();
-        assert!(!extraction.subprocessors.is_empty(), "Should extract from direct selectors");
+        assert!(
+            !extraction.subprocessors.is_empty(),
+            "Should extract from direct selectors"
+        );
     }
 
     #[test]
@@ -13608,7 +14016,13 @@ mod tests {
             }],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&doc, html, "https://example.com", &custom_rules, "example.com");
+        let result = analyzer.extract_with_custom_rules(
+            &doc,
+            html,
+            "https://example.com",
+            &custom_rules,
+            "example.com",
+        );
         assert!(result.is_ok());
     }
 
@@ -13636,11 +14050,25 @@ mod tests {
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&doc, html, "https://example.com", &custom_rules, "example.com");
+        let result = analyzer.extract_with_custom_rules(
+            &doc,
+            html,
+            "https://example.com",
+            &custom_rules,
+            "example.com",
+        );
         assert!(result.is_ok());
         let extraction = result.unwrap();
-        let domains: Vec<&str> = extraction.subprocessors.iter().map(|s| s.domain.as_str()).collect();
-        assert!(domains.contains(&"acme.com"), "Should use org-to-domain mapping, got: {:?}", domains);
+        let domains: Vec<&str> = extraction
+            .subprocessors
+            .iter()
+            .map(|s| s.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"acme.com"),
+            "Should use org-to-domain mapping, got: {:?}",
+            domains
+        );
     }
 
     // === Coverage gap tests: extract_from_paragraphs with company patterns ===
@@ -13660,10 +14088,12 @@ mod tests {
             context_patterns: vec!["subprocessor".to_string()],
             ..Default::default()
         };
-        let result = analyzer.extract_from_paragraphs(&doc, html, "https://example.com", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(&doc, html, "https://example.com", &patterns)
+            .unwrap();
         // Exercises the paragraph extraction with context + company patterns code path
         // Results depend on domain resolution which may not resolve in test env
-        assert!(result.len() >= 0, "Should attempt paragraph extraction with subprocessor context");
+        let _ = result;
     }
 
     // === Coverage gap tests: generate_domain_specific_patterns ===
@@ -13682,13 +14112,17 @@ mod tests {
             </table>
         </body></html>"#;
         let doc = scraper::Html::parse_document(html);
-        let extractions = vec![
-            make_domain("cloudflare.com"),
-            make_domain("stripe.com"),
-        ];
-        let patterns = analyzer.generate_domain_specific_patterns(&doc, html, &extractions, "https://example.com");
-        assert!(patterns.direct_selectors.len() > 0 || patterns.custom_regex_patterns.len() > 0,
-            "Should generate at least one selector or regex pattern");
+        let extractions = vec![make_domain("cloudflare.com"), make_domain("stripe.com")];
+        let patterns = analyzer.generate_domain_specific_patterns(
+            &doc,
+            html,
+            &extractions,
+            "https://example.com",
+        );
+        assert!(
+            patterns.direct_selectors.len() > 0 || patterns.custom_regex_patterns.len() > 0,
+            "Should generate at least one selector or regex pattern"
+        );
     }
 
     // === Coverage gap tests: analyze_domain_with_full_options cache hit ===
@@ -13706,10 +14140,7 @@ mod tests {
             </table>
         </body></html>"#;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
@@ -13731,7 +14162,9 @@ mod tests {
             trust_center_strategy: None,
         };
         let content = serde_json::to_string_pretty(&entry).unwrap();
-        tokio::fs::write(cache_dir.join("cached-test.com.json"), &content).await.unwrap();
+        tokio::fs::write(cache_dir.join("cached-test.com.json"), &content)
+            .await
+            .unwrap();
 
         let cache = SubprocessorCache {
             cache_dir,
@@ -13742,9 +14175,9 @@ mod tests {
             client,
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
-        let result = analyzer.analyze_domain_with_full_options(
-            "cached-test.com", None, None, None
-        ).await;
+        let result = analyzer
+            .analyze_domain_with_full_options("cached-test.com", None, None, None)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -13777,7 +14210,9 @@ mod tests {
         tokio::fs::write(
             cache_dir.join("logged.com.json"),
             serde_json::to_string_pretty(&entry).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let cache = SubprocessorCache {
             cache_dir,
@@ -13789,9 +14224,9 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
         let logger = crate::logger::AnalysisLogger::new(crate::logger::VerbosityLevel::Debug);
-        let result = analyzer.analyze_domain_with_full_options(
-            "logged.com", None, Some(&logger), None
-        ).await;
+        let result = analyzer
+            .analyze_domain_with_full_options("logged.com", None, Some(&logger), None)
+            .await;
         assert!(result.is_ok(), "Cache hit with logger should work");
     }
 
@@ -13821,7 +14256,9 @@ mod tests {
         tokio::fs::write(
             cache_dir.join("failing.com.json"),
             serde_json::to_string_pretty(&entry).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let cache = SubprocessorCache {
             cache_dir,
@@ -13833,9 +14270,9 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
         // Cached URL returns 500, so should fall through to URL discovery (which also fails)
-        let result = analyzer.analyze_domain_with_full_options(
-            "failing.com", None, None, None
-        ).await;
+        let result = analyzer
+            .analyze_domain_with_full_options("failing.com", None, None, None)
+            .await;
         // The result may be Ok with empty results or Err depending on how URL discovery goes
         let _ = &result;
     }
@@ -13851,14 +14288,18 @@ mod tests {
         let a_sel = scraper::Selector::parse("a").unwrap();
         let elem = doc.select(&a_sel).next().unwrap();
         let result = analyzer.is_in_navigation_container(&elem);
-        assert!(result, "Element inside <nav> should be detected as navigation");
+        assert!(
+            result,
+            "Element inside <nav> should be detected as navigation"
+        );
     }
 
     #[test]
     fn test_is_in_navigation_container_not_nav_v2() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let html = r##"<html><body><div class="content"><span>cloudflare.com</span></div></body></html>"##;
+        let html =
+            r##"<html><body><div class="content"><span>cloudflare.com</span></div></body></html>"##;
         let doc = scraper::Html::parse_document(html);
         let span_sel = scraper::Selector::parse("span").unwrap();
         let elem = doc.select(&span_sel).next().unwrap();
@@ -13875,7 +14316,10 @@ mod tests {
         let a_sel = scraper::Selector::parse("a").unwrap();
         let elem = doc.select(&a_sel).next().unwrap();
         let result = analyzer.is_in_navigation_container(&elem);
-        assert!(result, "Element inside <footer> should be detected as navigation");
+        assert!(
+            result,
+            "Element inside <footer> should be detected as navigation"
+        );
     }
 
     // === Coverage gap tests: extract_from_tables_with_patterns branches ===
@@ -13887,7 +14331,12 @@ mod tests {
         let html = r#"<html><body><p>no tables here</p></body></html>"#;
         let doc = scraper::Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&doc, html, "https://example.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &doc,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         assert!(result.is_ok());
         let (vendors, _metadata) = result.unwrap();
         assert!(vendors.is_empty(), "No tables should mean no vendors");
@@ -13901,11 +14350,20 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         assert!(!analyzer.is_valid_domain(""), "Empty string not valid");
         assert!(!analyzer.is_valid_domain("abc"), "No dot not valid");
-        assert!(!analyzer.is_valid_domain(".com"), "Starts with dot not valid");
+        assert!(
+            !analyzer.is_valid_domain(".com"),
+            "Starts with dot not valid"
+        );
         assert!(!analyzer.is_valid_domain("a."), "Ends with dot not valid");
         assert!(!analyzer.is_valid_domain("ab.x"), "Too short not valid");
-        assert!(analyzer.is_valid_domain("example.com"), "Normal domain is valid");
-        assert!(!analyzer.is_valid_domain("has spaces.com"), "Spaces not valid");
+        assert!(
+            analyzer.is_valid_domain("example.com"),
+            "Normal domain is valid"
+        );
+        assert!(
+            !analyzer.is_valid_domain("has spaces.com"),
+            "Spaces not valid"
+        );
     }
 
     // === Coverage gap tests: read_response_body_capped ===
@@ -13916,8 +14374,7 @@ mod tests {
         let large_body = "x".repeat(100_000);
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(large_body, "text/plain"),
+                wiremock::ResponseTemplate::new(200).set_body_raw(large_body, "text/plain"),
             )
             .mount(&server)
             .await;
@@ -13934,7 +14391,10 @@ mod tests {
     #[tokio::test]
     async fn test_subprocessor_cache_load() {
         let cache = SubprocessorCache::load().await;
-        assert!(!cache.cache_dir.as_os_str().is_empty(), "Cache should have a directory");
+        assert!(
+            !cache.cache_dir.as_os_str().is_empty(),
+            "Cache should have a directory"
+        );
     }
 
     // === Coverage gap tests: extract_domain_from_entity_name edge cases ===
@@ -13945,10 +14405,12 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let patterns = ExtractionPatterns::default();
         // Known vendor should resolve
-        let result = analyzer.extract_domain_from_entity_name_with_patterns("Cloudflare", &patterns);
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("Cloudflare", &patterns);
         assert!(result.is_some(), "Cloudflare should resolve to a domain");
         // Unknown entity with generic fallback
-        let result = analyzer.extract_domain_from_entity_name_with_patterns("Totally Unknown Corp", &patterns);
+        let result = analyzer
+            .extract_domain_from_entity_name_with_patterns("Totally Unknown Corp", &patterns);
         // May or may not resolve depending on implementation
         assert!(result.is_some() || result.is_none());
     }
@@ -13964,16 +14426,23 @@ mod tests {
             Amazon Web Services - Cloud hosting\n\
             Twilio Inc. - Communications platform\n\
             We also use datadog.com for monitoring and sentry.io for error tracking.";
-        let result = analyzer.extract_from_pdf_content(pdf_text, "https://example.com/privacy.pdf", "example.com").await;
+        let result = analyzer
+            .extract_from_pdf_content(pdf_text, "https://example.com/privacy.pdf", "example.com")
+            .await;
         assert!(result.is_ok());
         let vendors = result.unwrap();
-        assert!(!vendors.is_empty(), "Should extract vendors from PDF text content");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract vendors from PDF text content"
+        );
     }
 
     #[tokio::test]
     async fn test_extract_from_pdf_content_empty_v2() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let result = analyzer.extract_from_pdf_content("", "https://example.com/empty.pdf", "example.com").await;
+        let result = analyzer
+            .extract_from_pdf_content("", "https://example.com/empty.pdf", "example.com")
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
@@ -13987,10 +14456,7 @@ mod tests {
             <div class="sp-entry">datadog.com</div>
         </body></html>"##;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
@@ -14039,7 +14505,9 @@ mod tests {
         tokio::fs::write(
             cache_dir.join("customrules.com.json"),
             serde_json::to_string_pretty(&entry).unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let cache = SubprocessorCache {
             cache_dir,
@@ -14050,9 +14518,9 @@ mod tests {
             client,
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
-        let result = analyzer.scrape_subprocessor_page_with_retry(
-            &server.uri(), None, "customrules.com", None
-        ).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "customrules.com", None)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -14069,19 +14537,16 @@ mod tests {
             </ul>
         </body></html>"##;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(html, "text/html"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_raw(html, "text/html"))
             .mount(&server)
             .await;
 
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
-        let result = analyzer.scrape_subprocessor_page_with_retry(
-            &server.uri(), None, "listtest.com", None
-        ).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "listtest.com", None)
+            .await;
         assert!(result.is_ok(), "List extraction path should work");
     }
 
@@ -14102,9 +14567,13 @@ mod tests {
                 <p>Infrastructure monitoring</p>
             </div>
         </body></html>"##;
-        let result = analyzer.scrape_with_intelligent_analysis(
-            "https://example.com/subprocessors", html, "example.com"
-        ).await;
+        let result = analyzer
+            .scrape_with_intelligent_analysis(
+                "https://example.com/subprocessors",
+                html,
+                "example.com",
+            )
+            .await;
         // May succeed or fail depending on organization detection
         let _ = &result;
     }
@@ -14121,7 +14590,8 @@ mod tests {
         </body></html>"##;
         let doc = scraper::Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_lists_with_patterns(&doc, html, "https://example.com", &patterns);
+        let result =
+            analyzer.extract_from_lists_with_patterns(&doc, html, "https://example.com", &patterns);
         assert!(result.is_ok());
     }
 
@@ -14157,7 +14627,7 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let result = analyzer_rt.block_on(analyzer.detect_organizations_in_content(&doc, html));
         // Exercises the organization detection code path
-        assert!(result.len() >= 0);
+        let _ = result;
     }
 
     #[test]
@@ -14177,7 +14647,12 @@ mod tests {
             make_domain("stripe.com"),
             make_domain("datadog.com"),
         ];
-        let patterns = analyzer.generate_domain_specific_patterns(&doc, html, &extractions, "https://example.com");
+        let patterns = analyzer.generate_domain_specific_patterns(
+            &doc,
+            html,
+            &extractions,
+            "https://example.com",
+        );
         // Exercises the pattern generation with list-based content
         let _ = &patterns;
     }
@@ -14192,8 +14667,7 @@ mod tests {
             sentry.io - Error Tracking";
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_raw(pdf_content, "application/pdf"),
+                wiremock::ResponseTemplate::new(200).set_body_raw(pdf_content, "application/pdf"),
             )
             .mount(&server)
             .await;
@@ -14201,9 +14675,9 @@ mod tests {
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
-        let result = analyzer.scrape_subprocessor_page_with_retry(
-            &server.uri(), None, "pdftest.com", None
-        ).await;
+        let result = analyzer
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "pdftest.com", None)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -14220,7 +14694,9 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         // This exercises the URL discovery fallback (no cache hit, generates URLs, all fail)
-        let result = analyzer.analyze_domain("nonexistent-domain-xyz.test", None).await;
+        let result = analyzer
+            .analyze_domain("nonexistent-domain-xyz.test", None)
+            .await;
         // Will fail since all URLs return 404 and domain doesn't resolve
         let _ = &result;
     }
@@ -14231,7 +14707,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         assert!(analyzer.looks_like_organization_name("Cloudflare Inc."));
         assert!(analyzer.looks_like_organization_name("Amazon Web Services"));
-        assert!(!analyzer.looks_like_organization_name("Stripe"), "Single word may not pass org name validation");
+        assert!(
+            !analyzer.looks_like_organization_name("Stripe"),
+            "Single word may not pass org name validation"
+        );
         assert!(!analyzer.looks_like_organization_name("a"));
         assert!(!analyzer.looks_like_organization_name(""));
     }
@@ -14254,7 +14733,11 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let p_sel = scraper::Selector::parse("p").unwrap();
         let elem = doc.select(&p_sel).next().unwrap();
-        let evidence = analyzer.create_enhanced_evidence(&elem, "Cloudflare provides CDN services", "https://example.com");
+        let evidence = analyzer.create_enhanced_evidence(
+            &elem,
+            "Cloudflare provides CDN services",
+            "https://example.com",
+        );
         assert!(!evidence.is_empty(), "Evidence should be non-empty");
     }
 
@@ -14284,7 +14767,8 @@ mod tests {
     #[tokio::test]
     async fn test_extract_vendor_domains_from_subprocessors_fn() {
         // Exercises the top-level extract_vendor_domains_from_subprocessors function
-        let result = extract_vendor_domains_from_subprocessors("nonexistent-domain-xyz.test", None).await;
+        let result =
+            extract_vendor_domains_from_subprocessors("nonexistent-domain-xyz.test", None).await;
         // Will fail for non-existent domain, but exercises the function
         let _ = &result;
     }
@@ -14305,17 +14789,21 @@ mod tests {
             trust_center_strategy: None,
         };
         let content = serde_json::to_string_pretty(&entry).unwrap();
-        tokio::fs::write(tmp.path().join("existing.com.json"), &content).await.unwrap();
+        tokio::fs::write(tmp.path().join("existing.com.json"), &content)
+            .await
+            .unwrap();
 
         // Now add confirmed mappings - should load and update existing file
-        let mappings = vec![
-            ("Acme, Inc.".to_string(), "acme.com".to_string()),
-        ];
-        let result = cache.add_confirmed_mappings("existing.com", &mappings).await;
+        let mappings = vec![("Acme, Inc.".to_string(), "acme.com".to_string())];
+        let result = cache
+            .add_confirmed_mappings("existing.com", &mappings)
+            .await;
         assert!(result.is_ok());
 
         // Verify the updated file contains both old and new data
-        let updated = tokio::fs::read_to_string(tmp.path().join("existing.com.json")).await.unwrap();
+        let updated = tokio::fs::read_to_string(tmp.path().join("existing.com.json"))
+            .await
+            .unwrap();
         assert!(updated.contains("acme.com"), "Should contain new mapping");
         assert!(updated.contains("existing.com"), "Should preserve domain");
     }
@@ -14326,12 +14814,17 @@ mod tests {
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
 
         // Write a corrupt cache file
-        tokio::fs::write(tmp.path().join("corrupt.com.json"), "not valid json!!!").await.unwrap();
+        tokio::fs::write(tmp.path().join("corrupt.com.json"), "not valid json!!!")
+            .await
+            .unwrap();
 
         // Should handle corrupt file gracefully
         let mappings = vec![("Test Corp".to_string(), "test.com".to_string())];
         let result = cache.add_confirmed_mappings("corrupt.com", &mappings).await;
-        assert!(result.is_ok(), "Should handle corrupt cache file gracefully");
+        assert!(
+            result.is_ok(),
+            "Should handle corrupt cache file gracefully"
+        );
     }
 
     #[test]
@@ -14352,7 +14845,12 @@ mod tests {
         </body></html>"##;
         let doc = scraper::Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&doc, html, "https://example.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &doc,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         assert!(result.is_ok());
         let (vendors, _metadata) = result.unwrap();
         // Exercises the table extraction with domain-style cells code path
@@ -14378,7 +14876,12 @@ mod tests {
         </body></html>"##;
         let doc = scraper::Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&doc, html, "https://example.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &doc,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         assert!(result.is_ok());
     }
 
@@ -14393,7 +14896,10 @@ mod tests {
         let result = analyzer.is_in_navigation_container(&elem);
         assert!(result, "Element inside <header> should be navigation");
         let span_sel = scraper::Selector::parse("main span").unwrap();
-        let elem = doc.select(&span_sel).next().expect("span element should exist");
+        let elem = doc
+            .select(&span_sel)
+            .next()
+            .expect("span element should exist");
         let result = analyzer.is_in_navigation_container(&elem);
         assert!(!result, "Element inside <main> should not be navigation");
     }
@@ -14410,16 +14916,22 @@ mod tests {
         let doc = scraper::Html::parse_document(html);
         let custom_rules = CustomExtractionRules {
             direct_selectors: vec![],
-            custom_regex_patterns: vec![
-                CustomRegexPattern {
-                    pattern: r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+(?:Inc\.?|Corp(?:oration)?\.?|LLC)".to_string(),
-                    capture_group: 1,
-                    description: "Company with suffix".to_string(),
-                },
-            ],
+            custom_regex_patterns: vec![CustomRegexPattern {
+                pattern:
+                    r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+(?:Inc\.?|Corp(?:oration)?\.?|LLC)"
+                        .to_string(),
+                capture_group: 1,
+                description: "Company with suffix".to_string(),
+            }],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&doc, html, "https://example.com", &custom_rules, "example.com");
+        let result = analyzer.extract_with_custom_rules(
+            &doc,
+            html,
+            "https://example.com",
+            &custom_rules,
+            "example.com",
+        );
         assert!(result.is_ok());
     }
 
@@ -14449,20 +14961,24 @@ mod tests {
             make_domain("twilio.com"),
             make_domain("sendgrid.com"),
         ];
-        let patterns = analyzer.generate_domain_specific_patterns(&doc, html, &extractions, "https://example.com");
+        let _patterns = analyzer.generate_domain_specific_patterns(
+            &doc,
+            html,
+            &extractions,
+            "https://example.com",
+        );
         // With 5 extractions from a table, should generate meaningful patterns
         // Exercises pattern generation code paths with table-based HTML and multiple extractions
-        assert!(
-            true,
-            "Pattern generation exercised"
-        );
+        assert!(true, "Pattern generation exercised");
     }
 
     #[tokio::test]
     async fn test_cache_working_url_and_retrieve() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
-        let result = cache.cache_working_url("testcache.com", "https://testcache.com/subs").await;
+        let result = cache
+            .cache_working_url("testcache.com", "https://testcache.com/subs")
+            .await;
         assert!(result.is_ok());
         let url = cache.get_cached_subprocessor_url("testcache.com").await;
         assert_eq!(url, Some("https://testcache.com/subs".to_string()));
@@ -14480,7 +14996,10 @@ mod tests {
     async fn test_clear_domain_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
-        cache.cache_working_url("clear-me.com", "https://clear-me.com/sp").await.ok();
+        cache
+            .cache_working_url("clear-me.com", "https://clear-me.com/sp")
+            .await
+            .ok();
         let result = cache.clear_domain_cache("clear-me.com").await;
         assert!(result.is_ok());
         let url = cache.get_cached_subprocessor_url("clear-me.com").await;
@@ -14493,7 +15012,10 @@ mod tests {
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
         let urls = analyzer.generate_subprocessor_urls("example.com");
         assert!(!urls.is_empty(), "Should generate candidate URLs");
-        assert!(urls.iter().any(|u| u.contains("subprocessor")), "Should include subprocessor URL variant");
+        assert!(
+            urls.iter().any(|u| u.contains("subprocessor")),
+            "Should include subprocessor URL variant"
+        );
     }
 
     #[test]
@@ -14503,11 +15025,13 @@ mod tests {
         let patterns = ExtractionPatterns::default();
 
         // Known vendors
-        let result = analyzer.extract_domain_from_entity_name_with_patterns("Amazon Web Services", &patterns);
+        let result = analyzer
+            .extract_domain_from_entity_name_with_patterns("Amazon Web Services", &patterns);
         assert!(result.is_some(), "AWS should resolve");
 
         // Company with .com in name
-        let result = analyzer.extract_domain_from_entity_name_with_patterns("stripe.com", &patterns);
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("stripe.com", &patterns);
         assert!(result.is_some(), "Domain-like name should resolve");
 
         // Very short name
@@ -14530,7 +15054,10 @@ mod tests {
         let ctx = analyzer.extract_dom_context(&element);
 
         assert!(!ctx.parent_tags.is_empty(), "Should capture parent tags");
-        assert!(ctx.parent_tags.len() <= 5, "Should limit parent tag depth to 5");
+        assert!(
+            ctx.parent_tags.len() <= 5,
+            "Should limit parent tag depth to 5"
+        );
         assert_eq!(ctx.text_content, "X");
         assert!(!ctx.xpath_like.is_empty());
         assert!(ctx.css_classes.contains(&"target".to_string()));
@@ -14547,7 +15074,10 @@ mod tests {
         let ctx = analyzer.extract_dom_context(&element);
 
         // Should limit to 5 parent tags
-        assert!(ctx.parent_tags.len() <= 5, "Should limit parent tag depth to 5");
+        assert!(
+            ctx.parent_tags.len() <= 5,
+            "Should limit parent tag depth to 5"
+        );
         assert_eq!(ctx.text_content, "Deep");
     }
 
@@ -14563,7 +15093,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("li.item").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element inside <nav> should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element inside <nav> should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14574,7 +15107,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("span.link").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element inside <header> should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element inside <header> should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14585,7 +15121,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("a.link").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element inside <footer> should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element inside <footer> should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14596,7 +15135,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("span.item").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element inside div.navigation should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element inside div.navigation should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14607,7 +15149,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("span.item").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element inside #sidebar should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element inside #sidebar should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14618,7 +15163,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("span.vendor").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(!analyzer.is_in_navigation_container(&element), "Element in content area should NOT be detected as nav");
+        assert!(
+            !analyzer.is_in_navigation_container(&element),
+            "Element in content area should NOT be detected as nav"
+        );
     }
 
     #[tokio::test]
@@ -14629,7 +15177,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("nav").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "nav element itself should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "nav element itself should be detected"
+        );
     }
 
     #[tokio::test]
@@ -14640,7 +15191,10 @@ mod tests {
         );
         let selector = scraper::Selector::parse("span").unwrap();
         let element = html.select(&selector).next().unwrap();
-        assert!(analyzer.is_in_navigation_container(&element), "Element in breadcrumb should be detected");
+        assert!(
+            analyzer.is_in_navigation_container(&element),
+            "Element in breadcrumb should be detected"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -14694,7 +15248,10 @@ mod tests {
         for (_, group) in &groups {
             max_group_size = max_group_size.max(group.len());
         }
-        assert_eq!(max_group_size, 2, "Largest group should have 2 orgs (Stripe+AWS)");
+        assert_eq!(
+            max_group_size, 2,
+            "Largest group should have 2 orgs (Stripe+AWS)"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -14717,7 +15274,10 @@ mod tests {
         };
         let orgs_ref: Vec<&DetectedOrganization> = vec![&org];
         let result = analyzer.calculate_selector_consistency(&orgs_ref);
-        assert!((result - 0.5).abs() < f64::EPSILON, "Single org should return 0.5");
+        assert!(
+            (result - 0.5).abs() < f64::EPSILON,
+            "Single org should return 0.5"
+        );
     }
 
     #[tokio::test]
@@ -14747,7 +15307,11 @@ mod tests {
         };
         let orgs_ref: Vec<&DetectedOrganization> = vec![&org1, &org2];
         let result = analyzer.calculate_selector_consistency(&orgs_ref);
-        assert!(result > 0.8, "Identical contexts should have high consistency, got {}", result);
+        assert!(
+            result > 0.8,
+            "Identical contexts should have high consistency, got {}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -14777,7 +15341,11 @@ mod tests {
         };
         let orgs_ref: Vec<&DetectedOrganization> = vec![&org1, &org2];
         let result = analyzer.calculate_selector_consistency(&orgs_ref);
-        assert!(result < 0.9, "Different contexts should have lower consistency, got {}", result);
+        assert!(
+            result < 0.9,
+            "Different contexts should have lower consistency, got {}",
+            result
+        );
         assert!(result >= 0.3, "Should still have base boost");
     }
 
@@ -14822,7 +15390,11 @@ mod tests {
             sample_matches: vec!["Stripe".to_string()],
         };
         let result = analyzer.calculate_pattern_confidence(&orgs_ref, &html, &selector);
-        assert!(result > 0.3, "Good matching selector should have reasonable confidence, got {}", result);
+        assert!(
+            result > 0.3,
+            "Good matching selector should have reasonable confidence, got {}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -14848,7 +15420,10 @@ mod tests {
             sample_matches: vec![],
         };
         let result = analyzer.calculate_pattern_confidence(&orgs_ref, &html, &selector);
-        assert!((result - 0.2).abs() < f64::EPSILON, "Invalid selector should get 0.2 confidence");
+        assert!(
+            (result - 0.2).abs() < f64::EPSILON,
+            "Invalid selector should get 0.2 confidence"
+        );
     }
 
     #[tokio::test]
@@ -14875,7 +15450,11 @@ mod tests {
         };
         let result = analyzer.calculate_pattern_confidence(&orgs_ref, &html, &selector);
         // 0 matches → match_ratio = 0 → ratio_score = 0*0.5 = 0 → (0 + 0.5)/2 = 0.25
-        assert!(result < 0.5, "No matches should give low confidence, got {}", result);
+        assert!(
+            result < 0.5,
+            "No matches should give low confidence, got {}",
+            result
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -14886,7 +15465,10 @@ mod tests {
     async fn test_generate_exclusion_patterns_generic_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
         let patterns = analyzer.generate_exclusion_patterns("https://example.com/subprocessors");
-        assert!(patterns.len() >= 6, "Should have at least 6 generic exclusion patterns");
+        assert!(
+            patterns.len() >= 6,
+            "Should have at least 6 generic exclusion patterns"
+        );
         let combined = patterns.join(" ");
         assert!(combined.contains("home"), "Should exclude 'home'");
         assert!(combined.contains("privacy"), "Should exclude 'privacy'");
@@ -14896,19 +15478,33 @@ mod tests {
     #[tokio::test]
     async fn test_generate_exclusion_patterns_klaviyo_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let patterns = analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
-        assert!(patterns.len() > 6, "Klaviyo should get extra exclusion patterns");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
+        assert!(
+            patterns.len() > 6,
+            "Klaviyo should get extra exclusion patterns"
+        );
         let combined = patterns.join(" ");
-        assert!(combined.contains("klaviyo"), "Should exclude 'klaviyo' for klaviyo domain");
+        assert!(
+            combined.contains("klaviyo"),
+            "Should exclude 'klaviyo' for klaviyo domain"
+        );
     }
 
     #[tokio::test]
     async fn test_generate_exclusion_patterns_stripe_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let patterns = analyzer.generate_exclusion_patterns("https://stripe.com/legal/service-providers");
-        assert!(patterns.len() > 6, "Stripe should get extra exclusion patterns");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://stripe.com/legal/service-providers");
+        assert!(
+            patterns.len() > 6,
+            "Stripe should get extra exclusion patterns"
+        );
         let combined = patterns.join(" ");
-        assert!(combined.contains("stripe"), "Should exclude 'stripe' for stripe domain");
+        assert!(
+            combined.contains("stripe"),
+            "Should exclude 'stripe' for stripe domain"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -14924,8 +15520,14 @@ mod tests {
         let selector = scraper::Selector::parse("td").unwrap();
         let element = html.select(&selector).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&element, "Amazon Web Services");
-        assert!(evidence.contains("Amazon Web Services"), "Evidence should contain entity name");
-        assert!(evidence.len() <= 200, "Small element should return full HTML");
+        assert!(
+            evidence.contains("Amazon Web Services"),
+            "Evidence should contain entity name"
+        );
+        assert!(
+            evidence.len() <= 200,
+            "Small element should return full HTML"
+        );
     }
 
     #[tokio::test]
@@ -14941,7 +15543,10 @@ mod tests {
         let selector = scraper::Selector::parse("div.big").unwrap();
         let element = html.select(&selector).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&element, "Stripe Inc");
-        assert!(evidence.contains("Stripe Inc"), "Evidence should contain entity name");
+        assert!(
+            evidence.contains("Stripe Inc"),
+            "Evidence should contain entity name"
+        );
     }
 
     #[tokio::test]
@@ -14956,7 +15561,10 @@ mod tests {
         let selector = scraper::Selector::parse("section").unwrap();
         let element = html.select(&selector).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&element, "Cloudflare");
-        assert!(evidence.contains("Cloudflare"), "Fallback should still contain entity name");
+        assert!(
+            evidence.contains("Cloudflare"),
+            "Fallback should still contain entity name"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -14968,7 +15576,10 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::new().await;
         let text = "We use stripe.com for payment processing and aws.amazon.com for hosting.";
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
-        assert!(excerpt.contains("stripe.com"), "Excerpt should contain the domain");
+        assert!(
+            excerpt.contains("stripe.com"),
+            "Excerpt should contain the domain"
+        );
         assert!(excerpt.len() <= 510, "Excerpt should be bounded");
     }
 
@@ -14978,7 +15589,10 @@ mod tests {
         let text = "We use various cloud services for our infrastructure needs.";
         let excerpt = analyzer.create_evidence_excerpt(text, "nonexistent.io");
         // Falls into the "else" branch — returns first part of text
-        assert_eq!(excerpt, text, "Should return full text when domain not found and text is short");
+        assert_eq!(
+            excerpt, text,
+            "Should return full text when domain not found and text is short"
+        );
     }
 
     #[tokio::test]
@@ -14997,7 +15611,10 @@ mod tests {
         let excerpt = analyzer.create_evidence_excerpt(text, "stripe.com");
         assert!(excerpt.contains("stripe.com"));
         // Domain at start means start=0, so no prefix ellipsis
-        assert!(!excerpt.starts_with("..."), "No ellipsis when domain is at start");
+        assert!(
+            !excerpt.starts_with("..."),
+            "No ellipsis when domain is at start"
+        );
     }
 
     #[tokio::test]
@@ -15022,7 +15639,10 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_cache(cache.clone());
         // Verify the analyzer is functional
         let mappings = analyzer.get_pending_mappings().await;
-        assert!(mappings.is_empty(), "New analyzer should have no pending mappings");
+        assert!(
+            mappings.is_empty(),
+            "New analyzer should have no pending mappings"
+        );
     }
 
     #[tokio::test]
@@ -15036,7 +15656,11 @@ mod tests {
             inferred_domain: "testcorp.com".to_string(),
             source_domain: "example.com".to_string(),
         };
-        analyzer.pending_mappings.write().await.push(mapping.clone());
+        analyzer
+            .pending_mappings
+            .write()
+            .await
+            .push(mapping.clone());
 
         let mappings = analyzer.get_pending_mappings().await;
         assert_eq!(mappings.len(), 1);
@@ -15054,15 +15678,22 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
 
         // Add some mappings
-        analyzer.pending_mappings.write().await.push(PendingOrgMapping {
-            org_name: "A".to_string(),
-            inferred_domain: "a.com".to_string(),
-            source_domain: "src.com".to_string(),
-        });
+        analyzer
+            .pending_mappings
+            .write()
+            .await
+            .push(PendingOrgMapping {
+                org_name: "A".to_string(),
+                inferred_domain: "a.com".to_string(),
+                source_domain: "src.com".to_string(),
+            });
         assert_eq!(analyzer.get_pending_mappings().await.len(), 1);
 
         analyzer.clear_pending_mappings().await;
-        assert!(analyzer.get_pending_mappings().await.is_empty(), "Should be empty after clear");
+        assert!(
+            analyzer.get_pending_mappings().await.is_empty(),
+            "Should be empty after clear"
+        );
     }
 
     #[tokio::test]
@@ -15092,7 +15723,9 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
         // Clearing cache for a domain that has no cache file should return false
-        let result = analyzer.clear_organization_cache("nonexistent-domain.com").await;
+        let result = analyzer
+            .clear_organization_cache("nonexistent-domain.com")
+            .await;
         assert!(!result, "Should return false for non-cached domain");
     }
 
@@ -15113,7 +15746,12 @@ mod tests {
         // Write a cache file first
         {
             let c = cache.read().await;
-            c.cache_working_url("cached-domain.com", "https://cached-domain.com/subprocessors").await.unwrap();
+            c.cache_working_url(
+                "cached-domain.com",
+                "https://cached-domain.com/subprocessors",
+            )
+            .await
+            .unwrap();
         }
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
         let result = analyzer.clear_organization_cache("cached-domain.com").await;
@@ -15138,10 +15776,18 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
         let mappings = vec![
             ("Stripe Inc".to_string(), "stripe.com".to_string()),
-            ("Amazon Web Services".to_string(), "aws.amazon.com".to_string()),
+            (
+                "Amazon Web Services".to_string(),
+                "aws.amazon.com".to_string(),
+            ),
         ];
-        let result = analyzer.save_confirmed_mappings("example.com", &mappings).await;
-        assert!(result.is_ok(), "Should successfully save confirmed mappings");
+        let result = analyzer
+            .save_confirmed_mappings("example.com", &mappings)
+            .await;
+        assert!(
+            result.is_ok(),
+            "Should successfully save confirmed mappings"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15194,11 +15840,21 @@ mod tests {
         );
 
         // Should have found at least one column-specific selector
-        assert!(!direct_selectors.is_empty(), "Should generate column-specific selector from productive table");
+        assert!(
+            !direct_selectors.is_empty(),
+            "Should generate column-specific selector from productive table"
+        );
         // Should have domain mappings
-        assert!(!custom_mappings.is_empty(), "Should generate org-to-domain mappings");
-        assert!(custom_mappings.contains_key("stripe, inc.") || custom_mappings.contains_key("stripe") || custom_mappings.is_empty(),
-            "Should map Stripe to its domain");
+        assert!(
+            !custom_mappings.is_empty(),
+            "Should generate org-to-domain mappings"
+        );
+        assert!(
+            custom_mappings.contains_key("stripe, inc.")
+                || custom_mappings.contains_key("stripe")
+                || custom_mappings.is_empty(),
+            "Should map Stripe to its domain"
+        );
     }
 
     #[tokio::test]
@@ -15210,13 +15866,11 @@ mod tests {
         </table></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
 
-        let extractions = vec![
-            SubprocessorDomain {
-                domain: "stripe.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "<td>Stripe, Inc.</td>".to_string(),
-            },
-        ];
+        let extractions = vec![SubprocessorDomain {
+            domain: "stripe.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "<td>Stripe, Inc.</td>".to_string(),
+        }];
 
         let mut direct_selectors = Vec::new();
         let mut custom_mappings = std::collections::HashMap::new();
@@ -15228,7 +15882,10 @@ mod tests {
             &mut custom_mappings,
         );
 
-        assert!(direct_selectors.is_empty(), "Non-matching table should produce no selectors");
+        assert!(
+            direct_selectors.is_empty(),
+            "Non-matching table should produce no selectors"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15238,12 +15895,18 @@ mod tests {
     #[tokio::test]
     async fn test_extract_from_paragraphs_no_context_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let html_str = r#"<html><body><p>This is a regular page about cooking recipes.</p></body></html>"#;
+        let html_str =
+            r#"<html><body><p>This is a regular page about cooking recipes.</p></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
 
-        let result = analyzer.extract_from_paragraphs(&document, html_str, "https://example.com", &patterns).unwrap();
-        assert!(result.is_empty(), "No subprocessor context should yield no results");
+        let result = analyzer
+            .extract_from_paragraphs(&document, html_str, "https://example.com", &patterns)
+            .unwrap();
+        assert!(
+            result.is_empty(),
+            "No subprocessor context should yield no results"
+        );
     }
 
     #[tokio::test]
@@ -15259,10 +15922,17 @@ mod tests {
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
 
-        let result = analyzer.extract_from_paragraphs(&document, html_str, "https://example.com/subprocessors", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(
+                &document,
+                html_str,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
+            .unwrap();
         // Should find at least some companies with Inc. suffix
         // (may not find all depending on domain resolution)
-        assert!(result.len() >= 0, "Should handle paragraph extraction without panic");
+        let _ = result;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15281,15 +15951,25 @@ The following third-party sub-processors are engaged:
 - Twilio, Inc. — Communication services
 - Cloudflare, Inc. — Content delivery network
 "#;
-        let result = analyzer.extract_from_pdf_content(pdf_text, "https://example.com/subprocessors.pdf", "example.com").await.unwrap();
+        let result = analyzer
+            .extract_from_pdf_content(
+                pdf_text,
+                "https://example.com/subprocessors.pdf",
+                "example.com",
+            )
+            .await
+            .unwrap();
         // PDF extraction should find companies with business suffixes
-        assert!(result.len() >= 0, "PDF extraction should not panic");
+        let _ = result;
     }
 
     #[tokio::test]
     async fn test_extract_from_pdf_content_empty_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let result = analyzer.extract_from_pdf_content("", "https://example.com/file.pdf", "example.com").await.unwrap();
+        let result = analyzer
+            .extract_from_pdf_content("", "https://example.com/file.pdf", "example.com")
+            .await
+            .unwrap();
         assert!(result.is_empty(), "Empty PDF content should return empty");
     }
 
@@ -15325,16 +16005,17 @@ The following third-party sub-processors are engaged:
             manifest_url
         );
         let result = analyzer.try_vanta_graphql_from_html(&html).await;
-        assert!(result.is_none(), "Manifest fetch failure should return None");
+        assert!(
+            result.is_none(),
+            "Manifest fetch failure should return None"
+        );
     }
 
     #[tokio::test]
     async fn test_try_vanta_graphql_from_html_manifest_invalid_json_grc146() {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_string("not json at all"),
-            )
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("not json at all"))
             .mount(&server)
             .await;
 
@@ -15360,8 +16041,7 @@ The following third-party sub-processors are engaged:
         });
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .set_body_string(manifest_json.to_string()),
+                wiremock::ResponseTemplate::new(200).set_body_string(manifest_json.to_string()),
             )
             .mount(&server)
             .await;
@@ -15376,7 +16056,10 @@ The following third-party sub-processors are engaged:
             manifest_url
         );
         let result = analyzer.try_vanta_graphql_from_html(&html).await;
-        assert!(result.is_none(), "Manifest without suitable operations should return None");
+        assert!(
+            result.is_none(),
+            "Manifest without suitable operations should return None"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15388,7 +16071,10 @@ The following third-party sub-processors are engaged:
         let analyzer = SubprocessorAnalyzer::new().await;
         let html = r#"<html data-signature-manifest-url="https://assets.vanta.com/static/signature-manifest.abc123.json"><head></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string())
+        );
     }
 
     #[tokio::test]
@@ -15396,7 +16082,10 @@ The following third-party sub-processors are engaged:
         let analyzer = SubprocessorAnalyzer::new().await;
         let html = r#"<html><head><link rel="preload" as="fetch" href="https://assets.vanta.com/static/signature-manifest.def456.json"></head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.def456.json".to_string())
+        );
     }
 
     #[tokio::test]
@@ -15404,7 +16093,10 @@ The following third-party sub-processors are engaged:
         let analyzer = SubprocessorAnalyzer::new().await;
         let html = r#"<html><head></head><body><script>var url = "https://assets.vanta.com/static/signature-manifest.789abc.json";</script></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.789abc.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.789abc.json".to_string())
+        );
     }
 
     #[tokio::test]
@@ -15489,7 +16181,10 @@ The following third-party sub-processors are engaged:
 
         let patterns = analyzer.derive_extraction_patterns(&orgs, &document).await;
         // With 3 orgs in same group (>= 2 required), should produce patterns
-        assert!(patterns.confidence_score >= 0.0, "Should have non-negative confidence");
+        assert!(
+            patterns.confidence_score >= 0.0,
+            "Should have non-negative confidence"
+        );
         assert!(patterns.discovery_timestamp > 0, "Should have timestamp");
     }
 
@@ -15526,7 +16221,10 @@ The following third-party sub-processors are engaged:
         ];
 
         let patterns = analyzer.derive_extraction_patterns(&orgs, &document).await;
-        assert!(patterns.discovered_selectors.is_empty(), "Single-org groups should not produce selectors");
+        assert!(
+            patterns.discovered_selectors.is_empty(),
+            "Single-org groups should not produce selectors"
+        );
         assert_eq!(patterns.confidence_score, 0.0);
     }
 
@@ -15552,7 +16250,9 @@ The following third-party sub-processors are engaged:
         };
 
         // Should not panic
-        analyzer.cache_adaptive_patterns("test-domain.com", patterns).await;
+        analyzer
+            .cache_adaptive_patterns("test-domain.com", patterns)
+            .await;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15584,11 +16284,9 @@ The following third-party sub-processors are engaged:
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
 
         // analyze_domain_with_rate_limit just delegates to analyze_domain_with_full_options
-        let result = analyzer.analyze_domain_with_rate_limit(
-            &server.uri().replace("http://", ""),
-            None,
-            None,
-        ).await;
+        let result = analyzer
+            .analyze_domain_with_rate_limit(&server.uri().replace("http://", ""), None, None)
+            .await;
         // Should succeed (possibly empty results) without panicking
         let _ = &result;
     }
@@ -15602,13 +16300,21 @@ The following third-party sub-processors are engaged:
         let cache = SubprocessorCache::new_temp().await;
         {
             let c = cache.read().await;
-            c.cache_working_url("domain1.com", "https://domain1.com/sub").await.unwrap();
-            c.cache_working_url("domain2.com", "https://domain2.com/sub").await.unwrap();
+            c.cache_working_url("domain1.com", "https://domain1.com/sub")
+                .await
+                .unwrap();
+            c.cache_working_url("domain2.com", "https://domain2.com/sub")
+                .await
+                .unwrap();
         }
         {
             let c = cache.read().await;
             let count = c.clear_all_cache().await.unwrap();
-            assert!(count >= 2, "Should clear at least 2 cache files, got {}", count);
+            assert!(
+                count >= 2,
+                "Should clear at least 2 cache files, got {}",
+                count
+            );
         }
     }
 
@@ -15645,7 +16351,10 @@ The following third-party sub-processors are engaged:
         ];
         let orgs_ref: Vec<&DetectedOrganization> = orgs.iter().collect();
         let selector = analyzer.generate_selector_from_pattern("test_sig", &orgs_ref);
-        assert_eq!(selector.selector, "table td", "Table with td parent should generate 'table td' selector");
+        assert_eq!(
+            selector.selector, "table td",
+            "Table with td parent should generate 'table td' selector"
+        );
         assert_eq!(selector.selector_type, SelectorType::Table);
     }
 
@@ -15769,9 +16478,10 @@ The following third-party sub-processors are engaged:
             sample_matches: vec!["Stripe".to_string()],
         };
 
-        let results = analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
+        let results =
+            analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
         // Should extract domains from elements that contain vendor-like content
-        assert!(results.len() >= 0, "Should handle adaptive extraction without panic");
+        let _ = results;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -15795,14 +16505,29 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, metadata) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should extract vendors from table with subprocessor context");
-        assert!(metadata.is_some(), "Should return extraction metadata when vendors found");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract vendors from table with subprocessor context"
+        );
+        assert!(
+            metadata.is_some(),
+            "Should return extraction metadata when vendors found"
+        );
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
         assert!(
-            domains.iter().any(|d| d.contains("amazon") || d.contains("aws")) || domains.is_empty(),
-            "Should extract AWS domain, got: {:?}", domains
+            domains
+                .iter()
+                .any(|d| d.contains("amazon") || d.contains("aws"))
+                || domains.is_empty(),
+            "Should extract AWS domain, got: {:?}",
+            domains
         );
     }
 
@@ -15821,9 +16546,17 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/legal/subprocessor-list", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/legal/subprocessor-list",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "URL containing 'subprocessor' should enable extraction");
+        assert!(
+            !vendors.is_empty(),
+            "URL containing 'subprocessor' should enable extraction"
+        );
     }
 
     #[test]
@@ -15841,14 +16574,28 @@ The following third-party sub-processors are engaged:
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.entity_header_patterns.push("sub-processor".to_string());
+        patterns
+            .entity_header_patterns
+            .push("sub-processor".to_string());
         let (vendors, metadata) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should find vendors with header pattern match");
+        assert!(
+            !vendors.is_empty(),
+            "Should find vendors with header pattern match"
+        );
         if let Some(ref m) = metadata {
             if m.successful_header_pattern.is_some() {
-                assert_eq!(m.successful_entity_column_index, Some(1), "Should identify column 1 as entity column");
+                assert_eq!(
+                    m.successful_entity_column_index,
+                    Some(1),
+                    "Should identify column 1 as entity column"
+                );
             }
         }
     }
@@ -15868,9 +16615,17 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should extract company name from multi-line cell, skipping address lines");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract company name from multi-line cell, skipping address lines"
+        );
     }
 
     #[test]
@@ -15887,11 +16642,18 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
         assert!(
-            !domains.iter().any(|d| d.contains("Name") || d.contains("Purpose")),
+            !domains
+                .iter()
+                .any(|d| d.contains("Name") || d.contains("Purpose")),
             "Should skip header rows with <th> elements"
         );
     }
@@ -15909,9 +16671,17 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should extract from tables without explicit header rows");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract from tables without explicit header rows"
+        );
     }
 
     #[test]
@@ -15926,9 +16696,16 @@ The following third-party sub-processors are engaged:
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer
-            .extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns);
-        assert!(result.is_ok(), "Should not error on paragraph with known companies");
+        let result = analyzer.extract_from_paragraphs(
+            &document,
+            html,
+            "https://example.com/subprocessors",
+            &patterns,
+        );
+        assert!(
+            result.is_ok(),
+            "Should not error on paragraph with known companies"
+        );
         // The path is exercised: context check passes, regex patterns iterate, company names
         // are captured. Domain mapping may or may not succeed, depending on built-in mapping table.
     }
@@ -15943,9 +16720,17 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should match d/b/a pattern in paragraphs");
+        assert!(
+            !vendors.is_empty(),
+            "Should match d/b/a pattern in paragraphs"
+        );
     }
 
     #[test]
@@ -15961,9 +16746,17 @@ The following third-party sub-processors are engaged:
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should extract from dash-separated text lines");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract from dash-separated text lines"
+        );
     }
 
     #[tokio::test]
@@ -15979,9 +16772,18 @@ The following third-party sub-processors are engaged:
             .await
             .unwrap();
         let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Should extract explicit stripe.com domain");
-        assert!(domains.contains(&"datadog.com"), "Should extract explicit datadog.com domain");
-        assert!(domains.contains(&"cloudflare.com"), "Should extract explicit cloudflare.com domain");
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Should extract explicit stripe.com domain"
+        );
+        assert!(
+            domains.contains(&"datadog.com"),
+            "Should extract explicit datadog.com domain"
+        );
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Should extract explicit cloudflare.com domain"
+        );
     }
 
     #[tokio::test]
@@ -15995,54 +16797,74 @@ The following third-party sub-processors are engaged:
             .extract_from_pdf_content(pdf_content, "https://example.com/subs.pdf", "example.com")
             .await
             .unwrap();
-        let aws_count = result.iter().filter(|v| v.domain.contains("amazon") || v.domain.contains("aws")).count(); let _ = aws_count;
-        assert!(aws_count <= 1, "Should deduplicate AWS across company name and explicit domain extraction");
+        let aws_count = result
+            .iter()
+            .filter(|v| v.domain.contains("amazon") || v.domain.contains("aws"))
+            .count();
+        let _ = aws_count;
+        assert!(
+            aws_count <= 1,
+            "Should deduplicate AWS across company name and explicit domain extraction"
+        );
     }
 
     #[test]
     fn test_filter_subprocessor_results_org_prefix_invalid_name() {
-        let vendors = vec![
-            SubprocessorDomain {
-                domain: "_org:x".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "test".to_string(),
-            },
-        ];
+        let vendors = vec![SubprocessorDomain {
+            domain: "_org:x".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "test".to_string(),
+        }];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Should filter out _org: entries with invalid (too short) org names");
+        assert!(
+            result.is_empty(),
+            "Should filter out _org: entries with invalid (too short) org names"
+        );
     }
 
     #[test]
     fn test_filter_subprocessor_results_org_prefix_with_spaces_no_dot() {
-        let vendors = vec![
-            SubprocessorDomain {
-                domain: "_org:Cloudflare Inc".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "test".to_string(),
-            },
-        ];
+        let vendors = vec![SubprocessorDomain {
+            domain: "_org:Cloudflare Inc".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "test".to_string(),
+        }];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Should filter org names with spaces (not domains) that lack dots");
+        assert!(
+            result.is_empty(),
+            "Should filter org names with spaces (not domains) that lack dots"
+        );
     }
 
     #[test]
     fn test_filter_subprocessor_results_org_prefix_domain_like() {
-        let vendors = vec![
-            SubprocessorDomain {
-                domain: "_org:cloudflare.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "test".to_string(),
-            },
-        ];
+        let vendors = vec![SubprocessorDomain {
+            domain: "_org:cloudflare.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "test".to_string(),
+        }];
         let result = filter_subprocessor_results(vendors);
-        assert_eq!(result.len(), 1, "Should keep org entries that look like domains");
-        assert_eq!(result[0].domain, "cloudflare.com", "Should strip _org: prefix");
+        assert_eq!(
+            result.len(),
+            1,
+            "Should keep org entries that look like domains"
+        );
+        assert_eq!(
+            result[0].domain, "cloudflare.com",
+            "Should strip _org: prefix"
+        );
     }
 
     #[test]
     fn test_is_garbled_text_five_consecutive_consonants() {
-        assert!(is_garbled_text("bcdfgh"), "5+ consecutive consonants should be garbled");
-        assert!(is_garbled_text("prstrng"), "prstrng has 5+ consecutive consonants");
+        assert!(
+            is_garbled_text("bcdfgh"),
+            "5+ consecutive consonants should be garbled"
+        );
+        assert!(
+            is_garbled_text("prstrng"),
+            "prstrng has 5+ consecutive consonants"
+        );
     }
 
     #[test]
@@ -16055,8 +16877,14 @@ The following third-party sub-processors are engaged:
             <div>This is other content that should not be returned.</div>
         </body></html>"#;
         let result = extract_text_from_html(html);
-        assert!(result.contains("main content area"), "Should extract from <main> tag");
-        assert!(!result.contains("other content"), "Should prefer <main> over fallback");
+        assert!(
+            result.contains("main content area"),
+            "Should extract from <main> tag"
+        );
+        assert!(
+            !result.contains("other content"),
+            "Should prefer <main> over fallback"
+        );
     }
 
     #[test]
@@ -16068,7 +16896,10 @@ The following third-party sub-processors are engaged:
             </article>
         </body></html>"#;
         let result = extract_text_from_html(html);
-        assert!(result.contains("comprehensive description"), "Should extract from <article> tag");
+        assert!(
+            result.contains("comprehensive description"),
+            "Should extract from <article> tag"
+        );
     }
 
     #[test]
@@ -16080,7 +16911,10 @@ The following third-party sub-processors are engaged:
             </div>
         </body></html>"#;
         let result = extract_text_from_html(html);
-        assert!(result.contains("main role content"), "Should extract from [role='main']");
+        assert!(
+            result.contains("main role content"),
+            "Should extract from [role='main']"
+        );
     }
 
     #[test]
@@ -16092,7 +16926,10 @@ The following third-party sub-processors are engaged:
             </div>
         </body></html>"#;
         let result = extract_text_from_html(html);
-        assert!(result.contains("content class"), "Should extract from .content");
+        assert!(
+            result.contains("content class"),
+            "Should extract from .content"
+        );
     }
 
     #[test]
@@ -16104,7 +16941,10 @@ The following third-party sub-processors are engaged:
             </div>
         </body></html>"#;
         let result = extract_text_from_html(html);
-        assert!(result.contains("id=content"), "Should extract from #content");
+        assert!(
+            result.contains("id=content"),
+            "Should extract from #content"
+        );
     }
 
     #[test]
@@ -16125,7 +16965,10 @@ The following third-party sub-processors are engaged:
     fn test_validate_and_compile_regex_too_long_triggers_log() {
         let long_pattern = "a".repeat(MAX_REGEX_PATTERN_LENGTH + 1);
         let result = validate_and_compile_regex(&long_pattern);
-        assert!(result.is_none(), "Should reject patterns exceeding max length");
+        assert!(
+            result.is_none(),
+            "Should reject patterns exceeding max length"
+        );
     }
 
     #[test]
@@ -16167,9 +17010,20 @@ The following third-party sub-processors are engaged:
         ];
         let mut direct_selectors = Vec::new();
         let mut custom_mappings = std::collections::HashMap::new();
-        analyzer.analyze_table_patterns(&document, &extractions, &mut direct_selectors, &mut custom_mappings);
-        assert!(!direct_selectors.is_empty(), "Should generate column-specific selector from productive table");
-        assert!(!custom_mappings.is_empty(), "Should generate custom org-to-domain mappings");
+        analyzer.analyze_table_patterns(
+            &document,
+            &extractions,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
+        assert!(
+            !direct_selectors.is_empty(),
+            "Should generate column-specific selector from productive table"
+        );
+        assert!(
+            !custom_mappings.is_empty(),
+            "Should generate custom org-to-domain mappings"
+        );
     }
 
     #[test]
@@ -16181,17 +17035,23 @@ The following third-party sub-processors are engaged:
             </table>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let extractions = vec![
-            SubprocessorDomain {
-                domain: "onlyone.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "<td>Only One Match</td>".to_string(),
-            },
-        ];
+        let extractions = vec![SubprocessorDomain {
+            domain: "onlyone.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "<td>Only One Match</td>".to_string(),
+        }];
         let mut direct_selectors = Vec::new();
         let mut custom_mappings = std::collections::HashMap::new();
-        analyzer.analyze_table_patterns(&document, &extractions, &mut direct_selectors, &mut custom_mappings);
-        assert!(direct_selectors.is_empty(), "Should not generate selectors with fewer than 3 matches");
+        analyzer.analyze_table_patterns(
+            &document,
+            &extractions,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
+        assert!(
+            direct_selectors.is_empty(),
+            "Should not generate selectors with fewer than 3 matches"
+        );
     }
 
     #[tokio::test]
@@ -16206,12 +17066,17 @@ The following third-party sub-processors are engaged:
                 <div class="vendor"><span>Twilio, Inc.</span></div>
             </div>
         </body></html>"#;
-        let result = analyzer.scrape_with_intelligent_analysis(
-            "https://example.com/subprocessors",
-            html,
-            "example.com",
-        ).await;
-        assert!(result.is_ok(), "Should not error on HTML with known vendor names");
+        let result = analyzer
+            .scrape_with_intelligent_analysis(
+                "https://example.com/subprocessors",
+                html,
+                "example.com",
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "Should not error on HTML with known vendor names"
+        );
     }
 
     #[test]
@@ -16229,18 +17094,29 @@ The following third-party sub-processors are engaged:
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.table_selectors.push("table.vendor-table".to_string());
+        patterns
+            .table_selectors
+            .push("table.vendor-table".to_string());
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should use custom table selector to find vendors");
+        assert!(
+            !vendors.is_empty(),
+            "Should use custom table selector to find vendors"
+        );
     }
 
     #[test]
     fn test_extract_from_tables_long_cell_text_skipped() {
         let analyzer = make_test_analyzer();
         let long_text = "A".repeat(100);
-        let html = format!(r#"<html><body>
+        let html = format!(
+            r#"<html><body>
             <p>Subprocessors:</p>
             <table>
                 <thead><tr><th>Name</th></tr></thead>
@@ -16250,11 +17126,18 @@ The following third-party sub-processors are engaged:
                     <tr><td>Stripe, Inc.</td></tr>
                 </tbody>
             </table>
-        </body></html>"#, long_text);
+        </body></html>"#,
+            long_text
+        );
         let document = Html::parse_document(&html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, &html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                &html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
         assert!(
@@ -16280,11 +17163,22 @@ Suite 200</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(vendors.is_empty() || !domains.iter().any(|d| d.contains("avenue") || d.contains("suite")),
-            "Should skip address-like lines: {:?}", domains);
+        assert!(
+            vendors.is_empty()
+                || !domains
+                    .iter()
+                    .any(|d| d.contains("avenue") || d.contains("suite")),
+            "Should skip address-like lines: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -16296,9 +17190,18 @@ Suite 200</td></tr>
         ];
         let result = filter_subprocessor_results(vendors);
         let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
-        assert!(!domains.contains(&"co.uk"), "Bare compound TLD co.uk should be filtered");
-        assert!(!domains.contains(&"com.au"), "Bare compound TLD com.au should be filtered");
-        assert!(domains.contains(&"bbc.co.uk"), "Domain with compound TLD should be kept");
+        assert!(
+            !domains.contains(&"co.uk"),
+            "Bare compound TLD co.uk should be filtered"
+        );
+        assert!(
+            !domains.contains(&"com.au"),
+            "Bare compound TLD com.au should be filtered"
+        );
+        assert!(
+            domains.contains(&"bbc.co.uk"),
+            "Domain with compound TLD should be kept"
+        );
     }
 
     #[test]
@@ -16311,23 +17214,47 @@ Suite 200</td></tr>
         ];
         let result = filter_subprocessor_results(vendors);
         assert!(result.len() < 4, "Should filter some invalid domains");
-        assert!(result.iter().any(|v| v.domain == "stripe.com"), "Valid domains should remain");
+        assert!(
+            result.iter().any(|v| v.domain == "stripe.com"),
+            "Valid domains should remain"
+        );
     }
 
     #[test]
     fn test_is_common_english_word_matches() {
-        assert!(is_common_english_word("support"), "'support' is a common word");
-        assert!(is_common_english_word("security"), "'security' is a common word");
-        assert!(is_common_english_word("america"), "'america' is a country name");
+        assert!(
+            is_common_english_word("support"),
+            "'support' is a common word"
+        );
+        assert!(
+            is_common_english_word("security"),
+            "'security' is a common word"
+        );
+        assert!(
+            is_common_english_word("america"),
+            "'america' is a country name"
+        );
         assert!(is_common_english_word("button"), "'button' is a UI word");
-        assert!(is_common_english_word("platform"), "'platform' is a boilerplate word");
+        assert!(
+            is_common_english_word("platform"),
+            "'platform' is a boilerplate word"
+        );
     }
 
     #[test]
     fn test_is_common_english_word_non_matches_vendor_names() {
-        assert!(!is_common_english_word("stripe"), "'stripe' is not in common words list");
-        assert!(!is_common_english_word("datadog"), "'datadog' is not in common words list");
-        assert!(!is_common_english_word("cloudflare"), "'cloudflare' is not in common words list");
+        assert!(
+            !is_common_english_word("stripe"),
+            "'stripe' is not in common words list"
+        );
+        assert!(
+            !is_common_english_word("datadog"),
+            "'datadog' is not in common words list"
+        );
+        assert!(
+            !is_common_english_word("cloudflare"),
+            "'cloudflare' is not in common words list"
+        );
     }
 
     #[test]
@@ -16342,7 +17269,10 @@ Suite 200</td></tr>
     #[tokio::test]
     async fn test_cache_load_creates_directory() {
         let cache = SubprocessorCache::load().await;
-        assert!(!cache.cache_dir.as_os_str().is_empty(), "Cache should have a directory");
+        assert!(
+            !cache.cache_dir.as_os_str().is_empty(),
+            "Cache should have a directory"
+        );
     }
 
     #[tokio::test]
@@ -16350,9 +17280,15 @@ Suite 200</td></tr>
         let temp_dir = tempfile::tempdir().unwrap();
         let cache = SubprocessorCache::new_with_dir(temp_dir.path().to_path_buf());
         tokio::fs::create_dir_all(&cache.cache_dir).await.unwrap();
-        tokio::fs::write(cache.cache_dir.join("test1.json"), "{}").await.unwrap();
-        tokio::fs::write(cache.cache_dir.join("test2.json"), "{}").await.unwrap();
-        tokio::fs::write(cache.cache_dir.join("test3.txt"), "not json").await.unwrap();
+        tokio::fs::write(cache.cache_dir.join("test1.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(cache.cache_dir.join("test2.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(cache.cache_dir.join("test3.txt"), "not json")
+            .await
+            .unwrap();
         let count = cache.clear_all_cache().await.unwrap();
         assert_eq!(count, 2, "Should clear only JSON files");
     }
@@ -16386,7 +17322,10 @@ Suite 200</td></tr>
         let vendors = analyzer
             .extract_from_paragraphs(&document, html, "https://example.com/random", &patterns)
             .unwrap();
-        assert!(vendors.is_empty(), "Should return empty when no subprocessor context found");
+        assert!(
+            vendors.is_empty(),
+            "Should return empty when no subprocessor context found"
+        );
     }
 
     #[test]
@@ -16400,9 +17339,14 @@ Suite 200</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.len() >= 0, "Technologies/Software patterns should be attempted");
+        let _ = vendors;
     }
 
     #[test]
@@ -16439,9 +17383,19 @@ Suite 200</td></tr>
                 raw_record: "<td>Cloudflare</td>".to_string(),
             },
         ];
-        let rules = analyzer.generate_domain_specific_patterns(&document, html, &extractions, "https://example.com/subs");
-        assert!(!rules.direct_selectors.is_empty() || !rules.custom_regex_patterns.is_empty() || rules.special_handling.is_some() || true,
-            "Should generate at least some extraction rules from productive extractions");
+        let rules = analyzer.generate_domain_specific_patterns(
+            &document,
+            html,
+            &extractions,
+            "https://example.com/subs",
+        );
+        assert!(
+            !rules.direct_selectors.is_empty()
+                || !rules.custom_regex_patterns.is_empty()
+                || rules.special_handling.is_some()
+                || true,
+            "Should generate at least some extraction rules from productive extractions"
+        );
     }
 
     #[test]
@@ -16458,16 +17412,43 @@ Suite 200</td></tr>
             </table>
         </body></html>"#;
         let extractions = vec![
-            SubprocessorDomain { domain: "stripe.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Stripe</td>".to_string() },
-            SubprocessorDomain { domain: "datadog.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Datadog</td>".to_string() },
-            SubprocessorDomain { domain: "cloudflare.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Cloudflare</td>".to_string() },
-            SubprocessorDomain { domain: "twilio.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Twilio</td>".to_string() },
-            SubprocessorDomain { domain: "snowflake.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Snowflake</td>".to_string() },
-            SubprocessorDomain { domain: "zendesk.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Zendesk</td>".to_string() },
+            SubprocessorDomain {
+                domain: "stripe.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Stripe</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "datadog.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Datadog</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "cloudflare.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Cloudflare</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "twilio.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Twilio</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "snowflake.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Snowflake</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "zendesk.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Zendesk</td>".to_string(),
+            },
         ];
         let mut regex_patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut regex_patterns);
-        assert!(!regex_patterns.is_empty(), "Should generate regex pattern when many capitalized extractions found");
+        assert!(
+            !regex_patterns.is_empty(),
+            "Should generate regex pattern when many capitalized extractions found"
+        );
     }
 
     #[test]
@@ -16478,21 +17459,17 @@ Suite 200</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let rules = CustomExtractionRules {
-            direct_selectors: vec![
-                DirectSelector {
-                    selector: "p".to_string(),
-                    attribute: None,
-                    transform: Some("trim".to_string()),
-                    description: "Extract from paragraphs".to_string(),
-                },
-            ],
-            custom_regex_patterns: vec![
-                CustomRegexPattern {
-                    pattern: r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+Inc\.?".to_string(),
-                    capture_group: 1,
-                    description: "Match Inc. pattern".to_string(),
-                },
-            ],
+            direct_selectors: vec![DirectSelector {
+                selector: "p".to_string(),
+                attribute: None,
+                transform: Some("trim".to_string()),
+                description: "Extract from paragraphs".to_string(),
+            }],
+            custom_regex_patterns: vec![CustomRegexPattern {
+                pattern: r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]*)*),?\s+Inc\.?".to_string(),
+                capture_group: 1,
+                description: "Match Inc. pattern".to_string(),
+            }],
             special_handling: Some(SpecialHandling {
                 skip_generic_methods: false,
                 custom_org_to_domain_mapping: Some({
@@ -16504,8 +17481,19 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        assert!(!result.subprocessors.is_empty(), "Should extract from custom rules with regex patterns");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        assert!(
+            !result.subprocessors.is_empty(),
+            "Should extract from custom rules with regex patterns"
+        );
     }
 
     #[test]
@@ -16524,7 +17512,12 @@ Suite 200</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         assert!(
             !vendors.iter().any(|v| v.domain.is_empty()),
@@ -16559,8 +17552,19 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        assert!(!result.subprocessors.is_empty(), "Unknown transform should pass text through unchanged");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        assert!(
+            !result.subprocessors.is_empty(),
+            "Unknown transform should pass text through unchanged"
+        );
         assert_eq!(result.subprocessors[0].domain, "cloudflare.com");
     }
 
@@ -16587,8 +17591,19 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        assert!(!result.subprocessors.is_empty(), "Should apply lowercase transform then match");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        assert!(
+            !result.subprocessors.is_empty(),
+            "Should apply lowercase transform then match"
+        );
     }
 
     #[test]
@@ -16614,9 +17629,17 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
         // The remove_suffix transform exercises the code path; result depends on internal domain mapping
-        assert!(result.subprocessors.len() >= 0, "Should exercise remove_suffix transform path");
+        let _ = result;
     }
 
     #[test]
@@ -16646,9 +17669,24 @@ Suite 200</td></tr>
                 exclusion_patterns: vec!["Internal".to_string()],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(!domains.contains(&"internal.com"), "Should exclude domains matching exclusion pattern");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            !domains.contains(&"internal.com"),
+            "Should exclude domains matching exclusion pattern"
+        );
     }
 
     #[test]
@@ -16669,9 +17707,20 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
         // Datadog should be found via generic company-to-domain mapping
-        assert!(result.subprocessors.is_empty() || result.subprocessors[0].domain.contains("datadog"), "Should resolve Datadog via fallback");
+        assert!(
+            result.subprocessors.is_empty() || result.subprocessors[0].domain.contains("datadog"),
+            "Should resolve Datadog via fallback"
+        );
     }
 
     #[test]
@@ -16688,14 +17737,26 @@ Suite 200</td></tr>
             }],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        assert!(result.subprocessors.is_empty(), "Invalid regex should be skipped gracefully");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        assert!(
+            result.subprocessors.is_empty(),
+            "Invalid regex should be skipped gracefully"
+        );
     }
 
     #[test]
     fn test_extract_with_custom_rules_attribute_extraction_grc162() {
         let analyzer = make_test_analyzer();
-        let html = r#"<html><body><div class="v" data-company="Cloudflare">click</div></body></html>"#;
+        let html =
+            r#"<html><body><div class="v" data-company="Cloudflare">click</div></body></html>"#;
         let document = Html::parse_document(html);
         let rules = CustomExtractionRules {
             direct_selectors: vec![DirectSelector {
@@ -16715,8 +17776,19 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
-        assert!(!result.subprocessors.is_empty(), "Should extract text from data attribute");
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
+        assert!(
+            !result.subprocessors.is_empty(),
+            "Should extract text from data attribute"
+        );
     }
 
     #[test]
@@ -16738,16 +17810,30 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com").unwrap();
+        let result = analyzer
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
+            .unwrap();
         // If a fallback domain is inferred, it should generate a pending mapping
-        assert!(result.subprocessors.is_empty() || !result.pending_mappings.is_empty(), "Fallback-resolved domains should create pending mappings");
+        assert!(
+            result.subprocessors.is_empty() || !result.pending_mappings.is_empty(),
+            "Fallback-resolved domains should create pending mappings"
+        );
     }
 
     #[test]
     fn test_company_name_to_domain_regex_pattern_grc162() {
         let analyzer = make_test_analyzer();
         let result = analyzer.company_name_to_domain("Acmetools, Inc.");
-        assert!(result.is_some(), "Should extract domain from 'Company, Inc.' pattern");
+        assert!(
+            result.is_some(),
+            "Should extract domain from 'Company, Inc.' pattern"
+        );
         assert_eq!(result.unwrap(), "acmetools.com");
     }
 
@@ -16755,7 +17841,10 @@ Suite 200</td></tr>
     fn test_company_name_to_domain_llc_pattern_grc162() {
         let analyzer = make_test_analyzer();
         let result = analyzer.company_name_to_domain("Superwidget LLC");
-        assert!(result.is_some(), "Should extract domain from 'Company LLC' pattern");
+        assert!(
+            result.is_some(),
+            "Should extract domain from 'Company LLC' pattern"
+        );
         assert_eq!(result.unwrap(), "superwidget.com");
     }
 
@@ -16764,7 +17853,10 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         let result = analyzer.company_name_to_domain("Acmetools Technologies Inc.");
         // Should match known mapping or technologies pattern
-        assert!(result.is_some(), "Should handle 'Company Technologies Inc.' pattern");
+        assert!(
+            result.is_some(),
+            "Should handle 'Company Technologies Inc.' pattern"
+        );
     }
 
     #[test]
@@ -16784,9 +17876,18 @@ Suite 200</td></tr>
     #[test]
     fn test_is_valid_vendor_domain_short_label_grc162() {
         let analyzer = make_test_analyzer();
-        assert!(!analyzer.is_valid_vendor_domain("b.com"), "2-char label too short");
-        assert!(!analyzer.is_valid_vendor_domain("ab.io"), "2-char label too short");
-        assert!(analyzer.is_valid_vendor_domain("abc.com"), "3-char label ok");
+        assert!(
+            !analyzer.is_valid_vendor_domain("b.com"),
+            "2-char label too short"
+        );
+        assert!(
+            !analyzer.is_valid_vendor_domain("ab.io"),
+            "2-char label too short"
+        );
+        assert!(
+            analyzer.is_valid_vendor_domain("abc.com"),
+            "3-char label ok"
+        );
     }
 
     #[test]
@@ -16800,32 +17901,50 @@ Suite 200</td></tr>
     fn test_is_valid_vendor_domain_too_long_grc162() {
         let analyzer = make_test_analyzer();
         let long_domain = format!("{}.com", "a".repeat(200));
-        assert!(!analyzer.is_valid_vendor_domain(&long_domain), "Domain >100 chars rejected");
+        assert!(
+            !analyzer.is_valid_vendor_domain(&long_domain),
+            "Domain >100 chars rejected"
+        );
     }
 
     #[test]
     fn test_is_valid_vendor_domain_common_word_rejected() {
         let analyzer = make_test_analyzer();
-        assert!(!analyzer.is_valid_vendor_domain("support.com"), "Common word domain rejected");
-        assert!(!analyzer.is_valid_vendor_domain("security.com"), "Common word domain rejected");
+        assert!(
+            !analyzer.is_valid_vendor_domain("support.com"),
+            "Common word domain rejected"
+        );
+        assert!(
+            !analyzer.is_valid_vendor_domain("security.com"),
+            "Common word domain rejected"
+        );
     }
 
     #[test]
     fn test_is_valid_vendor_domain_garbled_rejected() {
         let analyzer = make_test_analyzer();
-        assert!(!analyzer.is_valid_vendor_domain("ksbpw.com"), "Garbled text domain rejected");
+        assert!(
+            !analyzer.is_valid_vendor_domain("ksbpw.com"),
+            "Garbled text domain rejected"
+        );
     }
 
     #[test]
     fn test_create_enhanced_evidence_truncation_grc162() {
         let analyzer = make_test_analyzer();
         let long_text = "A".repeat(300);
-        let html = format!(r#"<html><body><table><tr><td>{}</td></tr></table></body></html>"#, long_text);
+        let html = format!(
+            r#"<html><body><table><tr><td>{}</td></tr></table></body></html>"#,
+            long_text
+        );
         let document = Html::parse_document(&html);
         let td_sel = scraper::Selector::parse("td").unwrap();
         let element = document.select(&td_sel).next().unwrap();
         let evidence = analyzer.create_enhanced_evidence(&element, "Test", "https://example.com");
-        assert!(evidence.contains("..."), "Long evidence should be truncated with ellipsis");
+        assert!(
+            evidence.contains("..."),
+            "Long evidence should be truncated with ellipsis"
+        );
         assert!(evidence.len() < 500, "Evidence should be reasonably sized");
     }
 
@@ -16840,15 +17959,25 @@ Suite 200</td></tr>
         let table_sel = scraper::Selector::parse("table").unwrap();
         let element = document.select(&table_sel).next().unwrap();
         let evidence = analyzer.create_focused_html_evidence(&element, "Cloudflare");
-        assert!(evidence.contains("Cloudflare"), "Should contain the entity name");
+        assert!(
+            evidence.contains("Cloudflare"),
+            "Should contain the entity name"
+        );
     }
 
     #[test]
     fn test_create_evidence_excerpt_very_long_truncated() {
         let analyzer = make_test_analyzer();
-        let long_text = format!("prefix {} stripe.com {} suffix", "a".repeat(400), "b".repeat(400));
+        let long_text = format!(
+            "prefix {} stripe.com {} suffix",
+            "a".repeat(400),
+            "b".repeat(400)
+        );
         let excerpt = analyzer.create_evidence_excerpt(&long_text, "stripe.com");
-        assert!(excerpt.len() < long_text.len(), "Should truncate very long text");
+        assert!(
+            excerpt.len() < long_text.len(),
+            "Should truncate very long text"
+        );
         assert!(excerpt.contains("stripe.com"), "Should contain the domain");
     }
 
@@ -16867,7 +17996,10 @@ Suite 200</td></tr>
         let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
         assert!(domains.contains(&"stripe.com"), "Should find stripe.com");
         assert!(domains.contains(&"datadog.com"), "Should find datadog.com");
-        assert!(domains.contains(&"cloudflare.com"), "Should find cloudflare.com");
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Should find cloudflare.com"
+        );
     }
 
     #[tokio::test]
@@ -16882,7 +18014,10 @@ Suite 200</td></tr>
             .await
             .unwrap();
         let stripe_count = result.iter().filter(|v| v.domain == "stripe.com").count();
-        assert_eq!(stripe_count, 1, "Should deduplicate stripe.com to single entry");
+        assert_eq!(
+            stripe_count, 1,
+            "Should deduplicate stripe.com to single entry"
+        );
     }
 
     #[test]
@@ -16894,7 +18029,10 @@ Suite 200</td></tr>
         }];
         let result = filter_subprocessor_results(vendors);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain, "stripe.com", "Should strip _org: prefix and keep valid domain");
+        assert_eq!(
+            result[0].domain, "stripe.com",
+            "Should strip _org: prefix and keep valid domain"
+        );
     }
 
     #[test]
@@ -16912,7 +18050,10 @@ Suite 200</td></tr>
             raw_record: "test".to_string(),
         }];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Domains with whitespace should be rejected");
+        assert!(
+            result.is_empty(),
+            "Domains with whitespace should be rejected"
+        );
     }
 
     #[test]
@@ -16926,7 +18067,10 @@ Suite 200</td></tr>
     fn test_filter_subprocessor_results_common_word_domain_rejected() {
         let vendors = vec![make_domain("support.com"), make_domain("security.com")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Common English word domains should be rejected");
+        assert!(
+            result.is_empty(),
+            "Common English word domains should be rejected"
+        );
     }
 
     #[test]
@@ -16943,11 +18087,21 @@ Suite 200</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.context_patterns.push("data processors".to_string());
+        patterns
+            .context_patterns
+            .push("data processors".to_string());
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/vendors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/vendors",
+                &patterns,
+            )
             .unwrap();
-        assert!(!vendors.is_empty(), "Should match custom context pattern 'data processors'");
+        assert!(
+            !vendors.is_empty(),
+            "Should match custom context pattern 'data processors'"
+        );
     }
 
     #[test]
@@ -16964,24 +18118,38 @@ Suite 200</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/legal/sub-processor-list", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/legal/sub-processor-list",
+                &patterns,
+            )
             .unwrap();
         // URL contains "sub-processor" so context fallback should activate
-        assert!(!vendors.is_empty(), "URL with 'sub-processor' should enable extraction");
+        assert!(
+            !vendors.is_empty(),
+            "URL with 'sub-processor' should enable extraction"
+        );
     }
 
     #[test]
     fn test_map_organization_to_domain_inferred_grc162() {
         let analyzer = make_test_analyzer();
         let result = analyzer.map_organization_to_domain("Acmewidgets");
-        assert!(result.is_none() || result.as_ref().unwrap().contains("acmewidgets"), "Should infer domain from org name");
+        assert!(
+            result.is_none() || result.as_ref().unwrap().contains("acmewidgets"),
+            "Should infer domain from org name"
+        );
     }
 
     #[test]
     fn test_is_valid_domain_grc162() {
         let analyzer = make_test_analyzer();
         assert!(analyzer.is_valid_domain("stripe.com"), "Valid domain");
-        assert!(analyzer.is_valid_domain("aws.amazon.com"), "Valid subdomain");
+        assert!(
+            analyzer.is_valid_domain("aws.amazon.com"),
+            "Valid subdomain"
+        );
         assert!(!analyzer.is_valid_domain("nodot"), "No dot");
         assert!(!analyzer.is_valid_domain(".com"), "Starts with dot");
         assert!(!analyzer.is_valid_domain("a.b"), "Too short");
@@ -17004,7 +18172,8 @@ Suite 200</td></tr>
     #[test]
     fn test_looks_like_vendor_content_grc162() {
         let analyzer = make_test_analyzer();
-        assert!(analyzer.looks_like_vendor_content("Stripe (stripe.com) provides payment processing services"));
+        assert!(analyzer
+            .looks_like_vendor_content("Stripe (stripe.com) provides payment processing services"));
         assert!(!analyzer.looks_like_vendor_content("Just some random text"));
     }
 
@@ -17018,10 +18187,17 @@ Suite 200</td></tr>
                 <p>Datadog, Inc. – Monitoring and analytics service</p>
             </div>
         </body></html>"#;
-        let result = analyzer.scrape_with_intelligent_analysis(
-            "https://example.com/subprocessors", html, "example.com"
-        ).await;
-        assert!(result.is_ok(), "Should handle intelligent analysis without error");
+        let result = analyzer
+            .scrape_with_intelligent_analysis(
+                "https://example.com/subprocessors",
+                html,
+                "example.com",
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "Should handle intelligent analysis without error"
+        );
     }
 
     #[tokio::test]
@@ -17070,7 +18246,10 @@ Suite 200</td></tr>
             },
         ];
         let patterns = analyzer.derive_extraction_patterns(&orgs, &document).await;
-        assert!(patterns.confidence_score >= 0.0, "Should compute confidence score");
+        assert!(
+            patterns.confidence_score >= 0.0,
+            "Should compute confidence score"
+        );
     }
 
     #[tokio::test]
@@ -17097,8 +18276,12 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_exclusion_patterns_with_known_domains() {
         let analyzer = make_test_analyzer();
-        let patterns = analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
-        assert!(patterns.len() > 3, "Klaviyo URL should add extra exclusion patterns");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://klaviyo.com/legal/subprocessors");
+        assert!(
+            patterns.len() > 3,
+            "Klaviyo URL should add extra exclusion patterns"
+        );
     }
 
     #[test]
@@ -17114,32 +18297,51 @@ Suite 200</td></tr>
                 <tr><td>Intercom</td></tr>
             </table>
         </body></html>"#;
-        let extractions: Vec<SubprocessorDomain> = ["Stripe", "Datadog", "Cloudflare", "Twilio", "Zendesk", "Intercom"]
-            .iter()
-            .map(|name| SubprocessorDomain {
-                domain: format!("{}.com", name.to_lowercase()),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: format!("<td>{}</td>", name),
-            })
-            .collect();
+        let extractions: Vec<SubprocessorDomain> = [
+            "Stripe",
+            "Datadog",
+            "Cloudflare",
+            "Twilio",
+            "Zendesk",
+            "Intercom",
+        ]
+        .iter()
+        .map(|name| SubprocessorDomain {
+            domain: format!("{}.com", name.to_lowercase()),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: format!("<td>{}</td>", name),
+        })
+        .collect();
         let mut regex_patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut regex_patterns);
-        assert!(!regex_patterns.is_empty(), "Should generate patterns from 6+ successful extractions");
+        assert!(
+            !regex_patterns.is_empty(),
+            "Should generate patterns from 6+ successful extractions"
+        );
     }
 
     #[test]
     fn test_extract_organization_variations_grc162() {
         let analyzer = make_test_analyzer();
         let variations = analyzer.extract_organization_variations("Acme Corp, Inc.");
-        assert!(!variations.is_empty(), "Should produce variations from name with suffix");
-        assert!(variations.iter().any(|v| !v.contains("Inc")), "Should have variation without suffix");
+        assert!(
+            !variations.is_empty(),
+            "Should produce variations from name with suffix"
+        );
+        assert!(
+            variations.iter().any(|v| !v.contains("Inc")),
+            "Should have variation without suffix"
+        );
     }
 
     #[test]
     fn test_extract_organization_variations_parentheses() {
         let analyzer = make_test_analyzer();
         let variations = analyzer.extract_organization_variations("Cloudflare (CDN Provider)");
-        assert!(!variations.is_empty(), "Should produce variations from name with parentheses");
+        assert!(
+            !variations.is_empty(),
+            "Should produce variations from name with parentheses"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -17156,9 +18358,17 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.is_empty(), "No subprocessor context and non-subprocessor URL should yield empty");
+        assert!(
+            vendors.is_empty(),
+            "No subprocessor context and non-subprocessor URL should yield empty"
+        );
         assert!(meta.is_none());
     }
 
@@ -17172,7 +18382,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, _meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/subprocessor", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/subprocessor",
+                &patterns,
+            )
             .unwrap();
         assert!(
             vendors.iter().any(|v| v.domain == "stripe.com"),
@@ -17191,8 +18406,10 @@ Suite 200</td></tr>
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
             .extract_from_tables_with_patterns(
-                &document, html_str,
-                "https://example.com/legal/processor-list", &patterns,
+                &document,
+                html_str,
+                "https://example.com/legal/processor-list",
+                &patterns,
             )
             .unwrap();
         assert!(
@@ -17217,11 +18434,24 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/legal", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/legal",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Should extract Stripe: {:?}", domains);
-        assert!(domains.contains(&"cloudflare.com"), "Should extract Cloudflare: {:?}", domains);
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Should extract Stripe: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Should extract Cloudflare: {:?}",
+            domains
+        );
         let meta = meta.expect("Should return metadata when vendors found");
         assert_eq!(meta.successful_extractions, 2);
     }
@@ -17241,7 +18471,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(
             vendors.iter().any(|v| v.domain == "twilio.com"),
@@ -17249,7 +18484,10 @@ Suite 200</td></tr>
         );
         let meta = meta.unwrap();
         assert_eq!(meta.successful_entity_column_index, Some(1));
-        assert_eq!(meta.successful_header_pattern.as_deref(), Some("company name"));
+        assert_eq!(
+            meta.successful_header_pattern.as_deref(),
+            Some("company name")
+        );
     }
 
     #[test]
@@ -17266,7 +18504,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(
             vendors.iter().any(|v| v.domain == "stripe.com"),
@@ -17289,11 +18532,20 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
         assert!(!domains.is_empty(), "Should extract from data rows");
-        assert!(domains.contains(&"zendesk.com"), "Should extract Zendesk: {:?}", domains);
+        assert!(
+            domains.contains(&"zendesk.com"),
+            "Should extract Zendesk: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17311,7 +18563,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(
             vendors.iter().any(|v| v.domain == "stripe.com"),
@@ -17334,7 +18591,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(vendors.is_empty(), "Lines < 3 chars should be skipped");
         assert!(meta.is_none());
@@ -17353,9 +18615,17 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.is_empty(), "Empty table body should yield no vendors");
+        assert!(
+            vendors.is_empty(),
+            "Empty table body should yield no vendors"
+        );
         assert!(meta.is_none());
     }
 
@@ -17376,11 +18646,24 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Should extract from first table: {:?}", domains);
-        assert!(domains.contains(&"cloudflare.com"), "Should extract from second table: {:?}", domains);
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Should extract from first table: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Should extract from second table: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17400,7 +18683,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert_eq!(vendors.len(), 3);
         let meta = meta.unwrap();
@@ -17421,10 +18709,18 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(vendors.is_empty());
-        assert!(meta.is_none(), "Metadata should be None when no vendors extracted");
+        assert!(
+            meta.is_none(),
+            "Metadata should be None when no vendors extracted"
+        );
     }
 
     #[test]
@@ -17440,7 +18736,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
-            .extract_from_tables_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         for v in &vendors {
             assert_eq!(v.source_type, RecordType::HttpSubprocessor);
@@ -17495,9 +18796,17 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.is_empty(), "No subprocessor context should yield empty");
+        assert!(
+            vendors.is_empty(),
+            "No subprocessor context should yield empty"
+        );
     }
 
     #[test]
@@ -17514,12 +18823,29 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Should extract Stripe: {:?}", domains);
-        assert!(domains.contains(&"cloudflare.com"), "Should extract Cloudflare: {:?}", domains);
-        assert!(domains.contains(&"twilio.com"), "Should extract Twilio: {:?}", domains);
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Should extract Stripe: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Should extract Cloudflare: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"twilio.com"),
+            "Should extract Twilio: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17535,11 +18861,24 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"zendesk.com"), "Should extract from ol: {:?}", domains);
-        assert!(domains.contains(&"hubspot.com"), "Should extract HubSpot from ol: {:?}", domains);
+        assert!(
+            domains.contains(&"zendesk.com"),
+            "Should extract from ol: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"hubspot.com"),
+            "Should extract HubSpot from ol: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17555,7 +18894,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         assert!(vendors.is_empty(), "Text < 3 chars should be skipped");
     }
@@ -17572,9 +18916,17 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.is_empty(), "Whitespace-only items should be skipped");
+        assert!(
+            vendors.is_empty(),
+            "Whitespace-only items should be skipped"
+        );
     }
 
     #[test]
@@ -17591,9 +18943,17 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
-        assert!(vendors.is_empty(), "Navigation terms should be filtered by looks_like_organization_name");
+        assert!(
+            vendors.is_empty(),
+            "Navigation terms should be filtered by looks_like_organization_name"
+        );
     }
 
     #[test]
@@ -17606,7 +18966,12 @@ Suite 200</td></tr>
         let document = scraper::Html::parse_document(html_str);
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
-            .extract_from_lists_with_patterns(&document, html_str, "https://example.com/page", &patterns)
+            .extract_from_lists_with_patterns(
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
+            )
             .unwrap();
         for v in &vendors {
             assert_eq!(v.source_type, RecordType::HttpSubprocessor);
@@ -17642,7 +19007,10 @@ Suite 200</td></tr>
         let vendors = analyzer
             .extract_from_lists(&document, html_str, "https://example.com/page")
             .unwrap();
-        assert!(vendors.is_empty(), "No context paragraph should yield empty");
+        assert!(
+            vendors.is_empty(),
+            "No context paragraph should yield empty"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -17653,9 +19021,8 @@ Suite 200</td></tr>
     fn test_entity_name_domain_extraction_regex_parens() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "Stripe (stripe.com)", &patterns,
-        );
+        let result = analyzer
+            .extract_domain_from_entity_name_with_patterns("Stripe (stripe.com)", &patterns);
         assert_eq!(result, Some("stripe.com".to_string()));
     }
 
@@ -17664,7 +19031,8 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
         let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "Visit https://cloudflare.com for details", &patterns,
+            "Visit https://cloudflare.com for details",
+            &patterns,
         );
         assert_eq!(result, Some("cloudflare.com".to_string()));
     }
@@ -17673,9 +19041,8 @@ Suite 200</td></tr>
     fn test_entity_name_domain_org_mapping_known_company() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "Amazon Web Services", &patterns,
-        );
+        let result = analyzer
+            .extract_domain_from_entity_name_with_patterns("Amazon Web Services", &patterns);
         assert_eq!(result, Some("aws.amazon.com".to_string()));
     }
 
@@ -17683,9 +19050,8 @@ Suite 200</td></tr>
     fn test_entity_name_domain_org_mapping_with_suffix() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "Stripe, Inc.", &patterns,
-        );
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("Stripe, Inc.", &patterns);
         assert_eq!(result, Some("stripe.com".to_string()));
     }
 
@@ -17693,19 +19059,18 @@ Suite 200</td></tr>
     fn test_entity_name_domain_extraction_no_match() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "home", &patterns,
+        let result = analyzer.extract_domain_from_entity_name_with_patterns("home", &patterns);
+        assert!(
+            result.is_none(),
+            "Navigation term should not produce a domain"
         );
-        assert!(result.is_none(), "Navigation term should not produce a domain");
     }
 
     #[test]
     fn test_entity_name_domain_extraction_cookie_identifiers_rejected() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "__cf_bm", &patterns,
-        );
+        let result = analyzer.extract_domain_from_entity_name_with_patterns("__cf_bm", &patterns);
         assert!(result.is_none(), "Cookie identifiers should be rejected");
     }
 
@@ -17713,10 +19078,12 @@ Suite 200</td></tr>
     fn test_entity_name_domain_extraction_hyphenated_tracker_rejected() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "sa-user-id-v2", &patterns,
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("sa-user-id-v2", &patterns);
+        assert!(
+            result.is_none(),
+            "Hyphenated tracker IDs should be rejected"
         );
-        assert!(result.is_none(), "Hyphenated tracker IDs should be rejected");
     }
 
     #[test]
@@ -17733,9 +19100,7 @@ Suite 200</td></tr>
     fn test_entity_name_domain_single_word_known_vendor() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns(
-            "Datadog", &patterns,
-        );
+        let result = analyzer.extract_domain_from_entity_name_with_patterns("Datadog", &patterns);
         assert_eq!(result, Some("datadoghq.com".to_string()));
     }
 
@@ -17838,15 +19203,33 @@ Suite 200</td></tr>
         let patterns = ExtractionPatterns::default();
         let (vendors, meta) = analyzer
             .extract_from_tables_with_patterns(
-                &document, html_str,
-                "https://acme.com/legal/subprocessors", &patterns,
+                &document,
+                html_str,
+                "https://acme.com/legal/subprocessors",
+                &patterns,
             )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"aws.amazon.com"), "Missing AWS: {:?}", domains);
-        assert!(domains.contains(&"stripe.com"), "Missing Stripe: {:?}", domains);
-        assert!(domains.contains(&"twilio.com"), "Missing Twilio: {:?}", domains);
-        assert!(domains.contains(&"datadoghq.com"), "Missing Datadog: {:?}", domains);
+        assert!(
+            domains.contains(&"aws.amazon.com"),
+            "Missing AWS: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Missing Stripe: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"twilio.com"),
+            "Missing Twilio: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"datadoghq.com"),
+            "Missing Datadog: {:?}",
+            domains
+        );
         let meta = meta.unwrap();
         assert_eq!(meta.successful_extractions as usize, vendors.len());
     }
@@ -17867,14 +19250,28 @@ Suite 200</td></tr>
         let patterns = ExtractionPatterns::default();
         let vendors = analyzer
             .extract_from_lists_with_patterns(
-                &document, html_str,
-                "https://acme.com/legal/sub-processors", &patterns,
+                &document,
+                html_str,
+                "https://acme.com/legal/sub-processors",
+                &patterns,
             )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Missing Stripe: {:?}", domains);
-        assert!(domains.contains(&"cloudflare.com"), "Missing Cloudflare: {:?}", domains);
-        assert!(domains.contains(&"zendesk.com"), "Missing Zendesk: {:?}", domains);
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Missing Stripe: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Missing Cloudflare: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"zendesk.com"),
+            "Missing Zendesk: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17894,13 +19291,23 @@ Suite 200</td></tr>
         let patterns = ExtractionPatterns::default();
         let (vendors, _) = analyzer
             .extract_from_tables_with_patterns(
-                &document, html_str,
-                "https://example.com/page", &patterns,
+                &document,
+                html_str,
+                "https://example.com/page",
+                &patterns,
             )
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"acme.com"), "Should extract domain from parens: {:?}", domains);
-        assert!(domains.contains(&"foobar.io"), "Should extract .io domain from parens: {:?}", domains);
+        assert!(
+            domains.contains(&"acme.com"),
+            "Should extract domain from parens: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"foobar.io"),
+            "Should extract .io domain from parens: {:?}",
+            domains
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -17918,7 +19325,10 @@ Suite 200</td></tr>
         let vendors = analyzer
             .extract_from_paragraphs(&document, html_str, "https://example.com", &patterns)
             .unwrap();
-        assert!(vendors.is_empty(), "No subprocessor context should yield no vendors");
+        assert!(
+            vendors.is_empty(),
+            "No subprocessor context should yield no vendors"
+        );
     }
 
     #[test]
@@ -17936,8 +19346,16 @@ Suite 200</td></tr>
             .extract_from_paragraphs(&document, html_str, "https://example.com/subs", &patterns)
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(!vendors.is_empty(), "Should find at least one vendor: {:?}", domains);
-        assert!(domains.contains(&"mailgun.com"), "Should find Mailgun: {:?}", domains);
+        assert!(
+            !vendors.is_empty(),
+            "Should find at least one vendor: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"mailgun.com"),
+            "Should find Mailgun: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17953,7 +19371,11 @@ Suite 200</td></tr>
             .extract_from_paragraphs(&document, html_str, "https://example.com/legal", &patterns)
             .unwrap();
         let domains: Vec<&str> = vendors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"mailgun.com"), "Dash-separated line should extract: {:?}", domains);
+        assert!(
+            domains.contains(&"mailgun.com"),
+            "Dash-separated line should extract: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -17999,10 +19421,24 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"cloudflare.com"), "Direct selector should extract Cloudflare: {:?}", domains);
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"cloudflare.com"),
+            "Direct selector should extract Cloudflare: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -18030,11 +19466,24 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
         assert!(domains.contains(&"cloudflare.com"));
-        assert!(!domains.iter().any(|d| d.contains("navigation")), "Navigation should be excluded");
+        assert!(
+            !domains.iter().any(|d| d.contains("navigation")),
+            "Navigation should be excluded"
+        );
     }
 
     #[test]
@@ -18058,10 +19507,24 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"twilio.com"), "Regex should extract Twilio: {:?}", domains);
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"twilio.com"),
+            "Regex should extract Twilio: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -18086,10 +19549,24 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"snowflake.com"), "remove_suffix transform should work: {:?}", domains);
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"snowflake.com"),
+            "remove_suffix transform should work: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -18114,16 +19591,31 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"stripe.com"), "Lowercase transform should work: {:?}", domains);
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"stripe.com"),
+            "Lowercase transform should work: {:?}",
+            domains
+        );
     }
 
     #[test]
     fn test_custom_rules_attribute_extraction() {
         let analyzer = make_test_analyzer();
-        let html_str = r#"<html><body><a class="vendor" data-company="Zendesk">Link</a></body></html>"#;
+        let html_str =
+            r#"<html><body><a class="vendor" data-company="Zendesk">Link</a></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
         let mut mappings = std::collections::HashMap::new();
         mappings.insert("zendesk".to_string(), "zendesk.com".to_string());
@@ -18142,10 +19634,24 @@ Suite 200</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
-        let domains: Vec<&str> = result.subprocessors.iter().map(|v| v.domain.as_str()).collect();
-        assert!(domains.contains(&"zendesk.com"), "Attribute extraction should work: {:?}", domains);
+        let domains: Vec<&str> = result
+            .subprocessors
+            .iter()
+            .map(|v| v.domain.as_str())
+            .collect();
+        assert!(
+            domains.contains(&"zendesk.com"),
+            "Attribute extraction should work: {:?}",
+            domains
+        );
     }
 
     #[test]
@@ -18165,7 +19671,13 @@ Suite 200</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "source.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "source.com",
+            )
             .unwrap();
         // Either resolves to a subprocessor or creates a pending mapping
         if !result.pending_mappings.is_empty() {
@@ -18186,7 +19698,13 @@ Suite 200</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html_str, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html_str,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
         assert!(result.subprocessors.is_empty());
         assert!(result.pending_mappings.is_empty());
@@ -18202,7 +19720,10 @@ Suite 200</td></tr>
         let html_str = "<html><body><p>Hello</p></body></html>";
         let document = scraper::Html::parse_document(html_str);
         let result = analyzer.generate_domain_specific_patterns(
-            &document, html_str, &[], "https://example.com",
+            &document,
+            html_str,
+            &[],
+            "https://example.com",
         );
         assert!(result.direct_selectors.is_empty());
         assert!(result.custom_regex_patterns.is_empty());
@@ -18214,12 +19735,18 @@ Suite 200</td></tr>
         let html_str = "<html><body></body></html>";
         let document = scraper::Html::parse_document(html_str);
         let result = analyzer.generate_domain_specific_patterns(
-            &document, html_str, &[], "https://klaviyo.com/subs",
+            &document,
+            html_str,
+            &[],
+            "https://klaviyo.com/subs",
         );
         assert!(result.special_handling.is_some());
         let handling = result.special_handling.unwrap();
         let all_patterns = handling.exclusion_patterns.join(" ");
-        assert!(all_patterns.contains("klaviyo"), "Klaviyo-specific exclusions expected");
+        assert!(
+            all_patterns.contains("klaviyo"),
+            "Klaviyo-specific exclusions expected"
+        );
     }
 
     #[test]
@@ -18255,9 +19782,15 @@ Suite 200</td></tr>
             },
         ];
         let result = analyzer.generate_domain_specific_patterns(
-            &document, html_str, &extractions, "https://example.com/subs",
+            &document,
+            html_str,
+            &extractions,
+            "https://example.com/subs",
         );
-        assert!(!result.direct_selectors.is_empty(), "Should generate selectors from table");
+        assert!(
+            !result.direct_selectors.is_empty(),
+            "Should generate selectors from table"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -18272,7 +19805,10 @@ Suite 200</td></tr>
         let vendors = analyzer
             .extract_from_structured_content(&document, html_str)
             .unwrap();
-        assert!(vendors.is_empty(), "Structured content extraction is disabled");
+        assert!(
+            vendors.is_empty(),
+            "Structured content extraction is disabled"
+        );
     }
 
     // ════════════════════════════════════════════════��══════════════════════════
@@ -18289,7 +19825,8 @@ Suite 200</td></tr>
     #[test]
     fn test_entity_name_dba_format() {
         let analyzer = make_test_analyzer();
-        let result = analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Sinch Email)");
+        let result =
+            analyzer.extract_domain_from_entity_name("Mailgun Technologies (d/b/a Sinch Email)");
         assert!(result.is_some(), "d/b/a format should produce a domain");
     }
 
@@ -18424,7 +19961,9 @@ Suite 200</td></tr>
     #[test]
     fn test_looks_like_vendor_with_keyword_and_domain() {
         let analyzer = make_test_analyzer();
-        assert!(analyzer.looks_like_vendor_content("Cloudflare Inc provides hosting at cloudflare.com"));
+        assert!(
+            analyzer.looks_like_vendor_content("Cloudflare Inc provides hosting at cloudflare.com")
+        );
     }
 
     #[test]
@@ -18535,10 +20074,13 @@ Suite 200</td></tr>
     #[test]
     fn test_enhanced_evidence_short_text() {
         let analyzer = make_test_analyzer();
-        let html = scraper::Html::parse_document("<html><body><p>Cloudflare handles CDN</p></body></html>");
+        let html = scraper::Html::parse_document(
+            "<html><body><p>Cloudflare handles CDN</p></body></html>",
+        );
         let selector = scraper::Selector::parse("p").unwrap();
         let element = html.select(&selector).next().unwrap();
-        let evidence = analyzer.create_enhanced_evidence(&element, "Cloudflare", "https://example.com/subs");
+        let evidence =
+            analyzer.create_enhanced_evidence(&element, "Cloudflare", "https://example.com/subs");
         assert!(evidence.contains("Cloudflare"));
         assert!(evidence.contains("https://example.com/subs#:~:text=Cloudflare"));
     }
@@ -18552,7 +20094,10 @@ Suite 200</td></tr>
         let selector = scraper::Selector::parse("p").unwrap();
         let element = html.select(&selector).next().unwrap();
         let evidence = analyzer.create_enhanced_evidence(&element, "Entity", "https://example.com");
-        assert!(evidence.contains("..."), "Long text should be truncated with ellipsis");
+        assert!(
+            evidence.contains("..."),
+            "Long text should be truncated with ellipsis"
+        );
         assert!(evidence.len() < 500, "Evidence should be bounded");
     }
 
@@ -18684,7 +20229,8 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_calculate_org_confidence_in_list() {
         let analyzer = make_test_analyzer();
-        let confidence = analyzer.calculate_organization_confidence("Random Vendor", "<li>Random Vendor</li>");
+        let confidence =
+            analyzer.calculate_organization_confidence("Random Vendor", "<li>Random Vendor</li>");
         assert!(confidence > 0.5);
     }
 
@@ -18732,16 +20278,20 @@ Suite 200</td></tr>
     #[tokio::test]
     async fn test_grc175_pending_mappings_add_and_get() {
         let analyzer = make_test_analyzer();
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "Acme Inc".to_string(),
-            inferred_domain: "acme.com".to_string(),
-            source_domain: "source.com".to_string(),
-        }).await;
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "Beta Corp".to_string(),
-            inferred_domain: "beta.com".to_string(),
-            source_domain: "source.com".to_string(),
-        }).await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "Acme Inc".to_string(),
+                inferred_domain: "acme.com".to_string(),
+                source_domain: "source.com".to_string(),
+            })
+            .await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "Beta Corp".to_string(),
+                inferred_domain: "beta.com".to_string(),
+                source_domain: "source.com".to_string(),
+            })
+            .await;
         let mappings = analyzer.get_pending_mappings().await;
         assert_eq!(mappings.len(), 2);
         assert_eq!(mappings[0].org_name, "Acme Inc");
@@ -18974,14 +20524,17 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         let html_str = r#"<html><body><main><table><tr><td>Atlassian Pty Ltd</td></tr><tr><td>Salesforce Inc.</td></tr><tr><td>Adobe Systems Corp.</td></tr></table></main></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
-        let results = analyzer.detect_organizations_in_content(&document, html_str).await;
+        let results = analyzer
+            .detect_organizations_in_content(&document, html_str)
+            .await;
         assert!(!results.is_empty());
     }
 
     #[tokio::test]
     async fn test_grc175_derive_patterns_similar_dom_contexts() {
         let analyzer = make_test_analyzer();
-        let html_str = r#"<html><body><table><tr><td>X</td></tr><tr><td>Y</td></tr></table></body></html>"#;
+        let html_str =
+            r#"<html><body><table><tr><td>X</td></tr><tr><td>Y</td></tr></table></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
         let orgs = vec![
             DetectedOrganization {
@@ -19014,7 +20567,7 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_all_lazy_selectors_used() {
         let html = scraper::Html::parse_document(
-            r#"<html><body><table><thead><tr><th>H1</th><th>H2</th></tr></thead><tbody><tr><td>C1</td><td>C2</td></tr></tbody></table><p>Text</p><div>Div</div></body></html>"#
+            r#"<html><body><table><thead><tr><th>H1</th><th>H2</th></tr></thead><tbody><tr><td>C1</td><td>C2</td></tr></tbody></table><p>Text</p><div>Div</div></body></html>"#,
         );
         assert!(html.select(&TR_SELECTOR).count() > 0);
         assert!(html.select(&PARAGRAPH_SELECTOR).count() > 0);
@@ -19037,14 +20590,35 @@ Suite 200</td></tr>
         </table></body></html>"#;
         let document = scraper::Html::parse_document(html_str);
         let extractions = vec![
-            SubprocessorDomain { domain: "aws.amazon.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Amazon Web Services, Inc.</td>".to_string() },
-            SubprocessorDomain { domain: "stripe.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Stripe, Inc.</td>".to_string() },
-            SubprocessorDomain { domain: "cloudflare.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Cloudflare, Inc.</td>".to_string() },
-            SubprocessorDomain { domain: "twilio.com".to_string(), source_type: RecordType::HttpSubprocessor, raw_record: "<td>Twilio Inc.</td>".to_string() },
+            SubprocessorDomain {
+                domain: "aws.amazon.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Amazon Web Services, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "stripe.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Stripe, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "cloudflare.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Cloudflare, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "twilio.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Twilio Inc.</td>".to_string(),
+            },
         ];
         let mut direct_selectors = Vec::new();
         let mut custom_mappings = std::collections::HashMap::new();
-        analyzer.analyze_table_patterns(&document, &extractions, &mut direct_selectors, &mut custom_mappings);
+        analyzer.analyze_table_patterns(
+            &document,
+            &extractions,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
     }
 
     #[test]
@@ -19079,7 +20653,10 @@ Suite 200</td></tr>
         };
         let result = analyzer.extract_domain_from_organization_name("xyznonexistentorg", &rules);
         // May or may not match via generic fallback
-        assert!(result.is_none() || result.as_ref().unwrap().is_fallback, "if matched, should be a fallback");
+        assert!(
+            result.is_none() || result.as_ref().unwrap().is_fallback,
+            "if matched, should be a fallback"
+        );
     }
 
     #[test]
@@ -19097,7 +20674,8 @@ Suite 200</td></tr>
                 exclusion_patterns: vec![],
             }),
         };
-        let result = analyzer.extract_domain_from_organization_name("Loom, Inc. (Atlassian)", &rules);
+        let result =
+            analyzer.extract_domain_from_organization_name("Loom, Inc. (Atlassian)", &rules);
         assert!(result.is_some());
         assert_eq!(result.unwrap().domain, "loom.com");
     }
@@ -19106,7 +20684,7 @@ Suite 200</td></tr>
     fn test_grc175_is_in_navigation_header_tag() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><header><div><span>Logo</span></div></header></body></html>"#
+            r#"<html><body><header><div><span>Logo</span></div></header></body></html>"#,
         );
         let sel = scraper::Selector::parse("span").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19118,7 +20696,7 @@ Suite 200</td></tr>
     fn test_grc175_is_in_navigation_aside_tag() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><aside><p>Sidebar</p></aside></body></html>"#
+            r#"<html><body><aside><p>Sidebar</p></aside></body></html>"#,
         );
         let sel = scraper::Selector::parse("p").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19130,7 +20708,7 @@ Suite 200</td></tr>
     fn test_grc175_is_in_navigation_sidebar_class() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><div class="sidebar"><p>Side</p></div></body></html>"#
+            r#"<html><body><div class="sidebar"><p>Side</p></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("p").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19142,7 +20720,7 @@ Suite 200</td></tr>
     fn test_grc175_is_in_navigation_breadcrumb_id() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><div id="breadcrumb"><a>Home</a></div></body></html>"#
+            r#"<html><body><div id="breadcrumb"><a>Home</a></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("a").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19154,7 +20732,7 @@ Suite 200</td></tr>
     fn test_grc177_is_in_navigation_element_own_class() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><div><span class="navbar-link">Link</span></div></body></html>"#
+            r#"<html><body><div><span class="navbar-link">Link</span></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("span").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19166,7 +20744,7 @@ Suite 200</td></tr>
     fn test_grc177_is_in_navigation_element_own_id() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><div><a id="main-navigation">Home</a></div></body></html>"#
+            r#"<html><body><div><a id="main-navigation">Home</a></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("a").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19178,7 +20756,7 @@ Suite 200</td></tr>
     fn test_grc177_is_in_navigation_not_nav_element() {
         let analyzer = make_test_analyzer();
         let html = scraper::Html::parse_document(
-            r#"<html><body><div class="content"><p>Cloudflare, Inc.</p></div></body></html>"#
+            r#"<html><body><div class="content"><p>Cloudflare, Inc.</p></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("p").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
@@ -19189,9 +20767,8 @@ Suite 200</td></tr>
     #[test]
     fn test_grc177_is_in_navigation_element_is_nav_tag() {
         let analyzer = make_test_analyzer();
-        let html = scraper::Html::parse_document(
-            r#"<html><body><nav>Main Nav</nav></body></html>"#
-        );
+        let html =
+            scraper::Html::parse_document(r#"<html><body><nav>Main Nav</nav></body></html>"#);
         let sel = scraper::Selector::parse("nav").unwrap();
         let el = html.select(&sel).next().expect("element should exist");
 
@@ -19202,7 +20779,12 @@ Suite 200</td></tr>
     // GRC-178: Pattern Analysis — derive_extraction_patterns
     // ═══════════════════════════════════════════════════════════════════════════
 
-    fn make_detected_org(name: &str, parent_tags: Vec<&str>, css_classes: Vec<&str>, sibling_count: usize) -> DetectedOrganization {
+    fn make_detected_org(
+        name: &str,
+        parent_tags: Vec<&str>,
+        css_classes: Vec<&str>,
+        sibling_count: usize,
+    ) -> DetectedOrganization {
         DetectedOrganization {
             name: name.to_string(),
             confidence: 0.8,
@@ -19240,7 +20822,7 @@ Suite 200</td></tr>
     async fn test_derive_extraction_patterns_grouped_orgs_table() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document(
-            r#"<html><body><table><tr><td>Stripe</td></tr><tr><td>Twilio</td></tr><tr><td>AWS</td></tr></table></body></html>"#
+            r#"<html><body><table><tr><td>Stripe</td></tr><tr><td>Twilio</td></tr><tr><td>AWS</td></tr></table></body></html>"#,
         );
         let orgs = vec![
             make_detected_org("Stripe", vec!["table", "td"], vec![], 3),
@@ -19256,7 +20838,7 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         // HTML with many div elements - selector will match too broadly, giving low confidence
         let html = Html::parse_document(
-            r#"<html><body><div>A</div><div>B</div><div>C</div><div>D</div><div>E</div><div>F</div><div>G</div><div>H</div><div>I</div><div>J</div></body></html>"#
+            r#"<html><body><div>A</div><div>B</div><div>C</div><div>D</div><div>E</div><div>F</div><div>G</div><div>H</div><div>I</div><div>J</div></body></html>"#,
         );
         // Orgs in a non-specific container, selector confidence will be low
         let orgs = vec![
@@ -19425,7 +21007,12 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_single_org() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![make_detected_org("Stripe", vec!["table", "td"], vec!["vendor"], 3)];
+        let orgs = vec![make_detected_org(
+            "Stripe",
+            vec!["table", "td"],
+            vec!["vendor"],
+            3,
+        )];
         let org_refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         assert_eq!(analyzer.calculate_selector_consistency(&org_refs), 0.5);
     }
@@ -19460,8 +21047,18 @@ Suite 200</td></tr>
     fn test_selector_consistency_partial_overlap() {
         let analyzer = make_test_analyzer();
         let orgs = vec![
-            make_detected_org("Stripe", vec!["div", "table", "td"], vec!["vendor", "active"], 3),
-            make_detected_org("Twilio", vec!["div", "table", "th"], vec!["vendor", "inactive"], 3),
+            make_detected_org(
+                "Stripe",
+                vec!["div", "table", "td"],
+                vec!["vendor", "active"],
+                3,
+            ),
+            make_detected_org(
+                "Twilio",
+                vec!["div", "table", "th"],
+                vec!["vendor", "inactive"],
+                3,
+            ),
         ];
         let org_refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         let result = analyzer.calculate_selector_consistency(&org_refs);
@@ -19505,7 +21102,7 @@ Suite 200</td></tr>
     fn test_pattern_confidence_valid_selector_good_ratio() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document(
-            r#"<html><body><table><td>A</td><td>B</td><td>C</td></table></body></html>"#
+            r#"<html><body><table><td>A</td><td>B</td><td>C</td></table></body></html>"#,
         );
         let orgs = vec![
             make_detected_org("A", vec!["table", "td"], vec![], 3),
@@ -19529,7 +21126,7 @@ Suite 200</td></tr>
     fn test_pattern_confidence_overmatch() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document(
-            r#"<html><body><div>A</div><div>B</div><div>C</div><div>D</div><div>E</div><div>F</div><div>G</div><div>H</div><div>I</div><div>J</div></body></html>"#
+            r#"<html><body><div>A</div><div>B</div><div>C</div><div>D</div><div>E</div><div>F</div><div>G</div><div>H</div><div>I</div><div>J</div></body></html>"#,
         );
         let orgs = vec![
             make_detected_org("A", vec!["div"], vec![], 10),
@@ -19551,9 +21148,8 @@ Suite 200</td></tr>
     #[test]
     fn test_pattern_confidence_ratio_above_one() {
         let analyzer = make_test_analyzer();
-        let html = Html::parse_document(
-            r#"<html><body><table><td>Only</td></table></body></html>"#
-        );
+        let html =
+            Html::parse_document(r#"<html><body><table><td>Only</td></table></body></html>"#);
         let orgs = vec![
             make_detected_org("A", vec!["table", "td"], vec![], 3),
             make_detected_org("B", vec!["table", "td"], vec![], 3),
@@ -19632,7 +21228,8 @@ Suite 200</td></tr>
     #[test]
     fn test_exclusion_patterns_stripe_url() {
         let analyzer = make_test_analyzer();
-        let patterns = analyzer.generate_exclusion_patterns("https://stripe.com/legal/subprocessors");
+        let patterns =
+            analyzer.generate_exclusion_patterns("https://stripe.com/legal/subprocessors");
         assert_eq!(patterns.len(), 7);
         assert!(patterns.last().unwrap().contains("stripe"));
     }
@@ -19645,7 +21242,7 @@ Suite 200</td></tr>
     fn test_grc178_extract_adaptive_selector_with_domains() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document(
-            r#"<html><body><ul><li>stripe.com - Payment processing</li><li>twilio.com - Communications</li></ul></body></html>"#
+            r#"<html><body><ul><li>stripe.com - Payment processing</li><li>twilio.com - Communications</li></ul></body></html>"#,
         );
         let selector = DomSelector {
             selector: "li".to_string(),
@@ -19653,7 +21250,8 @@ Suite 200</td></tr>
             confidence: 0.8,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
         // Whether domains are extracted depends on extract_domain_from_text + looks_like_vendor_content
         // At minimum, the function should not panic
         assert!(vendors.len() <= 2);
@@ -19669,7 +21267,8 @@ Suite 200</td></tr>
             confidence: 0.5,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
         assert!(vendors.is_empty());
     }
 
@@ -19683,7 +21282,8 @@ Suite 200</td></tr>
             confidence: 0.9,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
         assert!(vendors.is_empty());
     }
 
@@ -19707,9 +21307,15 @@ Suite 200</td></tr>
     #[test]
     fn test_extraction_patterns_default_header_patterns_content() {
         let patterns = ExtractionPatterns::default();
-        assert!(patterns.entity_header_patterns.contains(&"entity name".to_string()));
-        assert!(patterns.entity_header_patterns.contains(&"vendor".to_string()));
-        assert!(patterns.entity_header_patterns.contains(&"subprocessor".to_string()));
+        assert!(patterns
+            .entity_header_patterns
+            .contains(&"entity name".to_string()));
+        assert!(patterns
+            .entity_header_patterns
+            .contains(&"vendor".to_string()));
+        assert!(patterns
+            .entity_header_patterns
+            .contains(&"subprocessor".to_string()));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -19723,7 +21329,7 @@ Suite 200</td></tr>
             <p>paragraph</p>
             <div>division</div>
             <table><thead><tr><th>Header</th><td>Cell</td></tr></thead><tbody><tr><td>Data</td></tr></tbody></table>
-            </body></html>"#
+            </body></html>"#,
         );
         // Exercise all static Lazy selectors
         assert!(html.select(&PARAGRAPH_SELECTOR).next().is_some());
@@ -19938,9 +21544,10 @@ Suite 200</td></tr>
     fn test_special_handling_clone_and_debug() {
         let handling = SpecialHandling {
             skip_generic_methods: true,
-            custom_org_to_domain_mapping: Some(std::collections::HashMap::from([
-                ("Acme".to_string(), "acme.com".to_string()),
-            ])),
+            custom_org_to_domain_mapping: Some(std::collections::HashMap::from([(
+                "Acme".to_string(),
+                "acme.com".to_string(),
+            )])),
             exclusion_patterns: vec!["^Internal.*".to_string()],
         };
         let cloned = handling.clone();
@@ -19971,7 +21578,10 @@ Suite 200</td></tr>
         let patterns = ExtractionPatterns::default();
         let json = serde_json::to_string(&patterns).unwrap();
         let deserialized: ExtractionPatterns = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.entity_header_patterns, patterns.entity_header_patterns);
+        assert_eq!(
+            deserialized.entity_header_patterns,
+            patterns.entity_header_patterns
+        );
         assert_eq!(deserialized.is_domain_specific, false);
     }
 
@@ -20030,7 +21640,13 @@ Suite 200</td></tr>
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: SubprocessorUrlCacheEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.domain, "stripe.com");
-        assert_eq!(deserialized.extraction_metadata.unwrap().successful_extractions, 10);
+        assert_eq!(
+            deserialized
+                .extraction_metadata
+                .unwrap()
+                .successful_extractions,
+            10
+        );
     }
 
     #[test]
@@ -20200,7 +21816,7 @@ Suite 200</td></tr>
                     <tr><td class="vendor">GCP</td></tr>
                     <tr><td class="vendor">Azure</td></tr>
                 </table>
-            </body></html>"#
+            </body></html>"#,
         );
         let orgs = vec![
             make_detected_org("Stripe", vec!["table", "td"], vec!["vendor"], 5),
@@ -20219,7 +21835,7 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         // 12 levels of nesting to test depth limit
         let html = Html::parse_document(
-            r#"<html><body><div><div><div><div><div><div><div><div><div><div><div><div><span>Deep</span></div></div></div></div></div></div></div></div></div></div></div></div></body></html>"#
+            r#"<html><body><div><div><div><div><div><div><div><div><div><div><div><div><span>Deep</span></div></div></div></div></div></div></div></div></div></div></div></div></body></html>"#,
         );
         let sel = scraper::Selector::parse("span").unwrap();
         let el = html.select(&sel).next().expect("div element should exist");
@@ -20282,7 +21898,12 @@ NY 10001</td><td>Payments</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         // Should extract vendors while skipping address lines
         let _ = &result;
@@ -20300,7 +21921,8 @@ NY 10001</td><td>Payments</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.entity_header_patterns = vec!["service provider".to_string(), "sub-processor".to_string()];
+        patterns.entity_header_patterns =
+            vec!["service provider".to_string(), "sub-processor".to_string()];
         let (vendors, metadata) = analyzer
             .extract_from_tables_with_patterns(&document, html, "https://example.com", &patterns)
             .unwrap();
@@ -20405,7 +22027,9 @@ NY 10001</td><td>Payments</td></tr>
             <div class="content"><p>Stripe, Inc. provides payment processing.</p></div>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let result = analyzer.detect_organizations_in_content(&document, html).await;
+        let result = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // Should skip nav content and potentially find Stripe
         for org in &result {
             assert_ne!(org.name, "Cloudflare, Inc.");
@@ -20420,7 +22044,9 @@ NY 10001</td><td>Payments</td></tr>
             <span>Acme Corporation provides infrastructure services.</span>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let result = analyzer.detect_organizations_in_content(&document, html).await;
+        let result = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         // May or may not find organizations depending on pattern matching
         let _ = result;
     }
@@ -20462,7 +22088,10 @@ NY 10001</td><td>Payments</td></tr>
         );
         let document = Html::parse_document(&html_str);
         let sel = Selector::parse("td").unwrap();
-        let el = document.select(&sel).next().expect("td should be found inside table");
+        let el = document
+            .select(&sel)
+            .next()
+            .expect("td should be found inside table");
         let evidence = analyzer.create_enhanced_evidence(&el, "test", "https://example.com");
         assert!(evidence.contains("..."));
     }
@@ -20515,7 +22144,10 @@ NY 10001</td><td>Payments</td></tr>
     fn test_extract_text_from_html_main_content_long_enough() {
         // When main content has > 200 chars, should return that without falling to body
         let long_main = "a ".repeat(150);
-        let html = format!(r#"<html><body><main>{}</main><p>other content</p></body></html>"#, long_main);
+        let html = format!(
+            r#"<html><body><main>{}</main><p>other content</p></body></html>"#,
+            long_main
+        );
         let content = extract_text_from_html(&html);
         assert!(content.len() > 200);
     }
@@ -20551,7 +22183,12 @@ NY 10001</td><td>Payments</td></tr>
         ];
         let patterns = analyzer.derive_extraction_patterns(&orgs, &document).await;
         // Should derive a selector using the CSS class
-        assert!(patterns.discovered_selectors.is_empty() || patterns.discovered_selectors[0].selector.contains("vendor-card"));
+        assert!(
+            patterns.discovered_selectors.is_empty()
+                || patterns.discovered_selectors[0]
+                    .selector
+                    .contains("vendor-card")
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -20653,7 +22290,10 @@ NY 10001</td><td>Payments</td></tr>
         );
         assert!(result.is_ok());
         let (vendors, metadata) = result.unwrap();
-        assert!(!vendors.is_empty(), "Should extract vendors from entity name column");
+        assert!(
+            !vendors.is_empty(),
+            "Should extract vendors from entity name column"
+        );
         assert!(metadata.is_some());
         let meta = metadata.unwrap();
         assert_eq!(meta.successful_entity_column_index, Some(1));
@@ -20738,10 +22378,7 @@ NY 10001</td><td>Payments</td></tr>
         let analyzer = make_test_analyzer();
         // HTML where regex captures something that's too long (>150 chars) to be a valid org name
         let long_text = "A".repeat(200);
-        let html = format!(
-            r#"<html><body><p>{} Inc.</p></body></html>"#,
-            long_text
-        );
+        let html = format!(r#"<html><body><p>{} Inc.</p></body></html>"#, long_text);
         let document = Html::parse_document(&html);
         let custom_rules = CustomExtractionRules {
             direct_selectors: vec![],
@@ -20817,11 +22454,18 @@ NY 10001</td><td>Payments</td></tr>
             context_patterns: vec!["subprocessor".to_string()],
             ..ExtractionPatterns::default()
         };
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns);
+        let result = analyzer.extract_from_paragraphs(
+            &document,
+            html,
+            "https://example.com/subprocessors",
+            &patterns,
+        );
         assert!(result.is_ok());
         let vendors = result.unwrap();
         assert!(
-            vendors.iter().any(|v| v.domain.contains("datadog") || v.domain.contains("cloudflare")),
+            vendors
+                .iter()
+                .any(|v| v.domain.contains("datadog") || v.domain.contains("cloudflare")),
             "Should extract companies from 'Company – Description' text line format"
         );
     }
@@ -20832,8 +22476,7 @@ NY 10001</td><td>Payments</td></tr>
     fn test_grc189_entity_name_dba_unknown_company() {
         let analyzer = make_test_analyzer();
         // d/b/a with a company name that doesn't have a known mapping
-        let result =
-            analyzer.extract_domain_from_entity_name("Some Corp (d/b/a UnknownBrandXYZ)");
+        let result = analyzer.extract_domain_from_entity_name("Some Corp (d/b/a UnknownBrandXYZ)");
         // UnknownBrandXYZ has no known mapping, so it falls through d/b/a to company_name_to_domain
         // which may or may not resolve it
         assert!(
@@ -20899,7 +22542,10 @@ NY 10001</td><td>Payments</td></tr>
         let analyzer = make_test_analyzer();
         // A name that doesn't match any known mapping or regex pattern
         let result = analyzer.company_name_to_domain("random words here");
-        assert!(result.is_none(), "Should return None for unrecognized names");
+        assert!(
+            result.is_none(),
+            "Should return None for unrecognized names"
+        );
     }
 
     #[test]
@@ -20953,7 +22599,10 @@ NY 10001</td><td>Payments</td></tr>
     fn test_grc189_filter_org_prefix_invalid_name_rejected() {
         let results = vec![make_domain("_org:A")]; // Too short to be valid
         let filtered = filter_subprocessor_results(results);
-        assert!(filtered.is_empty(), "Should reject _org: entries with invalid org names (too short)");
+        assert!(
+            filtered.is_empty(),
+            "Should reject _org: entries with invalid org names (too short)"
+        );
     }
 
     #[test]
@@ -20961,7 +22610,10 @@ NY 10001</td><td>Payments</td></tr>
         let long_name = "A".repeat(200);
         let results = vec![make_domain(&format!("_org:{}", long_name))];
         let filtered = filter_subprocessor_results(results);
-        assert!(filtered.is_empty(), "Should reject _org: entries with names exceeding max length");
+        assert!(
+            filtered.is_empty(),
+            "Should reject _org: entries with names exceeding max length"
+        );
     }
 
     #[test]
@@ -20969,7 +22621,10 @@ NY 10001</td><td>Payments</td></tr>
         // NER false positive: ISO standard identifier
         let results = vec![make_domain("_org:ISO 27001")];
         let filtered = filter_subprocessor_results(results);
-        assert!(filtered.is_empty(), "Should reject _org: entries that are NER false positives");
+        assert!(
+            filtered.is_empty(),
+            "Should reject _org: entries that are NER false positives"
+        );
     }
 
     // --- filter_subprocessor_results: domain with no valid TLD ---
@@ -21056,7 +22711,8 @@ NY 10001</td><td>Payments</td></tr>
             assert!(
                 *count <= 1,
                 "Name '{}' appears {} times — should be deduplicated to 1",
-                name, count
+                name,
+                count
             );
         }
     }
@@ -21151,13 +22807,11 @@ NY 10001</td><td>Payments</td></tr>
     fn test_grc189_analyze_html_patterns_no_td_pattern() {
         let analyzer = make_test_analyzer();
         let mut patterns = Vec::new();
-        let extractions = vec![
-            SubprocessorDomain {
-                domain: "stripe.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "<li>stripe.com</li>".to_string(),
-            },
-        ];
+        let extractions = vec![SubprocessorDomain {
+            domain: "stripe.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "<li>stripe.com</li>".to_string(),
+        }];
         // HTML without <td> containing the domain
         let html = "<ul><li>stripe.com</li></ul>";
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
@@ -21172,13 +22826,11 @@ NY 10001</td><td>Payments</td></tr>
     fn test_grc189_analyze_html_patterns_td_pattern_added() {
         let analyzer = make_test_analyzer();
         let mut patterns = Vec::new();
-        let extractions = vec![
-            SubprocessorDomain {
-                domain: "stripe.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "<td>stripe.com</td>".to_string(),
-            },
-        ];
+        let extractions = vec![SubprocessorDomain {
+            domain: "stripe.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "<td>stripe.com</td>".to_string(),
+        }];
         let html = "<table><tr><td>stripe.com</td></tr></table>";
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         assert!(
@@ -21203,7 +22855,9 @@ NY 10001</td><td>Payments</td></tr>
         let html = "<ul><li>items</li></ul>";
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         assert!(
-            patterns.iter().any(|p| p.description.contains("capitalized")),
+            patterns
+                .iter()
+                .any(|p| p.description.contains("capitalized")),
             "Should add capitalized company name pattern when > 5 extractions"
         );
     }
@@ -21215,7 +22869,11 @@ NY 10001</td><td>Payments</td></tr>
         let analyzer = make_test_analyzer();
         let patterns = analyzer.generate_exclusion_patterns("https://randomsite.com/subprocessors");
         // Should only have generic patterns, no domain-specific ones
-        assert_eq!(patterns.len(), 6, "Unknown domains should have exactly 6 generic exclusion patterns");
+        assert_eq!(
+            patterns.len(),
+            6,
+            "Unknown domains should have exactly 6 generic exclusion patterns"
+        );
     }
 
     // --- extract_domain_from_organization_name: no special handling ---
@@ -21232,7 +22890,10 @@ NY 10001</td><td>Payments</td></tr>
         assert!(result.is_some());
         let res = result.unwrap();
         assert_eq!(res.domain, "stripe.com");
-        assert!(res.is_fallback, "Should be marked as fallback without custom mapping");
+        assert!(
+            res.is_fallback,
+            "Should be marked as fallback without custom mapping"
+        );
     }
 
     #[test]
@@ -21251,10 +22912,14 @@ NY 10001</td><td>Payments</td></tr>
             }),
         };
         // "Loom, Inc. (Atlassian)" — "loom" appears at position 0, "atlassian" at position ~12
-        let result = analyzer.extract_domain_from_organization_name("Loom, Inc. (Atlassian)", &rules);
+        let result =
+            analyzer.extract_domain_from_organization_name("Loom, Inc. (Atlassian)", &rules);
         assert!(result.is_some());
         let res = result.unwrap();
-        assert_eq!(res.domain, "loom.com", "Should match earliest position (loom at 0)");
+        assert_eq!(
+            res.domain, "loom.com",
+            "Should match earliest position (loom at 0)"
+        );
         assert!(!res.is_fallback);
     }
 
@@ -21300,7 +22965,8 @@ NY 10001</td><td>Payments</td></tr>
             confidence: 0.9,
             sample_matches: vec!["stripe.com".to_string()],
         };
-        let results = analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
+        let results =
+            analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
         assert!(
             results.iter().any(|v| v.domain == "stripe.com"),
             "Should extract domains using adaptive selector"
@@ -21318,8 +22984,12 @@ NY 10001</td><td>Payments</td></tr>
             confidence: 0.9,
             sample_matches: vec![],
         };
-        let results = analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
-        assert!(results.is_empty(), "Should return empty for invalid CSS selector");
+        let results =
+            analyzer.extract_using_adaptive_selector(&document, &selector, "https://example.com");
+        assert!(
+            results.is_empty(),
+            "Should return empty for invalid CSS selector"
+        );
     }
 
     // --- GRC-178: Coverage uplift — edge case tests ---
@@ -21495,7 +23165,7 @@ South San Francisco</td><td>US</td></tr>
         let result = analyzer
             .extract_from_lists_with_patterns(&document, html, "https://test.com", &patterns)
             .unwrap();
-        assert!(result.len() >= 0);
+        let _ = result;
     }
 
     #[test]
@@ -21582,7 +23252,8 @@ South San Francisco</td><td>US</td></tr>
     #[test]
     fn test_grc191_parse_vanta_graphql_response_empty() {
         let analyzer = make_test_analyzer();
-        let json_data = serde_json::json!({"data": {"trust": {"trustReportBySlugId": {"subprocessors": []}}}});
+        let json_data =
+            serde_json::json!({"data": {"trust": {"trustReportBySlugId": {"subprocessors": []}}}});
         assert!(analyzer.parse_vanta_graphql_response(&json_data).is_none());
     }
 
@@ -21594,7 +23265,9 @@ South San Francisco</td><td>US</td></tr>
             <div>We also use Stripe Corp. for payments.</div>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         assert!(!orgs.is_empty());
     }
 
@@ -21605,25 +23278,42 @@ South San Francisco</td><td>US</td></tr>
             <span>Google Cloud provides infrastructure.</span>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         let _ = orgs.len();
     }
 
     #[test]
     fn test_grc191_calculate_organization_confidence() {
         let analyzer = make_test_analyzer();
-        let high = analyzer.calculate_organization_confidence("Google Cloud", "<td>Google Cloud</td>");
-        assert!(high > 0.7, "Known company in table should have high confidence: {}", high);
+        let high =
+            analyzer.calculate_organization_confidence("Google Cloud", "<td>Google Cloud</td>");
+        assert!(
+            high > 0.7,
+            "Known company in table should have high confidence: {}",
+            high
+        );
         let with_suffix = analyzer.calculate_organization_confidence("Acme Inc", "plain text");
-        assert!(with_suffix > 0.5, "Inc suffix should boost: {}", with_suffix);
+        assert!(
+            with_suffix > 0.5,
+            "Inc suffix should boost: {}",
+            with_suffix
+        );
         let short = analyzer.calculate_organization_confidence("AB", "context");
-        assert!(short < 0.5, "Very short name should be penalized: {}", short);
+        assert!(
+            short < 0.5,
+            "Very short name should be penalized: {}",
+            short
+        );
     }
 
     #[test]
     fn test_grc191_extract_dom_context() {
         let analyzer = make_test_analyzer();
-        let html = Html::parse_document(r#"<html><body><table><tr><td class="vendor-name">Acme</td></tr></table></body></html>"#);
+        let html = Html::parse_document(
+            r#"<html><body><table><tr><td class="vendor-name">Acme</td></tr></table></body></html>"#,
+        );
         let sel = Selector::parse("td").unwrap();
         let el = html.select(&sel).next().expect("td should exist");
         let ctx = analyzer.extract_dom_context(&el);
@@ -21634,34 +23324,50 @@ South San Francisco</td><td>US</td></tr>
     #[test]
     fn test_grc191_is_in_navigation_container_various() {
         let analyzer = make_test_analyzer();
-        let html = Html::parse_document(r##"<html><body>
+        let html = Html::parse_document(
+            r##"<html><body>
             <nav><a href="#">Nav Link</a></nav>
             <footer><span>Footer text</span></footer>
             <header><div>Header div</div></header>
             <main><p>Main content</p></main>
             <div class="sidebar"><span>Sidebar</span></div>
             <div role="navigation"><span>Nav role</span></div>
-        </body></html>"##);
+        </body></html>"##,
+        );
         let nav_sel = Selector::parse("nav a").unwrap();
         let el = html.select(&nav_sel).next().expect("nav a should exist");
-        assert!(analyzer.is_in_navigation_container(&el), "nav element should be navigation");
+        assert!(
+            analyzer.is_in_navigation_container(&el),
+            "nav element should be navigation"
+        );
 
         let footer_sel = Selector::parse("footer span").unwrap();
-        let el = html.select(&footer_sel).next().expect("footer span should exist");
-        assert!(analyzer.is_in_navigation_container(&el), "footer should be navigation");
+        let el = html
+            .select(&footer_sel)
+            .next()
+            .expect("footer span should exist");
+        assert!(
+            analyzer.is_in_navigation_container(&el),
+            "footer should be navigation"
+        );
 
         let main_sel = Selector::parse("main p").unwrap();
         let el = html.select(&main_sel).next().expect("main p should exist");
-        assert!(!analyzer.is_in_navigation_container(&el), "main content should not be navigation");
+        assert!(
+            !analyzer.is_in_navigation_container(&el),
+            "main content should not be navigation"
+        );
     }
 
     #[tokio::test]
     async fn test_grc191_derive_extraction_patterns() {
         let analyzer = make_test_analyzer();
-        let html = Html::parse_document(r#"<html><body><table>
+        let html = Html::parse_document(
+            r#"<html><body><table>
             <tr><td class="vendor">Cloudflare, Inc.</td><td>CDN</td></tr>
             <tr><td class="vendor">Stripe, Inc.</td><td>Payments</td></tr>
-        </table></body></html>"#);
+        </table></body></html>"#,
+        );
         let orgs = vec![
             DetectedOrganization {
                 name: "Cloudflare, Inc.".to_string(),
@@ -21693,19 +23399,17 @@ South San Francisco</td><td>US</td></tr>
     #[test]
     fn test_grc191_group_by_dom_patterns() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
-            DetectedOrganization {
-                name: "A Corp".to_string(),
-                confidence: 0.8,
-                dom_context: DomContext {
-                    parent_tags: vec!["td".to_string()],
-                    sibling_count: 1,
-                    css_classes: vec![],
-                    text_content: "A Corp".to_string(),
-                    xpath_like: "td".to_string(),
-                },
+        let orgs = vec![DetectedOrganization {
+            name: "A Corp".to_string(),
+            confidence: 0.8,
+            dom_context: DomContext {
+                parent_tags: vec!["td".to_string()],
+                sibling_count: 1,
+                css_classes: vec![],
+                text_content: "A Corp".to_string(),
+                xpath_like: "td".to_string(),
             },
-        ];
+        }];
         let groups = analyzer.group_by_dom_patterns(&orgs);
         assert!(!groups.is_empty());
     }
@@ -21726,7 +23430,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://test.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://test.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let _ = result.0.len();
     }
@@ -21776,7 +23485,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_paragraphs(&document, html, "https://test.com/sub-processors", &patterns)
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://test.com/sub-processors",
+                &patterns,
+            )
             .unwrap();
         let _ = result.len();
     }
@@ -21795,7 +23509,10 @@ WA 98101</td><td>Address-like</td></tr>
     #[test]
     fn test_grc191_company_name_to_domain() {
         let analyzer = make_test_analyzer();
-        assert_eq!(analyzer.company_name_to_domain("Amazon Web Services"), Some("aws.amazon.com".to_string()));
+        assert_eq!(
+            analyzer.company_name_to_domain("Amazon Web Services"),
+            Some("aws.amazon.com".to_string())
+        );
         let custom = analyzer.company_name_to_domain("Acmewidgets Inc.");
         let _ = custom;
     }
@@ -21811,7 +23528,12 @@ WA 98101</td><td>Address-like</td></tr>
         let extractions = vec![make_domain("cloudflare.com")];
         let mut direct_selectors = Vec::new();
         let mut custom_mappings = std::collections::HashMap::new();
-        analyzer.analyze_table_patterns(&document, &extractions, &mut direct_selectors, &mut custom_mappings);
+        analyzer.analyze_table_patterns(
+            &document,
+            &extractions,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
         let _ = direct_selectors.len();
     }
 
@@ -21829,9 +23551,15 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc191_generate_exclusion_patterns() {
         let analyzer = make_test_analyzer();
         let p1 = analyzer.generate_exclusion_patterns("https://klaviyo.com/subs");
-        assert!(p1.iter().any(|p| p.contains("klaviyo")), "Should have klaviyo-specific exclusion");
+        assert!(
+            p1.iter().any(|p| p.contains("klaviyo")),
+            "Should have klaviyo-specific exclusion"
+        );
         let p2 = analyzer.generate_exclusion_patterns("https://stripe.com/subs");
-        assert!(p2.iter().any(|p| p.contains("stripe")), "Should have stripe-specific exclusion");
+        assert!(
+            p2.iter().any(|p| p.contains("stripe")),
+            "Should have stripe-specific exclusion"
+        );
         let p3 = analyzer.generate_exclusion_patterns("https://example.com/subs");
         assert!(!p3.is_empty());
     }
@@ -21840,7 +23568,8 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc191_extract_from_structured_content() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document("<html><body><p>test</p></body></html>");
-        let result = analyzer.extract_from_structured_content(&html, "<html><body><p>test</p></body></html>");
+        let result = analyzer
+            .extract_from_structured_content(&html, "<html><body><p>test</p></body></html>");
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
@@ -21903,7 +23632,10 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html_str);
         let extractions = vec![make_domain("cloudflare.com")];
         let result = analyzer.generate_domain_specific_patterns(
-            &document, html_str, &extractions, "https://example.com",
+            &document,
+            html_str,
+            &extractions,
+            "https://example.com",
         );
         let _ = result.direct_selectors.len();
     }
@@ -21935,12 +23667,12 @@ WA 98101</td><td>Address-like</td></tr>
 
     #[test]
     fn test_grc191_filter_results_compound_tld_branch() {
-        let vendors = vec![
-            make_domain("co.uk"),
-            make_domain("valid-vendor.com"),
-        ];
+        let vendors = vec![make_domain("co.uk"), make_domain("valid-vendor.com")];
         let result = filter_subprocessor_results(vendors);
-        assert!(!result.iter().any(|v| v.domain == "co.uk"), "compound TLD should be filtered");
+        assert!(
+            !result.iter().any(|v| v.domain == "co.uk"),
+            "compound TLD should be filtered"
+        );
     }
 
     // ── GRC-197: Tests for uncovered pure-logic function branches ──
@@ -21956,11 +23688,13 @@ WA 98101</td><td>Address-like</td></tr>
     #[tokio::test]
     async fn test_grc197_add_then_get_pending_mappings() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "Acme Corp".to_string(),
-            inferred_domain: "acme.com".to_string(),
-            source_domain: "example.com".to_string(),
-        }).await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "Acme Corp".to_string(),
+                inferred_domain: "acme.com".to_string(),
+                source_domain: "example.com".to_string(),
+            })
+            .await;
         let mappings = analyzer.get_pending_mappings().await;
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].org_name, "Acme Corp");
@@ -21969,16 +23703,20 @@ WA 98101</td><td>Address-like</td></tr>
     #[tokio::test]
     async fn test_grc197_clear_pending_mappings_removes_all() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "A".to_string(),
-            inferred_domain: "a.com".to_string(),
-            source_domain: "src.com".to_string(),
-        }).await;
-        analyzer.add_pending_mapping(PendingOrgMapping {
-            org_name: "B".to_string(),
-            inferred_domain: "b.com".to_string(),
-            source_domain: "src.com".to_string(),
-        }).await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "A".to_string(),
+                inferred_domain: "a.com".to_string(),
+                source_domain: "src.com".to_string(),
+            })
+            .await;
+        analyzer
+            .add_pending_mapping(PendingOrgMapping {
+                org_name: "B".to_string(),
+                inferred_domain: "b.com".to_string(),
+                source_domain: "src.com".to_string(),
+            })
+            .await;
         assert_eq!(analyzer.get_pending_mappings().await.len(), 2);
         analyzer.clear_pending_mappings().await;
         assert!(analyzer.get_pending_mappings().await.is_empty());
@@ -22064,7 +23802,8 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_org_confidence_context_list_boost() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let confidence = analyzer.calculate_organization_confidence("RandomCorp", "content in <li> tag");
+        let confidence =
+            analyzer.calculate_organization_confidence("RandomCorp", "content in <li> tag");
         assert!(confidence > 0.5, "list context should boost confidence");
     }
 
@@ -22082,9 +23821,8 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_org_confidence_all_boosts_clamped() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let confidence = analyzer.calculate_organization_confidence(
-            "Google Inc", "data in <td> cell <li> item",
-        );
+        let confidence =
+            analyzer.calculate_organization_confidence("Google Inc", "data in <td> cell <li> item");
         assert_eq!(confidence, 1.0, "all boosts should clamp to 1.0");
     }
 
@@ -22093,7 +23831,9 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_nav_container_parent_with_nav_class() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let html = Html::parse_document(r#"<div class="main-navigation"><span id="target">Company</span></div>"#);
+        let html = Html::parse_document(
+            r#"<div class="main-navigation"><span id="target">Company</span></div>"#,
+        );
         let selector = Selector::parse("#target").unwrap();
         let element = html.select(&selector).next().unwrap();
         assert!(analyzer.is_in_navigation_container(&element));
@@ -22270,17 +24010,35 @@ WA 98101</td><td>Address-like</td></tr>
         let org1 = DetectedOrganization {
             name: "A".to_string(),
             confidence: 0.8,
-            dom_context: DomContext { parent_tags: vec![], sibling_count: 0, css_classes: vec![], text_content: "".to_string(), xpath_like: "".to_string() },
+            dom_context: DomContext {
+                parent_tags: vec![],
+                sibling_count: 0,
+                css_classes: vec![],
+                text_content: "".to_string(),
+                xpath_like: "".to_string(),
+            },
         };
         let org2 = DetectedOrganization {
             name: "B".to_string(),
             confidence: 0.8,
-            dom_context: DomContext { parent_tags: vec![], sibling_count: 0, css_classes: vec![], text_content: "".to_string(), xpath_like: "".to_string() },
+            dom_context: DomContext {
+                parent_tags: vec![],
+                sibling_count: 0,
+                css_classes: vec![],
+                text_content: "".to_string(),
+                xpath_like: "".to_string(),
+            },
         };
         let org3 = DetectedOrganization {
             name: "C".to_string(),
             confidence: 0.8,
-            dom_context: DomContext { parent_tags: vec![], sibling_count: 0, css_classes: vec![], text_content: "".to_string(), xpath_like: "".to_string() },
+            dom_context: DomContext {
+                parent_tags: vec![],
+                sibling_count: 0,
+                css_classes: vec![],
+                text_content: "".to_string(),
+                xpath_like: "".to_string(),
+            },
         };
         let orgs = vec![&org1, &org2, &org3];
         let selector = DomSelector {
@@ -22305,7 +24063,13 @@ WA 98101</td><td>Address-like</td></tr>
         let org1 = DetectedOrganization {
             name: "A".to_string(),
             confidence: 0.8,
-            dom_context: DomContext { parent_tags: vec![], sibling_count: 0, css_classes: vec![], text_content: "".to_string(), xpath_like: "".to_string() },
+            dom_context: DomContext {
+                parent_tags: vec![],
+                sibling_count: 0,
+                css_classes: vec![],
+                text_content: "".to_string(),
+                xpath_like: "".to_string(),
+            },
         };
         let orgs = vec![&org1];
         let selector = DomSelector {
@@ -22328,7 +24092,13 @@ WA 98101</td><td>Address-like</td></tr>
         let org1 = DetectedOrganization {
             name: "A".to_string(),
             confidence: 0.8,
-            dom_context: DomContext { parent_tags: vec![], sibling_count: 0, css_classes: vec![], text_content: "".to_string(), xpath_like: "".to_string() },
+            dom_context: DomContext {
+                parent_tags: vec![],
+                sibling_count: 0,
+                css_classes: vec![],
+                text_content: "".to_string(),
+                xpath_like: "".to_string(),
+            },
         };
         let orgs = vec![&org1];
         let selector = DomSelector {
@@ -22347,14 +24117,17 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_extract_adaptive_no_vendor_content() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let html = Html::parse_document(r#"<div><span>stripe.com cloud services inc platform.io</span></div>"#);
+        let html = Html::parse_document(
+            r#"<div><span>stripe.com cloud services inc platform.io</span></div>"#,
+        );
         let selector = DomSelector {
             selector: "span".to_string(),
             selector_type: SelectorType::DirectText,
             confidence: 0.8,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
         // stripe.com text has vendor keywords and domain, should extract
         let _ = &vendors;
     }
@@ -22371,7 +24144,8 @@ WA 98101</td><td>Address-like</td></tr>
             confidence: 0.5,
             sample_matches: vec![],
         };
-        let vendors = analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
+        let vendors =
+            analyzer.extract_using_adaptive_selector(&html, &selector, "https://example.com");
         assert!(vendors.is_empty());
     }
 
@@ -22426,10 +24200,19 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_paragraphs_skips_short_company_name() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let html = Html::parse_document(r#"<html><body><p>Our subprocessors include AB Inc and Service Provider Corp.</p></body></html>"#);
+        let html = Html::parse_document(
+            r#"<html><body><p>Our subprocessors include AB Inc and Service Provider Corp.</p></body></html>"#,
+        );
         let content = "Our subprocessors include AB Inc and Service Provider Corp.";
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&html, content, "https://example.com/sub-processors", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(
+                &html,
+                content,
+                "https://example.com/sub-processors",
+                &patterns,
+            )
+            .unwrap();
         // "AB" is < 3 chars, "Service" contains "service" -> both filtered
         let _ = &result;
     }
@@ -22447,7 +24230,14 @@ WA 98101</td><td>Address-like</td></tr>
         let html = Html::parse_document(&html_str);
         let content = &format!("Our subprocessors: hi {}", long_line);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&html, content, "https://example.com/sub-processors", &patterns).unwrap();
+        let result = analyzer
+            .extract_from_paragraphs(
+                &html,
+                content,
+                "https://example.com/sub-processors",
+                &patterns,
+            )
+            .unwrap();
         // Short line "hi" is < 5 chars, long line > 200 -> both skipped in strategy 2
         let _ = &result;
     }
@@ -22468,7 +24258,9 @@ WA 98101</td><td>Address-like</td></tr>
             custom_regex_patterns: vec![],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&html, "", "https://example.com", &rules, "example.com").unwrap();
+        let result = analyzer
+            .extract_with_custom_rules(&html, "", "https://example.com", &rules, "example.com")
+            .unwrap();
         assert!(result.subprocessors.is_empty());
     }
 
@@ -22488,7 +24280,9 @@ WA 98101</td><td>Address-like</td></tr>
             custom_regex_patterns: vec![],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&html, "", "https://example.com", &rules, "example.com").unwrap();
+        let result = analyzer
+            .extract_with_custom_rules(&html, "", "https://example.com", &rules, "example.com")
+            .unwrap();
         // Text is unchanged by unknown transform, should try to extract domain
         let _ = &result;
     }
@@ -22535,7 +24329,12 @@ WA 98101</td><td>Address-like</td></tr>
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
         let html = Html::parse_document(r#"<table><tr><td>AWS</td></tr></table>"#);
         let extractions = vec![];
-        let result = analyzer.generate_domain_specific_patterns(&html, "", &extractions, "https://example.com");
+        let result = analyzer.generate_domain_specific_patterns(
+            &html,
+            "",
+            &extractions,
+            "https://example.com",
+        );
         assert!(result.special_handling.is_some());
     }
 
@@ -22545,13 +24344,11 @@ WA 98101</td><td>Address-like</td></tr>
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
         let html = Html::parse_document(r#"<table><tr><td>CompanyA</td></tr></table>"#);
-        let extractions = vec![
-            SubprocessorDomain {
-                domain: "companya.com".to_string(),
-                source_type: RecordType::HttpSubprocessor,
-                raw_record: "<td>CompanyA</td>".to_string(),
-            },
-        ];
+        let extractions = vec![SubprocessorDomain {
+            domain: "companya.com".to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: "<td>CompanyA</td>".to_string(),
+        }];
         let mut selectors = Vec::new();
         let mut mappings = std::collections::HashMap::new();
         analyzer.analyze_table_patterns(&html, &extractions, &mut selectors, &mut mappings);
@@ -22586,11 +24383,13 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_analyze_html_patterns_5_or_fewer_no_extra() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let extractions: Vec<SubprocessorDomain> = (0..5).map(|i| SubprocessorDomain {
-            domain: format!("company{}.com", i),
-            source_type: RecordType::HttpSubprocessor,
-            raw_record: format!("Company{}", i),
-        }).collect();
+        let extractions: Vec<SubprocessorDomain> = (0..5)
+            .map(|i| SubprocessorDomain {
+                domain: format!("company{}.com", i),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: format!("Company{}", i),
+            })
+            .collect();
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns("no td content", &extractions, &mut patterns);
         // No <td>domain pattern match, and <= 5 extractions -> no capitalized pattern
@@ -22602,14 +24401,20 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_analyze_html_patterns_more_than_5_adds_pattern() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let extractions: Vec<SubprocessorDomain> = (0..6).map(|i| SubprocessorDomain {
-            domain: format!("company{}.com", i),
-            source_type: RecordType::HttpSubprocessor,
-            raw_record: format!("Company{}", i),
-        }).collect();
+        let extractions: Vec<SubprocessorDomain> = (0..6)
+            .map(|i| SubprocessorDomain {
+                domain: format!("company{}.com", i),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: format!("Company{}", i),
+            })
+            .collect();
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns("no td content", &extractions, &mut patterns);
-        assert_eq!(patterns.len(), 1, "should add capitalized company name pattern");
+        assert_eq!(
+            patterns.len(),
+            1,
+            "should add capitalized company name pattern"
+        );
     }
 
     // generate_exclusion_patterns: unknown domain (not klaviyo/stripe)
@@ -22626,8 +24431,12 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_structured_content_always_empty() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let html = Html::parse_document("<div><section><h2>Vendors</h2><p>Stripe, Twilio</p></section></div>");
-        let result = analyzer.extract_from_structured_content(&html, "<div>content</div>").unwrap();
+        let html = Html::parse_document(
+            "<div><section><h2>Vendors</h2><p>Stripe, Twilio</p></section></div>",
+        );
+        let result = analyzer
+            .extract_from_structured_content(&html, "<div>content</div>")
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -22753,18 +24562,24 @@ WA 98101</td><td>Address-like</td></tr>
     #[tokio::test]
     async fn test_grc197_detect_orgs_dedup_by_lowercase() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let html = Html::parse_document(r#"
+        let html = Html::parse_document(
+            r#"
             <main>
                 <p>We use Stripe Inc for payments.</p>
                 <p>Stripe Inc handles billing.</p>
             </main>
-        "#);
+        "#,
+        );
         let orgs = analyzer.detect_organizations_in_content(&html, "").await;
         // Deduplication uses lowercase name as key, same-name entries are merged
-        let stripe_entries: Vec<_> = orgs.iter()
+        let stripe_entries: Vec<_> = orgs
+            .iter()
             .filter(|o| o.name.to_lowercase() == "stripe inc")
             .collect();
-        assert!(stripe_entries.len() <= 1, "should deduplicate by lowercase name");
+        assert!(
+            stripe_entries.len() <= 1,
+            "should deduplicate by lowercase name"
+        );
     }
 
     // detect_organizations_in_content: fallback to * selector when no content found
@@ -22772,7 +24587,9 @@ WA 98101</td><td>Address-like</td></tr>
     async fn test_grc197_detect_orgs_fallback_all_selector() {
         let analyzer = SubprocessorAnalyzer::new().await;
         // No main/article/content elements, force fallback
-        let html = Html::parse_document(r#"<div><span>Amazon Web Services Inc provides hosting.</span></div>"#);
+        let html = Html::parse_document(
+            r#"<div><span>Amazon Web Services Inc provides hosting.</span></div>"#,
+        );
         let orgs = analyzer.detect_organizations_in_content(&html, "").await;
         // Should still find via fallback * selector
         let _ = &orgs;
@@ -22783,7 +24600,9 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc197_extract_dom_context_depth_limit() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = rt.block_on(SubprocessorAnalyzer::new());
-        let html = Html::parse_document(r#"<div><div><div><div><div><div><div><span id="deep">text</span></div></div></div></div></div></div></div>"#);
+        let html = Html::parse_document(
+            r#"<div><div><div><div><div><div><div><span id="deep">text</span></div></div></div></div></div></div></div>"#,
+        );
         let selector = Selector::parse("#deep").unwrap();
         let element = html.select(&selector).next().unwrap();
         let context = analyzer.extract_dom_context(&element);
@@ -22935,7 +24754,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -22953,7 +24777,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -22972,7 +24801,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -22981,10 +24815,16 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc212_create_enhanced_evidence_multibyte_truncation() {
         let analyzer = make_test_analyzer();
         let long_text = format!("{}{}", "A".repeat(198), "日本語テスト");
-        let html_str = format!(r#"<html><body><span id="t">{}</span></body></html>"#, long_text);
+        let html_str = format!(
+            r#"<html><body><span id="t">{}</span></body></html>"#,
+            long_text
+        );
         let document = Html::parse_document(&html_str);
         let sel = Selector::parse("#t").unwrap();
-        let el = document.select(&sel).next().expect("span#t should be found");
+        let el = document
+            .select(&sel)
+            .next()
+            .expect("span#t should be found");
         let evidence = analyzer.create_enhanced_evidence(&el, "test", "https://example.com");
         assert!(evidence.len() > 0);
     }
@@ -22993,7 +24833,11 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_grc212_create_evidence_excerpt_long_text() {
         let analyzer = make_test_analyzer();
         let long_prefix = "x".repeat(500);
-        let text = format!("{}stripe.com is our provider{}", long_prefix, "y".repeat(500));
+        let text = format!(
+            "{}stripe.com is our provider{}",
+            long_prefix,
+            "y".repeat(500)
+        );
         let excerpt = analyzer.create_evidence_excerpt(&text, "stripe.com");
         assert!(!excerpt.is_empty());
     }
@@ -23128,7 +24972,13 @@ WA 98101</td><td>Address-like</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &custom_rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &custom_rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23148,7 +24998,13 @@ WA 98101</td><td>Address-like</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &custom_rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &custom_rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23166,7 +25022,12 @@ WA 98101</td><td>Address-like</td></tr>
             source_type: RecordType::HttpSubprocessor,
             raw_record: "<td>Cloudflare, Inc.</td>".to_string(),
         }];
-        let rules = analyzer.generate_domain_specific_patterns(&document, html, &extractions, "https://example.com");
+        let rules = analyzer.generate_domain_specific_patterns(
+            &document,
+            html,
+            &extractions,
+            "https://example.com",
+        );
         let _ = &rules;
     }
 
@@ -23181,7 +25042,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_paragraphs(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23212,7 +25078,12 @@ WA 98101</td><td>Address-like</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/sub-processors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/sub-processors",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23226,7 +25097,10 @@ WA 98101</td><td>Address-like</td></tr>
         // Covers lines 72, 74: pattern exceeding MAX_REGEX_PATTERN_LENGTH
         let long_pattern = "a".repeat(501);
         let result = validate_and_compile_regex(&long_pattern);
-        assert!(result.is_none(), "Pattern exceeding 500 chars should be rejected");
+        assert!(
+            result.is_none(),
+            "Pattern exceeding 500 chars should be rejected"
+        );
     }
 
     #[test]
@@ -23260,7 +25134,10 @@ WA 98101</td><td>Address-like</td></tr>
         let analyzer = make_test_analyzer();
         let long_text = "x".repeat(600);
         let result = analyzer.create_evidence_excerpt(&long_text, "not-in-text.com");
-        assert!(result.ends_with("..."), "Fallback long text should be truncated with ...");
+        assert!(
+            result.ends_with("..."),
+            "Fallback long text should be truncated with ..."
+        );
         assert!(result.len() <= 503); // 500 chars + "..."
     }
 
@@ -23345,7 +25222,12 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subs", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subs",
+                &patterns,
+            )
             .unwrap();
         // The table should be processed — address lines with NY/CA should be skipped
         let _ = &result;
@@ -23366,7 +25248,12 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subs", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subs",
+                &patterns,
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23385,9 +25272,18 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.entity_header_patterns = vec!["company".to_string(), "name".to_string(), "sub-processor".to_string()];
+        patterns.entity_header_patterns = vec![
+            "company".to_string(),
+            "name".to_string(),
+            "sub-processor".to_string(),
+        ];
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subs", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subs",
+                &patterns,
+            )
             .unwrap();
         // Should find entity column via "company name" header match
         let _ = &result;
@@ -23408,7 +25304,12 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
         let result = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subs", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subs",
+                &patterns,
+            )
             .unwrap();
         // No valid domains should be extracted
         let _ = &result;
@@ -23432,7 +25333,12 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let mut patterns = ExtractionPatterns::default();
         patterns.entity_header_patterns = vec!["sub-processor".to_string()];
         let (vendors, metadata) = analyzer
-            .extract_from_tables_with_patterns(&document, html, "https://example.com/subprocessors", &patterns)
+            .extract_from_tables_with_patterns(
+                &document,
+                html,
+                "https://example.com/subprocessors",
+                &patterns,
+            )
             .unwrap();
         // Vendors may or may not be extracted depending on company->domain resolution
         let _ = &vendors;
@@ -23446,14 +25352,16 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     #[tokio::test]
     async fn test_grc212_scrape_with_rate_limit_ctx() {
         // Covers lines 2047, 2080: rate_limit_ctx Some branch
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("<html><body><table><tr><td>stripe.com</td></tr></table></body></html>")
+                    .set_body_string(
+                        "<html><body><table><tr><td>stripe.com</td></tr></table></body></html>",
+                    )
                     .insert_header("content-type", "text/html"),
             )
             .mount(&mock_server)
@@ -23461,7 +25369,8 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
 
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new();
-        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
+        let analyzer =
+            SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
 
         let config = crate::config::RateLimitConfig::default();
         let ctx = RateLimitContext::from_config(&config);
@@ -23476,8 +25385,8 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     #[tokio::test]
     async fn test_grc212_scrape_retry_with_rate_limit_backoff() {
         // Covers line 2080 more specifically: calculate_backoff_delay path
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
         // First request fails, second succeeds
@@ -23497,7 +25406,8 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
 
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new();
-        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
+        let analyzer =
+            SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
 
         let mut config = crate::config::RateLimitConfig::default();
         config.max_retries = 2;
@@ -23521,7 +25431,10 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let sel = Selector::parse("td").unwrap();
         let el = document.select(&sel).next().unwrap();
         let evidence = analyzer.create_enhanced_evidence(&el, "test", "https://example.com");
-        assert!(evidence.contains("..."), "Long evidence should be truncated with ...");
+        assert!(
+            evidence.contains("..."),
+            "Long evidence should be truncated with ..."
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -23535,7 +25448,10 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             <link rel="preload" as="fetch" href="https://assets.vanta.com/static/signature-manifest.abc123.json">
         </head><body></body></html>"#;
         let result = analyzer.extract_vanta_manifest_url(html);
-        assert_eq!(result, Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string()));
+        assert_eq!(
+            result,
+            Some("https://assets.vanta.com/static/signature-manifest.abc123.json".to_string())
+        );
     }
 
     #[test]
@@ -23574,16 +25490,31 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     #[test]
     fn test_grc212_residual_is_valid_vendor_domain_short_label() {
         let analyzer = make_test_analyzer();
-        assert!(!analyzer.is_valid_vendor_domain("ab.com"), "2-char label should be rejected");
-        assert!(analyzer.is_valid_vendor_domain("abc.com"), "3-char label should pass");
+        assert!(
+            !analyzer.is_valid_vendor_domain("ab.com"),
+            "2-char label should be rejected"
+        );
+        assert!(
+            analyzer.is_valid_vendor_domain("abc.com"),
+            "3-char label should pass"
+        );
     }
 
     #[test]
     fn test_grc212_residual_is_valid_vendor_domain_labels() {
         let analyzer = make_test_analyzer();
-        assert!(!analyzer.is_valid_vendor_domain("com"), "Bare TLD should fail (no dot)");
-        assert!(!analyzer.is_valid_vendor_domain("a"), "Single char should fail");
-        assert!(!analyzer.is_valid_vendor_domain("toolong.invalidtldmore"), "TLD > 10 chars");
+        assert!(
+            !analyzer.is_valid_vendor_domain("com"),
+            "Bare TLD should fail (no dot)"
+        );
+        assert!(
+            !analyzer.is_valid_vendor_domain("a"),
+            "Single char should fail"
+        );
+        assert!(
+            !analyzer.is_valid_vendor_domain("toolong.invalidtldmore"),
+            "TLD > 10 chars"
+        );
     }
 
     #[test]
@@ -23593,7 +25524,10 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             "<p>Some intro text</p><span>Stripe, Inc.</span><p>{}</p>",
             "x".repeat(300)
         );
-        let html = format!("<html><body><div id=\"c\">{}</div></body></html>", long_content);
+        let html = format!(
+            "<html><body><div id=\"c\">{}</div></body></html>",
+            long_content
+        );
         let document = Html::parse_document(&html);
         let sel = Selector::parse("#c").unwrap();
         let el = document.select(&sel).next().unwrap();
@@ -23661,7 +25595,8 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     fn test_grc212_extract_domain_from_entity_name_with_patterns_map_org() {
         let analyzer = make_test_analyzer();
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_domain_from_entity_name_with_patterns("Stripe, Inc.", &patterns);
+        let result =
+            analyzer.extract_domain_from_entity_name_with_patterns("Stripe, Inc.", &patterns);
         assert!(result.is_some());
     }
 
@@ -23733,7 +25668,13 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result.subprocessors;
     }
@@ -23756,7 +25697,13 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result.subprocessors;
     }
@@ -23778,7 +25725,13 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             special_handling: None,
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result.subprocessors;
         let _ = &result.pending_mappings;
@@ -23807,7 +25760,13 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
             }),
         };
         let result = analyzer
-            .extract_with_custom_rules(&document, html, "https://example.com", &rules, "example.com")
+            .extract_with_custom_rules(
+                &document,
+                html,
+                "https://example.com",
+                &rules,
+                "example.com",
+            )
             .unwrap();
         let _ = &result;
     }
@@ -23855,7 +25814,9 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let mut patterns = ExtractionPatterns::default();
-        patterns.entity_header_patterns.push("sub-processor".to_string());
+        patterns
+            .entity_header_patterns
+            .push("sub-processor".to_string());
         let result = analyzer
             .extract_from_tables_with_patterns(
                 &document,
@@ -23877,7 +25838,12 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns);
+        let result = analyzer.extract_from_paragraphs(
+            &document,
+            html,
+            "https://example.com/subprocessors",
+            &patterns,
+        );
         let _ = result;
     }
 }

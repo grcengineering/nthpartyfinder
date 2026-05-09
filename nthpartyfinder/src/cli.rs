@@ -1006,8 +1006,7 @@ mod tests {
 
     #[test]
     fn test_args_whois_concurrency() {
-        let cli =
-            Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--whois-concurrency", "15"]);
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--whois-concurrency", "15"]);
         let args = Args::from(&cli);
         assert_eq!(args.whois_concurrency, Some(15));
     }

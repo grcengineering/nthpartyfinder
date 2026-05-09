@@ -7,10 +7,10 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-#[cfg(not(test))]
-use tracing::{debug, info, warn};
 #[cfg(test)]
 use tracing::warn;
+#[cfg(not(test))]
+use tracing::{debug, info, warn};
 
 /// Latest subfinder version to download
 const SUBFINDER_VERSION: &str = "2.11.0";
@@ -66,7 +66,6 @@ impl SubfinderDiscovery {
             timeout,
         }
     }
-
 
     pub fn is_available(&self) -> bool {
         self.get_resolved_binary_path().is_some()
@@ -414,7 +413,10 @@ impl SubfinderDiscovery {
     /// Check if Docker is installed
     #[cfg(not(test))] // probes system PATH for `docker` binary — result depends on host environment
     pub fn is_docker_installed() -> bool {
-        match std::process::Command::new("docker").arg("--version").output() {
+        match std::process::Command::new("docker")
+            .arg("--version")
+            .output()
+        {
             Ok(o) => o.status.success(),
             Err(_) => false,
         }
@@ -529,7 +531,6 @@ impl SubfinderDiscovery {
 
         options
     }
-
 
     #[cfg_attr(coverage_nightly, coverage(off))] // coverage: process-spawn thin wrapper — tested via scripted-binary integration tests; LLVM async state machine artifacts make line-level coverage unreliable
     pub async fn discover(&self, domain: &str) -> Result<Vec<SubdomainResult>> {

@@ -455,8 +455,11 @@ mod tests {
 
     #[test]
     fn test_initialize_with_invalid_directory() {
-        let logger =
-            VerificationFailureLogger::new("/nonexistent/path/that/does/not/exist", "test.org", true);
+        let logger = VerificationFailureLogger::new(
+            "/nonexistent/path/that/does/not/exist",
+            "test.org",
+            true,
+        );
         let result = logger.initialize();
         assert!(result.is_err());
     }

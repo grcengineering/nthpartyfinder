@@ -310,7 +310,9 @@ fn find_config_dir_inner(
     if cwd_config.exists() && cwd_config.is_dir() && cwd_config.join("vendors").exists() {
         debug!(
             "Found config directory at: {:?}",
-            cwd_config.canonicalize().unwrap_or(cwd_config.to_path_buf())
+            cwd_config
+                .canonicalize()
+                .unwrap_or(cwd_config.to_path_buf())
         );
         return Some(cwd_config.to_path_buf());
     }
@@ -1357,11 +1359,7 @@ mod tests {
         fs::create_dir_all(bin_dir.join("config").join("vendors")).unwrap();
         let exe_path = bin_dir.join("myexe");
 
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            Some(exe_path),
-            None,
-        );
+        let result = find_config_dir_inner(Path::new("/nonexistent"), Some(exe_path), None);
         assert!(result.is_some());
         assert!(result.unwrap().join("vendors").exists());
     }
@@ -1376,11 +1374,7 @@ mod tests {
         fs::create_dir_all(target_dir.join("config").join("vendors")).unwrap();
         let exe_path = debug_dir.join("myexe");
 
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            Some(exe_path),
-            None,
-        );
+        let result = find_config_dir_inner(Path::new("/nonexistent"), Some(exe_path), None);
         assert!(result.is_some());
     }
 
@@ -1393,11 +1387,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("a").join("config").join("vendors")).unwrap();
         let exe_path = c_dir.join("myexe");
 
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            Some(exe_path),
-            None,
-        );
+        let result = find_config_dir_inner(Path::new("/nonexistent"), Some(exe_path), None);
         assert!(result.is_some());
     }
 
@@ -1406,11 +1396,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let exe_path = dir.path().join("myexe");
 
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            Some(exe_path),
-            None,
-        );
+        let result = find_config_dir_inner(Path::new("/nonexistent"), Some(exe_path), None);
         assert!(result.is_none());
     }
 
@@ -1469,22 +1455,15 @@ mod tests {
 
     #[test]
     fn find_config_dir_inner_none_inputs_returns_none() {
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            None,
-            None,
-        );
+        let result = find_config_dir_inner(Path::new("/nonexistent"), None, None);
         assert!(result.is_none());
     }
 
     #[test]
     fn find_config_dir_inner_exe_none_parent() {
         // Edge: exe_path is "/" so parent() returns None for parent-of-root
-        let result = find_config_dir_inner(
-            Path::new("/nonexistent"),
-            Some(PathBuf::from("/")),
-            None,
-        );
+        let result =
+            find_config_dir_inner(Path::new("/nonexistent"), Some(PathBuf::from("/")), None);
         assert!(result.is_none());
     }
 
@@ -1565,10 +1544,7 @@ mod tests {
         let json_path = dir.path().join("vendor.json");
         fs::write(&json_path, "{}").unwrap();
 
-        let entry = std::fs::read_dir(dir.path())
-            .unwrap()
-            .next()
-            .unwrap();
+        let entry = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
         let result = filter_vendor_path(entry);
         assert!(result.is_some());
     }
@@ -1578,10 +1554,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("readme.txt"), "text").unwrap();
 
-        let entry = std::fs::read_dir(dir.path())
-            .unwrap()
-            .next()
-            .unwrap();
+        let entry = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
         let result = filter_vendor_path(entry);
         assert!(result.is_none());
     }
@@ -1591,10 +1564,7 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("_schema.json"), "{}").unwrap();
 
-        let entry = std::fs::read_dir(dir.path())
-            .unwrap()
-            .next()
-            .unwrap();
+        let entry = std::fs::read_dir(dir.path()).unwrap().next().unwrap();
         let result = filter_vendor_path(entry);
         assert!(result.is_none());
     }

@@ -280,10 +280,7 @@ mod tests {
 
     #[test]
     fn test_normalize_for_dns_lookup_case_insensitive() {
-        assert_eq!(
-            normalize_for_dns_lookup("_SPF.Example.COM"),
-            "example.com"
-        );
+        assert_eq!(normalize_for_dns_lookup("_SPF.Example.COM"), "example.com");
     }
 
     #[test]

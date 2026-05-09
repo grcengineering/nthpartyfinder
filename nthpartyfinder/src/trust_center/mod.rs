@@ -1272,7 +1272,7 @@ mod tests {
             .unwrap()
             .as_secs();
         meta.discovered_at = now + 3600; // Future timestamp
-        // saturating_sub produces 0, so never stale even with 0-day threshold
+                                         // saturating_sub produces 0, so never stale even with 0-day threshold
         assert!(!meta.is_stale(0));
     }
 

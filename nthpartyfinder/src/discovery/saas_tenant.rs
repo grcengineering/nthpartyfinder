@@ -16,10 +16,10 @@ use std::path::Path;
 #[cfg(not(coverage))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-#[cfg(not(coverage))]
-use tracing::{debug, info};
 #[cfg(coverage)]
 use tracing::debug;
+#[cfg(not(coverage))]
+use tracing::{debug, info};
 
 use crate::logger::AnalysisLogger;
 #[cfg(not(coverage))]
@@ -1841,21 +1841,19 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec!["Sign In".to_string(), "Okta".to_string()],
             failure_indicators: vec!["not found".to_string()],
             notes: None,
         };
 
-        let (status, evidence) = probe_url_with_baseline(
-            &client,
-            &mock_server.uri(),
-            &detection,
-            "okta.com",
-            None,
-        )
-        .await;
+        let (status, evidence) =
+            probe_url_with_baseline(&client, &mock_server.uri(), &detection, "okta.com", None)
+                .await;
 
         assert_eq!(status, TenantStatus::Confirmed);
         assert!(evidence.contains("200"));
@@ -1866,27 +1864,23 @@ mod tests {
     async fn test_probe_url_with_baseline_not_found_failure_indicator() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Okta tenant not found"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Okta tenant not found"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec!["Okta".to_string()],
             failure_indicators: vec!["not found".to_string()],
             notes: None,
         };
 
-        let (status, _evidence) = probe_url_with_baseline(
-            &client,
-            &mock_server.uri(),
-            &detection,
-            "okta.com",
-            None,
-        )
-        .await;
+        let (status, _evidence) =
+            probe_url_with_baseline(&client, &mock_server.uri(), &detection, "okta.com", None)
+                .await;
 
         assert_eq!(status, TenantStatus::NotFound);
     }
@@ -1896,13 +1890,14 @@ mod tests {
     async fn test_probe_url_with_baseline_likely_no_indicators() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Some generic content"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Some generic content"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -1924,7 +1919,10 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_probe_url_with_baseline_connection_error() {
-        let client = Client::builder().timeout(Duration::from_secs(1)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -1951,13 +1949,14 @@ mod tests {
         let body = "This is the generic login page for everyone";
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(body),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -1988,13 +1987,14 @@ mod tests {
     async fn test_probe_url_with_baseline_unknown_indicators_unmatched() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Some generic page"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Some generic page"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec!["SpecificBrand".to_string()],
             failure_indicators: vec![],
@@ -2018,13 +2018,14 @@ mod tests {
     async fn test_probe_url_with_baseline_404_response() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(404).set_body_string("Not Found"),
-            )
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2052,13 +2053,14 @@ mod tests {
         let body = "Generic canary page content";
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(body),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let pattern = &format!("{}/{{tenant}}", mock_server.uri().trim_end_matches('/'));
         let baseline = probe_baseline(&client, pattern).await;
 
@@ -2072,7 +2074,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_probe_baseline_connection_failure() {
-        let client = Client::builder().timeout(Duration::from_secs(1)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
         let baseline = probe_baseline(&client, "http://127.0.0.1:1/{tenant}").await;
         assert!(baseline.is_none());
     }
@@ -2084,9 +2089,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Welcome to Okta Sign In"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Welcome to Okta Sign In"))
             .mount(&mock_server)
             .await;
 
@@ -2143,7 +2146,8 @@ mod tests {
     #[test]
     fn test_load_platforms_with_fallback_missing_file() {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
-        let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
+        let result =
+            disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
         // VendorRegistry may inject platforms even when the file is missing.
         // Verify: either we got platforms from the registry, or the call errored.
         assert!(
@@ -2376,7 +2380,12 @@ mod tests {
         };
         // Same status, same length, different hash, different URL
         let body = "x".repeat(100);
-        assert!(matches_baseline(200, &body, "https://different.com/b", &baseline));
+        assert!(matches_baseline(
+            200,
+            &body,
+            "https://different.com/b",
+            &baseline
+        ));
     }
 
     #[test]
@@ -2529,13 +2538,14 @@ mod tests {
         // We need to simulate a redirect. Since wiremock won't do cross-domain redirects
         // easily, we test the non-redirect path with a baseline that has different final URL
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Welcome to the vendor"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Welcome to the vendor"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec!["Welcome".to_string()],
             failure_indicators: vec![],
@@ -2543,14 +2553,9 @@ mod tests {
         };
 
         // No baseline, no redirect — should be Confirmed
-        let (status, evidence) = probe_url_with_baseline(
-            &client,
-            &mock_server.uri(),
-            &detection,
-            "vendor.com",
-            None,
-        )
-        .await;
+        let (status, evidence) =
+            probe_url_with_baseline(&client, &mock_server.uri(), &detection, "vendor.com", None)
+                .await;
 
         assert_eq!(status, TenantStatus::Confirmed);
         assert!(evidence.contains("200"));
@@ -2564,13 +2569,14 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string("Some content"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string("Some content"))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2597,13 +2603,14 @@ mod tests {
         let body = "x".repeat(1000);
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(&body),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(&body))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2613,7 +2620,7 @@ mod tests {
         // Baseline with same status and similar length but different hash
         let baseline = BaselineResponse {
             status_code: 200,
-            body_hash: 99999, // different hash
+            body_hash: 99999,  // different hash
             body_length: 1000, // same length
             final_url: "https://different.com".to_string(),
         };
@@ -2639,12 +2646,16 @@ mod tests {
 
         Mock::given(method("GET"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_string("Welcome to Acme Corp Okta portal - Sign In"),
+                ResponseTemplate::new(200)
+                    .set_body_string("Welcome to Acme Corp Okta portal - Sign In"),
             )
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec!["Sign In".to_string()],
             failure_indicators: vec![],
@@ -2689,10 +2700,7 @@ mod tests {
     fn test_was_redirected_to_main_site_core_domain_logic() {
         // Test the core_domain closure behavior
         // Single-part host
-        assert!(!was_redirected_to_main_site(
-            "https://a",
-            "https://b"
-        ));
+        assert!(!was_redirected_to_main_site("https://a", "https://b"));
     }
 
     #[test]
@@ -2736,7 +2744,10 @@ mod tests {
         assert_eq!(platform.tenant_patterns.len(), 3);
         let cloned = platform.clone();
         assert_eq!(cloned.tenant_patterns.len(), 3);
-        assert_eq!(cloned.detection.notes, Some("Multiple patterns".to_string()));
+        assert_eq!(
+            cloned.detection.notes,
+            Some("Multiple patterns".to_string())
+        );
     }
 
     #[test]
@@ -2762,7 +2773,10 @@ mod tests {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
         disc.load_platforms(&file_path).unwrap();
         assert_eq!(disc.platform_count(), 1);
-        assert_eq!(disc.platforms[0].detection.notes, Some("Has notes field".to_string()));
+        assert_eq!(
+            disc.platforms[0].detection.notes,
+            Some("Has notes field".to_string())
+        );
     }
 
     #[test]
@@ -2796,13 +2810,14 @@ mod tests {
         let body = "This exact canary response body";
 
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(body),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2845,7 +2860,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2884,7 +2902,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let detection = DetectionConfig {
             success_indicators: vec![],
             failure_indicators: vec![],
@@ -2921,7 +2942,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let pattern = &format!("{}/{{tenant}}", mock_server.uri().trim_end_matches('/'));
         let baseline = probe_baseline(&client, pattern).await;
 
@@ -2942,7 +2966,10 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
         let pattern = &format!("{}/{{tenant}}", mock_server.uri().trim_end_matches('/'));
         let baseline = probe_baseline(&client, pattern).await;
 
@@ -2972,7 +2999,12 @@ mod tests {
             final_url: "https://a.com".to_string(),
         };
         let probe_body = "b".repeat(100);
-        assert!(matches_baseline(200, &probe_body, "https://c.com", &baseline));
+        assert!(matches_baseline(
+            200,
+            &probe_body,
+            "https://c.com",
+            &baseline
+        ));
     }
 
     #[test]
@@ -2994,13 +3026,17 @@ mod tests {
     #[test]
     fn test_load_platforms_with_fallback_missing_file_error() {
         let mut disc = SaasTenantDiscovery::new(Duration::from_secs(5), 2);
-        let result = disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
+        let result =
+            disc.load_platforms_with_fallback(std::path::Path::new("/nonexistent/file.json"));
         // VendorRegistry may inject platforms even when the file is missing.
         assert!(
             disc.platform_count() > 0 || result.is_err(),
             "With missing file, must either load from registry or error"
         );
-        result.as_ref().err().inspect(|e| assert!(!e.to_string().is_empty()));
+        result
+            .as_ref()
+            .err()
+            .inspect(|e| assert!(!e.to_string().is_empty()));
     }
 
     #[test]

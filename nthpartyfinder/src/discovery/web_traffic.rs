@@ -903,7 +903,11 @@ mod tests {
         // because the regex patterns require absolute URLs starting with http(s)://.
         let html = r#"<script src="//cdn.vendor.com/sdk.js"></script>"#;
         let results = extract_external_domains_from_html(html, "example.com");
-        assert_eq!(results.len(), 0, "Protocol-relative URLs should not be captured");
+        assert_eq!(
+            results.len(),
+            0,
+            "Protocol-relative URLs should not be captured"
+        );
     }
 
     #[test]
@@ -938,7 +942,11 @@ mod tests {
         "#;
         let results = extract_external_domains_from_html(html, "example.com");
         // link href is not an active resource load, so social media should be filtered
-        assert_eq!(results.len(), 0, "Social media link hrefs should be fully filtered");
+        assert_eq!(
+            results.len(),
+            0,
+            "Social media link hrefs should be fully filtered"
+        );
     }
 
     #[test]
@@ -1308,13 +1316,16 @@ mod tests {
             <a href="https://x.com/company">Follow us</a>
         "#;
         let results = extract_external_domains_from_html(html, "example.com");
-        assert_eq!(results.len(), 0, "x.com social media link should be filtered");
+        assert_eq!(
+            results.len(),
+            0,
+            "x.com social media link should be filtered"
+        );
     }
 
     #[test]
     fn test_extract_ogp_me_filtered() {
-        let html =
-            r#"<link href="https://ogp.me/ns#" rel="stylesheet"><script src="https://cdn.vendor.com/sdk.js"></script>"#;
+        let html = r#"<link href="https://ogp.me/ns#" rel="stylesheet"><script src="https://cdn.vendor.com/sdk.js"></script>"#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(!domains.contains(&"ogp.me"));
@@ -1391,12 +1402,30 @@ mod tests {
         "#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"vendor1.com"), "Missing vendor1.com (script src)");
-        assert!(domains.contains(&"vendor2.com"), "Missing vendor2.com (link href)");
-        assert!(domains.contains(&"vendor3.com"), "Missing vendor3.com (img src)");
-        assert!(domains.contains(&"vendor4.com"), "Missing vendor4.com (iframe src)");
-        assert!(domains.contains(&"vendor5.com"), "Missing vendor5.com (data-src)");
-        assert!(domains.contains(&"vendor6.com"), "Missing vendor6.com (inline URL)");
+        assert!(
+            domains.contains(&"vendor1.com"),
+            "Missing vendor1.com (script src)"
+        );
+        assert!(
+            domains.contains(&"vendor2.com"),
+            "Missing vendor2.com (link href)"
+        );
+        assert!(
+            domains.contains(&"vendor3.com"),
+            "Missing vendor3.com (img src)"
+        );
+        assert!(
+            domains.contains(&"vendor4.com"),
+            "Missing vendor4.com (iframe src)"
+        );
+        assert!(
+            domains.contains(&"vendor5.com"),
+            "Missing vendor5.com (data-src)"
+        );
+        assert!(
+            domains.contains(&"vendor6.com"),
+            "Missing vendor6.com (inline URL)"
+        );
     }
 
     #[test]
@@ -1437,9 +1466,18 @@ mod tests {
         "#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"linkedin.com"), "LinkedIn SDK script should pass");
-        assert!(domains.contains(&"facebook.net"), "Facebook SDK script should pass");
-        assert!(domains.contains(&"twitter.com"), "Twitter SDK script should pass");
+        assert!(
+            domains.contains(&"linkedin.com"),
+            "LinkedIn SDK script should pass"
+        );
+        assert!(
+            domains.contains(&"facebook.net"),
+            "Facebook SDK script should pass"
+        );
+        assert!(
+            domains.contains(&"twitter.com"),
+            "Twitter SDK script should pass"
+        );
     }
 
     #[test]
@@ -1450,7 +1488,10 @@ mod tests {
         "#;
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"facebook.com"), "Facebook tracking pixel should pass");
+        assert!(
+            domains.contains(&"facebook.com"),
+            "Facebook tracking pixel should pass"
+        );
     }
 
     #[test]
@@ -1510,7 +1551,9 @@ mod tests {
             .await;
 
         let disc = WebTrafficDiscovery::new(10);
-        let result = disc.analyze_page_source(&mock_server.uri(), "example.com").await;
+        let result = disc
+            .analyze_page_source(&mock_server.uri(), "example.com")
+            .await;
         assert!(result.is_ok());
         let results = result.unwrap();
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
@@ -1541,7 +1584,9 @@ mod tests {
             .await;
 
         let disc = WebTrafficDiscovery::new(10);
-        let result = disc.analyze_page_source(&mock_server.uri(), "example.com").await;
+        let result = disc
+            .analyze_page_source(&mock_server.uri(), "example.com")
+            .await;
         assert!(result.is_ok());
         let results = result.unwrap();
         assert_eq!(results.len(), 3);
@@ -1615,7 +1660,10 @@ mod tests {
         );
         let results = extract_external_domains_from_html(&html, "example.com");
         assert_eq!(results.len(), 1);
-        assert!(results[0].evidence.contains("..."), "Long URL evidence should be truncated");
+        assert!(
+            results[0].evidence.contains("..."),
+            "Long URL evidence should be truncated"
+        );
     }
 
     #[test]
@@ -1665,14 +1713,27 @@ mod tests {
             timeout: Duration::from_secs(5),
             network_wait_ms: 100,
         };
-        let results = discovery.analyze_page_source(
-            &format!("http://{}", host),
-            &host,
-        ).await.unwrap();
+        let results = discovery
+            .analyze_page_source(&format!("http://{}", host), &host)
+            .await
+            .unwrap();
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
-        assert!(domains.contains(&"pendo.io"), "Should find pendo.io, got: {:?}", domains);
-        assert!(domains.contains(&"segment.io"), "Should find segment.io, got: {:?}", domains);
-        assert_eq!(results.iter().all(|r| r.source == WebTrafficSource::PageSource), true);
+        assert!(
+            domains.contains(&"pendo.io"),
+            "Should find pendo.io, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"segment.io"),
+            "Should find segment.io, got: {:?}",
+            domains
+        );
+        assert_eq!(
+            results
+                .iter()
+                .all(|r| r.source == WebTrafficSource::PageSource),
+            true
+        );
     }
 
     #[tokio::test]
@@ -1680,7 +1741,9 @@ mod tests {
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("<html><body></body></html>"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string("<html><body></body></html>"),
+            )
             .mount(&server)
             .await;
 
@@ -1694,10 +1757,10 @@ mod tests {
             timeout: Duration::from_secs(5),
             network_wait_ms: 100,
         };
-        let results = discovery.analyze_page_source(
-            &format!("http://{}", host),
-            &host,
-        ).await.unwrap();
+        let results = discovery
+            .analyze_page_source(&format!("http://{}", host), &host)
+            .await
+            .unwrap();
         assert!(results.is_empty(), "Empty page should yield no vendors");
     }
 
@@ -1712,7 +1775,10 @@ mod tests {
         let results = extract_external_domains_from_html(html, "example.com");
         let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
         assert!(domains.contains(&"pendo.io"), "Should keep pendo.io");
-        assert!(!domains.contains(&"googleapis.com"), "Should filter googleapis.com");
+        assert!(
+            !domains.contains(&"googleapis.com"),
+            "Should filter googleapis.com"
+        );
         assert!(!domains.contains(&"w3.org"), "Should filter w3.org");
         assert!(!domains.contains(&"schema.org"), "Should filter schema.org");
     }
@@ -1721,12 +1787,19 @@ mod tests {
     fn test_extract_external_domains_social_media_script_vs_link() {
         let html_script = r#"<script src="https://connect.facebook.net/sdk.js"></script>"#;
         let results_script = extract_external_domains_from_html(html_script, "example.com");
-        assert_eq!(results_script.len(), 1, "Facebook SDK script should be captured");
+        assert_eq!(
+            results_script.len(),
+            1,
+            "Facebook SDK script should be captured"
+        );
         assert_eq!(results_script[0].vendor_domain, "facebook.net");
 
         let html_iframe = r#"<iframe src="https://www.youtube.com/embed/abc123"></iframe>"#;
         let results_iframe = extract_external_domains_from_html(html_iframe, "example.com");
-        assert!(results_iframe.is_empty(), "YouTube iframe embed should be filtered");
+        assert!(
+            results_iframe.is_empty(),
+            "YouTube iframe embed should be filtered"
+        );
     }
 
     #[test]

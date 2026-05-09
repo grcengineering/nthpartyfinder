@@ -1607,8 +1607,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_organization_with_status_fallback_domain() {
-        let result =
-            get_organization_with_status("zzz-nonexistent-test-domain-12345.com").await;
+        let result = get_organization_with_status("zzz-nonexistent-test-domain-12345.com").await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -1616,8 +1615,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_organization_with_status_and_config_web_disabled() {
-        let result =
-            get_organization_with_status_and_config("google.com", false, 0.6).await;
+        let result = get_organization_with_status_and_config("google.com", false, 0.6).await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -1630,8 +1628,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_organization_with_status_and_config_high_confidence_threshold() {
-        let result =
-            get_organization_with_status_and_config("google.com", false, 0.99).await;
+        let result = get_organization_with_status_and_config("google.com", false, 0.99).await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());

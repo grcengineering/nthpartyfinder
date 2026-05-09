@@ -513,11 +513,26 @@ mod tests {
         let results = disc.discover("example.com").await.unwrap();
 
         let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
-        assert!(domains.contains(&"vendor-a.com"), "Should find vendor-a.com from SAN");
-        assert!(domains.contains(&"vendor-b.io"), "Should find vendor-b.io from SAN");
-        assert!(domains.contains(&"vendor-d.org"), "Should find vendor-d.org from SAN");
-        assert!(domains.contains(&"vendor-c.net"), "Should find vendor-c.net from CN");
-        assert!(!domains.contains(&"example.com"), "Should not include self-reference");
+        assert!(
+            domains.contains(&"vendor-a.com"),
+            "Should find vendor-a.com from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-b.io"),
+            "Should find vendor-b.io from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-d.org"),
+            "Should find vendor-d.org from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-c.net"),
+            "Should find vendor-c.net from CN"
+        );
+        assert!(
+            !domains.contains(&"example.com"),
+            "Should not include self-reference"
+        );
     }
 
     #[tokio::test]
@@ -605,7 +620,11 @@ mod tests {
         let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
         let results = disc.discover("example.com").await.unwrap();
 
-        assert_eq!(results.len(), 1, "All subdomains of vendor.com should deduplicate to one");
+        assert_eq!(
+            results.len(),
+            1,
+            "All subdomains of vendor.com should deduplicate to one"
+        );
         assert_eq!(results[0].domain, "vendor.com");
     }
 
@@ -614,7 +633,8 @@ mod tests {
         let result = CtDiscoveryResult {
             domain: "vendor.io".to_string(),
             source: "Certificate SAN (crt.sh ID: 999)".to_string(),
-            certificate_info: "SAN: api.vendor.io | Issuer: DigiCert | Certificate ID: 999".to_string(),
+            certificate_info: "SAN: api.vendor.io | Issuer: DigiCert | Certificate ID: 999"
+                .to_string(),
         };
         assert_eq!(result.domain, "vendor.io");
         assert!(result.source.contains("999"));
@@ -659,13 +679,27 @@ mod tests {
     #[test]
     fn test_is_infrastructure_domain_subdomain_matching() {
         // Test that subdomains of infrastructure domains are also filtered (ends_with check)
-        assert!(CtLogDiscovery::is_infrastructure_domain("cdn.cloudflare.com"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("s3.us-east-1.amazonaws.com"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("test-app.azurewebsites.net"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("mysite.azureedge.net"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("storage.googleusercontent.com"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("abc.googlesyndication.com"));
-        assert!(CtLogDiscovery::is_infrastructure_domain("fonts.gstatic.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "cdn.cloudflare.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "s3.us-east-1.amazonaws.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "test-app.azurewebsites.net"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "mysite.azureedge.net"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "storage.googleusercontent.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "abc.googlesyndication.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "fonts.gstatic.com"
+        ));
     }
 
     #[test]
@@ -701,10 +735,17 @@ mod tests {
         }"#;
         let entry: CrtShEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.issuer_ca_id, Some(16418));
-        assert!(entry.issuer_name.as_ref().unwrap().contains("Let's Encrypt"));
+        assert!(entry
+            .issuer_name
+            .as_ref()
+            .unwrap()
+            .contains("Let's Encrypt"));
         assert_eq!(entry.common_name.as_ref().unwrap(), "*.example.com");
         assert!(entry.name_value.as_ref().unwrap().contains("*.example.com"));
-        assert_eq!(entry.entry_timestamp.as_ref().unwrap(), "2024-06-15T12:00:00");
+        assert_eq!(
+            entry.entry_timestamp.as_ref().unwrap(),
+            "2024-06-15T12:00:00"
+        );
         assert_eq!(entry.not_before.as_ref().unwrap(), "2024-06-15T00:00:00");
         assert_eq!(entry.not_after.as_ref().unwrap(), "2024-09-13T00:00:00");
     }

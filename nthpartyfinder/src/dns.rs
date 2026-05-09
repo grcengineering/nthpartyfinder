@@ -312,7 +312,11 @@ impl DnsServerPool {
     }
 
     #[cfg(coverage)]
-    async fn doh_txt_lookup(&self, _domain: &str, _server: &DohServerConfig) -> Result<Vec<String>> {
+    async fn doh_txt_lookup(
+        &self,
+        _domain: &str,
+        _server: &DohServerConfig,
+    ) -> Result<Vec<String>> {
         Ok(vec![])
     }
 
@@ -1096,7 +1100,10 @@ fn extract_from_dmarc_record(
 
             // Extract all mailto: addresses (comma-separated)
             // Pattern: mailto:localpart@domain or mailto:domain
-            for domain_match in MAILTO_REGEX.captures_iter(tag_value).filter_map(|c| c.get(2)) {
+            for domain_match in MAILTO_REGEX
+                .captures_iter(tag_value)
+                .filter_map(|c| c.get(2))
+            {
                 let domain = domain_match.as_str();
                 if is_valid_domain(domain) {
                     domains.push(VendorDomain {
@@ -2133,7 +2140,10 @@ mod tests {
     fn test_is_valid_domain_length_253() {
         let label = "a".repeat(60);
         let domain = format!("{}.{}.{}.{}.com", label, label, label, label);
-        assert!(domain.len() <= 253, "60*4 + separators = 247, within 253 limit");
+        assert!(
+            domain.len() <= 253,
+            "60*4 + separators = 247, within 253 limit"
+        );
         assert!(is_valid_domain(&domain));
     }
 
@@ -2141,7 +2151,10 @@ mod tests {
     fn test_is_valid_domain_length_too_long() {
         let label = "a".repeat(63);
         let domain = format!("{}.{}.{}.{}.com", label, label, label, label);
-        assert!(domain.len() > 253, "63*4 + separators = 259, exceeds 253 limit");
+        assert!(
+            domain.len() > 253,
+            "63*4 + separators = 259, exceeds 253 limit"
+        );
         assert!(!is_valid_domain(&domain));
     }
 
@@ -2730,14 +2743,12 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_doh_txt_lookup_success() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let response = build_doh_txt_response(
-            "example.com",
-            &["v=spf1 include:_spf.google.com ~all"],
-        );
+        let response =
+            build_doh_txt_response("example.com", &["v=spf1 include:_spf.google.com ~all"]);
 
         Mock::given(method("GET"))
             .and(path("/dns-query"))
@@ -2753,7 +2764,10 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_txt_lookup("example.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_txt_lookup("example.com", doh_server)
+            .await
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         assert!(records[0].contains("spf1"));
@@ -2762,8 +2776,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_doh_txt_lookup_multiple_records() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_txt_response(
@@ -2796,8 +2810,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doh_txt_lookup_empty_response() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_empty_response("empty.com");
@@ -2824,8 +2838,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_doh_txt_lookup_non_txt_type_ignored() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         // Answer with type=1 (A record) instead of type=16 (TXT)
@@ -2864,8 +2878,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_doh_cname_lookup_success() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_cname_response("alias.com", &["target.example.com"]);
@@ -2884,7 +2898,10 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_cname_lookup("alias.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_cname_lookup("alias.com", doh_server)
+            .await
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         // Trailing dot should be removed
@@ -2893,8 +2910,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_doh_cname_lookup_empty() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = serde_json::json!({
@@ -2917,15 +2934,18 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_cname_lookup("nocname.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_cname_lookup("nocname.com", doh_server)
+            .await
+            .unwrap();
 
         assert!(records.is_empty());
     }
 
     #[tokio::test]
     async fn test_doh_cname_lookup_non_cname_type_ignored() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         // Answer has type=1 (A record) but not type=5 (CNAME)
@@ -2951,7 +2971,10 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_cname_lookup("nocname.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_cname_lookup("nocname.com", doh_server)
+            .await
+            .unwrap();
 
         assert!(records.is_empty());
     }
@@ -2961,14 +2984,11 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_txt_records_with_pool_via_doh() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let response = build_doh_txt_response(
-            "test.com",
-            &["v=spf1 include:_spf.google.com ~all"],
-        );
+        let response = build_doh_txt_response("test.com", &["v=spf1 include:_spf.google.com ~all"]);
 
         Mock::given(method("GET"))
             .and(path("/dns-query"))
@@ -2992,8 +3012,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_txt_records_with_pool_doh_failure_fallback() {
         // DoH server returns error, should fall back to traditional DNS then system
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3016,8 +3036,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_cname_records_with_pool_via_doh() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_cname_response("alias.example.com", &["target.cdn.com"]);
@@ -3045,8 +3065,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_cname_records_with_pool_empty() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = serde_json::json!({
@@ -3080,8 +3100,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_txt_and_cname_fast() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
@@ -3122,8 +3142,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_txt_and_cname_fast_doh_failure() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3145,8 +3165,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_txt_records_with_rate_limit_no_limiter() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_txt_response("ratelimit.com", &["v=spf1 ~all"]);
@@ -3174,10 +3194,10 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_txt_records_with_rate_limit_with_limiter() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        use wiremock::matchers::{method, path, query_param};
-        use crate::rate_limit::RateLimitContext;
         use crate::config::RateLimitConfig;
+        use crate::rate_limit::RateLimitContext;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_txt_response("limited.com", &["v=spf1 ~all"]);
@@ -3217,8 +3237,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_cname_records_with_rate_limit_no_limiter() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_cname_response("cname-rl.com", &["target.cdn.com"]);
@@ -3247,10 +3267,10 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_cname_records_with_rate_limit_with_limiter() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        use wiremock::matchers::{method, path, query_param};
-        use crate::rate_limit::RateLimitContext;
         use crate::config::RateLimitConfig;
+        use crate::rate_limit::RateLimitContext;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_cname_response("cname-limited.com", &["target.example.com"]);
@@ -3339,17 +3359,15 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_resolve_spf_includes_recursive_with_mock() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
         // First level: initial SPF includes _spf.nested.com
         // When we resolve _spf.nested.com, it returns another SPF with a vendor
-        let nested_response = build_doh_txt_response(
-            "_spf.nested.com",
-            &["v=spf1 include:spf.vendor.com ~all"],
-        );
+        let nested_response =
+            build_doh_txt_response("_spf.nested.com", &["v=spf1 include:spf.vendor.com ~all"]);
 
         Mock::given(method("GET"))
             .and(path("/dns-query"))
@@ -3364,10 +3382,8 @@ mod tests {
             .await;
 
         // Second level: spf.vendor.com has a simple SPF
-        let vendor_response = build_doh_txt_response(
-            "spf.vendor.com",
-            &["v=spf1 ip4:10.0.0.0/8 ~all"],
-        );
+        let vendor_response =
+            build_doh_txt_response("spf.vendor.com", &["v=spf1 ip4:10.0.0.0/8 ~all"]);
 
         Mock::given(method("GET"))
             .and(path("/dns-query"))
@@ -3391,8 +3407,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_spf_includes_recursive_failed_lookup() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         // DoH server always returns 500
@@ -3429,8 +3445,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_fast_txt_lookup_doh_success() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_txt_response("fast-txt.com", &["v=spf1 ~all"]);
@@ -3455,8 +3471,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fast_txt_lookup_doh_failure_dns_fallback() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         // DoH returns empty/error
@@ -3474,8 +3490,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_fast_cname_lookup_doh_success() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         let response = build_doh_cname_response("fast-cname.com", &["target.cdn.com"]);
@@ -3501,8 +3517,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_fast_cname_lookup_doh_failure_dns_fallback() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3531,8 +3547,8 @@ mod tests {
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_doh_txt_lookup_with_escaped_data() {
-        use wiremock::{Mock, MockServer, ResponseTemplate};
         use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         // Response with escaped characters in TXT data
@@ -3563,7 +3579,10 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_txt_lookup("escaped.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_txt_lookup("escaped.com", doh_server)
+            .await
+            .unwrap();
 
         assert_eq!(records.len(), 1);
         // The unescape function should handle \_ -> _
@@ -3623,12 +3642,33 @@ mod tests {
         assert!(results.len() >= 8);
 
         // Check record types are correct
-        let spf_count = results.iter().filter(|r| r.source_type == RecordType::DnsTxtSpf).count();
-        let dmarc_count = results.iter().filter(|r| r.source_type == RecordType::DnsTxtDmarc).count();
-        let verif_count = results.iter().filter(|r| r.source_type == RecordType::DnsTxtVerification).count();
-        assert!(spf_count >= 3, "Should have at least 3 SPF domains, got {}", spf_count);
-        assert!(dmarc_count >= 2, "Should have at least 2 DMARC domains, got {}", dmarc_count);
-        assert!(verif_count >= 4, "Should have at least 4 verification domains, got {}", verif_count);
+        let spf_count = results
+            .iter()
+            .filter(|r| r.source_type == RecordType::DnsTxtSpf)
+            .count();
+        let dmarc_count = results
+            .iter()
+            .filter(|r| r.source_type == RecordType::DnsTxtDmarc)
+            .count();
+        let verif_count = results
+            .iter()
+            .filter(|r| r.source_type == RecordType::DnsTxtVerification)
+            .count();
+        assert!(
+            spf_count >= 3,
+            "Should have at least 3 SPF domains, got {}",
+            spf_count
+        );
+        assert!(
+            dmarc_count >= 2,
+            "Should have at least 2 DMARC domains, got {}",
+            dmarc_count
+        );
+        assert!(
+            verif_count >= 4,
+            "Should have at least 4 verification domains, got {}",
+            verif_count
+        );
     }
 
     // --- Additional static verification patterns ---
@@ -3735,8 +3775,7 @@ mod tests {
 
     #[test]
     fn test_extract_vendor_domains_double_quoted() {
-        let records =
-            vec!["\"v=spf1 include:_spf.google.com ~all\"".to_string()];
+        let records = vec!["\"v=spf1 include:_spf.google.com ~all\"".to_string()];
         let results = extract_vendor_domains_with_source(&records);
         assert!(!results.is_empty());
     }
@@ -3745,7 +3784,8 @@ mod tests {
 
     #[test]
     fn test_dns_server_pool_with_single_test_url() {
-        let pool = DnsServerPool::with_test_urls(vec!["http://localhost:1234/dns-query".to_string()]);
+        let pool =
+            DnsServerPool::with_test_urls(vec!["http://localhost:1234/dns-query".to_string()]);
         assert_eq!(pool.doh_servers.len(), 1);
         assert_eq!(pool.dns_servers.len(), 1);
         // Rotation with single server should always return the same
@@ -3820,7 +3860,9 @@ mod tests {
         assert!(result.is_some());
         let domains = result.unwrap();
         assert!(domains.iter().any(|d| d.domain == "mail.vendor.com"));
-        assert!(domains.iter().all(|d| d.source_type == RecordType::DnsTxtDkim));
+        assert!(domains
+            .iter()
+            .all(|d| d.source_type == RecordType::DnsTxtDkim));
     }
 
     #[test]
@@ -3841,7 +3883,9 @@ mod tests {
                 .to_string(),
         ];
         let results = extract_vendor_domains_with_source(&records);
-        assert!(results.iter().any(|d| d.domain == "selector.mailservice.com"));
+        assert!(results
+            .iter()
+            .any(|d| d.domain == "selector.mailservice.com"));
     }
 
     #[test]
@@ -3897,12 +3941,20 @@ mod tests {
                 // google.com has TXT records (SPF, verification, etc.)
                 assert!(!records.is_empty(), "google.com should have TXT records");
                 let has_spf = records.iter().any(|r| r.contains("spf"));
-                assert!(has_spf, "google.com TXT records should include SPF: {:?}", records);
+                assert!(
+                    has_spf,
+                    "google.com TXT records should include SPF: {:?}",
+                    records
+                );
             }
             Err(e) => {
                 // DNS resolution may fail in sandboxed/offline environments
                 let msg = e.to_string();
-                assert!(!msg.is_empty(), "Error message should be descriptive: {}", msg);
+                assert!(
+                    !msg.is_empty(),
+                    "Error message should be descriptive: {}",
+                    msg
+                );
             }
         }
     }
@@ -3912,7 +3964,10 @@ mod tests {
     async fn test_try_system_dns_resolver_nonexistent_domain() {
         let result = try_system_dns_resolver("zzz-nonexistent.invalid").await;
         // .invalid TLD should fail DNS resolution
-        assert!(result.is_err(), "Nonexistent domain should fail DNS resolution");
+        assert!(
+            result.is_err(),
+            "Nonexistent domain should fail DNS resolution"
+        );
     }
 
     #[tokio::test]
@@ -3938,7 +3993,10 @@ mod tests {
         let result = extract_from_spf_record(record, Some(&logger), "example.com", record);
         assert!(result.is_none());
         let failures = logger.failures.lock().unwrap();
-        assert!(!failures.is_empty(), "Logger should capture invalid SPF domain 'a'");
+        assert!(
+            !failures.is_empty(),
+            "Logger should capture invalid SPF domain 'a'"
+        );
         assert!(failures[0].contains("Invalid domain format"));
     }
 
@@ -3951,7 +4009,10 @@ mod tests {
             &mut to_resolve,
             &mut visited,
         );
-        assert!(!to_resolve.is_empty(), "Should collect SPF include/redirect targets");
+        assert!(
+            !to_resolve.is_empty(),
+            "Should collect SPF include/redirect targets"
+        );
         assert!(to_resolve.iter().any(|d| d.contains("google.com")));
         assert!(to_resolve.iter().any(|d| d.contains("example.com")));
     }
@@ -3960,7 +4021,10 @@ mod tests {
     fn test_dkim_record_with_domain_value() {
         let record = "v=DKIM1; k=rsa; h=mail.sendgrid.net; s=selector; p=MIGfMA0";
         let result = extract_from_dkim_record(record, None, "example.com", record);
-        assert!(result.is_some(), "DKIM h= with a domain-like value should extract");
+        assert!(
+            result.is_some(),
+            "DKIM h= with a domain-like value should extract"
+        );
         let domains = result.unwrap();
         assert!(domains.iter().any(|d| d.domain.contains("sendgrid")));
     }
@@ -3972,7 +4036,10 @@ mod tests {
         let result = extract_from_dmarc_record(record, Some(&logger), "example.com", record);
         assert!(result.is_none());
         let failures = logger.failures.lock().unwrap();
-        assert!(!failures.is_empty(), "Logger should capture invalid DMARC domain 'x'");
+        assert!(
+            !failures.is_empty(),
+            "Logger should capture invalid DMARC domain 'x'"
+        );
         assert!(failures[0].contains("DMARC"));
     }
 
@@ -3980,7 +4047,10 @@ mod tests {
     fn test_verification_record_prefix_pattern() {
         let record = "verification-google=abc123";
         let result = extract_from_verification_record(record, None, "example.com", record);
-        assert!(result.is_some(), "verification-google= should infer google.com");
+        assert!(
+            result.is_some(),
+            "verification-google= should infer google.com"
+        );
         let domains = result.unwrap();
         assert!(domains.iter().any(|d| d.domain == "google.com"));
     }
@@ -3989,7 +4059,10 @@ mod tests {
     fn test_verification_record_site_pattern() {
         let record = "hubspot-site-verification=def456";
         let result = extract_from_verification_record(record, None, "example.com", record);
-        assert!(result.is_some(), "hubspot-site-verification= should infer hubspot.com");
+        assert!(
+            result.is_some(),
+            "hubspot-site-verification= should infer hubspot.com"
+        );
         let domains = result.unwrap();
         assert!(domains.iter().any(|d| d.domain == "hubspot.com"));
     }
@@ -4007,7 +4080,10 @@ mod tests {
     fn test_verification_record_domain_equals_pattern() {
         let record = "atlassian-domain-verification=abc";
         let result = extract_from_verification_record(record, None, "example.com", record);
-        assert!(result.is_some(), "atlassian-domain-verification should infer atlassian.com");
+        assert!(
+            result.is_some(),
+            "atlassian-domain-verification should infer atlassian.com"
+        );
     }
 
     #[tokio::test]

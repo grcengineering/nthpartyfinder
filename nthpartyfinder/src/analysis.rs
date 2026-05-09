@@ -7,12 +7,12 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::checkpoint;
 use crate::cli::Args;
 use crate::config::{AnalysisConfig, AnalysisStrategy};
-use crate::discovery::{
-    CtLogDiscovery, SaasTenantDiscovery, SubfinderDiscovery, TenantStatus, WebTrafficDiscovery,
-};
 use crate::discovery::ct_logs::CtDiscoveryResult;
 use crate::discovery::saas_tenant::TenantProbeResult;
 use crate::discovery::web_traffic::{WebTrafficResult, WebTrafficSource};
+use crate::discovery::{
+    CtLogDiscovery, SaasTenantDiscovery, SubfinderDiscovery, TenantStatus, WebTrafficDiscovery,
+};
 use crate::dns;
 use crate::domain_utils;
 use crate::logger::AnalysisLogger;
@@ -204,7 +204,10 @@ pub fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
 }
 
 /// If domain is a subdomain (different from its base), return a VendorDomain entry for the base.
-pub fn add_base_domain_if_subdomain(domain: &str, current_base_domain: &str) -> Option<dns::VendorDomain> {
+pub fn add_base_domain_if_subdomain(
+    domain: &str,
+    current_base_domain: &str,
+) -> Option<dns::VendorDomain> {
     if current_base_domain != domain {
         Some(dns::VendorDomain {
             domain: current_base_domain.to_string(),
@@ -234,7 +237,12 @@ pub fn convert_subprocessor_domains(
 /// the target domain_base. Returns (new vendor domains, txt_count, cname_count).
 #[allow(clippy::type_complexity)]
 pub fn filter_subfinder_results(
-    subdomain_results: Vec<(String, String, Vec<dns::VendorDomain>, Vec<(String, String)>)>,
+    subdomain_results: Vec<(
+        String,
+        String,
+        Vec<dns::VendorDomain>,
+        Vec<(String, String)>,
+    )>,
     domain_base: &str,
 ) -> (Vec<dns::VendorDomain>, usize, usize) {
     let mut vendor_domains = Vec::new();
@@ -750,8 +758,11 @@ pub async fn discover_nth_parties(
                                 .collect()
                                 .await;
 
-                            let (new_vendor_domains, subdomain_txt_vendors_found, subdomain_cname_vendors_found) =
-                                filter_subfinder_results(subdomain_results, &domain_base);
+                            let (
+                                new_vendor_domains,
+                                subdomain_txt_vendors_found,
+                                subdomain_cname_vendors_found,
+                            ) = filter_subfinder_results(subdomain_results, &domain_base);
                             all_vendor_domains.extend(new_vendor_domains);
 
                             if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0
@@ -2330,7 +2341,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.is_empty(), "already-processed domain should return empty");
+        assert!(
+            result.is_empty(),
+            "already-processed domain should return empty"
+        );
     }
 
     #[tokio::test]
@@ -2469,8 +2483,14 @@ mod tests {
             "subfinder".to_string(),
             vec![],
             vec![
-                ("app.example.com.cdn.cloudfront.net".to_string(), "cloudfront.net".to_string()),
-                ("app.example.com.example.com".to_string(), "example.com".to_string()),
+                (
+                    "app.example.com.cdn.cloudfront.net".to_string(),
+                    "cloudfront.net".to_string(),
+                ),
+                (
+                    "app.example.com.example.com".to_string(),
+                    "example.com".to_string(),
+                ),
             ],
         )];
         let (result, txt_count, cname_count) =
@@ -2567,7 +2587,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].domain, "cdn.vendor.com");
         assert_eq!(result[0].source_type, RecordType::CtLogDiscovery);
-        assert_eq!(result[0].raw_record, "CN=*.vendor.com, Issuer=Let's Encrypt");
+        assert_eq!(
+            result[0].raw_record,
+            "CN=*.vendor.com, Issuer=Let's Encrypt"
+        );
         assert_eq!(result[1].domain, "api.other.io");
     }
 
@@ -2644,7 +2667,10 @@ mod tests {
 
     #[test]
     fn test_should_skip_self_reference_same_base() {
-        assert!(should_skip_self_reference("mail.example.com", "example.com"));
+        assert!(should_skip_self_reference(
+            "mail.example.com",
+            "example.com"
+        ));
         assert!(should_skip_self_reference("example.com", "www.example.com"));
         assert!(should_skip_self_reference("example.com", "example.com"));
     }
@@ -2652,7 +2678,10 @@ mod tests {
     #[test]
     fn test_should_skip_self_reference_different_base() {
         assert!(!should_skip_self_reference("stripe.com", "example.com"));
-        assert!(!should_skip_self_reference("mail.google.com", "example.com"));
+        assert!(!should_skip_self_reference(
+            "mail.google.com",
+            "example.com"
+        ));
     }
 
     #[test]
@@ -2660,7 +2689,8 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("example.com".to_string(), "Example Inc.".to_string());
         map.insert("stripe.com".to_string(), "Stripe, Inc.".to_string());
-        let (customer_org, vendor_org) = resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
         assert_eq!(customer_org, "Example Inc.");
         assert_eq!(vendor_org, "Stripe, Inc.");
     }
@@ -2668,7 +2698,8 @@ mod tests {
     #[test]
     fn test_resolve_orgs_from_vendors_with_fallback() {
         let map = HashMap::new(); // empty
-        let (customer_org, vendor_org) = resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
         assert_eq!(customer_org, "example.com");
         assert_eq!(vendor_org, "stripe.com");
     }
@@ -2677,7 +2708,8 @@ mod tests {
     fn test_resolve_orgs_from_vendors_partial_entries() {
         let mut map = HashMap::new();
         map.insert("example.com".to_string(), "Example Corp".to_string());
-        let (customer_org, vendor_org) = resolve_orgs_from_vendors(&map, "example.com", "unknown.io");
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "unknown.io");
         assert_eq!(customer_org, "Example Corp");
         assert_eq!(vendor_org, "unknown.io"); // fallback
     }

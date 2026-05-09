@@ -977,7 +977,10 @@ mod tests {
         let evil_pattern = r"((a+)+)\1b";
         let evil_input = "a".repeat(40);
         let result = extract_embedded_base64(&evil_input, evil_pattern);
-        assert!(result.is_err(), "Backtrack limit exceeded should produce an error");
+        assert!(
+            result.is_err(),
+            "Backtrack limit exceeded should produce an error"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Regex error"),
@@ -1008,7 +1011,10 @@ mod tests {
         let evil_pattern = r"((a+)+)\1b";
         let evil_input = "a".repeat(40);
         let result = extract_embedded_js_object(&evil_input, evil_pattern);
-        assert!(result.is_err(), "Backtrack limit exceeded should produce an error");
+        assert!(
+            result.is_err(),
+            "Backtrack limit exceeded should produce an error"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Regex error"),
@@ -1513,15 +1519,7 @@ mod tests {
         let mut headers = std::collections::HashMap::new();
         headers.insert("X-Api-Key".to_string(), "test-key".to_string());
 
-        let result = execute_rest(
-            &client,
-            &mock_server.uri(),
-            "GET",
-            None,
-            &headers,
-            None,
-        )
-        .await;
+        let result = execute_rest(&client, &mock_server.uri(), "GET", None, &headers, None).await;
 
         assert!(result.is_ok());
     }
@@ -1674,7 +1672,10 @@ mod tests {
         });
         let b64 =
             base64::engine::general_purpose::STANDARD.encode(json_data.to_string().as_bytes());
-        let html = format!(r#"<html><body><div data-payload="{}"></div></body></html>"#, b64);
+        let html = format!(
+            r#"<html><body><div data-payload="{}"></div></body></html>"#,
+            b64
+        );
 
         let strategy = TrustCenterStrategy {
             strategy_type: StrategyType::EmbeddedBase64Json {
@@ -1906,7 +1907,11 @@ mod tests {
             url_field: Some("url".to_string()),
             purpose_field: Some("purpose".to_string()),
             location_field: Some("location".to_string()),
-            evidence_fields: vec!["name".to_string(), "purpose".to_string(), "location".to_string()],
+            evidence_fields: vec![
+                "name".to_string(),
+                "purpose".to_string(),
+                "location".to_string(),
+            ],
         };
         let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
         assert_eq!(result.len(), 1);

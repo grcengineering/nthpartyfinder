@@ -411,11 +411,12 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
         );
 
         for rel in &web_traffic_relationships {
-            let method = if rel.nth_party_record_type.as_hierarchy_string() == "DISCOVERY::WEBPAGE_SOURCE" {
-                "Webpage Source"
-            } else {
-                "Webpage Network Requests"
-            };
+            let method =
+                if rel.nth_party_record_type.as_hierarchy_string() == "DISCOVERY::WEBPAGE_SOURCE" {
+                    "Webpage Source"
+                } else {
+                    "Webpage Network Requests"
+                };
             content.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 escape_markdown(&rel.nth_party_domain),
@@ -1020,9 +1021,7 @@ mod tests {
 
     #[test]
     fn test_export_markdown_only_other_relationships() {
-        let rels = vec![
-            make_vendor("api.com", "ApiCo", 3, RecordType::DnsMx),
-        ];
+        let rels = vec![make_vendor("api.com", "ApiCo", 3, RecordType::DnsMx)];
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("other_only.md");
         let path_str = path.to_str().unwrap();
@@ -1198,8 +1197,10 @@ mod tests {
             rels.iter().map(|r| r.nth_party_domain.clone()).collect();
         assert_eq!(unique_domains.len(), 2);
 
-        let unique_orgs: std::collections::HashSet<_> =
-            rels.iter().map(|r| r.nth_party_organization.clone()).collect();
+        let unique_orgs: std::collections::HashSet<_> = rels
+            .iter()
+            .map(|r| r.nth_party_organization.clone())
+            .collect();
         assert_eq!(unique_orgs.len(), 2);
 
         let layer_3_count = rels.iter().filter(|r| r.nth_party_layer == 3).count();

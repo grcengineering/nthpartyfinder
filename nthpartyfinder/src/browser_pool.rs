@@ -94,15 +94,13 @@ fn find_chrome_binary_inner(
     env_path: Option<String>,
     wsl_path: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    env_path
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            if wsl_path.exists() {
-                Some(wsl_path.to_path_buf())
-            } else {
-                None
-            }
-        })
+    env_path.map(std::path::PathBuf::from).or_else(|| {
+        if wsl_path.exists() {
+            Some(wsl_path.to_path_buf())
+        } else {
+            None
+        }
+    })
 }
 
 /// Atomic counter for assigning unique debug ports to Chrome instances.
@@ -398,10 +396,8 @@ mod tests {
 
     #[test]
     fn test_find_chrome_binary_inner_no_env_wsl_missing() {
-        let result = find_chrome_binary_inner(
-            None,
-            std::path::Path::new("/nonexistent/wsl/chrome.exe"),
-        );
+        let result =
+            find_chrome_binary_inner(None, std::path::Path::new("/nonexistent/wsl/chrome.exe"));
         assert!(result.is_none());
     }
 
@@ -421,10 +417,7 @@ mod tests {
         let fake_wsl = dir.path().join("chrome.exe");
         std::fs::write(&fake_wsl, b"fake").unwrap();
 
-        let result = find_chrome_binary_inner(
-            Some("/custom/chrome".to_string()),
-            &fake_wsl,
-        );
+        let result = find_chrome_binary_inner(Some("/custom/chrome".to_string()), &fake_wsl);
         // env var path wins (even if WSL path exists)
         assert_eq!(result, Some(std::path::PathBuf::from("/custom/chrome")));
     }
@@ -476,21 +469,13 @@ mod tests {
 
     #[test]
     fn test_build_launch_options_no_container_with_path() {
-        let opts = build_launch_options(
-            false,
-            Some(std::path::Path::new("/usr/bin/chrome")),
-            9260,
-        );
+        let opts = build_launch_options(false, Some(std::path::Path::new("/usr/bin/chrome")), 9260);
         assert!(opts.is_ok());
     }
 
     #[test]
     fn test_build_launch_options_container_with_path() {
-        let opts = build_launch_options(
-            true,
-            Some(std::path::Path::new("/usr/bin/chrome")),
-            9270,
-        );
+        let opts = build_launch_options(true, Some(std::path::Path::new("/usr/bin/chrome")), 9270);
         assert!(opts.is_ok());
     }
 }

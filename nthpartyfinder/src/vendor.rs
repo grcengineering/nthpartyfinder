@@ -602,7 +602,10 @@ mod tests {
     #[case(RecordType::SubfinderDiscovery, "Subdomain discovered via subfinder")]
     #[case(RecordType::SaasTenantProbe, "SaaS tenant probe discovery")]
     #[case(RecordType::CtLogDiscovery, "Certificate Transparency log discovery")]
-    #[case(RecordType::WebTrafficSource, "External resource referenced in webpage source")]
+    #[case(
+        RecordType::WebTrafficSource,
+        "External resource referenced in webpage source"
+    )]
     fn test_get_description_all(#[case] record_type: RecordType, #[case] expected: &str) {
         assert_eq!(record_type.get_description(), expected);
     }

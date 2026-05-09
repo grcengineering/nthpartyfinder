@@ -1489,8 +1489,10 @@ mod tests {
     fn test_export_logs_with_log_file() {
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("test.log");
-        let logger =
-            AnalysisLogger::with_log_file(VerbosityLevel::Summary, log_path.to_string_lossy().into());
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Summary,
+            log_path.to_string_lossy().into(),
+        );
 
         // Add some log entries via the buffer
         {
@@ -1533,8 +1535,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("test.log");
-        let logger_with_file =
-            AnalysisLogger::with_log_file(VerbosityLevel::Summary, log_path.to_string_lossy().into());
+        let logger_with_file = AnalysisLogger::with_log_file(
+            VerbosityLevel::Summary,
+            log_path.to_string_lossy().into(),
+        );
         assert!(logger_with_file.is_log_export_enabled());
     }
 
@@ -1572,8 +1576,10 @@ mod tests {
     fn test_export_logs_poisoned_mutex() {
         let tmp = tempfile::tempdir().unwrap();
         let log_path = tmp.path().join("poisoned.log");
-        let logger =
-            AnalysisLogger::with_log_file(VerbosityLevel::Summary, log_path.to_string_lossy().into());
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Summary,
+            log_path.to_string_lossy().into(),
+        );
         let log_buffer = logger.log_buffer.clone();
 
         // Poison the mutex

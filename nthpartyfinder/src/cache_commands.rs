@@ -3,9 +3,9 @@
 //! This module provides functionality to list, show, clear, and validate
 //! the subprocessor URL cache stored in the /cache directory.
 
+use crate::app::AppExitCode;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use crate::app::AppExitCode;
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -947,18 +947,28 @@ mod tests {
         let long_url =
             "https://very-long-domain-name-that-exceeds-forty-characters.com/subprocessors/list";
 
-        assert!(short_url.len() <= 40, "short URL should not need truncation");
+        assert!(
+            short_url.len() <= 40,
+            "short URL should not need truncation"
+        );
         assert!(long_url.len() > 40, "long URL should need truncation");
-        assert!(long_url.is_char_boundary(37), "ASCII URL: byte 37 is always a boundary");
+        assert!(
+            long_url.is_char_boundary(37),
+            "ASCII URL: byte 37 is always a boundary"
+        );
         let long_display = format!("{}...", &long_url[..37]);
         assert!(long_display.ends_with("..."));
         assert!(long_display.len() <= 40);
 
         // Verify char boundary retreat with a URL that has a multibyte char at byte 37
-        let retreat_url = "https://domain-with-lots-of-char\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
+        let retreat_url =
+            "https://domain-with-lots-of-char\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
         assert!(retreat_url.len() > 40);
         let mut end_r = 37;
-        assert!(!retreat_url.is_char_boundary(end_r), "byte 37 should be mid-char");
+        assert!(
+            !retreat_url.is_char_boundary(end_r),
+            "byte 37 should be mid-char"
+        );
         while end_r > 0 && !retreat_url.is_char_boundary(end_r) {
             end_r -= 1;
         }
@@ -972,7 +982,10 @@ mod tests {
         let multibyte_url = "https://example.com/longpath/1234567\u{00e9}\u{00e9}\u{00e9}abc";
         assert!(multibyte_url.len() > 40);
         let mut end2 = 37;
-        assert!(!multibyte_url.is_char_boundary(end2), "byte 37 should be mid-char");
+        assert!(
+            !multibyte_url.is_char_boundary(end2),
+            "byte 37 should be mid-char"
+        );
         while end2 > 0 && !multibyte_url.is_char_boundary(end2) {
             end2 -= 1;
         }
@@ -985,7 +998,10 @@ mod tests {
     #[test]
     fn test_url_truncation_with_unicode() {
         let unicode_url = "https://example.com/sub/\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
-        assert!(unicode_url.len() > 40, "unicode URL must exceed truncation threshold");
+        assert!(
+            unicode_url.len() > 40,
+            "unicode URL must exceed truncation threshold"
+        );
         let mut end = 37;
         while end > 0 && !unicode_url.is_char_boundary(end) {
             end -= 1;
@@ -1068,9 +1084,8 @@ mod tests {
     /// Helper: create a cache entry with full extraction patterns and metadata.
     async fn write_full_cache_entry(cache_dir: &std::path::Path, domain: &str) {
         use crate::subprocessor::{
-            AdaptivePatterns, CustomExtractionRules, CustomRegexPattern,
-            DomSelector, ExtractionMetadata, ExtractionPatterns, SelectorType,
-            SpecialHandling,
+            AdaptivePatterns, CustomExtractionRules, CustomRegexPattern, DomSelector,
+            ExtractionMetadata, ExtractionPatterns, SelectorType, SpecialHandling,
         };
 
         let entry = SubprocessorUrlCacheEntry {
@@ -1164,8 +1179,20 @@ mod tests {
         let cache_dir = tmpdir.path().join("cache");
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
-        write_cache_entry(&cache_dir, "example.com", "https://example.com/subs", 1704067200).await;
-        write_cache_entry(&cache_dir, "test.org", "https://test.org/vendors", 1718451000).await;
+        write_cache_entry(
+            &cache_dir,
+            "example.com",
+            "https://example.com/subs",
+            1704067200,
+        )
+        .await;
+        write_cache_entry(
+            &cache_dir,
+            "test.org",
+            "https://test.org/vendors",
+            1718451000,
+        )
+        .await;
 
         let result = list_cached_domains().await;
         assert!(result.is_ok());
@@ -1228,10 +1255,7 @@ mod tests {
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
         // Entry with very long URL
-        let long_url = format!(
-            "https://very-long-domain-name.com/{}",
-            "a".repeat(80)
-        );
+        let long_url = format!("https://very-long-domain-name.com/{}", "a".repeat(80));
         write_cache_entry(&cache_dir, "long.com", &long_url, 1000).await;
 
         let result = list_cached_domains().await;
@@ -1633,13 +1657,7 @@ mod tests {
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
         // URL to a port that isn't listening
-        write_cache_entry(
-            &cache_dir,
-            "neterr.com",
-            "http://127.0.0.1:1/invalid",
-            1000,
-        )
-        .await;
+        write_cache_entry(&cache_dir, "neterr.com", "http://127.0.0.1:1/invalid", 1000).await;
 
         let result = validate_cache(true, None).await;
         assert!(result.is_ok()); // Handles network error gracefully
@@ -1666,13 +1684,7 @@ mod tests {
 
         let url = format!("{}/subs", server.uri());
         write_cache_entry(&cache_dir, "target.com", &url, 1000).await;
-        write_cache_entry(
-            &cache_dir,
-            "other.com",
-            "http://127.0.0.1:1/bad",
-            2000,
-        )
-        .await;
+        write_cache_entry(&cache_dir, "other.com", "http://127.0.0.1:1/bad", 2000).await;
 
         // Validate only "target.com" - should succeed without hitting the bad URL
         let result = validate_cache(false, Some("target.com")).await;
@@ -1707,7 +1719,13 @@ mod tests {
         let cache_dir = tmpdir.path().join("cache");
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
-        write_cache_entry(&cache_dir, "good.com", &format!("{}/ok", server.uri()), 1000).await;
+        write_cache_entry(
+            &cache_dir,
+            "good.com",
+            &format!("{}/ok", server.uri()),
+            1000,
+        )
+        .await;
         write_cache_entry(
             &cache_dir,
             "bad.com",
@@ -1856,9 +1874,7 @@ mod tests {
         let cache_dir = tmpdir.path().join("cache");
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
-        use crate::subprocessor::{
-            CustomExtractionRules, DirectSelector, ExtractionPatterns,
-        };
+        use crate::subprocessor::{CustomExtractionRules, DirectSelector, ExtractionPatterns};
 
         let entry = SubprocessorUrlCacheEntry {
             domain: "rules.com".to_string(),
@@ -1995,9 +2011,7 @@ mod tests {
         let cache_dir = tmpdir.path().join("cache");
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
-        use crate::subprocessor::{
-            CustomExtractionRules, ExtractionPatterns, SpecialHandling,
-        };
+        use crate::subprocessor::{CustomExtractionRules, ExtractionPatterns, SpecialHandling};
 
         let entry = SubprocessorUrlCacheEntry {
             domain: "special.com".to_string(),
@@ -2189,8 +2203,9 @@ mod tests {
         write_full_cache_entry(&cache_dir, "detailed.com").await;
 
         // Verify the entry was written with expected data
-        let content =
-            tokio::fs::read_to_string(cache_dir.join("detailed.com.json")).await.unwrap();
+        let content = tokio::fs::read_to_string(cache_dir.join("detailed.com.json"))
+            .await
+            .unwrap();
         let entry: SubprocessorUrlCacheEntry = serde_json::from_str(&content).unwrap();
         assert_eq!(entry.domain, "detailed.com");
         assert_eq!(entry.cache_version, 2);

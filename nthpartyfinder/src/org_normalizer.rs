@@ -1317,14 +1317,26 @@ mod tests {
     fn test_strip_domain_suffix_all_suffixes() {
         // Cover all the TLD patterns
         let tlds = vec![
-            (".net", "TestNet"), (".org", "TestOrg"), (".co", "TestCo"),
-            (".us", "TestUs"), (".app", "TestApp"), (".tech", "TestTech"),
-            (".cloud", "TestCloud"), (".so", "TestSo"), (".ly", "TestLy"),
-            (".me", "TestMe"), (".to", "TestTo"),
+            (".net", "TestNet"),
+            (".org", "TestOrg"),
+            (".co", "TestCo"),
+            (".us", "TestUs"),
+            (".app", "TestApp"),
+            (".tech", "TestTech"),
+            (".cloud", "TestCloud"),
+            (".so", "TestSo"),
+            (".ly", "TestLy"),
+            (".me", "TestMe"),
+            (".to", "TestTo"),
         ];
         for (suffix, expected) in tlds {
             let input = format!("{}{}", expected, suffix);
-            assert_eq!(strip_domain_suffix(&input), expected, "Failed for {}", input);
+            assert_eq!(
+                strip_domain_suffix(&input),
+                expected,
+                "Failed for {}",
+                input
+            );
         }
     }
 
@@ -1486,7 +1498,10 @@ mod tests {
         let candidates = vec!["Google".to_string(), "Microsoft".to_string()];
         // "Gogle" — single missing letter, still too distant for default threshold
         let result = n.find_best_match("Gogle", &candidates);
-        assert!(result.is_none(), "Single-letter typo should not meet strict similarity threshold");
+        assert!(
+            result.is_none(),
+            "Single-letter typo should not meet strict similarity threshold"
+        );
     }
 
     #[test]

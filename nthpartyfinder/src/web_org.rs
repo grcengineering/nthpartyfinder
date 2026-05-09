@@ -1997,7 +1997,8 @@ mod tests {
 
     #[test]
     fn test_extract_from_title_colon_separator() {
-        let html = r#"<html><head><title>Acme Corp: Product Page</title></head><body></body></html>"#;
+        let html =
+            r#"<html><head><title>Acme Corp: Product Page</title></head><body></body></html>"#;
         let result = extract_organization_from_html(html, "acme.com").unwrap();
         assert!(result.is_some());
         let org = result.unwrap();
@@ -2051,8 +2052,7 @@ mod tests {
 
     #[test]
     fn test_extract_from_copyright_copyright_word() {
-        let html =
-            r#"<html><body><footer>Copyright © 2024 Legal Corp. All rights reserved.</footer></body></html>"#;
+        let html = r#"<html><body><footer>Copyright © 2024 Legal Corp. All rights reserved.</footer></body></html>"#;
         let doc = Html::parse_document(html);
         let result = extract_from_copyright(&doc, html);
         assert!(result.is_some());
@@ -2077,7 +2077,8 @@ mod tests {
 
     #[test]
     fn test_get_meta_name_found() {
-        let html = r#"<html><head><meta name="author" content="Auth Corp"></head><body></body></html>"#;
+        let html =
+            r#"<html><head><meta name="author" content="Auth Corp"></head><body></body></html>"#;
         let doc = Html::parse_document(html);
         let result = get_meta_name(&doc, "author");
         assert_eq!(result, Some("Auth Corp".to_string()));

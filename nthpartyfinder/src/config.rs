@@ -628,7 +628,8 @@ mod tests {
 
     #[test]
     fn test_default_config_parses() {
-        let _config: AppConfig = toml::from_str(DEFAULT_CONFIG).expect("Default config should parse");
+        let _config: AppConfig =
+            toml::from_str(DEFAULT_CONFIG).expect("Default config should parse");
     }
 
     #[test]
@@ -849,7 +850,10 @@ total_vendor_budget = 200
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
         config.dns.doh_servers.clear();
         config.dns.dns_servers.clear();
-        assert!(matches!(config.validate(), Err(ConfigError::NoServersConfigured)));
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::NoServersConfigured)
+        ));
     }
 
     #[test]
@@ -1677,7 +1681,9 @@ backoff_max_delay_ms = 60000
             timeout_secs: 3,
         });
         let result = config.validate();
-        assert!(matches!(result, Err(ConfigError::InvalidUrl { ref field, .. }) if field.contains("[1]")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidUrl { ref field, .. }) if field.contains("[1]"))
+        );
     }
 
     #[test]
@@ -1689,7 +1695,9 @@ backoff_max_delay_ms = 60000
             timeout_secs: 2,
         });
         let result = config.validate();
-        assert!(matches!(result, Err(ConfigError::InvalidAddress { ref field, .. }) if field.contains("[1]")));
+        assert!(
+            matches!(result, Err(ConfigError::InvalidAddress { ref field, .. }) if field.contains("[1]"))
+        );
     }
 
     #[test]
@@ -1713,15 +1721,29 @@ backoff_max_delay_ms = 60000
         let config = DiscoveryConfig::default();
         assert_eq!(config.subprocessor_enabled, default_subprocessor_enabled());
         assert_eq!(config.subfinder_path, default_subfinder_path());
-        assert_eq!(config.subfinder_timeout_secs, default_subfinder_timeout_secs());
-        assert_eq!(config.tenant_probe_timeout_secs, default_tenant_probe_timeout_secs());
-        assert_eq!(config.tenant_probe_concurrency, default_tenant_probe_concurrency());
+        assert_eq!(
+            config.subfinder_timeout_secs,
+            default_subfinder_timeout_secs()
+        );
+        assert_eq!(
+            config.tenant_probe_timeout_secs,
+            default_tenant_probe_timeout_secs()
+        );
+        assert_eq!(
+            config.tenant_probe_concurrency,
+            default_tenant_probe_concurrency()
+        );
         assert_eq!(config.ct_timeout_secs, default_ct_timeout_secs());
         assert_eq!(config.web_traffic_enabled, default_web_traffic_enabled());
-        assert_eq!(config.web_traffic_timeout_secs, default_web_traffic_timeout_secs());
+        assert_eq!(
+            config.web_traffic_timeout_secs,
+            default_web_traffic_timeout_secs()
+        );
         assert_eq!(config.web_org_enabled, default_web_org_enabled());
         assert_eq!(config.web_org_timeout_secs, default_web_org_timeout_secs());
-        assert!((config.web_org_min_confidence - default_web_org_min_confidence()).abs() < f32::EPSILON);
+        assert!(
+            (config.web_org_min_confidence - default_web_org_min_confidence()).abs() < f32::EPSILON
+        );
         assert_eq!(config.ner_enabled, default_ner_enabled());
         assert!((config.ner_min_confidence - default_ner_min_confidence()).abs() < f32::EPSILON);
         assert_eq!(config.whois_concurrency, default_whois_concurrency());

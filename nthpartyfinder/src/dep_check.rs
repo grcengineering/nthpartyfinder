@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_chrome_with_env_var_nonexistent_path() {
+    fn test_check_chrome_with_env_var_nonexistent_path() {
         // Save and set a bogus CHROME_PATH
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/nonexistent/chrome/binary");
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_subfinder_message_content() {
+    fn test_check_subfinder_message_content() {
         let result = check_subfinder();
         let msg = result.message.unwrap();
         assert!(!msg.is_empty());
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
+    fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
         // Temporarily unset ORT_DYLIB_PATH so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_dependencies_slm_via_config_enables_ort_check() {
+    fn test_check_dependencies_slm_via_config_enables_ort_check() {
         // enable_slm=false, disable_slm=false, config_slm_enabled=true
         // => slm_wanted = true
         let result = check_dependencies(
@@ -934,7 +934,7 @@ mod tests {
     // ── ORT env var path ──────────────────────────────────────────────
 
     #[test]
-        fn test_check_onnx_with_valid_env_path() {
+    fn test_check_onnx_with_valid_env_path() {
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join("libonnxruntime.dylib");
         std::fs::write(&fake_lib, b"fake ort lib").unwrap();
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_onnx_with_invalid_env_path() {
+    fn test_check_onnx_with_invalid_env_path() {
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "/nonexistent/libonnxruntime.dylib");
 
@@ -964,7 +964,7 @@ mod tests {
     // ── Chrome env var ────────────────────────────────────────────────
 
     #[test]
-        fn test_check_chrome_with_valid_env_path() {
+    fn test_check_chrome_with_valid_env_path() {
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome");
         std::fs::write(&fake_chrome, b"fake chrome").unwrap();
@@ -1158,7 +1158,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_dependencies_disable_slm_overrides_config() {
+    fn test_check_dependencies_disable_slm_overrides_config() {
         // disable_slm=true should prevent ONNX check even if config_slm_enabled=true
         let result = check_dependencies(false, true, false, false, false, true, false);
         // slm_wanted = false || (!true && true) = false
@@ -1234,7 +1234,7 @@ mod tests {
     // ── check_onnx_runtime with env var edge cases ───────────────────
 
     #[test]
-        fn test_check_onnx_with_empty_env_var() {
+    fn test_check_onnx_with_empty_env_var() {
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "");
 
@@ -1278,7 +1278,7 @@ mod tests {
     // --- check_onnx_runtime: ORT_DYLIB_PATH with existing file ---
 
     #[test]
-        fn test_check_onnx_runtime_env_var_existing_file_message() {
+    fn test_check_onnx_runtime_env_var_existing_file_message() {
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join("libonnxruntime.dylib");
         std::fs::write(&fake_lib, b"fake").unwrap();
@@ -1299,7 +1299,7 @@ mod tests {
     // --- check_onnx_runtime: search in system path ---
 
     #[test]
-        fn test_check_onnx_runtime_system_path_not_found() {
+    fn test_check_onnx_runtime_system_path_not_found() {
         // Ensure ORT_DYLIB_PATH is unset so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1322,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_chrome_env_var_valid_path() {
+    fn test_check_chrome_env_var_valid_path() {
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome-binary");
         std::fs::write(&fake_chrome, b"fake chrome binary").unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-        fn test_check_chrome_not_found_message() {
+    fn test_check_chrome_not_found_message() {
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/definitely/not/a/real/path/chrome");
 
@@ -1437,7 +1437,7 @@ mod tests {
     // --- check_dependencies: edge case combinations ---
 
     #[test]
-        fn test_check_dependencies_all_enabled() {
+    fn test_check_dependencies_all_enabled() {
         // Enable everything — exercises all code paths
         let result = check_dependencies(
             true,  // enable_slm
@@ -1516,7 +1516,7 @@ mod tests {
     // --- check_onnx_runtime: ORT_DYLIB_PATH set to dir (not file) ---
 
     #[test]
-        fn test_check_onnx_runtime_env_var_points_to_directory() {
+    fn test_check_onnx_runtime_env_var_points_to_directory() {
         let dir = tempdir().unwrap();
 
         let original = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1535,7 +1535,7 @@ mod tests {
     // --- Multiple errors aggregation ---
 
     #[test]
-        fn test_check_dependencies_error_formatting() {
+    fn test_check_dependencies_error_formatting() {
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
@@ -1601,7 +1601,10 @@ mod tests {
     #[test]
     fn test_get_ort_download_info_url_is_valid_for_curl_arg() {
         let (_, _, url) = get_ort_download_info();
-        assert!(url.starts_with("https://"), "URL must be HTTPS for curl -fSL");
+        assert!(
+            url.starts_with("https://"),
+            "URL must be HTTPS for curl -fSL"
+        );
         assert!(!url.contains(' '), "URL must not contain spaces");
         assert!(!url.contains('\''), "URL must not contain single quotes");
     }
@@ -1865,8 +1868,7 @@ mod tests {
         let f = dir.path().join("chrome");
         std::fs::write(&f, b"fake").unwrap();
 
-        let result =
-            check_chrome_inner(Some(f.to_str().unwrap().to_string()), &[], "hint");
+        let result = check_chrome_inner(Some(f.to_str().unwrap().to_string()), &[], "hint");
         assert!(result.available);
         assert!(result.message.unwrap().contains("CHROME_PATH"));
     }
@@ -1877,16 +1879,14 @@ mod tests {
         let f = dir.path().join("chrome");
         std::fs::write(&f, b"fake").unwrap();
 
-        let result =
-            check_chrome_inner(None, &[f.to_str().unwrap()], "hint");
+        let result = check_chrome_inner(None, &[f.to_str().unwrap()], "hint");
         assert!(result.available);
         assert!(result.message.unwrap().contains("Found at"));
     }
 
     #[test]
     fn test_check_chrome_inner_not_found() {
-        let result =
-            check_chrome_inner(None, &["/nonexistent/chrome"], "test install cmd");
+        let result = check_chrome_inner(None, &["/nonexistent/chrome"], "test install cmd");
         assert!(!result.available);
         let msg = result.message.unwrap();
         assert!(msg.contains("Chrome/Chromium not found"));
@@ -2023,8 +2023,7 @@ mod tests {
 
     #[test]
     fn test_find_ort_after_download_nonexistent_dir() {
-        let result =
-            find_ort_after_download(std::path::Path::new("/nonexistent"), "lib.dylib");
+        let result = find_ort_after_download(std::path::Path::new("/nonexistent"), "lib.dylib");
         assert!(result.is_err());
     }
 
@@ -2081,8 +2080,7 @@ mod tests {
         }]);
         assert_dep_result(ok_results, "whois");
 
-        let err_result: Result<Vec<DepCheckResult>, String> =
-            Err("missing dep".to_string());
+        let err_result: Result<Vec<DepCheckResult>, String> = Err("missing dep".to_string());
         assert_dep_result(err_result, "irrelevant");
     }
 

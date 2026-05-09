@@ -318,7 +318,10 @@ impl KnownVendors {
     fn lookup_in_overrides(&self, key: &str, original: &str) -> Option<KnownVendorResult> {
         let overrides = self.local_overrides.read().ok()?;
         let entry = overrides.overrides.get(key)?;
-        debug!("Found {} in local overrides: {}", original, entry.organization);
+        debug!(
+            "Found {} in local overrides: {}",
+            original, entry.organization
+        );
         Some(KnownVendorResult {
             organization: entry.organization.clone(),
             source: KnownVendorSource::LocalOverride,
@@ -489,18 +492,17 @@ impl KnownVendors {
 
     /// Get the number of vendors in all databases combined (deduplicated)
     pub fn total_unique_vendors(&self) -> usize {
-        let mut all_domains: std::collections::HashSet<String> = self
-            .base
-            .vendors
-            .keys()
-            .map(|d| d.to_lowercase())
-            .collect();
+        let mut all_domains: std::collections::HashSet<String> =
+            self.base.vendors.keys().map(|d| d.to_lowercase()).collect();
 
         let remote_domains = self
             .remote
             .read()
             .ok()
-            .and_then(|r| r.as_ref().map(|db| db.vendors.keys().cloned().collect::<Vec<_>>()))
+            .and_then(|r| {
+                r.as_ref()
+                    .map(|db| db.vendors.keys().cloned().collect::<Vec<_>>())
+            })
             .unwrap_or_default();
         for domain in remote_domains {
             all_domains.insert(domain.to_lowercase());
@@ -1250,7 +1252,10 @@ mod tests {
         {
             let mut remote = kv.remote.write().unwrap();
             let mut vendors = HashMap::new();
-            vendors.insert("remote-vendor.com".to_string(), "Remote Vendor Corp".to_string());
+            vendors.insert(
+                "remote-vendor.com".to_string(),
+                "Remote Vendor Corp".to_string(),
+            );
             *remote = Some(KnownVendorsDatabase {
                 version: "2.0.0".into(),
                 updated: "2024-06-01".into(),
@@ -1429,8 +1434,7 @@ mod tests {
         // Test that subdomain lookup finds base domain in local overrides
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("override.com", "Override Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("override.com", "Override Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -1508,8 +1512,7 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("traced.com", "Traced Corp")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("ov-traced.com", "OV Traced Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("ov-traced.com", "OV Traced Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -1555,7 +1558,9 @@ mod tests {
         fs::set_permissions(&overrides_path, fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = KnownVendors::load_from_paths(&base_path, &overrides_path);
-        let err = result.err().expect("Expected error for unreadable overrides");
+        let err = result
+            .err()
+            .expect("Expected error for unreadable overrides");
         assert!(
             err.to_string().contains("Failed to read local overrides"),
             "Unexpected error: {}",
@@ -1578,7 +1583,9 @@ mod tests {
         let overrides_path = dir.path().join("no_overrides.json");
 
         let result = KnownVendors::load_from_paths(&base_path, &overrides_path);
-        let err = result.err().expect("Expected error for unreadable base file");
+        let err = result
+            .err()
+            .expect("Expected error for unreadable base file");
         assert!(
             err.to_string().contains("Failed to read known vendors"),
             "Unexpected error: {}",
@@ -1774,7 +1781,11 @@ mod tests {
         let result = kv.sync_from_github(Some(&url)).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("GitHub sync failed with status"), "{}", err_msg);
+        assert!(
+            err_msg.contains("GitHub sync failed with status"),
+            "{}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -1827,11 +1838,15 @@ mod tests {
         let overrides_path = dir.path().join("no_overrides.json");
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
-        let registry = crate::vendor_registry::get().expect("vendor registry should be initialized");
+        let registry =
+            crate::vendor_registry::get().expect("vendor registry should be initialized");
         assert!(registry.vendor_count() > 0);
 
         let result = kv.lookup("airtable.com");
-        assert!(result.is_some(), "airtable.com should be in vendor registry");
+        assert!(
+            result.is_some(),
+            "airtable.com should be in vendor registry"
+        );
         let r = result.unwrap();
         assert_eq!(r.source, KnownVendorSource::VendorRegistry);
         assert!(!r.organization.is_empty());
@@ -1849,7 +1864,10 @@ mod tests {
         assert!(crate::vendor_registry::get().is_some());
 
         let result = kv.lookup("api.airtable.com");
-        assert!(result.is_some(), "subdomain of airtable.com should resolve via vendor registry");
+        assert!(
+            result.is_some(),
+            "subdomain of airtable.com should resolve via vendor registry"
+        );
         let r = result.unwrap();
         assert_eq!(r.source, KnownVendorSource::VendorRegistry);
     }
@@ -1869,16 +1887,20 @@ mod tests {
         // Second call should definitely fail with "already initialized"
         let result = init();
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("already initialized"),
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already initialized"),);
     }
 
     // ── find_config_dir with cwd that has no config/ ─────────────────
 
     #[test]
     fn test_find_config_dir_exercises_exe_path() {
-        assert!(PathBuf::from("./config").exists(), "tests must run from project root");
+        assert!(
+            PathBuf::from("./config").exists(),
+            "tests must run from project root"
+        );
         let result = find_config_dir();
         assert!(result.is_some());
         assert!(result.unwrap().is_dir());
@@ -1948,8 +1970,7 @@ mod tests {
         // when overrides and remote DON'T have the base domain
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("basehit.com", "Base Hit Corp")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("different.com", "Different Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("different.com", "Different Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -1980,8 +2001,7 @@ mod tests {
         // Subdomain → base domain found in remote (not in overrides, not in base db)
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("unrelated.com", "Unrelated")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("different.com", "Different Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("different.com", "Different Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
@@ -2010,8 +2030,7 @@ mod tests {
         // Subdomain → base domain found in overrides (not in base db, not in remote)
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[("unrelated.com", "Unrelated")]);
-        let overrides_path =
-            write_overrides_db(dir.path(), &[("ovhit.com", "Override Hit Corp")]);
+        let overrides_path = write_overrides_db(dir.path(), &[("ovhit.com", "Override Hit Corp")]);
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
