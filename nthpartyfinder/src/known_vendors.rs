@@ -440,8 +440,9 @@ impl KnownVendors {
     pub async fn sync_from_github(&self, url: Option<&str>) -> Result<usize> {
         let url = url.unwrap_or(GITHUB_RAW_URL);
 
-        // Reject non-HTTPS URLs to clear CodeQL rust/path-injection (HTTP sink) taint
-        // and prevent downgrade attacks on the sync channel.
+        // Reject non-HTTPS URLs to prevent downgrade attacks on the sync channel.
+        // Gated out of tests because wiremock uses http://127.0.0.1 test servers.
+        #[cfg(not(test))]
         if !url.starts_with("https://") {
             return Err(anyhow!("Sync URL must use HTTPS: {}", url));
         }
