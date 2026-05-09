@@ -195,7 +195,18 @@ fn find_ort_library(
     system_lib_dir: &std::path::Path,
 ) -> DepCheckResult {
     if let Some(ref path) = env_path_value {
-        if std::path::Path::new(path).exists() {
+        let candidate = std::path::Path::new(path);
+        let has_parent_component = candidate
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+        let filename_matches = candidate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == lib_name)
+            .unwrap_or(false);
+
+        if candidate.is_absolute() && !has_parent_component && filename_matches && candidate.exists()
+        {
             return DepCheckResult {
                 name: "ONNX Runtime",
                 available: true,
