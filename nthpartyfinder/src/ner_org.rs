@@ -1366,7 +1366,7 @@ mod tests {
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = std::env::temp_dir();
         #[cfg(target_os = "macos")]
         let lib_name = "libonnxruntime.dylib";
         #[cfg(not(target_os = "macos"))]
