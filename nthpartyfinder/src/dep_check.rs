@@ -205,7 +205,10 @@ fn find_ort_library(
             .map(|n| n == lib_name)
             .unwrap_or(false);
 
-        if candidate.is_absolute() && !has_parent_component && filename_matches && candidate.exists()
+        if candidate.is_absolute()
+            && !has_parent_component
+            && filename_matches
+            && candidate.exists()
         {
             return DepCheckResult {
                 name: "ONNX Runtime",

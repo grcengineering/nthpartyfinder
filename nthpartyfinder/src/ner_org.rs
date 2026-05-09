@@ -1183,8 +1183,12 @@ mod tests {
         }
         let temp_dir = std::env::temp_dir().join("nthpartyfinder_ner");
         let model_path = temp_dir.join("gliner_small.onnx");
-        let canon_temp = temp_dir.canonicalize().expect("Temp dir should be resolvable after init");
-        let canon_model = model_path.canonicalize().expect("Model path should be resolvable after init");
+        let canon_temp = temp_dir
+            .canonicalize()
+            .expect("Temp dir should be resolvable after init");
+        let canon_model = model_path
+            .canonicalize()
+            .expect("Model path should be resolvable after init");
         assert!(
             canon_model.starts_with(&canon_temp),
             "Model path must remain within expected temp directory"
