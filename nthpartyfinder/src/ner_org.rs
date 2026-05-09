@@ -1104,14 +1104,33 @@ mod tests {
     fn test_ner_write_if_missing_new_file() {
         let temp = std::env::temp_dir().join("nthpartyfinder_ner_test_write");
         let _ = std::fs::create_dir_all(&temp);
+        let temp_canon = std::fs::canonicalize(&temp).unwrap();
         let test_path = temp.join("test_file.bin");
-        let _ = std::fs::remove_file(&test_path);
+
+        if test_path.exists() {
+            if let Ok(test_path_canon) = std::fs::canonicalize(&test_path) {
+                if test_path_canon.starts_with(&temp_canon) {
+                    let _ = std::fs::remove_file(&test_path_canon);
+                }
+            }
+        }
+
         assert!(!test_path.exists());
         assert!(NerOrganizationExtractor::write_if_missing(&test_path, b"hello").is_ok());
         assert!(test_path.exists());
         assert_eq!(std::fs::read(&test_path).unwrap(), b"hello");
-        let _ = std::fs::remove_file(&test_path);
-        let _ = std::fs::remove_dir(&temp);
+
+        if let Ok(test_path_canon) = std::fs::canonicalize(&test_path) {
+            if test_path_canon.starts_with(&temp_canon) {
+                let _ = std::fs::remove_file(&test_path_canon);
+            }
+        }
+
+        if let Ok(temp_canon_again) = std::fs::canonicalize(&temp) {
+            if temp_canon_again.starts_with(std::env::temp_dir()) {
+                let _ = std::fs::remove_dir(&temp_canon_again);
+            }
+        }
     }
 
     #[cfg(feature = "embedded-ner")]
