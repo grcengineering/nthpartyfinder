@@ -5,7 +5,9 @@
 
 use anyhow::Result;
 
+#[cfg(not(coverage))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(coverage))]
 use std::time::Duration;
 use tracing::debug;
 

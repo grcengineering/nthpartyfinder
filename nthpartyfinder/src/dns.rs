@@ -15,6 +15,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(coverage))]
 use tracing::{debug, info, warn};
 
 // Compile regex patterns once at startup for performance (fixes B020)

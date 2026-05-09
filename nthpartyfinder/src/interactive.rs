@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[cfg(not(coverage))]
 use crate::known_vendors;
 use crate::logger::AnalysisLogger;
 use crate::subprocessor;
