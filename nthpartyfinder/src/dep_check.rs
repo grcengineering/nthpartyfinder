@@ -327,7 +327,13 @@ fn check_chrome_inner(
     install_hint: &str,
 ) -> DepCheckResult {
     if let Some(ref path) = env_path {
-        if std::path::Path::new(path).exists() {
+        let candidate = std::path::Path::new(path);
+        let is_non_empty = !path.trim().is_empty();
+        let has_parent_traversal = candidate
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+
+        if is_non_empty && !has_parent_traversal && candidate.exists() {
             return DepCheckResult {
                 name: "Chrome/Chromium",
                 available: true,
