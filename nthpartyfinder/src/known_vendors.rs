@@ -54,7 +54,10 @@ fn find_config_dir() -> Option<PathBuf> {
                 let parent_config = parent.join("config");
                 if let Ok(canonical) = parent_config.canonicalize() {
                     if canonical.is_dir() {
-                        debug!("Found config directory at parent of executable: {:?}", canonical);
+                        debug!(
+                            "Found config directory at parent of executable: {:?}",
+                            canonical
+                        );
                         return Some(canonical);
                     }
                 }
@@ -64,7 +67,10 @@ fn find_config_dir() -> Option<PathBuf> {
                     let grandparent_config = grandparent.join("config");
                     if let Ok(canonical) = grandparent_config.canonicalize() {
                         if canonical.is_dir() {
-                            debug!("Found config directory at grandparent of executable: {:?}", canonical);
+                            debug!(
+                                "Found config directory at grandparent of executable: {:?}",
+                                canonical
+                            );
                             return Some(canonical);
                         }
                     }
