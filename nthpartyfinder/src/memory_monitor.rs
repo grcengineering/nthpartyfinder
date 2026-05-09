@@ -155,7 +155,7 @@ mod tests {
     fn test_check_returns_valid_level() {
         let mut monitor = MemoryMonitor::new(10);
         let (_, concurrency) = monitor.check();
-        assert!(concurrency >= 1 && concurrency <= 10);
+        assert!((1..=10).contains(&concurrency));
     }
 
     #[test]

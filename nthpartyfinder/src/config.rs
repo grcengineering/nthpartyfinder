@@ -1215,7 +1215,7 @@ similarity_threshold = 0.9
         // In CI/test context, stdin is not a TTY
         let result = AppConfig::is_interactive();
         // Just verify it returns a bool without panicking
-        assert!(result || !result);
+        let _ = result;
     }
 
     // --- prompt_create_config: only testable for non-interactive path ---
@@ -1382,7 +1382,7 @@ backoff_max_delay_ms = 60000
     fn test_load_from_path_valid_config() {
         let temp_dir = tempfile::tempdir().unwrap();
         let file_path = temp_dir.path().join("valid.toml");
-        std::fs::write(&file_path, &minimal_config_str()).unwrap();
+        std::fs::write(&file_path, minimal_config_str()).unwrap();
 
         let config = AppConfig::load_from_path(&file_path).unwrap();
         assert_eq!(config.http.user_agent, "test/1.0");
@@ -1437,9 +1437,9 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_default_org_normalization_enabled_returns_true() {
-        assert_eq!(default_org_normalization_enabled(), true);
+        assert!(default_org_normalization_enabled());
         // Negative: must not be false — normalization is on by default
-        assert_ne!(default_org_normalization_enabled(), false);
+        assert!(default_org_normalization_enabled());
     }
 
     #[test]
@@ -1519,8 +1519,8 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_default_subprocessor_enabled_returns_true() {
-        assert_eq!(default_subprocessor_enabled(), true);
-        assert_ne!(default_subprocessor_enabled(), false);
+        assert!(default_subprocessor_enabled());
+        assert!(default_subprocessor_enabled());
     }
 
     #[test]
@@ -1562,8 +1562,8 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_default_web_org_enabled_returns_true() {
-        assert_eq!(default_web_org_enabled(), true);
-        assert_ne!(default_web_org_enabled(), false);
+        assert!(default_web_org_enabled());
+        assert!(default_web_org_enabled());
     }
 
     #[test]
@@ -1586,8 +1586,8 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_default_ner_enabled_returns_true() {
-        assert_eq!(default_ner_enabled(), true);
-        assert_ne!(default_ner_enabled(), false);
+        assert!(default_ner_enabled());
+        assert!(default_ner_enabled());
     }
 
     #[test]
@@ -1608,8 +1608,8 @@ backoff_max_delay_ms = 60000
 
     #[test]
     fn test_default_web_traffic_enabled_returns_true() {
-        assert_eq!(default_web_traffic_enabled(), true);
-        assert_ne!(default_web_traffic_enabled(), false);
+        assert!(default_web_traffic_enabled());
+        assert!(default_web_traffic_enabled());
     }
 
     #[test]
@@ -1618,7 +1618,7 @@ backoff_max_delay_ms = 60000
         assert_eq!(val, 15);
         assert!(val > 0);
         // Should be reasonable for page load
-        assert!(val >= 5 && val <= 60);
+        assert!((5..=60).contains(&val));
     }
 
     // ====================================================================

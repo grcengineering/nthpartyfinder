@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn test_check_onnx_with_valid_env_path() {
         let dir = tempdir().unwrap();
-        let fake_lib = dir.path().join("libonnxruntime.dylib");
+        let fake_lib = dir.path().join(ort_lib_name());
         std::fs::write(&fake_lib, b"fake ort lib").unwrap();
 
         let original = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1283,7 +1283,7 @@ mod tests {
     #[test]
     fn test_check_onnx_runtime_env_var_existing_file_message() {
         let dir = tempdir().unwrap();
-        let fake_lib = dir.path().join("libonnxruntime.dylib");
+        let fake_lib = dir.path().join(ort_lib_name());
         std::fs::write(&fake_lib, b"fake").unwrap();
 
         let original = std::env::var("ORT_DYLIB_PATH").ok();

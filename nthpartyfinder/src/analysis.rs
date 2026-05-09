@@ -2172,7 +2172,7 @@ mod tests {
         let result = truncate_utf8(s, 4);
         assert!(result.ends_with("..."));
         // The result should be valid UTF-8
-        assert!(result.len() > 0);
+        assert!(!result.is_empty());
     }
 
     // --- ABSOLUTE_MAX_DEPTH constant ---

@@ -779,14 +779,14 @@ mod tests {
         if !ensure_ner_available() {
             return;
         }
-        let result = std::panic::catch_unwind(|| NerOrganizationExtractor::new());
+        let result = std::panic::catch_unwind(NerOrganizationExtractor::new);
         let _ = result;
     }
 
     #[cfg(feature = "embedded-ner")]
     #[test]
     fn test_ner_init_module_level() {
-        let result = std::panic::catch_unwind(|| init());
+        let result = std::panic::catch_unwind(init);
         let _ = result;
     }
 
@@ -1466,7 +1466,7 @@ mod tests {
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
-        let cwd = std::env::temp_dir();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
         #[cfg(target_os = "macos")]
         let lib_name = "libonnxruntime.dylib";
         #[cfg(not(target_os = "macos"))]
@@ -1603,11 +1603,11 @@ mod tests {
         let mut text = String::with_capacity(8000);
         text.push_str("Amazon ");
         while text.len() < 2999 {
-            text.push_str("\u{2019}");
+            text.push('\u{2019}');
         }
         text.push(' ');
         while text.len() < 5500 {
-            text.push_str("\u{2019}");
+            text.push('\u{2019}');
         }
         text.push_str(" Apple Inc.");
         assert!(text.len() > 4000);
@@ -1728,7 +1728,7 @@ mod tests {
         let mut text = String::with_capacity(10000);
         text.push_str("Netflix Inc ");
         while text.len() < 7000 {
-            text.push_str("\u{1F600}");
+            text.push('\u{1F600}');
         }
         assert!(text.len() > 4000);
 
@@ -1827,11 +1827,11 @@ mod tests {
         let mut text = String::with_capacity(10000);
         text.push_str("Samsung ");
         while text.len() < 3100 {
-            text.push_str("\u{00E9}");
+            text.push('\u{00E9}');
         }
         text.push(' ');
         while text.len() < 6500 {
-            text.push_str("\u{00E9}");
+            text.push('\u{00E9}');
         }
         text.push_str(" Toshiba Corp");
         assert!(text.len() > 4000);

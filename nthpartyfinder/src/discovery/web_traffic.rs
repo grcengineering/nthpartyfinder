@@ -1728,12 +1728,9 @@ mod tests {
             "Should find segment.io, got: {:?}",
             domains
         );
-        assert_eq!(
-            results
-                .iter()
-                .all(|r| r.source == WebTrafficSource::PageSource),
-            true
-        );
+        assert!(results
+            .iter()
+            .all(|r| r.source == WebTrafficSource::PageSource));
     }
 
     #[tokio::test]

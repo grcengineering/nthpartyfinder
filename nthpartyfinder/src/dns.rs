@@ -3974,11 +3974,8 @@ mod tests {
     #[cfg(not(coverage))]
     async fn test_try_system_dns_resolver_no_txt_records() {
         let result = try_system_dns_resolver("zzz-no-txt-records-test.com").await;
-        match result {
-            Ok(records) => {
-                let _ = records;
-            }
-            Err(_) => {}
+        if let Ok(records) = result {
+            let _ = records;
         }
     }
 

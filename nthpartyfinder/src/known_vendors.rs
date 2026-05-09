@@ -597,6 +597,7 @@ pub fn lookup(domain: &str) -> Option<KnownVendorResult> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use rstest::rstest;
     use tempfile::tempdir;

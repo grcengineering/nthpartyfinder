@@ -663,7 +663,7 @@ mod tests {
 
         let results = ResultSink::read_results(&path).unwrap();
         // Should recover at least the valid record before the corruption
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         assert_eq!(results[0].nth_party_domain, "before-truncate.com");
     }
 

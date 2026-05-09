@@ -1596,6 +1596,7 @@ mod tests {
         assert!(
             org.source == "known_vendors"
                 || org.source == "known_vendor"
+                || org.source == "vendor_registry"
                 || org.source.starts_with("web_")
                 || org.source == "whois"
                 || org.source == "system_whois"
@@ -1676,7 +1677,7 @@ mod tests {
         let result = try_native_whois("zzz-nonexistent-domain-00000.invalid").await;
         // .invalid TLD may fail or return data depending on WHOIS server behavior
         match result {
-            Ok(data) => assert!(data.len() > 0 || data.is_empty()),
+            Ok(data) => assert!(!data.is_empty() || data.is_empty()),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(!msg.is_empty(), "Error message should be descriptive");

@@ -522,6 +522,7 @@ fn format_timestamp(timestamp: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
     use super::*;
 
     #[test]
@@ -1014,7 +1015,7 @@ mod tests {
     fn test_domain_similarity_matching() {
         // Test the "similar domain" matching logic from show_cache_entry
         let search = "example";
-        let cached_domains = vec!["example.com", "my-example.org", "test.com", "other.com"];
+        let cached_domains = ["example.com", "my-example.org", "test.com", "other.com"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -1029,7 +1030,7 @@ mod tests {
     #[test]
     fn test_domain_similarity_no_matches() {
         let search = "zzz-unknown";
-        let cached_domains = vec!["example.com", "test.org"];
+        let cached_domains = ["example.com", "test.org"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -1042,7 +1043,7 @@ mod tests {
     #[test]
     fn test_domain_similarity_exact_match() {
         let search = "example.com";
-        let cached_domains = vec!["example.com", "other.com"];
+        let cached_domains = ["example.com", "other.com"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -2125,7 +2126,7 @@ mod tests {
         write_cache_entry(&cache_dir, "mid.com", "https://mid.com/subs", 5000).await;
 
         // Verify sorting logic: sort by Reverse(timestamp)
-        let mut domains = vec![
+        let mut domains = [
             ("old.com".to_string(), 1000u64),
             ("new.com".to_string(), 9999u64),
             ("mid.com".to_string(), 5000u64),

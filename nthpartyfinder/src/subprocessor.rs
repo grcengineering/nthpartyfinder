@@ -6673,6 +6673,7 @@ fn extract_text_from_html(html: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use crate::vendor::RecordType;
 
@@ -9447,7 +9448,7 @@ mod tests {
     #[test]
     fn test_generate_selector_from_pattern_table() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Org A".to_string(),
             confidence: 0.8,
             dom_context: DomContext {
@@ -9467,7 +9468,7 @@ mod tests {
     #[test]
     fn test_generate_selector_from_pattern_list() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Org A".to_string(),
             confidence: 0.8,
             dom_context: DomContext {
@@ -9487,7 +9488,7 @@ mod tests {
     #[test]
     fn test_generate_selector_from_pattern_container_with_class() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Org A".to_string(),
             confidence: 0.8,
             dom_context: DomContext {
@@ -9507,7 +9508,7 @@ mod tests {
     #[test]
     fn test_generate_selector_from_pattern_direct_text() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Org A".to_string(),
             confidence: 0.8,
             dom_context: DomContext {
@@ -9531,7 +9532,7 @@ mod tests {
     #[test]
     fn test_calculate_selector_consistency_single_org() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Single".to_string(),
             confidence: 0.9,
             dom_context: DomContext {
@@ -9550,7 +9551,7 @@ mod tests {
     #[test]
     fn test_calculate_selector_consistency_identical_patterns() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "A".to_string(),
                 confidence: 0.9,
@@ -9592,7 +9593,7 @@ mod tests {
         let analyzer = make_test_analyzer();
         let html = r#"<html><body><p>Item 1</p><p>Item 2</p></body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "Item 1".to_string(),
                 confidence: 0.8,
@@ -9871,13 +9872,9 @@ mod tests {
         let orgs = analyzer
             .detect_organizations_in_content(&document, html)
             .await;
-        // Should detect known companies
+        // Should detect known companies — exercise the path, not assert count (depends on heuristics)
         let names: Vec<&str> = orgs.iter().map(|o| o.name.as_str()).collect();
-        assert!(
-            true, // names validated
-            "Should detect at least one known company from: {:?}",
-            names
-        );
+        let _ = names;
     }
 
     #[tokio::test]
@@ -12093,10 +12090,7 @@ mod tests {
         let mut patterns = Vec::new();
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         // With exactly 5 extractions (not > 5), should NOT add the capitalized company pattern
-        assert!(
-            true, // patterns validated
-            "Exactly 5 extractions should not trigger capitalized pattern"
-        );
+        let _ = patterns;
     }
 
     #[test]
@@ -13096,7 +13090,7 @@ mod tests {
     fn test_generate_selector_from_pattern_v2() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Stripe".to_string(),
             confidence: 0.9,
             dom_context: DomContext {
@@ -13121,7 +13115,7 @@ mod tests {
     fn test_calculate_selector_consistency_all_same() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "A".to_string(),
                 confidence: 0.9,
@@ -13160,7 +13154,7 @@ mod tests {
     fn test_calculate_pattern_confidence() {
         let analyzer_rt = tokio::runtime::Runtime::new().unwrap();
         let analyzer = analyzer_rt.block_on(SubprocessorAnalyzer::new());
-        let orgs = vec![DetectedOrganization {
+        let orgs = [DetectedOrganization {
             name: "Stripe".to_string(),
             confidence: 0.95,
             dom_context: DomContext {
@@ -14120,7 +14114,7 @@ mod tests {
             "https://example.com",
         );
         assert!(
-            patterns.direct_selectors.len() > 0 || patterns.custom_regex_patterns.len() > 0,
+            !patterns.direct_selectors.is_empty() || !patterns.custom_regex_patterns.is_empty(),
             "Should generate at least one selector or regex pattern"
         );
     }
@@ -14380,7 +14374,7 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let resp = client.get(&server.uri()).send().await.unwrap();
+        let resp = client.get(server.uri()).send().await.unwrap();
         let result = read_response_body_capped(resp, 50_000).await;
         assert!(result.is_ok());
         assert!(result.unwrap().len() <= 50_000, "Should cap response body");
@@ -14969,7 +14963,6 @@ mod tests {
         );
         // With 5 extractions from a table, should generate meaningful patterns
         // Exercises pattern generation code paths with table-based HTML and multiple extractions
-        assert!(true, "Pattern generation exercised");
     }
 
     #[tokio::test]
@@ -15245,7 +15238,7 @@ mod tests {
         // Stripe and AWS have identical patterns so should be in same group
         assert_eq!(groups.len(), 2, "Should have 2 groups (table vs div)");
         let mut max_group_size = 0;
-        for (_, group) in &groups {
+        for group in groups.values() {
             max_group_size = max_group_size.max(group.len());
         }
         assert_eq!(
@@ -16325,7 +16318,7 @@ The following third-party sub-processors are engaged:
     #[tokio::test]
     async fn test_generate_selector_from_pattern_table_td() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "A".to_string(),
                 confidence: 0.9,
@@ -16361,7 +16354,7 @@ The following third-party sub-processors are engaged:
     #[tokio::test]
     async fn test_generate_selector_from_pattern_list_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "X".to_string(),
                 confidence: 0.9,
@@ -16394,7 +16387,7 @@ The following third-party sub-processors are engaged:
     #[tokio::test]
     async fn test_generate_selector_from_pattern_container_with_class_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "Z".to_string(),
                 confidence: 0.9,
@@ -16427,7 +16420,7 @@ The following third-party sub-processors are engaged:
     #[tokio::test]
     async fn test_generate_selector_from_pattern_direct_text_grc146() {
         let analyzer = SubprocessorAnalyzer::new().await;
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "A".to_string(),
                 confidence: 0.9,
@@ -17389,13 +17382,7 @@ Suite 200</td></tr>
             &extractions,
             "https://example.com/subs",
         );
-        assert!(
-            !rules.direct_selectors.is_empty()
-                || !rules.custom_regex_patterns.is_empty()
-                || rules.special_handling.is_some()
-                || true,
-            "Should generate at least some extraction rules from productive extractions"
-        );
+        let _ = rules;
     }
 
     #[test]
@@ -20312,7 +20299,7 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_generate_selector_table_with_td() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "Stripe".to_string(),
                 confidence: 0.8,
@@ -20346,7 +20333,7 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_generate_selector_list_type() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "V1".to_string(),
                 confidence: 0.7,
@@ -20379,7 +20366,7 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_generate_selector_container_type() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "V1".to_string(),
                 confidence: 0.7,
@@ -20412,7 +20399,7 @@ Suite 200</td></tr>
     #[test]
     fn test_grc175_generate_selector_direct_text_type() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "Org1".to_string(),
                 confidence: 0.6,
@@ -20894,7 +20881,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_table_with_td() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec![], 3),
             make_detected_org("Twilio", vec!["table", "td"], vec![], 3),
         ];
@@ -20907,7 +20894,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_table_without_td() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "tr"], vec![], 3),
             make_detected_org("Twilio", vec!["table", "tr"], vec![], 3),
         ];
@@ -20920,7 +20907,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_list_ul() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["ul", "li"], vec![], 5),
             make_detected_org("Twilio", vec!["ul", "li"], vec![], 5),
         ];
@@ -20933,7 +20920,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_list_ol() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["ol", "li"], vec![], 5),
             make_detected_org("Twilio", vec!["ol", "li"], vec![], 5),
         ];
@@ -20946,7 +20933,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_container_with_class() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["div"], vec!["vendor-card"], 3),
             make_detected_org("Twilio", vec!["div"], vec!["vendor-card"], 3),
         ];
@@ -20959,7 +20946,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_direct_text_fallback() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["span"], vec![], 3),
             make_detected_org("Twilio", vec!["span"], vec![], 3),
         ];
@@ -20972,7 +20959,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_direct_text_empty_parents() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec![], vec![], 3),
             make_detected_org("Twilio", vec![], vec![], 3),
         ];
@@ -20985,7 +20972,7 @@ Suite 200</td></tr>
     #[test]
     fn test_generate_selector_sample_matches_populated() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec![], 3),
             make_detected_org("Twilio", vec!["table", "td"], vec![], 3),
             make_detected_org("AWS", vec!["table", "td"], vec![], 3),
@@ -21007,7 +20994,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_single_org() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![make_detected_org(
+        let orgs = [make_detected_org(
             "Stripe",
             vec!["table", "td"],
             vec!["vendor"],
@@ -21020,7 +21007,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_identical_contexts() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec!["vendor", "name"], 3),
             make_detected_org("Twilio", vec!["table", "td"], vec!["vendor", "name"], 3),
         ];
@@ -21033,7 +21020,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_different_contexts() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec!["vendor"], 3),
             make_detected_org("Twilio", vec!["ul", "li"], vec!["item"], 5),
         ];
@@ -21046,7 +21033,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_partial_overlap() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org(
                 "Stripe",
                 vec!["div", "table", "td"],
@@ -21070,7 +21057,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_no_classes() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec![], 3),
             make_detected_org("Twilio", vec!["table", "td"], vec![], 3),
         ];
@@ -21084,7 +21071,7 @@ Suite 200</td></tr>
     #[test]
     fn test_selector_consistency_capped_at_one() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["table", "td"], vec!["vendor", "name"], 3),
             make_detected_org("Twilio", vec!["table", "td"], vec!["vendor", "name"], 3),
             make_detected_org("AWS", vec!["table", "td"], vec!["vendor", "name"], 3),
@@ -21104,7 +21091,7 @@ Suite 200</td></tr>
         let html = Html::parse_document(
             r#"<html><body><table><td>A</td><td>B</td><td>C</td></table></body></html>"#,
         );
-        let orgs = vec![
+        let orgs = [
             make_detected_org("A", vec!["table", "td"], vec![], 3),
             make_detected_org("B", vec!["table", "td"], vec![], 3),
             make_detected_org("C", vec!["table", "td"], vec![], 3),
@@ -21128,7 +21115,7 @@ Suite 200</td></tr>
         let html = Html::parse_document(
             r#"<html><body><div>A</div><div>B</div><div>C</div><div>D</div><div>E</div><div>F</div><div>G</div><div>H</div><div>I</div><div>J</div></body></html>"#,
         );
-        let orgs = vec![
+        let orgs = [
             make_detected_org("A", vec!["div"], vec![], 10),
             make_detected_org("B", vec!["div"], vec![], 10),
         ];
@@ -21150,7 +21137,7 @@ Suite 200</td></tr>
         let analyzer = make_test_analyzer();
         let html =
             Html::parse_document(r#"<html><body><table><td>Only</td></table></body></html>"#);
-        let orgs = vec![
+        let orgs = [
             make_detected_org("A", vec!["table", "td"], vec![], 3),
             make_detected_org("B", vec!["table", "td"], vec![], 3),
             make_detected_org("C", vec!["table", "td"], vec![], 3),
@@ -21172,7 +21159,7 @@ Suite 200</td></tr>
     fn test_pattern_confidence_no_matches() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document("<html><body><p>text</p></body></html>");
-        let orgs = vec![
+        let orgs = [
             make_detected_org("A", vec!["table", "td"], vec![], 3),
             make_detected_org("B", vec!["table", "td"], vec![], 3),
         ];
@@ -21193,7 +21180,7 @@ Suite 200</td></tr>
     fn test_pattern_confidence_invalid_selector() {
         let analyzer = make_test_analyzer();
         let html = Html::parse_document("<html><body></body></html>");
-        let orgs = vec![make_detected_org("A", vec!["div"], vec![], 3)];
+        let orgs = [make_detected_org("A", vec!["div"], vec![], 3)];
         let org_refs: Vec<&DetectedOrganization> = orgs.iter().collect();
         let selector = DomSelector {
             selector: "[[[invalid".to_string(),
@@ -21582,7 +21569,7 @@ Suite 200</td></tr>
             deserialized.entity_header_patterns,
             patterns.entity_header_patterns
         );
-        assert_eq!(deserialized.is_domain_specific, false);
+        assert!(!deserialized.is_domain_specific);
     }
 
     #[test]
@@ -21795,7 +21782,7 @@ Suite 200</td></tr>
         // This test verifies generate_selector_from_pattern handles the Container type
         // Note: The Container branch's else ("div") is unreachable because Container
         // is only selected when css_classes is non-empty
-        let orgs = vec![
+        let orgs = [
             make_detected_org("Stripe", vec!["div", "span"], vec!["card"], 3),
             make_detected_org("Twilio", vec!["div", "span"], vec!["card"], 3),
         ];
@@ -22816,10 +22803,7 @@ NY 10001</td><td>Payments</td></tr>
         let html = "<ul><li>stripe.com</li></ul>";
         analyzer.analyze_html_patterns(html, &extractions, &mut patterns);
         // Should NOT add td-specific pattern
-        assert!(
-            true, // patterns validated
-            "Should not add td pattern when domain isn't in td elements"
-        );
+        let _ = patterns;
     }
 
     #[test]
@@ -23047,7 +23031,7 @@ NY 10001</td><td>Payments</td></tr>
     #[test]
     fn test_grc178_generate_selector_direct_text_no_classes() {
         let analyzer = make_test_analyzer();
-        let orgs = vec![
+        let orgs = [
             DetectedOrganization {
                 name: "TestCorp".to_string(),
                 confidence: 0.9,
@@ -24826,7 +24810,7 @@ WA 98101</td><td>Address-like</td></tr>
             .next()
             .expect("span#t should be found");
         let evidence = analyzer.create_enhanced_evidence(&el, "test", "https://example.com");
-        assert!(evidence.len() > 0);
+        assert!(!evidence.is_empty());
     }
 
     #[test]
@@ -25193,13 +25177,9 @@ WA 98101</td><td>Address-like</td></tr>
         let result = analyzer
             .analyze_domain_with_full_options("no-such-domain-abc123.invalid", None, None, None)
             .await;
-        match result {
-            Ok(v) => {
-                // Either empty or results from unlikely URL hits — both acceptable
-                let _ = v;
-            }
-            Err(_) => {} // Network errors acceptable
-        }
+        if let Ok(v) = result {
+            let _ = v; // Either empty or results from unlikely URL hits — both acceptable
+        } // Network errors acceptable
     }
 
     #[test]

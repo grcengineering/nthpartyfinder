@@ -1980,9 +1980,8 @@ mod tests {
             false,
         )
         .await;
-        match result {
-            Ok(inner) => assert!(inner.is_none()),
-            Err(_) => {}
+        if let Ok(inner) = result {
+            assert!(inner.is_none())
         }
     }
 

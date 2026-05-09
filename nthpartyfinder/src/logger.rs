@@ -1459,7 +1459,7 @@ mod tests {
     #[test]
     fn test_verbosity_level_clone() {
         let level = VerbosityLevel::Detailed;
-        let cloned = level.clone();
+        let cloned = level;
         assert_eq!(level, cloned);
     }
 
@@ -1963,7 +1963,7 @@ mod tests {
     #[test]
     fn test_ui_phase_debug_and_clone() {
         let phase = UiPhase::Complete;
-        let cloned = phase.clone();
+        let cloned = phase;
         assert_eq!(cloned, UiPhase::Complete);
         let debug_str = format!("{:?}", phase);
         assert_eq!(debug_str, "Complete");

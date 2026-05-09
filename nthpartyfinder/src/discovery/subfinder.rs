@@ -787,7 +787,7 @@ garbage
     #[test]
     fn test_install_option_clone() {
         let original = InstallOption::Go;
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 
@@ -806,7 +806,7 @@ garbage
 
     #[test]
     fn test_install_option_all_variants_unique_names() {
-        let all = vec![
+        let all = [
             InstallOption::AutoDownload,
             InstallOption::Go,
             InstallOption::Homebrew,
@@ -1449,7 +1449,7 @@ garbage
 
     #[test]
     fn test_install_option_ne_all_pairs() {
-        let variants = vec![
+        let variants = [
             InstallOption::AutoDownload,
             InstallOption::Go,
             InstallOption::Homebrew,
