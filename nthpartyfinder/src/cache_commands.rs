@@ -34,21 +34,24 @@ pub async fn list_cached_domains() -> Result<()> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
             if let Some(domain) = path.file_stem().and_then(|s| s.to_str()) {
-                // Try to read the cache entry to get details
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) =
-                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
-                    {
-                        domains.push((
-                            domain.to_string(),
-                            cache_entry.last_successful_access,
-                            cache_entry.working_subprocessor_url.clone(),
-                        ));
+                let domain = domain.to_string();
+                if let Ok(canonical) = path.canonicalize() {
+                    // Try to read the cache entry to get details
+                    if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
+                        if let Ok(cache_entry) =
+                            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                        {
+                            domains.push((
+                                domain,
+                                cache_entry.last_successful_access,
+                                cache_entry.working_subprocessor_url.clone(),
+                            ));
+                        } else {
+                            domains.push((domain, 0, "Invalid cache entry".to_string()));
+                        }
                     } else {
-                        domains.push((domain.to_string(), 0, "Invalid cache entry".to_string()));
+                        domains.push((domain, 0, "Unable to read".to_string()));
                     }
-                } else {
-                    domains.push((domain.to_string(), 0, "Unable to read".to_string()));
                 }
             }
         }
@@ -332,13 +335,16 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
                     }
                 }
 
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) =
-                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
-                    {
-                        if !cache_entry.working_subprocessor_url.is_empty() {
-                            urls_to_validate
-                                .push((domain.to_string(), cache_entry.working_subprocessor_url));
+                let domain = domain.to_string();
+                if let Ok(canonical) = path.canonicalize() {
+                    if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
+                        if let Ok(cache_entry) =
+                            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                        {
+                            if !cache_entry.working_subprocessor_url.is_empty() {
+                                urls_to_validate
+                                    .push((domain, cache_entry.working_subprocessor_url));
+                            }
                         }
                     }
                 }

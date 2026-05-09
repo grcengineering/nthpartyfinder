@@ -208,14 +208,16 @@ impl ResultSink {
                     if let Ok(pid) = pid_str.parse::<u32>() {
                         // Check if this PID is still running
                         if !is_process_running(pid) {
-                            if let Err(e) = std::fs::remove_file(entry.path()) {
-                                eprintln!(
-                                    "Warning: Failed to clean up orphaned file {}: {}",
-                                    entry.path().display(),
-                                    e
-                                );
-                            } else {
-                                cleaned += 1;
+                            if let Ok(canonical) = entry.path().canonicalize() {
+                                if let Err(e) = std::fs::remove_file(&canonical) {
+                                    eprintln!(
+                                        "Warning: Failed to clean up orphaned file {}: {}",
+                                        canonical.display(),
+                                        e
+                                    );
+                                } else {
+                                    cleaned += 1;
+                                }
                             }
                         }
                     }

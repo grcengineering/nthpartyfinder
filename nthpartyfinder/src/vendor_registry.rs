@@ -307,36 +307,36 @@ fn find_config_dir_inner(
     env_config: Option<String>,
 ) -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
-    if cwd_config.exists() && cwd_config.is_dir() && cwd_config.join("vendors").exists() {
-        debug!(
-            "Found config directory at: {:?}",
-            cwd_config
-                .canonicalize()
-                .unwrap_or(cwd_config.to_path_buf())
-        );
-        return Some(cwd_config.to_path_buf());
+    if let Ok(canonical) = cwd_config.canonicalize() {
+        if canonical.is_dir() && canonical.join("vendors").exists() {
+            debug!("Found config directory at: {:?}", canonical);
+            return Some(canonical);
+        }
     }
 
     // Priority 2: Relative to executable directory
     if let Some(exe_path) = exe_path {
         if let Some(exe_dir) = exe_path.parent() {
             let exe_config = exe_dir.join("config");
-            if exe_config.exists() && exe_config.join("vendors").exists() {
-                debug!(
-                    "Found config directory next to executable: {:?}",
-                    exe_config
-                );
-                return Some(exe_config);
+            if let Ok(canonical) = exe_config.canonicalize() {
+                if canonical.join("vendors").exists() {
+                    debug!("Found config directory next to executable: {:?}", canonical);
+                    return Some(canonical);
+                }
             }
             if let Some(parent) = exe_dir.parent() {
                 let parent_config = parent.join("config");
-                if parent_config.exists() && parent_config.join("vendors").exists() {
-                    return Some(parent_config);
+                if let Ok(canonical) = parent_config.canonicalize() {
+                    if canonical.join("vendors").exists() {
+                        return Some(canonical);
+                    }
                 }
                 if let Some(grandparent) = parent.parent() {
                     let grandparent_config = grandparent.join("config");
-                    if grandparent_config.exists() && grandparent_config.join("vendors").exists() {
-                        return Some(grandparent_config);
+                    if let Ok(canonical) = grandparent_config.canonicalize() {
+                        if canonical.join("vendors").exists() {
+                            return Some(canonical);
+                        }
                     }
                 }
             }
@@ -346,8 +346,10 @@ fn find_config_dir_inner(
     // Priority 3: Env var
     if let Some(env_config) = env_config {
         let env_path = PathBuf::from(&env_config);
-        if env_path.exists() && env_path.join("vendors").exists() {
-            return Some(env_path);
+        if let Ok(canonical) = env_path.canonicalize() {
+            if canonical.join("vendors").exists() {
+                return Some(canonical);
+            }
         }
     }
 
@@ -1327,7 +1329,7 @@ mod tests {
         fs::create_dir_all(cwd_config.join("vendors")).unwrap();
 
         let result = find_config_dir_inner(&cwd_config, None, None);
-        assert_eq!(result, Some(cwd_config));
+        assert_eq!(result, Some(cwd_config.canonicalize().unwrap()));
     }
 
     #[test]
@@ -1411,7 +1413,7 @@ mod tests {
             Some(dir.path().to_str().unwrap().to_string()),
         );
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), dir.path());
+        assert_eq!(result.unwrap(), dir.path().canonicalize().unwrap());
     }
 
     #[test]
@@ -1450,7 +1452,7 @@ mod tests {
             None,
             Some(env_dir.path().to_str().unwrap().to_string()),
         );
-        assert_eq!(result, Some(cwd_dir.path().to_path_buf()));
+        assert_eq!(result, Some(cwd_dir.path().canonicalize().unwrap()));
     }
 
     #[test]
@@ -1502,7 +1504,7 @@ mod tests {
         fs::create_dir_all(cwd_config.join("vendors")).unwrap();
 
         let result = find_config_dir_inner(&cwd_config, None, None);
-        assert_eq!(result, Some(cwd_config));
+        assert_eq!(result, Some(cwd_config.canonicalize().unwrap()));
     }
 
     #[test]

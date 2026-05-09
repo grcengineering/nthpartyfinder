@@ -30,12 +30,11 @@ pub const LOCAL_OVERRIDES_PATH: &str = "./config/known_vendors_local.json";
 fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
     let cwd_config = PathBuf::from("./config");
-    if cwd_config.exists() && cwd_config.is_dir() {
-        debug!(
-            "Found config directory at: {:?}",
-            cwd_config.canonicalize().unwrap_or(cwd_config.clone())
-        );
-        return Some(cwd_config);
+    if let Ok(canonical) = cwd_config.canonicalize() {
+        if canonical.is_dir() {
+            debug!("Found config directory at: {:?}", canonical);
+            return Some(canonical);
+        }
     }
 
     // Priority 2: Relative to executable directory
@@ -43,34 +42,31 @@ fn find_config_dir() -> Option<PathBuf> {
         if let Some(exe_dir) = exe_path.parent() {
             // Check config next to executable
             let exe_config = exe_dir.join("config");
-            if exe_config.exists() && exe_config.is_dir() {
-                debug!(
-                    "Found config directory next to executable: {:?}",
-                    exe_config
-                );
-                return Some(exe_config);
+            if let Ok(canonical) = exe_config.canonicalize() {
+                if canonical.is_dir() {
+                    debug!("Found config directory next to executable: {:?}", canonical);
+                    return Some(canonical);
+                }
             }
 
             // Check parent of executable (for target/release/ layout)
             if let Some(parent) = exe_dir.parent() {
                 let parent_config = parent.join("config");
-                if parent_config.exists() && parent_config.is_dir() {
-                    debug!(
-                        "Found config directory at parent of executable: {:?}",
-                        parent_config
-                    );
-                    return Some(parent_config);
+                if let Ok(canonical) = parent_config.canonicalize() {
+                    if canonical.is_dir() {
+                        debug!("Found config directory at parent of executable: {:?}", canonical);
+                        return Some(canonical);
+                    }
                 }
 
                 // Check grandparent (for target/release/ -> project root)
                 if let Some(grandparent) = parent.parent() {
                     let grandparent_config = grandparent.join("config");
-                    if grandparent_config.exists() && grandparent_config.is_dir() {
-                        debug!(
-                            "Found config directory at grandparent of executable: {:?}",
-                            grandparent_config
-                        );
-                        return Some(grandparent_config);
+                    if let Ok(canonical) = grandparent_config.canonicalize() {
+                        if canonical.is_dir() {
+                            debug!("Found config directory at grandparent of executable: {:?}", canonical);
+                            return Some(canonical);
+                        }
                     }
                 }
             }
@@ -80,9 +76,11 @@ fn find_config_dir() -> Option<PathBuf> {
     // Priority 3: Absolute path from NTHPARTYFINDER_CONFIG_DIR env var
     if let Ok(env_config) = std::env::var("NTHPARTYFINDER_CONFIG_DIR") {
         let env_path = PathBuf::from(&env_config);
-        if env_path.exists() && env_path.is_dir() {
-            debug!("Found config directory from env var: {:?}", env_path);
-            return Some(env_path);
+        if let Ok(canonical) = env_path.canonicalize() {
+            if canonical.is_dir() {
+                debug!("Found config directory from env var: {:?}", canonical);
+                return Some(canonical);
+            }
         }
     }
 
@@ -227,6 +225,14 @@ impl KnownVendors {
 
     /// Load known vendors from specific paths
     pub fn load_from_paths(base_path: &Path, overrides_path: &Path) -> Result<Self> {
+        let base_path = base_path
+            .canonicalize()
+            .unwrap_or_else(|_| base_path.to_path_buf());
+        let overrides_path = overrides_path
+            .canonicalize()
+            .unwrap_or_else(|_| overrides_path.to_path_buf());
+        let base_path = base_path.as_path();
+        let overrides_path = overrides_path.as_path();
         // Load base database (required)
         let base = if base_path.exists() {
             let content = fs::read_to_string(base_path)
