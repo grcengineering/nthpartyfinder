@@ -508,53 +508,16 @@ fn escape_markdown(text: &str) -> String {
 const VENDOR_GRAPH_JS: &str = include_str!("../static/vendor-graph.js");
 const VENDOR_GRAPH_CSS: &str = include_str!("../static/vendor-graph.css");
 
-// cfg(not(coverage)): askama derive generates a generic render_into whose definition-point is
-// uncoverable on stable — LLVM attributes coverage to monomorphized instances, not the generic
-#[cfg(not(coverage))]
-mod html_template {
-    use super::*;
-
-    #[derive(Template)]
-    #[template(path = "report.html")]
-    pub(super) struct HtmlReportTemplate {
-        pub(super) summary: HtmlSummary,
-        pub(super) relationships: Vec<VendorRelationship>,
-        pub(super) relationships_json: String,
-        pub(super) summary_json: String,
-        pub(super) vendor_graph_js: &'static str,
-        pub(super) vendor_graph_css: &'static str,
-    }
+#[derive(Template)]
+#[template(path = "report.html")]
+struct HtmlReportTemplate {
+    summary: HtmlSummary,
+    relationships: Vec<VendorRelationship>,
+    relationships_json: String,
+    summary_json: String,
+    vendor_graph_js: &'static str,
+    vendor_graph_css: &'static str,
 }
-#[cfg(coverage)]
-mod html_template {
-    use super::*;
-
-    pub(super) struct HtmlReportTemplate {
-        pub(super) summary: HtmlSummary,
-        pub(super) relationships: Vec<VendorRelationship>,
-        pub(super) relationships_json: String,
-        pub(super) summary_json: String,
-        pub(super) vendor_graph_js: &'static str,
-        pub(super) vendor_graph_css: &'static str,
-    }
-
-    impl std::fmt::Display for HtmlReportTemplate {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("<html></html>")
-        }
-    }
-
-    impl askama::Template for HtmlReportTemplate {
-        const EXTENSION: Option<&'static str> = Some("html");
-        const SIZE_HINT: usize = 0;
-        const MIME_TYPE: &'static str = "text/html; charset=utf-8";
-        fn render_into(&self, w: &mut (impl std::fmt::Write + ?Sized)) -> askama::Result<()> {
-            w.write_str("<html></html>")?;
-            Ok(())
-        }
-    }
-}
-use html_template::HtmlReportTemplate;
 
 #[derive(serde::Serialize)]
 struct HtmlSummary {
@@ -1056,7 +1019,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(coverage))]
     fn test_export_html_with_multiple_layers() {
         let rels = vec![
             make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
@@ -1097,7 +1059,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(coverage))]
     fn test_html_report_template_render_into_string() {
         // Exercise the askama-generated render_into::<String> monomorphization
         use askama::Template;
@@ -1232,7 +1193,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(coverage))]
     fn test_export_html_embeds_json_data() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("data_check.html");
