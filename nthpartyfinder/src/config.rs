@@ -569,8 +569,6 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
-    // cfg(not(coverage)): writes to hardcoded CONFIG_PATH on real filesystem — not unit-testable
-    #[cfg(not(coverage))]
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -611,11 +609,6 @@ impl AppConfig {
         } else {
             Ok(None)
         }
-    }
-
-    #[cfg(coverage)]
-    pub fn create_default_config() -> Result<PathBuf, ConfigError> {
-        Ok(PathBuf::from("/tmp/nthpartyfinder.toml"))
     }
 
     #[cfg(coverage)]
