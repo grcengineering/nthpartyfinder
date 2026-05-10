@@ -210,12 +210,13 @@ fn find_ort_library(
             // (CodeQL: rust/path-injection sanitizer requires allowlist comparison on canonical).
             // canonicalize() also implicitly checks existence — Ok means the file exists.
             if let Ok(canonical) = candidate.canonicalize() {
-                let canonical_filename_matches = canonical
+                if canonical
                     .file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n == lib_name)
-                    .unwrap_or(false);
-                if canonical_filename_matches && canonical.exists() {
+                    .unwrap_or(false)
+                    && canonical.exists()
+                {
                     return DepCheckResult {
                         name: "ONNX Runtime",
                         available: true,
