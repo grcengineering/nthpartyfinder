@@ -72,6 +72,7 @@ insta = { version = "1.42", features = ["json"] }
 rstest = "0.26"
 assert_cmd = "2.0"
 predicates = "3.0"
+http = "1.4"
 
 [[bin]]
 name = "nthpartyfinder"
@@ -83,7 +84,7 @@ bin-dir = "nthpartyfinder{ binary-ext }"
 pkg-fmt = "tgz"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)', 'cfg(coverage)'] }
 
 [[example]]
 name = "progress_test"

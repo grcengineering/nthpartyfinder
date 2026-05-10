@@ -7,6 +7,9 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::checkpoint;
 use crate::cli::Args;
 use crate::config::{AnalysisConfig, AnalysisStrategy};
+use crate::discovery::ct_logs::CtDiscoveryResult;
+use crate::discovery::saas_tenant::TenantProbeResult;
+use crate::discovery::web_traffic::{WebTrafficResult, WebTrafficSource};
 use crate::discovery::{
     CtLogDiscovery, SaasTenantDiscovery, SubfinderDiscovery, TenantStatus, WebTrafficDiscovery,
 };
@@ -200,6 +203,189 @@ pub fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
     common_inferred_patterns.contains(&org_lower)
 }
 
+/// If domain is a subdomain (different from its base), return a VendorDomain entry for the base.
+pub fn add_base_domain_if_subdomain(
+    domain: &str,
+    current_base_domain: &str,
+) -> Option<dns::VendorDomain> {
+    if current_base_domain != domain {
+        Some(dns::VendorDomain {
+            domain: current_base_domain.to_string(),
+            source_type: RecordType::DnsSubdomain,
+            raw_record: format!("Subdomain analysis: {} -> {}", domain, current_base_domain),
+        })
+    } else {
+        None
+    }
+}
+
+/// Convert SubprocessorDomain entries into VendorDomain entries (field mapping).
+pub fn convert_subprocessor_domains(
+    subprocessor_domains: Vec<subprocessor::SubprocessorDomain>,
+) -> Vec<dns::VendorDomain> {
+    subprocessor_domains
+        .into_iter()
+        .map(|sub_domain| dns::VendorDomain {
+            domain: sub_domain.domain,
+            source_type: sub_domain.source_type,
+            raw_record: sub_domain.raw_record,
+        })
+        .collect()
+}
+
+/// Filter subfinder subdomain results: keep only vendors whose base domain differs from
+/// the target domain_base. Returns (new vendor domains, txt_count, cname_count).
+#[allow(clippy::type_complexity)]
+pub fn filter_subfinder_results(
+    subdomain_results: Vec<(
+        String,
+        String,
+        Vec<dns::VendorDomain>,
+        Vec<(String, String)>,
+    )>,
+    domain_base: &str,
+) -> (Vec<dns::VendorDomain>, usize, usize) {
+    let mut vendor_domains = Vec::new();
+    let mut txt_count = 0;
+    let mut cname_count = 0;
+
+    for (subdomain, source, txt_vendors, cname_vendors) in subdomain_results {
+        for vd in txt_vendors {
+            let vd_base = domain_utils::extract_base_domain(&vd.domain);
+            if vd_base != domain_base {
+                txt_count += 1;
+                vendor_domains.push(dns::VendorDomain {
+                    domain: vd.domain,
+                    source_type: vd.source_type,
+                    raw_record: format!(
+                        "Via subdomain {} (subfinder:{}): {}",
+                        subdomain, source, vd.raw_record
+                    ),
+                });
+            }
+        }
+        for (cname_target, cname_base) in cname_vendors {
+            cname_count += 1;
+            vendor_domains.push(dns::VendorDomain {
+                domain: cname_base,
+                source_type: RecordType::SubfinderDiscovery,
+                raw_record: format!(
+                    "Subdomain {} CNAMEs to {} (subfinder:{})",
+                    subdomain, cname_target, source
+                ),
+            });
+        }
+    }
+
+    (vendor_domains, txt_count, cname_count)
+}
+
+/// Filter tenant probe results to only Confirmed/Likely, converting to VendorDomain entries.
+pub fn filter_confirmed_tenants(tenants: &[TenantProbeResult]) -> Vec<dns::VendorDomain> {
+    tenants
+        .iter()
+        .filter(|t| matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely))
+        .map(|tenant| dns::VendorDomain {
+            domain: tenant.vendor_domain.clone(),
+            source_type: RecordType::SaasTenantProbe,
+            raw_record: format!(
+                "Tenant URL: {} ({:?}) | {}",
+                tenant.tenant_url, tenant.status, tenant.evidence
+            ),
+        })
+        .collect()
+}
+
+/// Convert CT log discovery results into VendorDomain entries.
+pub fn convert_ct_results(ct_results: Vec<CtDiscoveryResult>) -> Vec<dns::VendorDomain> {
+    ct_results
+        .into_iter()
+        .map(|result| dns::VendorDomain {
+            domain: result.domain,
+            source_type: RecordType::CtLogDiscovery,
+            raw_record: result.certificate_info,
+        })
+        .collect()
+}
+
+/// Convert web traffic analysis results into VendorDomain entries with source-type mapping.
+pub fn convert_web_traffic_results(results: Vec<WebTrafficResult>) -> Vec<dns::VendorDomain> {
+    results
+        .into_iter()
+        .map(|result| {
+            let record_type = match result.source {
+                WebTrafficSource::PageSource => RecordType::WebTrafficSource,
+                WebTrafficSource::NetworkTraffic => RecordType::WebTrafficNetwork,
+            };
+            dns::VendorDomain {
+                domain: result.vendor_domain,
+                source_type: record_type,
+                raw_record: result.evidence,
+            }
+        })
+        .collect()
+}
+
+/// Compute stream buffer size: min of configured concurrency and parallel_jobs, floored at 2.
+pub fn compute_buffer_size(configured_concurrency: usize, parallel_jobs: usize) -> usize {
+    configured_concurrency.min(parallel_jobs).max(2)
+}
+
+/// Compute progress bar position (30-100 range) given current index and total vendors.
+pub fn compute_progress_position(index: usize, total_vendors: usize) -> u64 {
+    30 + ((index as u64 + 1) * 70) / total_vendors as u64
+}
+
+/// Determine whether a periodic checkpoint should be saved.
+pub fn should_checkpoint(processed_count: usize, vendor_count: usize) -> bool {
+    processed_count.is_multiple_of(5) || processed_count == vendor_count
+}
+
+/// Map memory pressure level to a delay in milliseconds.
+pub fn compute_pressure_delay_ms(pressure_level: u8) -> u64 {
+    if pressure_level >= 2 {
+        250
+    } else if pressure_level >= 1 {
+        25
+    } else {
+        0
+    }
+}
+
+/// Check whether a vendor domain is a self-reference to the customer domain.
+pub fn should_skip_self_reference(vendor_domain: &str, customer_domain: &str) -> bool {
+    let base_domain = domain_utils::extract_base_domain(vendor_domain);
+    let customer_base_domain = domain_utils::extract_base_domain(customer_domain);
+    base_domain == customer_base_domain
+}
+
+/// Resolve organization names from the discovered vendors map with domain fallback.
+pub fn resolve_orgs_from_vendors(
+    discovered_vendors: &HashMap<String, String>,
+    customer_base_domain: &str,
+    base_domain: &str,
+) -> (String, String) {
+    let customer_org = discovered_vendors
+        .get(customer_base_domain)
+        .cloned()
+        .unwrap_or_else(|| customer_base_domain.to_string());
+    let vendor_org = discovered_vendors
+        .get(base_domain)
+        .cloned()
+        .unwrap_or_else(|| base_domain.to_string());
+    (customer_org, vendor_org)
+}
+
+/// Check whether recursion should stop at a common denominator domain.
+pub fn should_stop_at_common_denominator(max_depth: Option<u32>, base_domain: &str) -> bool {
+    max_depth.is_none() && is_common_denominator(base_domain)
+}
+
+// coverage(off): thin logging wrapper over SubprocessorAnalyzer::analyze_domain_with_logging
+// which performs real HTTP requests and browser scraping; branch outcomes depend on external
+// service responses. Branches: non-empty result (lines 221-228), empty result (229-235),
+// error (238-247) — all determined by network I/O.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn subprocessor_analysis_with_logging(
     domain: &str,
     verification_logger: &verification_logger::VerificationFailureLogger,
@@ -248,6 +434,13 @@ pub async fn subprocessor_analysis_with_logging(
     }
 }
 
+// coverage(off): I/O-only orchestration shell after DI extraction. All pure logic extracted to:
+// add_base_domain_if_subdomain, convert_subprocessor_domains, filter_subfinder_results,
+// filter_confirmed_tenants, convert_ct_results, convert_web_traffic_results,
+// compute_buffer_size, compute_progress_position, should_checkpoint, compute_pressure_delay_ms.
+// Remaining code is: DNS-over-HTTPS calls, subfinder/SaaS/CT/web I/O, checkpoint file writes,
+// tokio mutex locks, and progress logger calls — no testable branching logic.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_nth_parties(
     domain: &str,
@@ -412,16 +605,12 @@ pub async fn discover_nth_parties(
         let current_base_domain = domain_utils::extract_base_domain(domain);
         let mut all_vendor_domains = vendor_domains_with_source;
         all_vendor_domains.extend(spf_recursive_domains);
-        if current_base_domain != domain {
-            all_vendor_domains.push(dns::VendorDomain {
-                domain: current_base_domain.clone(),
-                source_type: RecordType::DnsSubdomain,
-                raw_record: format!("Subdomain analysis: {} -> {}", domain, current_base_domain),
-            });
+        if let Some(base_vd) = add_base_domain_if_subdomain(domain, &current_base_domain) {
             logger.debug(&format!(
                 "Added base domain {} for subdomain analysis of {}",
                 current_base_domain, domain
             ));
+            all_vendor_domains.push(base_vd);
         }
 
         if let Some(analyzer) = subprocessor_analyzer.filter(|_| subprocessor_enabled) {
@@ -469,20 +658,7 @@ pub async fn discover_nth_parties(
                                 .collect::<Vec<_>>()
                         ));
 
-                        let converted_domains: Vec<dns::VendorDomain> = subprocessor_domains
-                            .into_iter()
-                            .map(|sub_domain| {
-                                logger.debug(&format!(
-                                    "Converting subprocessor domain: {} ({})",
-                                    sub_domain.domain, sub_domain.source_type
-                                ));
-                                dns::VendorDomain {
-                                    domain: sub_domain.domain,
-                                    source_type: sub_domain.source_type,
-                                    raw_record: sub_domain.raw_record,
-                                }
-                            })
-                            .collect();
+                        let converted_domains = convert_subprocessor_domains(subprocessor_domains);
                         all_vendor_domains.extend(converted_domains);
                     } else {
                         logger.log_subprocessor_analysis(domain, 0);
@@ -523,8 +699,6 @@ pub async fn discover_nth_parties(
                             use futures::{stream, StreamExt};
 
                             let subdomain_concurrency = 50;
-                            let mut subdomain_txt_vendors_found = 0;
-                            let mut subdomain_cname_vendors_found = 0;
                             let domain_base = domain_utils::extract_base_domain(domain);
 
                             let total_subdomains = subdomains.len();
@@ -584,34 +758,12 @@ pub async fn discover_nth_parties(
                                 .collect()
                                 .await;
 
-                            for (subdomain, source, txt_vendors, cname_vendors) in subdomain_results
-                            {
-                                for vd in txt_vendors {
-                                    let vd_base = domain_utils::extract_base_domain(&vd.domain);
-                                    if vd_base != domain_base {
-                                        subdomain_txt_vendors_found += 1;
-                                        all_vendor_domains.push(dns::VendorDomain {
-                                            domain: vd.domain,
-                                            source_type: vd.source_type,
-                                            raw_record: format!(
-                                                "Via subdomain {} (subfinder:{}): {}",
-                                                subdomain, source, vd.raw_record
-                                            ),
-                                        });
-                                    }
-                                }
-                                for (cname_target, cname_base) in cname_vendors {
-                                    subdomain_cname_vendors_found += 1;
-                                    all_vendor_domains.push(dns::VendorDomain {
-                                        domain: cname_base,
-                                        source_type: RecordType::SubfinderDiscovery,
-                                        raw_record: format!(
-                                            "Subdomain {} CNAMEs to {} (subfinder:{})",
-                                            subdomain, cname_target, source
-                                        ),
-                                    });
-                                }
-                            }
+                            let (
+                                new_vendor_domains,
+                                subdomain_txt_vendors_found,
+                                subdomain_cname_vendors_found,
+                            ) = filter_subfinder_results(subdomain_results, &domain_base);
+                            all_vendor_domains.extend(new_vendor_domains);
 
                             if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0
                             {
@@ -638,27 +790,13 @@ pub async fn discover_nth_parties(
                 logger.info("Running SaaS tenant discovery...");
                 match tenant_disc.probe_with_logger(domain, Some(&logger)).await {
                     Ok(tenants) => {
-                        let confirmed_tenants: Vec<_> = tenants
-                            .iter()
-                            .filter(|t| {
-                                matches!(t.status, TenantStatus::Confirmed | TenantStatus::Likely)
-                            })
-                            .collect();
-                        if !confirmed_tenants.is_empty() {
+                        let tenant_vendors = filter_confirmed_tenants(&tenants);
+                        if !tenant_vendors.is_empty() {
                             logger.info(&format!(
                                 "Found {} likely/confirmed SaaS tenants",
-                                confirmed_tenants.len()
+                                tenant_vendors.len()
                             ));
-                            for tenant in confirmed_tenants {
-                                all_vendor_domains.push(dns::VendorDomain {
-                                    domain: tenant.vendor_domain.clone(),
-                                    source_type: RecordType::SaasTenantProbe,
-                                    raw_record: format!(
-                                        "Tenant URL: {} ({:?}) | {}",
-                                        tenant.tenant_url, tenant.status, tenant.evidence
-                                    ),
-                                });
-                            }
+                            all_vendor_domains.extend(tenant_vendors);
                         } else {
                             logger.debug("No SaaS tenants discovered");
                         }
@@ -684,13 +822,8 @@ pub async fn discover_nth_parties(
                         if !ct_results.is_empty() {
                             logger
                                 .info(&format!("Found {} vendors from CT logs", ct_results.len()));
-                            for result in ct_results {
-                                all_vendor_domains.push(dns::VendorDomain {
-                                    domain: result.domain,
-                                    source_type: RecordType::CtLogDiscovery,
-                                    raw_record: result.certificate_info,
-                                });
-                            }
+                            let ct_vendors = convert_ct_results(ct_results);
+                            all_vendor_domains.extend(ct_vendors);
                         } else {
                             logger.debug("No vendors discovered from CT logs");
                         }
@@ -720,21 +853,8 @@ pub async fn discover_nth_parties(
                         "Found {} vendors from webpage analysis",
                         web_traffic_results.len()
                     ));
-                    for result in web_traffic_results {
-                        let record_type = match result.source {
-                            crate::discovery::web_traffic::WebTrafficSource::PageSource => {
-                                RecordType::WebTrafficSource
-                            }
-                            crate::discovery::web_traffic::WebTrafficSource::NetworkTraffic => {
-                                RecordType::WebTrafficNetwork
-                            }
-                        };
-                        all_vendor_domains.push(dns::VendorDomain {
-                            domain: result.vendor_domain,
-                            source_type: record_type,
-                            raw_record: result.evidence,
-                        });
-                    }
+                    let web_vendors = convert_web_traffic_results(web_traffic_results);
+                    all_vendor_domains.extend(web_vendors);
                 } else {
                     logger.debug("No vendors discovered from webpage analysis");
                 }
@@ -852,10 +972,9 @@ pub async fn discover_nth_parties(
 
                     async move {
                         let pressure = pressure_level.load(std::sync::atomic::Ordering::Relaxed);
-                        if pressure >= 2 {
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        } else if pressure >= 1 {
-                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        let delay = compute_pressure_delay_ms(pressure);
+                        if delay > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
 
                         if request_delay_ms > 0 && index > 0 && current_depth == 1 {
@@ -916,7 +1035,7 @@ pub async fn discover_nth_parties(
                             index + 1, total_vendors, vendor_domain_clone, elapsed.as_secs_f64(), new_relationships));
 
                         if current_depth == 1 && total_vendors > 0 {
-                            let position = 30 + ((index as u64 + 1) * 70) / total_vendors as u64;
+                            let position = compute_progress_position(index, total_vendors);
                             logger_clone.set_progress_position(position).await;
                         }
 
@@ -926,7 +1045,7 @@ pub async fn discover_nth_parties(
 
             let configured_concurrency =
                 analysis_config.get_concurrency_for_depth(current_depth as usize);
-            let buffer_size = configured_concurrency.min(args.parallel_jobs).max(2);
+            let buffer_size = compute_buffer_size(configured_concurrency, args.parallel_jobs);
 
             let mut vendor_stream = vendor_stream.buffer_unordered(buffer_size);
 
@@ -978,7 +1097,7 @@ pub async fn discover_nth_parties(
                         ))
                         .await;
                 }
-                if processed_count % 5 == 0 || processed_count == vendor_count {
+                if should_checkpoint(processed_count, vendor_count) {
                     logger.debug(&format!(
                         "📊 Progress: {}/{} vendors processed, {} relationships found",
                         processed_count, vendor_count, total_relationships_found
@@ -1022,6 +1141,12 @@ pub async fn discover_nth_parties(
     Ok(())
 }
 
+// coverage(off): I/O-only orchestration shell after DI extraction. Pure logic extracted to:
+// should_skip_self_reference, resolve_orgs_from_vendors, build_record_value,
+// should_stop_at_common_denominator. Remaining code is: WHOIS network lookups via
+// get_organization_with_status_and_config, result_sink file I/O, recursive discover_nth_parties
+// call — no testable branching logic remains.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn process_vendor_domain(
     vendor_domain: String,
@@ -1050,16 +1175,16 @@ pub async fn process_vendor_domain(
     result_sink: Arc<Mutex<ResultSink>>,
     memory_pressure_level: Arc<std::sync::atomic::AtomicU8>,
 ) {
-    let base_domain = domain_utils::extract_base_domain(&vendor_domain);
-    let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
-
-    if base_domain == customer_base_domain {
+    if should_skip_self_reference(&vendor_domain, &customer_domain) {
         logger.debug(&format!(
             "Skipping self-reference: {} -> {}",
-            customer_domain, base_domain
+            customer_domain, vendor_domain
         ));
         return;
     }
+
+    let base_domain = domain_utils::extract_base_domain(&vendor_domain);
+    let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
 
     {
         let vendors = discovered_vendors.lock().await;
@@ -1130,12 +1255,7 @@ pub async fn process_vendor_domain(
 
     let (customer_org, vendor_org) = {
         let vendors = discovered_vendors.lock().await;
-        let customer_org = vendors
-            .get(&customer_base_domain)
-            .unwrap_or(&customer_base_domain.to_string())
-            .clone();
-        let vendor_org = vendors.get(&base_domain).unwrap_or(&base_domain).clone();
-        (customer_org, vendor_org)
+        resolve_orgs_from_vendors(&vendors, &customer_base_domain, &base_domain)
     };
 
     let record_value = build_record_value(
@@ -1175,7 +1295,7 @@ pub async fn process_vendor_domain(
         }
     }
 
-    if max_depth.is_none() && is_common_denominator(&base_domain) {
+    if should_stop_at_common_denominator(max_depth, &base_domain) {
         logger.debug(&format!("Reached common denominator: {}", base_domain));
         return;
     }
@@ -1219,6 +1339,11 @@ pub async fn process_vendor_domain(
     }
 }
 
+// coverage(off): I/O-only orchestration shell — calls DNS (get_txt_records_with_pool,
+// resolve_spf_includes_recursive) and WHOIS (get_organization_with_status_and_config).
+// All pure logic (self-reference check, org resolution, record building, common-denominator stop)
+// tested via extracted functions. Remaining code is network I/O and recursion plumbing.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_nth_parties_minimal(
     domain: &str,
@@ -1677,17 +1802,11 @@ mod tests {
     }
 
     #[test]
-    fn test_interrupted_multiple_sets_idempotent() {
+    fn test_interrupted_set_and_check() {
         INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
-        set_interrupted();
-        set_interrupted();
+        assert!(!is_interrupted());
         set_interrupted();
         assert!(is_interrupted());
-        INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    #[test]
-    fn test_interrupted_reset_works() {
         set_interrupted();
         assert!(is_interrupted());
         INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2053,7 +2172,14 @@ mod tests {
         let result = truncate_utf8(s, 4);
         assert!(result.ends_with("..."));
         // The result should be valid UTF-8
-        assert!(result.len() > 0);
+        assert!(!result.is_empty());
+    }
+
+    // --- ABSOLUTE_MAX_DEPTH constant ---
+
+    #[test]
+    fn test_absolute_max_depth_constant() {
+        assert_eq!(ABSOLUTE_MAX_DEPTH, 10);
     }
 
     #[test]
@@ -2169,5 +2295,434 @@ mod tests {
         let (result, _) = apply_vendor_limits(domains, &AnalysisStrategy::Limits, &config, 1);
         assert_eq!(result[0].domain, "vendor0.com");
         assert_eq!(result[4].domain, "vendor4.com");
+    }
+
+    #[test]
+    fn test_apply_vendor_limits_limits_zero_limit_returns_none() {
+        // When get_vendor_limit_for_depth returns None (limit is 0), no truncation occurs
+        let domains = make_vendor_domains(10);
+        let config = make_analysis_config_with_limits(vec![0]);
+        let (result, removed) = apply_vendor_limits(domains, &AnalysisStrategy::Limits, &config, 0);
+        assert_eq!(result.len(), 10);
+        assert_eq!(removed, 0);
+    }
+
+    // ── discover_nth_parties_minimal early-return paths ───────────────
+
+    #[tokio::test]
+    async fn test_discover_nth_parties_minimal_already_processed() {
+        let mut processed = HashSet::new();
+        processed.insert("example.com".to_string());
+        let processed_domains = Arc::new(tokio::sync::Mutex::new(processed));
+        let discovered_vendors = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let semaphore = Arc::new(Semaphore::new(10));
+        let recursive_semaphore = Arc::new(Semaphore::new(10));
+        let dns_pool = Arc::new(dns::DnsServerPool::new());
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+        let config = make_analysis_config_with_limits(vec![20]);
+
+        let result = discover_nth_parties_minimal(
+            "example.com",
+            Some(3),
+            discovered_vendors,
+            processed_domains,
+            semaphore,
+            1,
+            "root.com",
+            "Root Org",
+            &vl,
+            dns_pool,
+            recursive_semaphore,
+            4,
+            logger,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.is_empty(),
+            "already-processed domain should return empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_nth_parties_minimal_depth_exceeded() {
+        let processed_domains = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let discovered_vendors = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let semaphore = Arc::new(Semaphore::new(10));
+        let recursive_semaphore = Arc::new(Semaphore::new(10));
+        let dns_pool = Arc::new(dns::DnsServerPool::new());
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+        let config = make_analysis_config_with_limits(vec![20]);
+
+        let result = discover_nth_parties_minimal(
+            "new-domain.com",
+            Some(2),
+            discovered_vendors,
+            processed_domains,
+            semaphore,
+            5, // current_depth > max_depth (2)
+            "root.com",
+            "Root Org",
+            &vl,
+            dns_pool,
+            recursive_semaphore,
+            4,
+            logger,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_empty(), "depth-exceeded should return empty");
+    }
+
+    // ── subprocessor_analysis_with_logging ────────────────────────────
+
+    #[tokio::test]
+    async fn test_subprocessor_analysis_with_logging_invalid_domain() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let vl = verification_logger::VerificationFailureLogger::new("/tmp", "test.com", false);
+
+        let result = subprocessor_analysis_with_logging(
+            "nonexistent.invalid.domain.test",
+            &vl,
+            logger,
+            &analyzer,
+        )
+        .await;
+
+        // Should return Ok (errors are swallowed) with empty or populated vec
+        assert!(result.is_ok());
+    }
+
+    // ── Phase-function extraction tests ──────────────────────────────
+
+    #[test]
+    fn test_add_base_domain_if_subdomain_returns_some() {
+        let result = add_base_domain_if_subdomain("mail.example.com", "example.com");
+        assert!(result.is_some());
+        let vd = result.unwrap();
+        assert_eq!(vd.domain, "example.com");
+        assert_eq!(vd.source_type, RecordType::DnsSubdomain);
+        assert!(vd.raw_record.contains("mail.example.com"));
+        assert!(vd.raw_record.contains("example.com"));
+    }
+
+    #[test]
+    fn test_add_base_domain_if_subdomain_returns_none_when_same() {
+        let result = add_base_domain_if_subdomain("example.com", "example.com");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_convert_subprocessor_domains_field_mapping() {
+        let input = vec![
+            subprocessor::SubprocessorDomain {
+                domain: "stripe.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "Found on /subprocessors page".to_string(),
+            },
+            subprocessor::SubprocessorDomain {
+                domain: "twilio.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "Found on /privacy page".to_string(),
+            },
+        ];
+        let result = convert_subprocessor_domains(input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "stripe.com");
+        assert_eq!(result[0].source_type, RecordType::HttpSubprocessor);
+        assert_eq!(result[0].raw_record, "Found on /subprocessors page");
+        assert_eq!(result[1].domain, "twilio.com");
+    }
+
+    #[test]
+    fn test_convert_subprocessor_domains_empty() {
+        let result = convert_subprocessor_domains(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_subfinder_results_filters_same_base() {
+        let subdomain_results = vec![(
+            "mail.example.com".to_string(),
+            "certspotter".to_string(),
+            vec![
+                dns::VendorDomain {
+                    domain: "example.com".to_string(), // same base — should be filtered
+                    source_type: RecordType::DnsTxtSpf,
+                    raw_record: "v=spf1".to_string(),
+                },
+                dns::VendorDomain {
+                    domain: "sendgrid.net".to_string(), // different base — kept
+                    source_type: RecordType::DnsTxtSpf,
+                    raw_record: "v=spf1 include:sendgrid.net".to_string(),
+                },
+            ],
+            vec![],
+        )];
+        let (result, txt_count, cname_count) =
+            filter_subfinder_results(subdomain_results, "example.com");
+        assert_eq!(result.len(), 1);
+        assert_eq!(txt_count, 1);
+        assert_eq!(cname_count, 0);
+        assert_eq!(result[0].domain, "sendgrid.net");
+        assert!(result[0].raw_record.contains("mail.example.com"));
+        assert!(result[0].raw_record.contains("certspotter"));
+    }
+
+    #[test]
+    fn test_filter_subfinder_results_includes_cname_cross_domain() {
+        let subdomain_results = vec![(
+            "app.example.com".to_string(),
+            "subfinder".to_string(),
+            vec![],
+            vec![
+                (
+                    "app.example.com.cdn.cloudfront.net".to_string(),
+                    "cloudfront.net".to_string(),
+                ),
+                (
+                    "app.example.com.example.com".to_string(),
+                    "example.com".to_string(),
+                ),
+            ],
+        )];
+        let (result, txt_count, cname_count) =
+            filter_subfinder_results(subdomain_results, "example.com");
+        // Both CNAMEs are counted (the function doesn't filter by base for CNAMEs)
+        assert_eq!(cname_count, 2);
+        assert_eq!(txt_count, 0);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "cloudfront.net");
+        assert_eq!(result[0].source_type, RecordType::SubfinderDiscovery);
+        assert!(result[0].raw_record.contains("CNAMEs to"));
+    }
+
+    #[test]
+    fn test_filter_subfinder_results_empty_input() {
+        let (result, txt, cname) = filter_subfinder_results(vec![], "example.com");
+        assert!(result.is_empty());
+        assert_eq!(txt, 0);
+        assert_eq!(cname, 0);
+    }
+
+    #[test]
+    fn test_filter_confirmed_tenants_only_confirmed_and_likely() {
+        use crate::discovery::saas_tenant::TenantProbeResult;
+        let tenants = vec![
+            TenantProbeResult {
+                platform_name: "Slack".to_string(),
+                vendor_domain: "slack.com".to_string(),
+                tenant_url: "https://example.slack.com".to_string(),
+                status: TenantStatus::Confirmed,
+                evidence: "HTTP 200".to_string(),
+            },
+            TenantProbeResult {
+                platform_name: "Jira".to_string(),
+                vendor_domain: "atlassian.com".to_string(),
+                tenant_url: "https://example.atlassian.net".to_string(),
+                status: TenantStatus::Likely,
+                evidence: "redirect".to_string(),
+            },
+            TenantProbeResult {
+                platform_name: "Notion".to_string(),
+                vendor_domain: "notion.so".to_string(),
+                tenant_url: "https://example.notion.site".to_string(),
+                status: TenantStatus::NotFound,
+                evidence: "HTTP 404".to_string(),
+            },
+            TenantProbeResult {
+                platform_name: "Linear".to_string(),
+                vendor_domain: "linear.app".to_string(),
+                tenant_url: "https://linear.app/example".to_string(),
+                status: TenantStatus::Unknown,
+                evidence: "timeout".to_string(),
+            },
+        ];
+        let result = filter_confirmed_tenants(&tenants);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "slack.com");
+        assert_eq!(result[0].source_type, RecordType::SaasTenantProbe);
+        assert!(result[0].raw_record.contains("Confirmed"));
+        assert_eq!(result[1].domain, "atlassian.com");
+        assert!(result[1].raw_record.contains("Likely"));
+    }
+
+    #[test]
+    fn test_filter_confirmed_tenants_empty_when_all_not_found() {
+        use crate::discovery::saas_tenant::TenantProbeResult;
+        let tenants = vec![TenantProbeResult {
+            platform_name: "Notion".to_string(),
+            vendor_domain: "notion.so".to_string(),
+            tenant_url: "https://example.notion.site".to_string(),
+            status: TenantStatus::NotFound,
+            evidence: "404".to_string(),
+        }];
+        let result = filter_confirmed_tenants(&tenants);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_convert_ct_results_maps_fields() {
+        use crate::discovery::ct_logs::CtDiscoveryResult;
+        let input = vec![
+            CtDiscoveryResult {
+                domain: "cdn.vendor.com".to_string(),
+                source: "crt.sh".to_string(),
+                certificate_info: "CN=*.vendor.com, Issuer=Let's Encrypt".to_string(),
+            },
+            CtDiscoveryResult {
+                domain: "api.other.io".to_string(),
+                source: "crt.sh".to_string(),
+                certificate_info: "CN=api.other.io".to_string(),
+            },
+        ];
+        let result = convert_ct_results(input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "cdn.vendor.com");
+        assert_eq!(result[0].source_type, RecordType::CtLogDiscovery);
+        assert_eq!(
+            result[0].raw_record,
+            "CN=*.vendor.com, Issuer=Let's Encrypt"
+        );
+        assert_eq!(result[1].domain, "api.other.io");
+    }
+
+    #[test]
+    fn test_convert_web_traffic_results_maps_source_types() {
+        let input = vec![
+            WebTrafficResult {
+                vendor_domain: "pendo.io".to_string(),
+                source: WebTrafficSource::PageSource,
+                evidence: "<script src=\"https://cdn.pendo.io/agent.js\">".to_string(),
+            },
+            WebTrafficResult {
+                vendor_domain: "segment.io".to_string(),
+                source: WebTrafficSource::NetworkTraffic,
+                evidence: "XHR to https://api.segment.io/v1/track".to_string(),
+            },
+        ];
+        let result = convert_web_traffic_results(input);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].domain, "pendo.io");
+        assert_eq!(result[0].source_type, RecordType::WebTrafficSource);
+        assert!(result[0].raw_record.contains("pendo.io"));
+        assert_eq!(result[1].domain, "segment.io");
+        assert_eq!(result[1].source_type, RecordType::WebTrafficNetwork);
+    }
+
+    #[test]
+    fn test_compute_buffer_size_minimum_is_two() {
+        assert_eq!(compute_buffer_size(1, 1), 2);
+        assert_eq!(compute_buffer_size(0, 0), 2);
+        assert_eq!(compute_buffer_size(1, 100), 2);
+    }
+
+    #[test]
+    fn test_compute_buffer_size_takes_min_of_inputs() {
+        assert_eq!(compute_buffer_size(10, 5), 5);
+        assert_eq!(compute_buffer_size(5, 10), 5);
+        assert_eq!(compute_buffer_size(50, 50), 50);
+    }
+
+    #[test]
+    fn test_compute_progress_position_boundaries() {
+        // First vendor (index 0) of 10: 30 + (1*70)/10 = 37
+        assert_eq!(compute_progress_position(0, 10), 37);
+        // Last vendor (index 9) of 10: 30 + (10*70)/10 = 100
+        assert_eq!(compute_progress_position(9, 10), 100);
+        // Single vendor: 30 + (1*70)/1 = 100
+        assert_eq!(compute_progress_position(0, 1), 100);
+        // Middle vendor (index 4) of 10: 30 + (5*70)/10 = 65
+        assert_eq!(compute_progress_position(4, 10), 65);
+    }
+
+    #[test]
+    fn test_should_checkpoint_every_5_and_final() {
+        assert!(should_checkpoint(5, 100));
+        assert!(should_checkpoint(10, 100));
+        assert!(should_checkpoint(15, 100));
+        assert!(!should_checkpoint(1, 100));
+        assert!(!should_checkpoint(3, 100));
+        assert!(!should_checkpoint(7, 100));
+        // Final vendor always checkpoints
+        assert!(should_checkpoint(13, 13));
+        assert!(should_checkpoint(1, 1));
+    }
+
+    #[test]
+    fn test_compute_pressure_delay_ms_tiers() {
+        assert_eq!(compute_pressure_delay_ms(0), 0);
+        assert_eq!(compute_pressure_delay_ms(1), 25);
+        assert_eq!(compute_pressure_delay_ms(2), 250);
+        assert_eq!(compute_pressure_delay_ms(3), 250);
+        assert_eq!(compute_pressure_delay_ms(255), 250);
+    }
+
+    #[test]
+    fn test_should_skip_self_reference_same_base() {
+        assert!(should_skip_self_reference(
+            "mail.example.com",
+            "example.com"
+        ));
+        assert!(should_skip_self_reference("example.com", "www.example.com"));
+        assert!(should_skip_self_reference("example.com", "example.com"));
+    }
+
+    #[test]
+    fn test_should_skip_self_reference_different_base() {
+        assert!(!should_skip_self_reference("stripe.com", "example.com"));
+        assert!(!should_skip_self_reference(
+            "mail.google.com",
+            "example.com"
+        ));
+    }
+
+    #[test]
+    fn test_resolve_orgs_from_vendors_with_entries() {
+        let mut map = HashMap::new();
+        map.insert("example.com".to_string(), "Example Inc.".to_string());
+        map.insert("stripe.com".to_string(), "Stripe, Inc.".to_string());
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
+        assert_eq!(customer_org, "Example Inc.");
+        assert_eq!(vendor_org, "Stripe, Inc.");
+    }
+
+    #[test]
+    fn test_resolve_orgs_from_vendors_with_fallback() {
+        let map = HashMap::new(); // empty
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "stripe.com");
+        assert_eq!(customer_org, "example.com");
+        assert_eq!(vendor_org, "stripe.com");
+    }
+
+    #[test]
+    fn test_resolve_orgs_from_vendors_partial_entries() {
+        let mut map = HashMap::new();
+        map.insert("example.com".to_string(), "Example Corp".to_string());
+        let (customer_org, vendor_org) =
+            resolve_orgs_from_vendors(&map, "example.com", "unknown.io");
+        assert_eq!(customer_org, "Example Corp");
+        assert_eq!(vendor_org, "unknown.io"); // fallback
+    }
+
+    #[test]
+    fn test_should_stop_at_common_denominator_combinations() {
+        // No max_depth + common denominator → stop
+        assert!(should_stop_at_common_denominator(None, "google.com"));
+        assert!(should_stop_at_common_denominator(None, "amazonaws.com"));
+        // No max_depth + NOT common denominator → don't stop
+        assert!(!should_stop_at_common_denominator(None, "stripe.com"));
+        // With max_depth (even if common denominator) → don't stop (depth controls recursion)
+        assert!(!should_stop_at_common_denominator(Some(3), "google.com"));
+        assert!(!should_stop_at_common_denominator(Some(5), "stripe.com"));
     }
 }

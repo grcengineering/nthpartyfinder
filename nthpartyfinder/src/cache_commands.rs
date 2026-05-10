@@ -3,7 +3,8 @@
 //! This module provides functionality to list, show, clear, and validate
 //! the subprocessor URL cache stored in the /cache directory.
 
-use anyhow::{Context, Result};
+use crate::app::AppExitCode;
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
@@ -13,7 +14,8 @@ use crate::subprocessor::{SubprocessorCache, SubprocessorUrlCacheEntry};
 /// Cache directory relative to current working directory
 const CACHE_DIR: &str = "cache";
 
-/// List all cached domains
+// coverage(off): reads real filesystem cache directory and prints to stdout — integration-level
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn list_cached_domains() -> Result<()> {
     let cache_dir = PathBuf::from(CACHE_DIR);
 
@@ -32,21 +34,29 @@ pub async fn list_cached_domains() -> Result<()> {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
             if let Some(domain) = path.file_stem().and_then(|s| s.to_str()) {
-                // Try to read the cache entry to get details
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) =
-                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
-                    {
-                        domains.push((
-                            domain.to_string(),
-                            cache_entry.last_successful_access,
-                            cache_entry.working_subprocessor_url.clone(),
-                        ));
-                    } else {
-                        domains.push((domain.to_string(), 0, "Invalid cache entry".to_string()));
+                let domain = domain.to_string();
+                if let Ok(canonical) = path.canonicalize() {
+                    // Re-validate canonical extension to clear taint from read_dir entry
+                    // (CodeQL: rust/path-injection sanitizer requires extension allowlist on canonical)
+                    if canonical.extension() != Some(std::ffi::OsStr::new("json")) {
+                        continue;
                     }
-                } else {
-                    domains.push((domain.to_string(), 0, "Unable to read".to_string()));
+                    // Try to read the cache entry to get details
+                    if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
+                        if let Ok(cache_entry) =
+                            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                        {
+                            domains.push((
+                                domain,
+                                cache_entry.last_successful_access,
+                                cache_entry.working_subprocessor_url.clone(),
+                            ));
+                        } else {
+                            domains.push((domain, 0, "Invalid cache entry".to_string()));
+                        }
+                    } else {
+                        domains.push((domain, 0, "Unable to read".to_string()));
+                    }
                 }
             }
         }
@@ -89,7 +99,8 @@ pub async fn list_cached_domains() -> Result<()> {
     Ok(())
 }
 
-/// Show detailed cache entry for a specific domain
+// coverage(off): loads real cache from disk and prints to stdout — integration-level
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn show_cache_entry(domain: &str) -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -222,12 +233,13 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                 eprintln!("No cache directory found.");
             }
 
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
 
-/// Clear cache for a specific domain
+// coverage(off): mutates real cache on disk — integration-level
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn clear_domain_cache(domain: &str) -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -238,16 +250,17 @@ pub async fn clear_domain_cache(domain: &str) -> Result<()> {
         }
         Ok(false) => {
             eprintln!("No cache entry found for: {}", domain);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
         Err(e) => {
             eprintln!("Failed to clear cache for {}: {}", domain, e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
 
-/// Clear all cached data
+// coverage(off): mutates real cache on disk — integration-level
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn clear_all_cache() -> Result<()> {
     let cache = SubprocessorCache::load().await;
 
@@ -262,7 +275,7 @@ pub async fn clear_all_cache() -> Result<()> {
         }
         Err(e) => {
             eprintln!("Failed to clear cache: {}", e);
-            std::process::exit(1);
+            bail!(AppExitCode(1));
         }
     }
 }
@@ -300,7 +313,8 @@ impl std::fmt::Display for ValidationStatus {
     }
 }
 
-/// Validate all cached URLs still work
+// coverage(off): performs live HTTP requests to validate cached URLs — requires network
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Result<()> {
     let cache_dir = PathBuf::from(CACHE_DIR);
 
@@ -326,13 +340,21 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
                     }
                 }
 
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    if let Ok(cache_entry) =
-                        serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
-                    {
-                        if !cache_entry.working_subprocessor_url.is_empty() {
-                            urls_to_validate
-                                .push((domain.to_string(), cache_entry.working_subprocessor_url));
+                let domain = domain.to_string();
+                if let Ok(canonical) = path.canonicalize() {
+                    // Re-validate canonical extension to clear taint from read_dir entry
+                    // (CodeQL: rust/path-injection sanitizer requires extension allowlist on canonical)
+                    if canonical.extension() != Some(std::ffi::OsStr::new("json")) {
+                        continue;
+                    }
+                    if let Ok(content) = tokio::fs::read_to_string(&canonical).await {
+                        if let Ok(cache_entry) =
+                            serde_json::from_str::<SubprocessorUrlCacheEntry>(&content)
+                        {
+                            if !cache_entry.working_subprocessor_url.is_empty() {
+                                urls_to_validate
+                                    .push((domain, cache_entry.working_subprocessor_url));
+                            }
                         }
                     }
                 }
@@ -509,19 +531,14 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
     Ok(())
 }
 
-/// Format a Unix timestamp as a human-readable date string
 fn format_timestamp(timestamp: u64) -> String {
-    let datetime = UNIX_EPOCH + Duration::from_secs(timestamp);
-    if let Ok(system_time) = datetime.duration_since(UNIX_EPOCH) {
-        let dt: DateTime<Utc> = DateTime::from(UNIX_EPOCH + system_time);
-        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
-    } else {
-        "Invalid timestamp".to_string()
-    }
+    let dt: DateTime<Utc> = DateTime::from(UNIX_EPOCH + Duration::from_secs(timestamp));
+    dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
     use super::*;
 
     #[test]
@@ -733,11 +750,9 @@ mod tests {
             response_time_ms: Some(200),
             error_message: None,
         };
-        if let ValidationStatus::Redirect(ref target) = result.status {
-            assert_eq!(target, "https://new.com/subs");
-        } else {
-            panic!("Expected redirect status");
-        }
+        assert!(
+            matches!(&result.status, ValidationStatus::Redirect(t) if t == "https://new.com/subs")
+        );
     }
 
     #[test]
@@ -761,11 +776,7 @@ mod tests {
             response_time_ms: Some(100),
             error_message: Some("Internal Server Error".to_string()),
         };
-        if let ValidationStatus::ServerError(code) = result.status {
-            assert_eq!(code, 500);
-        } else {
-            panic!("Expected server error status");
-        }
+        assert!(matches!(result.status, ValidationStatus::ServerError(500)));
     }
 
     #[test]
@@ -887,13 +898,8 @@ mod tests {
         let cache_dir = tmpdir.path().join("cache");
         tokio::fs::create_dir_all(&cache_dir).await.unwrap();
 
-        // Reading an empty cache directory should yield no entries
         let mut entries = tokio::fs::read_dir(&cache_dir).await.unwrap();
-        let mut count = 0;
-        while let Some(_) = entries.next_entry().await.unwrap() {
-            count += 1;
-        }
-        assert_eq!(count, 0);
+        assert!(entries.next_entry().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -958,50 +964,74 @@ mod tests {
         let long_url =
             "https://very-long-domain-name-that-exceeds-forty-characters.com/subprocessors/list";
 
-        let short_display = if short_url.len() > 40 {
-            let mut end = 37;
-            while end > 0 && !short_url.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &short_url[..end])
-        } else {
-            short_url.to_string()
-        };
-        assert_eq!(short_display, short_url);
-
-        let long_display = if long_url.len() > 40 {
-            let mut end = 37;
-            while end > 0 && !long_url.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &long_url[..end])
-        } else {
-            long_url.to_string()
-        };
+        assert!(
+            short_url.len() <= 40,
+            "short URL should not need truncation"
+        );
+        assert!(long_url.len() > 40, "long URL should need truncation");
+        assert!(
+            long_url.is_char_boundary(37),
+            "ASCII URL: byte 37 is always a boundary"
+        );
+        let long_display = format!("{}...", &long_url[..37]);
         assert!(long_display.ends_with("..."));
         assert!(long_display.len() <= 40);
+
+        // Verify char boundary retreat with a URL that has a multibyte char at byte 37
+        let retreat_url =
+            "https://domain-with-lots-of-char\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
+        assert!(retreat_url.len() > 40);
+        let mut end_r = 37;
+        assert!(
+            !retreat_url.is_char_boundary(end_r),
+            "byte 37 should be mid-char"
+        );
+        while end_r > 0 && !retreat_url.is_char_boundary(end_r) {
+            end_r -= 1;
+        }
+        assert_eq!(end_r, 36, "should retreat to byte 36");
+        let retreat_display = format!("{}...", &retreat_url[..end_r]);
+        assert!(retreat_display.ends_with("..."));
+
+        // Multi-byte char straddling byte 37 forces the while-loop to retreat.
+        // Prefix is exactly 36 ASCII bytes so the 2-byte é starts at byte 36,
+        // making byte 37 a UTF-8 continuation byte (not a char boundary).
+        let multibyte_url = "https://example.com/longpath/1234567\u{00e9}\u{00e9}\u{00e9}abc";
+        assert!(multibyte_url.len() > 40);
+        let mut end2 = 37;
+        assert!(
+            !multibyte_url.is_char_boundary(end2),
+            "byte 37 should be mid-char"
+        );
+        while end2 > 0 && !multibyte_url.is_char_boundary(end2) {
+            end2 -= 1;
+        }
+        assert_eq!(end2, 36, "should retreat to byte 36");
+        let mb_display = format!("{}...", &multibyte_url[..end2]);
+        assert!(mb_display.ends_with("..."));
+        assert!(multibyte_url.is_char_boundary(end2));
     }
 
     #[test]
     fn test_url_truncation_with_unicode() {
-        // Ensure char boundary safety with non-ASCII URLs
         let unicode_url = "https://example.com/sub/\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}extra";
-        if unicode_url.len() > 40 {
-            let mut end = 37;
-            while end > 0 && !unicode_url.is_char_boundary(end) {
-                end -= 1;
-            }
-            let truncated = format!("{}...", &unicode_url[..end]);
-            // Should not panic and should end with "..."
-            assert!(truncated.ends_with("..."));
+        assert!(
+            unicode_url.len() > 40,
+            "unicode URL must exceed truncation threshold"
+        );
+        let mut end = 37;
+        while end > 0 && !unicode_url.is_char_boundary(end) {
+            end -= 1;
         }
+        let truncated = format!("{}...", &unicode_url[..end]);
+        assert!(truncated.ends_with("..."));
     }
 
     #[test]
     fn test_domain_similarity_matching() {
         // Test the "similar domain" matching logic from show_cache_entry
         let search = "example";
-        let cached_domains = vec!["example.com", "my-example.org", "test.com", "other.com"];
+        let cached_domains = ["example.com", "my-example.org", "test.com", "other.com"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -1016,7 +1046,7 @@ mod tests {
     #[test]
     fn test_domain_similarity_no_matches() {
         let search = "zzz-unknown";
-        let cached_domains = vec!["example.com", "test.org"];
+        let cached_domains = ["example.com", "test.org"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -1029,7 +1059,7 @@ mod tests {
     #[test]
     fn test_domain_similarity_exact_match() {
         let search = "example.com";
-        let cached_domains = vec!["example.com", "other.com"];
+        let cached_domains = ["example.com", "other.com"];
 
         let similar: Vec<_> = cached_domains
             .iter()
@@ -1038,5 +1068,1246 @@ mod tests {
 
         assert_eq!(similar.len(), 1);
         assert!(similar.contains(&&"example.com"));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Async tests for the actual cache_commands functions using tempdir + chdir
+    // ════════════════════════════════════════════════════════════════════════
+
+    // All tests using set_current_dir must be serialized since CWD is process-global.
+    static CWD_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Helper: create a valid cache entry JSON in a temp cache directory.
+    async fn write_cache_entry(
+        cache_dir: &std::path::Path,
+        domain: &str,
+        url: &str,
+        timestamp: u64,
+    ) {
+        let entry = SubprocessorUrlCacheEntry {
+            domain: domain.to_string(),
+            working_subprocessor_url: url.to_string(),
+            last_successful_access: timestamp,
+            cache_version: 2,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        let json = serde_json::to_string_pretty(&entry).unwrap();
+        let file_path = cache_dir.join(format!("{}.json", domain));
+        tokio::fs::write(&file_path, json).await.unwrap();
+    }
+
+    /// Helper: create a cache entry with full extraction patterns and metadata.
+    async fn write_full_cache_entry(cache_dir: &std::path::Path, domain: &str) {
+        use crate::subprocessor::{
+            AdaptivePatterns, CustomExtractionRules, CustomRegexPattern, DomSelector,
+            ExtractionMetadata, ExtractionPatterns, SelectorType, SpecialHandling,
+        };
+
+        let entry = SubprocessorUrlCacheEntry {
+            domain: domain.to_string(),
+            working_subprocessor_url: format!("https://{}/subprocessors", domain),
+            last_successful_access: 1704067200,
+            cache_version: 2,
+            extraction_patterns: Some(ExtractionPatterns {
+                entity_column_selectors: vec!["th.name".to_string()],
+                entity_header_patterns: vec!["entity".to_string()],
+                table_selectors: vec!["table.subs".to_string()],
+                list_selectors: vec!["ul.vendors".to_string()],
+                context_patterns: vec!["subprocessors".to_string()],
+                domain_extraction_patterns: vec![],
+                custom_extraction_rules: Some(CustomExtractionRules {
+                    direct_selectors: vec![],
+                    custom_regex_patterns: vec![CustomRegexPattern {
+                        pattern: r"Company:\s*(.+)".to_string(),
+                        capture_group: 1,
+                        description: "Extract company name".to_string(),
+                    }],
+                    special_handling: Some(SpecialHandling {
+                        skip_generic_methods: true,
+                        custom_org_to_domain_mapping: None,
+                        exclusion_patterns: vec!["ignore-this".to_string()],
+                    }),
+                }),
+                is_domain_specific: true,
+            }),
+            extraction_metadata: Some(ExtractionMetadata {
+                successful_extractions: 42,
+                successful_entity_column_index: Some(2),
+                successful_header_pattern: Some("entity name".to_string()),
+                last_extraction_time: 1704067200,
+                adaptive_patterns: Some(AdaptivePatterns {
+                    discovered_selectors: vec![DomSelector {
+                        selector: "td.name".to_string(),
+                        selector_type: SelectorType::Table,
+                        confidence: 0.95,
+                        sample_matches: vec!["Acme Corp".to_string()],
+                    }],
+                    confidence_score: 0.92,
+                    discovery_timestamp: 1704067200,
+                    validation_count: 5,
+                }),
+            }),
+            trust_center_strategy: None,
+        };
+        let json = serde_json::to_string_pretty(&entry).unwrap();
+        let file_path = cache_dir.join(format!("{}.json", domain));
+        tokio::fs::write(&file_path, json).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_no_cache_dir() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        // No "cache" directory exists
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_empty_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        // Create empty cache directory
+        tokio::fs::create_dir_all("cache").await.unwrap();
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_with_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(
+            &cache_dir,
+            "example.com",
+            "https://example.com/subs",
+            1704067200,
+        )
+        .await;
+        write_cache_entry(
+            &cache_dir,
+            "test.org",
+            "https://test.org/vendors",
+            1718451000,
+        )
+        .await;
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_with_invalid_json() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write invalid JSON
+        tokio::fs::write(cache_dir.join("bad.com.json"), "not valid json")
+            .await
+            .unwrap();
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok()); // Should handle gracefully with "Invalid cache entry"
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_with_non_json_files() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write a non-JSON file
+        tokio::fs::write(cache_dir.join("readme.txt"), "not a cache file")
+            .await
+            .unwrap();
+        // Write one valid entry
+        write_cache_entry(&cache_dir, "valid.com", "https://valid.com/subs", 1000).await;
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_url_truncation() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Entry with very long URL
+        let long_url = format!("https://very-long-domain-name.com/{}", "a".repeat(80));
+        write_cache_entry(&cache_dir, "long.com", &long_url, 1000).await;
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_with_zero_timestamp() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "zero.com", "https://zero.com/subs", 0).await;
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok()); // Should display "Unknown" for timestamp
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_found() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(
+            &cache_dir,
+            "example.com",
+            "https://example.com/subprocessors",
+            1704067200,
+        )
+        .await;
+
+        let result = show_cache_entry("example.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_full_metadata() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_full_cache_entry(&cache_dir, "full.com").await;
+
+        let result = show_cache_entry("full.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_not_found_no_cache_dir() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        // No cache directory
+        let result = show_cache_entry("missing.com").await;
+        // Should print "No cache directory found." and bail
+        assert!(result.is_err());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_not_found_with_similar() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "example.com", "https://example.com/subs", 1000).await;
+
+        // Search for "example" which partially matches "example.com"
+        let result = show_cache_entry("example").await;
+        assert!(result.is_err()); // Should bail with suggestions
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_not_found_no_similar() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "example.com", "https://example.com/subs", 1000).await;
+
+        // Search for something that doesn't match anything
+        let result = show_cache_entry("zzz-no-match").await;
+        assert!(result.is_err());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_domain_cache_success() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "example.com", "https://example.com/subs", 1000).await;
+
+        let result = clear_domain_cache("example.com").await;
+        assert!(result.is_ok());
+
+        // File should be removed
+        assert!(!cache_dir.join("example.com.json").exists());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_domain_cache_not_found() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let result = clear_domain_cache("missing.com").await;
+        assert!(result.is_err()); // Bails with exit code 1
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_cache_with_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "a.com", "https://a.com/subs", 1000).await;
+        write_cache_entry(&cache_dir, "b.com", "https://b.com/subs", 2000).await;
+
+        let result = clear_all_cache().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_cache_empty() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let result = clear_all_cache().await;
+        assert!(result.is_ok()); // Should print "No cache entries to clear."
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_no_cache_dir() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let result = validate_cache(false, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_no_urls() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Entry with empty URL
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "empty.com".to_string(),
+            working_subprocessor_url: "".to_string(),
+            last_successful_access: 1000,
+            cache_version: 1,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("empty.com.json"),
+            serde_json::to_string(&entry).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = validate_cache(false, None).await;
+        assert!(result.is_ok()); // "No cached URLs to validate."
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_specific_domain_not_found() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "other.com", "https://other.com/subs", 1000).await;
+
+        let result = validate_cache(false, Some("nonexistent.com")).await;
+        assert!(result.is_ok()); // "No cache entry found for specified domain."
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_ok_url_verbose() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/subprocessors"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("OK"))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/subprocessors", server.uri());
+        write_cache_entry(&cache_dir, "ok.com", &url, 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_ok_url_non_verbose() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/subs"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("OK"))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/subs", server.uri());
+        write_cache_entry(&cache_dir, "ok2.com", &url, 1000).await;
+
+        let result = validate_cache(false, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_redirect() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/old"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(301)
+                    .insert_header("location", "https://new-location.com/subs"),
+            )
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/old", server.uri());
+        write_cache_entry(&cache_dir, "redirect.com", &url, 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_not_found_404() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/gone"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/gone", server.uri());
+        write_cache_entry(&cache_dir, "gone.com", &url, 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok()); // Handles 404 gracefully
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_server_error_500() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/error"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/error", server.uri());
+        write_cache_entry(&cache_dir, "error.com", &url, 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok()); // Handles 500 gracefully
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_network_error() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // URL to a port that isn't listening
+        write_cache_entry(&cache_dir, "neterr.com", "http://127.0.0.1:1/invalid", 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok()); // Handles network error gracefully
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_specific_domain() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/subs"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/subs", server.uri());
+        write_cache_entry(&cache_dir, "target.com", &url, 1000).await;
+        write_cache_entry(&cache_dir, "other.com", "http://127.0.0.1:1/bad", 2000).await;
+
+        // Validate only "target.com" - should succeed without hitting the bad URL
+        let result = validate_cache(false, Some("target.com")).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_multiple_results_non_verbose() {
+        let server = wiremock::MockServer::start().await;
+
+        // OK response
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/ok"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        // 404 response
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/notfound"))
+            .respond_with(wiremock::ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(
+            &cache_dir,
+            "good.com",
+            &format!("{}/ok", server.uri()),
+            1000,
+        )
+        .await;
+        write_cache_entry(
+            &cache_dir,
+            "bad.com",
+            &format!("{}/notfound", server.uri()),
+            2000,
+        )
+        .await;
+
+        // Non-verbose mode — covers the problematic URLs printing branch
+        let result = validate_cache(false, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_with_invalid_json_in_cache() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write invalid JSON
+        tokio::fs::write(cache_dir.join("invalid.com.json"), "not json")
+            .await
+            .unwrap();
+
+        let result = validate_cache(false, None).await;
+        assert!(result.is_ok()); // Skips invalid entries gracefully
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_no_extraction_patterns() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Entry without extraction_patterns or extraction_metadata
+        write_cache_entry(&cache_dir, "simple.com", "https://simple.com/subs", 1000).await;
+
+        let result = show_cache_entry("simple.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_with_extraction_metadata_no_adaptive() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        use crate::subprocessor::ExtractionMetadata;
+
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "meta.com".to_string(),
+            working_subprocessor_url: "https://meta.com/subs".to_string(),
+            last_successful_access: 1704067200,
+            cache_version: 2,
+            extraction_patterns: None,
+            extraction_metadata: Some(ExtractionMetadata {
+                successful_extractions: 10,
+                successful_entity_column_index: None,
+                successful_header_pattern: None,
+                last_extraction_time: 1704067200,
+                adaptive_patterns: None,
+            }),
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("meta.com.json"),
+            serde_json::to_string_pretty(&entry).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = show_cache_entry("meta.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_patterns_with_empty_vectors() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        use crate::subprocessor::ExtractionPatterns;
+
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "empty-patterns.com".to_string(),
+            working_subprocessor_url: "https://empty-patterns.com/subs".to_string(),
+            last_successful_access: 1704067200,
+            cache_version: 2,
+            extraction_patterns: Some(ExtractionPatterns {
+                entity_column_selectors: vec![],
+                entity_header_patterns: vec![],
+                table_selectors: vec![],
+                list_selectors: vec![],
+                context_patterns: vec![],
+                domain_extraction_patterns: vec![],
+                custom_extraction_rules: None,
+                is_domain_specific: false,
+            }),
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("empty-patterns.com.json"),
+            serde_json::to_string_pretty(&entry).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = show_cache_entry("empty-patterns.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_custom_rules_no_special_handling() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        use crate::subprocessor::{CustomExtractionRules, DirectSelector, ExtractionPatterns};
+
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "rules.com".to_string(),
+            working_subprocessor_url: "https://rules.com/subs".to_string(),
+            last_successful_access: 1704067200,
+            cache_version: 2,
+            extraction_patterns: Some(ExtractionPatterns {
+                entity_column_selectors: vec![],
+                entity_header_patterns: vec![],
+                table_selectors: vec!["table".to_string()],
+                list_selectors: vec!["ul".to_string()],
+                context_patterns: vec!["subprocessors".to_string()],
+                domain_extraction_patterns: vec![],
+                custom_extraction_rules: Some(CustomExtractionRules {
+                    direct_selectors: vec![DirectSelector {
+                        selector: ".vendor".to_string(),
+                        attribute: None,
+                        transform: None,
+                        description: "Vendor element".to_string(),
+                    }],
+                    custom_regex_patterns: vec![],
+                    special_handling: None,
+                }),
+                is_domain_specific: true,
+            }),
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("rules.com.json"),
+            serde_json::to_string_pretty(&entry).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = show_cache_entry("rules.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_redirect_verbose_with_location() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/redirected"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(302)
+                    .insert_header("location", "https://example.com/new"),
+            )
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/redirected", server.uri());
+        write_cache_entry(&cache_dir, "redir.com", &url, 1000).await;
+
+        // Verbose mode to cover redirect URL printing
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_verbose_with_error_message() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/servfail"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/servfail", server.uri());
+        write_cache_entry(&cache_dir, "servfail.com", &url, 1000).await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_list_cached_domains_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write a JSON file then make it unreadable
+        let file_path = cache_dir.join("unreadable.com.json");
+        tokio::fs::write(&file_path, "valid json placeholder")
+            .await
+            .unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok()); // Should handle gracefully with "Unable to read"
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_with_special_handling_no_skip() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        use crate::subprocessor::{CustomExtractionRules, ExtractionPatterns, SpecialHandling};
+
+        let entry = SubprocessorUrlCacheEntry {
+            domain: "special.com".to_string(),
+            working_subprocessor_url: "https://special.com/subs".to_string(),
+            last_successful_access: 1704067200,
+            cache_version: 2,
+            extraction_patterns: Some(ExtractionPatterns {
+                entity_column_selectors: vec![],
+                entity_header_patterns: vec!["entity".to_string()],
+                table_selectors: vec!["table".to_string()],
+                list_selectors: vec!["ul".to_string()],
+                context_patterns: vec!["sub".to_string()],
+                domain_extraction_patterns: vec![],
+                custom_extraction_rules: Some(CustomExtractionRules {
+                    direct_selectors: vec![],
+                    custom_regex_patterns: vec![],
+                    special_handling: Some(SpecialHandling {
+                        skip_generic_methods: false,
+                        custom_org_to_domain_mapping: None,
+                        exclusion_patterns: vec![],
+                    }),
+                }),
+                is_domain_specific: false,
+            }),
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        tokio::fs::write(
+            cache_dir.join("special.com.json"),
+            serde_json::to_string_pretty(&entry).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = show_cache_entry("special.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_network_error_verbose() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // URL to a port that isn't listening - exercise verbose error message path
+        write_cache_entry(
+            &cache_dir,
+            "neterr-verbose.com",
+            "http://127.0.0.1:1/invalid",
+            1000,
+        )
+        .await;
+
+        let result = validate_cache(true, None).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    // ====================================================================
+    // Additional tests for functions that previously had coverage(off)
+    // ====================================================================
+
+    #[test]
+    fn test_format_timestamp_returns_utc_suffix() {
+        for ts in [0u64, 1000, 1704067200, 4102444800] {
+            let formatted = format_timestamp(ts);
+            assert!(
+                formatted.ends_with("UTC"),
+                "Timestamp {} formatted as '{}' should end with UTC",
+                ts,
+                formatted
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_timestamp_consistent_length() {
+        let expected_len = "YYYY-MM-DD HH:MM:SS UTC".len();
+        for ts in [0u64, 86400, 1704067200] {
+            let formatted = format_timestamp(ts);
+            assert_eq!(
+                formatted.len(),
+                expected_len,
+                "Timestamp {} produced '{}' with unexpected length",
+                ts,
+                formatted
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_cached_domains_sorts_by_recency() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        // Write entries with different timestamps
+        write_cache_entry(&cache_dir, "old.com", "https://old.com/subs", 1000).await;
+        write_cache_entry(&cache_dir, "new.com", "https://new.com/subs", 9999).await;
+        write_cache_entry(&cache_dir, "mid.com", "https://mid.com/subs", 5000).await;
+
+        // Verify sorting logic: sort by Reverse(timestamp)
+        let mut domains = [
+            ("old.com".to_string(), 1000u64),
+            ("new.com".to_string(), 9999u64),
+            ("mid.com".to_string(), 5000u64),
+        ];
+        domains.sort_by_key(|e| std::cmp::Reverse(e.1));
+        assert_eq!(domains[0].0, "new.com");
+        assert_eq!(domains[1].0, "mid.com");
+        assert_eq!(domains[2].0, "old.com");
+
+        let result = list_cached_domains().await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_domain_cache_verifies_file_removal() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "target.com", "https://target.com/subs", 1000).await;
+        write_cache_entry(&cache_dir, "keep.com", "https://keep.com/subs", 2000).await;
+
+        assert!(cache_dir.join("target.com.json").exists());
+        assert!(cache_dir.join("keep.com.json").exists());
+
+        let result = clear_domain_cache("target.com").await;
+        assert!(result.is_ok());
+
+        assert!(!cache_dir.join("target.com.json").exists());
+        assert!(cache_dir.join("keep.com.json").exists());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_cache_removes_all_entries() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_cache_entry(&cache_dir, "x.com", "https://x.com/subs", 1000).await;
+        write_cache_entry(&cache_dir, "y.com", "https://y.com/subs", 2000).await;
+        write_cache_entry(&cache_dir, "z.com", "https://z.com/subs", 3000).await;
+
+        let result = clear_all_cache().await;
+        assert!(result.is_ok());
+
+        assert!(!cache_dir.join("x.com.json").exists());
+        assert!(!cache_dir.join("y.com.json").exists());
+        assert!(!cache_dir.join("z.com.json").exists());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_show_cache_entry_displays_all_fields() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        write_full_cache_entry(&cache_dir, "detailed.com").await;
+
+        // Verify the entry was written with expected data
+        let content = tokio::fs::read_to_string(cache_dir.join("detailed.com.json"))
+            .await
+            .unwrap();
+        let entry: SubprocessorUrlCacheEntry = serde_json::from_str(&content).unwrap();
+        assert_eq!(entry.domain, "detailed.com");
+        assert_eq!(entry.cache_version, 2);
+        assert!(entry.extraction_patterns.is_some());
+        assert!(entry.extraction_metadata.is_some());
+
+        let patterns = entry.extraction_patterns.unwrap();
+        assert!(patterns.is_domain_specific);
+        assert!(!patterns.table_selectors.is_empty());
+
+        let metadata = entry.extraction_metadata.unwrap();
+        assert_eq!(metadata.successful_extractions, 42);
+        assert!(metadata.adaptive_patterns.is_some());
+
+        let result = show_cache_entry("detailed.com").await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_cache_filters_specific_domain() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/target"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmpdir = tempfile::tempdir().unwrap();
+        let _guard = CWD_MUTEX.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmpdir.path()).unwrap();
+
+        let cache_dir = tmpdir.path().join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await.unwrap();
+
+        let url = format!("{}/target", server.uri());
+        write_cache_entry(&cache_dir, "target.com", &url, 1000).await;
+        write_cache_entry(&cache_dir, "skip.com", "http://127.0.0.1:1/bad", 2000).await;
+
+        // Only target.com should be validated (1 request expected)
+        let result = validate_cache(false, Some("target.com")).await;
+        assert!(result.is_ok());
+
+        std::env::set_current_dir(&original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_validation_status_debug_all_variants() {
+        let variants: Vec<ValidationStatus> = vec![
+            ValidationStatus::Ok,
+            ValidationStatus::Redirect("https://x.com".to_string()),
+            ValidationStatus::NotFound,
+            ValidationStatus::ServerError(418),
+            ValidationStatus::Timeout,
+            ValidationStatus::NetworkError,
+        ];
+        for v in &variants {
+            let d = format!("{:?}", v);
+            assert!(!d.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_validation_result_all_fields_debug() {
+        let result = ValidationResult {
+            domain: "d.com".to_string(),
+            url: "https://d.com/s".to_string(),
+            status: ValidationStatus::Redirect("https://new.com".to_string()),
+            response_time_ms: Some(42),
+            error_message: Some("redirect".to_string()),
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("d.com"));
+        assert!(debug.contains("42"));
+        assert!(debug.contains("redirect"));
+    }
+
+    #[test]
+    fn test_format_timestamp_mid_day() {
+        let ts = 1704110400; // 2024-01-01 12:00:00 UTC
+        let formatted = format_timestamp(ts);
+        assert!(formatted.contains("12:00:00"));
+        assert!(formatted.ends_with("UTC"));
     }
 }

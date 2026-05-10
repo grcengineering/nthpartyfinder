@@ -2303,6 +2303,7 @@ dependencies = [
  "gline-rs",
  "headless_chrome",
  "hickory-resolver",
+ "http",
  "indicatif 0.18.4",
  "insta",
  "once_cell",

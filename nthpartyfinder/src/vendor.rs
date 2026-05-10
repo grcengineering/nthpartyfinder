@@ -518,6 +518,145 @@ mod tests {
         assert!(!denominators.contains(&"A".to_string()));
     }
 
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    // --- RecordType serde roundtrip ---
+
+    #[test]
+    fn test_record_type_serde_roundtrip() {
+        let types = vec![
+            RecordType::DnsTxtSpf,
+            RecordType::DnsTxtVerification,
+            RecordType::DnsTxtDmarc,
+            RecordType::DnsTxtDkim,
+            RecordType::DnsSubdomain,
+            RecordType::DnsMx,
+            RecordType::DnsA,
+            RecordType::DnsAaaa,
+            RecordType::HttpWellKnown,
+            RecordType::HttpMeta,
+            RecordType::HttpFile,
+            RecordType::CertDomain,
+            RecordType::CertSan,
+            RecordType::ApiEndpoint,
+            RecordType::ApiWebhook,
+            RecordType::HttpSubprocessor,
+            RecordType::SubfinderDiscovery,
+            RecordType::SaasTenantProbe,
+            RecordType::CtLogDiscovery,
+            RecordType::TrustCenterApi,
+            RecordType::WebTrafficSource,
+            RecordType::WebTrafficNetwork,
+            RecordType::Unknown,
+        ];
+        for rt in &types {
+            let json = serde_json::to_string(rt).unwrap();
+            let deserialized: RecordType = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, rt, "Serde roundtrip failed for {:?}", rt);
+        }
+    }
+
+    // --- All evidence_priority values ---
+
+    #[test]
+    fn test_evidence_priority_all_variants() {
+        assert_eq!(RecordType::SaasTenantProbe.evidence_priority(), 7);
+        assert_eq!(RecordType::DnsTxtDmarc.evidence_priority(), 5);
+        assert_eq!(RecordType::DnsTxtDkim.evidence_priority(), 5);
+        assert_eq!(RecordType::WebTrafficNetwork.evidence_priority(), 5);
+        assert_eq!(RecordType::WebTrafficSource.evidence_priority(), 4);
+        assert_eq!(RecordType::SubfinderDiscovery.evidence_priority(), 4);
+        assert_eq!(RecordType::CtLogDiscovery.evidence_priority(), 3);
+        assert_eq!(RecordType::DnsSubdomain.evidence_priority(), 2);
+        assert_eq!(RecordType::DnsMx.evidence_priority(), 2);
+        assert_eq!(RecordType::DnsA.evidence_priority(), 2);
+        assert_eq!(RecordType::DnsAaaa.evidence_priority(), 2);
+        assert_eq!(RecordType::HttpWellKnown.evidence_priority(), 2);
+        assert_eq!(RecordType::HttpMeta.evidence_priority(), 2);
+        assert_eq!(RecordType::HttpFile.evidence_priority(), 2);
+        assert_eq!(RecordType::CertDomain.evidence_priority(), 2);
+        assert_eq!(RecordType::CertSan.evidence_priority(), 2);
+        assert_eq!(RecordType::ApiEndpoint.evidence_priority(), 2);
+        assert_eq!(RecordType::ApiWebhook.evidence_priority(), 2);
+    }
+
+    // --- All get_description variants ---
+
+    #[rstest]
+    #[case(RecordType::DnsTxtVerification, "Domain ownership verification record")]
+    #[case(RecordType::DnsTxtDmarc, "Email authentication policy record")]
+    #[case(RecordType::DnsTxtDkim, "Email signature verification record")]
+    #[case(RecordType::DnsSubdomain, "Subdomain delegation")]
+    #[case(RecordType::DnsMx, "Mail exchange record")]
+    #[case(RecordType::DnsA, "IPv4 address record")]
+    #[case(RecordType::DnsAaaa, "IPv6 address record")]
+    #[case(RecordType::HttpWellKnown, "HTTP well-known URI verification")]
+    #[case(RecordType::HttpMeta, "HTML meta tag verification")]
+    #[case(RecordType::HttpFile, "HTTP file-based verification")]
+    #[case(RecordType::CertDomain, "SSL certificate domain verification")]
+    #[case(RecordType::CertSan, "SSL certificate subject alternative name")]
+    #[case(RecordType::ApiEndpoint, "API endpoint discovery")]
+    #[case(RecordType::ApiWebhook, "Webhook endpoint registration")]
+    #[case(RecordType::SubfinderDiscovery, "Subdomain discovered via subfinder")]
+    #[case(RecordType::SaasTenantProbe, "SaaS tenant probe discovery")]
+    #[case(RecordType::CtLogDiscovery, "Certificate Transparency log discovery")]
+    #[case(
+        RecordType::WebTrafficSource,
+        "External resource referenced in webpage source"
+    )]
+    fn test_get_description_all(#[case] record_type: RecordType, #[case] expected: &str) {
+        assert_eq!(record_type.get_description(), expected);
+    }
+
+    // --- VendorRelationship without _org: prefix ---
+
+    #[test]
+    fn test_vendor_relationship_no_org_prefix() {
+        let vr = VendorRelationship::new(
+            "normal.com".to_string(),
+            "Normal Inc".to_string(),
+            1,
+            "c.com".to_string(),
+            "C".to_string(),
+            "record".to_string(),
+            RecordType::DnsTxtSpf,
+            "r.com".to_string(),
+            "R".to_string(),
+            "evidence".to_string(),
+        );
+        assert_eq!(vr.nth_party_domain, "normal.com");
+        assert_eq!(vr.nth_party_organization, "Normal Inc");
+    }
+
+    // --- VendorRelationship serde ---
+
+    #[test]
+    fn test_vendor_relationship_serde() {
+        let vr = make_vendor("test.com", "Test Inc", 2, RecordType::DnsTxtSpf);
+        let json = serde_json::to_string(&vr).unwrap();
+        let deserialized: VendorRelationship = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.nth_party_domain, "test.com");
+        assert_eq!(deserialized.nth_party_organization, "Test Inc");
+        assert_eq!(deserialized.nth_party_layer, 2);
+    }
+
+    // --- AnalysisResult get_common_denominators edge cases ---
+
+    #[test]
+    fn test_get_common_denominators_single_depth() {
+        let vendors = vec![
+            make_vendor("a.com", "A", 1, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 1, RecordType::DnsTxtSpf),
+        ];
+        let result = AnalysisResult::new(vendors);
+        let denominators = result.get_common_denominators();
+        // All at depth 1, max_depth=1, saturating_sub(1)=0, so all at depth >= 0 are included
+        assert!(denominators.contains(&"A".to_string()));
+        assert!(denominators.contains(&"B".to_string()));
+    }
+
     #[test]
     fn test_unique_organizations_sorted() {
         let vendors = vec![

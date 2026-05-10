@@ -457,7 +457,6 @@ fn resolve_canonical_asset(
     (name, domain, evidence)
 }
 
-/// Extract a domain from URL text like "https://aws.amazon.com" or "cloudflare.com".
 fn extract_domain_from_url_text(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -553,6 +552,10 @@ mod tests {
         );
         assert_eq!(extract_domain_from_url_text(""), None);
         assert_eq!(extract_domain_from_url_text("just a name"), None);
+        // URL that parses but has no host (exercises the closing-brace else path)
+        assert_eq!(extract_domain_from_url_text("data:text/plain,hello"), None);
+        // URL with host but no dot — exercises the domain validation failure path
+        assert_eq!(extract_domain_from_url_text("https://localhost"), None);
     }
 
     #[test]
@@ -927,6 +930,99 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_extract_embedded_base64_non_utf8() {
+        // Valid base64 that decodes to non-UTF-8 bytes
+        use base64::Engine;
+        let non_utf8: Vec<u8> = vec![0xFF, 0xFE, 0x80, 0x81];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&non_utf8);
+        let html = format!(r#"data-payload="{}""#, b64);
+        let pattern = r#"data-payload="([A-Za-z0-9+/=]+)""#;
+        let result = extract_embedded_base64(&html, pattern);
+        assert!(result.is_err(), "Non-UTF-8 base64 content should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not valid UTF-8"),
+            "Error should mention UTF-8 issue, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_valid_utf8_not_json() {
+        // Valid base64 that decodes to valid UTF-8 but not valid JSON
+        use base64::Engine;
+        let not_json = "this is not json at all";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(not_json.as_bytes());
+        let html = format!(r#"data-payload="{}""#, b64);
+        let pattern = r#"data-payload="([A-Za-z0-9+/=]+)""#;
+        let result = extract_embedded_base64(&html, pattern);
+        assert!(result.is_err(), "Non-JSON base64 content should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to parse decoded JSON"),
+            "Error should mention JSON parse failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_extract_embedded_base64_regex_captures_error() {
+        // Trigger a regex runtime error by exceeding fancy_regex backtracking limits.
+        // The pattern MUST use a "fancy" feature (lookahead/backreference) so fancy_regex
+        // uses its own backtracking VM rather than delegating to the `regex` crate
+        // (which uses Thompson NFA and never backtracks).
+        // Pattern: backreference \1 forces the Fancy VM; nested (a+)+ causes exponential
+        // backtracking that exceeds the default 1M backtrack limit.
+        let evil_pattern = r"((a+)+)\1b";
+        let evil_input = "a".repeat(40);
+        let result = extract_embedded_base64(&evil_input, evil_pattern);
+        assert!(
+            result.is_err(),
+            "Backtrack limit exceeded should produce an error"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Regex error"),
+            "Expected 'Regex error' from backtrack limit, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_extract_embedded_js_object_no_capture_group() {
+        // Pattern that matches but has no capture group
+        let html = r#"window.DATA = {"items": [1]};"#;
+        let pattern = r#"window\.DATA"#; // matches but no capture group
+        let result = extract_embedded_js_object(html, pattern);
+        assert!(result.is_err(), "Pattern without capture group should fail");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No capture group"),
+            "Error should mention missing capture group, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_extract_embedded_js_object_regex_captures_error() {
+        // Must use a "fancy" feature (backreference \1) to force fancy_regex's
+        // backtracking VM, then nested (a+)+ exceeds the 1M backtrack limit.
+        let evil_pattern = r"((a+)+)\1b";
+        let evil_input = "a".repeat(40);
+        let result = extract_embedded_js_object(&evil_input, evil_pattern);
+        assert!(
+            result.is_err(),
+            "Backtrack limit exceeded should produce an error"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Regex error"),
+            "Expected 'Regex error' from backtrack limit, got: {}",
+            err_msg
+        );
+    }
+
     // --- extract_hydration_data ---
 
     #[test]
@@ -1144,6 +1240,707 @@ mod tests {
         assert_eq!(evidence, Some("AWS | Cloud".to_string()));
     }
 
+    // --- execute_graphql tests with wiremock ---
+
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_execute_graphql_success() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "data": {
+                "subprocessors": [
+                    {"name": "AWS", "url": "https://aws.amazon.com", "purpose": "Cloud"}
+                ]
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(header("Content-Type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { subprocessors { name } }",
+            &std::collections::HashMap::new(),
+            Some("GetSubprocessors"),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("data").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_with_slug() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"data": {"vendors": []}});
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut variables = std::collections::HashMap::new();
+        variables.insert(
+            "slug".to_string(),
+            serde_json::Value::String("{{slug}}".to_string()),
+        );
+
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query($slug: String!) { vendors(slug: $slug) { name } }",
+            &variables,
+            None,
+            Some("acme"),
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_http_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Error"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HTTP"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_with_errors() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "data": null,
+            "errors": [{"message": "Field not found"}]
+        });
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { invalid }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("GraphQL error"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_with_empty_errors_array() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "data": {"vendors": []},
+            "errors": []
+        });
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { vendors { name } }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+
+        // Empty errors array should NOT cause an error
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_variables_non_string_not_resolved() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"data": {"vendors": []}});
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut variables = std::collections::HashMap::new();
+        variables.insert("limit".to_string(), serde_json::json!(100));
+        variables.insert(
+            "slug".to_string(),
+            serde_json::Value::String("{{slug}}".to_string()),
+        );
+
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &variables,
+            None,
+            Some("my-company"),
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    // --- execute_rest tests with wiremock ---
+
+    #[tokio::test]
+    async fn test_execute_rest_get_success() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"vendors": [{"name": "AWS"}]});
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "GET",
+            None,
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.get("vendors").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_post_with_body() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"data": []});
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "POST",
+            Some(r#"{"query": "test"}"#),
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_post_with_slug_in_body() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"data": []});
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "POST",
+            Some(r#"{"slug": "{{slug}}"}"#),
+            &std::collections::HashMap::new(),
+            Some("my-company"),
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_with_custom_headers() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({"data": []});
+
+        Mock::given(method("GET"))
+            .and(header("X-Api-Key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Api-Key".to_string(), "test-key".to_string());
+
+        let result = execute_rest(&client, &mock_server.uri(), "GET", None, &headers, None).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_http_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "GET",
+            None,
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("HTTP"));
+    }
+
+    // --- execute_strategy full integration tests with wiremock ---
+
+    #[tokio::test]
+    async fn test_execute_strategy_rest_api() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "data": {
+                "vendors": [
+                    {"name": "Cloudflare", "url": "https://cloudflare.com", "purpose": "CDN"},
+                    {"name": "Datadog", "url": "https://datadoghq.com", "purpose": "Monitoring"},
+                    {"name": "Stripe", "url": "https://stripe.com", "purpose": "Payments"}
+                ]
+            }
+        });
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::RestApi {
+                method: "GET".to_string(),
+                body_template: None,
+                headers: std::collections::HashMap::new(),
+            },
+            endpoint: EndpointConfig {
+                url: mock_server.uri(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "data.vendors".to_string(),
+                name_field: "name".to_string(),
+                url_field: Some("url".to_string()),
+                purpose_field: Some("purpose".to_string()),
+                location_field: None,
+                evidence_fields: vec!["name".to_string(), "purpose".to_string()],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::Manual,
+                3,
+                0.95,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, None, "example.com").await;
+        assert!(result.is_ok());
+        let vendors = result.unwrap();
+        assert_eq!(vendors.len(), 3);
+        assert_eq!(vendors[0].domain, "cloudflare.com");
+        assert_eq!(vendors[1].domain, "datadoghq.com");
+        assert_eq!(vendors[2].domain, "stripe.com");
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_graphql_api() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "data": {
+                "trust": {
+                    "subprocessors": [
+                        {"name": "AWS", "url": "https://aws.amazon.com"},
+                        {"name": "GCP", "url": "https://cloud.google.com"}
+                    ]
+                }
+            }
+        });
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::GraphqlApi {
+                query_template: "query { trust { subprocessors { name url } } }".to_string(),
+                variables: std::collections::HashMap::new(),
+                operation_name: None,
+            },
+            endpoint: EndpointConfig {
+                url: mock_server.uri(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "data.trust.subprocessors".to_string(),
+                name_field: "name".to_string(),
+                url_field: Some("url".to_string()),
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::Manual,
+                2,
+                0.9,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, None, "example.com").await;
+        assert!(result.is_ok());
+        let vendors = result.unwrap();
+        assert_eq!(vendors.len(), 2);
+        assert_eq!(vendors[0].domain, "aws.amazon.com");
+        assert_eq!(vendors[1].domain, "cloud.google.com");
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_embedded_base64_json() {
+        use base64::Engine;
+        let json_data = serde_json::json!({
+            "vendors": [
+                {"name": "AWS", "url": "https://aws.amazon.com"},
+                {"name": "GCP", "url": "https://cloud.google.com"},
+                {"name": "Azure", "url": "https://azure.microsoft.com"}
+            ]
+        });
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(json_data.to_string().as_bytes());
+        let html = format!(
+            r#"<html><body><div data-payload="{}"></div></body></html>"#,
+            b64
+        );
+
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::EmbeddedBase64Json {
+                locator_pattern: r#"data-payload="([A-Za-z0-9+/=]+)""#.to_string(),
+            },
+            endpoint: EndpointConfig {
+                url: String::new(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "vendors".to_string(),
+                name_field: "name".to_string(),
+                url_field: Some("url".to_string()),
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::HtmlPatternScan,
+                3,
+                0.85,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, Some(&html), "example.com").await;
+        assert!(result.is_ok());
+        let vendors = result.unwrap();
+        assert_eq!(vendors.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_embedded_js_object() {
+        let html = r#"<html><body><script>
+            window.VENDOR_REPORT = {"vendors":[
+                {"name":"AWS","url":"https://aws.amazon.com"},
+                {"name":"GCP","url":"https://cloud.google.com"}
+            ]};
+        </script></body></html>"#;
+
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::EmbeddedJsObject {
+                locator_pattern: r#"window\.VENDOR_REPORT\s*=\s*(\{[^;]+\})"#.to_string(),
+            },
+            endpoint: EndpointConfig {
+                url: String::new(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "vendors".to_string(),
+                name_field: "name".to_string(),
+                url_field: Some("url".to_string()),
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::HtmlPatternScan,
+                2,
+                0.9,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, Some(html), "example.com").await;
+        assert!(result.is_ok());
+        let vendors = result.unwrap();
+        assert_eq!(vendors.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_hydration_data() {
+        let html = r#"<html><body>
+            <script id="__NEXT_DATA__" type="application/json">
+            {"props":{"pageProps":{"vendors":[
+                {"name":"Cloudflare","url":"https://cloudflare.com"},
+                {"name":"Datadog","url":"https://datadoghq.com"},
+                {"name":"Stripe","url":"https://stripe.com"}
+            ]}}}
+            </script></body></html>"#;
+
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::HydrationData {
+                script_selector: "script#__NEXT_DATA__".to_string(),
+                data_path: "props.pageProps.vendors".to_string(),
+            },
+            endpoint: EndpointConfig {
+                url: String::new(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: String::new(),
+                name_field: "name".to_string(),
+                url_field: Some("url".to_string()),
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::HtmlPatternScan,
+                3,
+                0.9,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, Some(html), "example.com").await;
+        assert!(result.is_ok());
+        let vendors = result.unwrap();
+        assert_eq!(vendors.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_embedded_no_html_requires_browser() {
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::EmbeddedBase64Json {
+                locator_pattern: r#"test"#.to_string(),
+            },
+            endpoint: EndpointConfig {
+                url: String::new(),
+                slug: None,
+                requires_browser: true,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "data".to_string(),
+                name_field: "name".to_string(),
+                url_field: None,
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::Manual,
+                0,
+                0.5,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, None, "example.com").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires browser"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_strategy_embedded_no_html_no_browser() {
+        let strategy = TrustCenterStrategy {
+            strategy_type: StrategyType::EmbeddedJsObject {
+                locator_pattern: r#"test"#.to_string(),
+            },
+            endpoint: EndpointConfig {
+                url: String::new(),
+                slug: None,
+                requires_browser: false,
+            },
+            response_mapping: ResponseMapping {
+                subprocessors_path: "data".to_string(),
+                name_field: "name".to_string(),
+                url_field: None,
+                purpose_field: None,
+                location_field: None,
+                evidence_fields: vec![],
+            },
+            discovery_metadata: super::super::DiscoveryMetadata::new(
+                super::super::DiscoveryMethod::Manual,
+                0,
+                0.5,
+            ),
+        };
+
+        let client = reqwest::Client::new();
+        let result = execute_strategy(&strategy, &client, None, "example.com").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No HTML content"));
+    }
+
+    // --- extract_domain_from_url_text additional edge cases ---
+
+    #[test]
+    fn test_extract_domain_from_url_text_with_trailing_slash() {
+        assert_eq!(
+            extract_domain_from_url_text("https://vendor.com/"),
+            Some("vendor.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_with_path_and_query() {
+        assert_eq!(
+            extract_domain_from_url_text("https://api.vendor.com/v1/data?key=val"),
+            Some("api.vendor.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_starts_with_dot() {
+        // Domain starting with dot — URL parsing rejects it (starts_with('.') guard)
+        // but the last-resort text check accepts it since it looks domain-like
+        assert_eq!(
+            extract_domain_from_url_text(".example.com"),
+            Some(".example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_very_long() {
+        // Domain over 100 chars - should fail the last-resort length check
+        // but may succeed via URL parsing
+        let long = format!("https://{}.com/path", "a".repeat(50));
+        let result = extract_domain_from_url_text(&long);
+        assert!(result.is_some());
+    }
+
+    // --- extract_subprocessors with evidence_fields ---
+
+    #[test]
+    fn test_extract_subprocessors_with_evidence_fields() {
+        let json = serde_json::json!({
+            "items": [
+                {"name": "Vendor", "url": "https://vendor.com", "purpose": "Cloud", "location": "US"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: Some("url".to_string()),
+            purpose_field: Some("purpose".to_string()),
+            location_field: Some("location".to_string()),
+            evidence_fields: vec![
+                "name".to_string(),
+                "purpose".to_string(),
+                "location".to_string(),
+            ],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].raw_record.contains("Vendor"));
+        assert!(result[0].raw_record.contains("Cloud"));
+        assert!(result[0].raw_record.contains("US"));
+    }
+
+    #[test]
+    fn test_extract_subprocessors_evidence_field_missing_value() {
+        let json = serde_json::json!({
+            "items": [
+                {"name": "Vendor", "url": "https://vendor.com"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: Some("url".to_string()),
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec!["name".to_string(), "missing_field".to_string()],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        // Only "name" should appear in evidence (missing_field is filtered out)
+        assert_eq!(result[0].raw_record, "Vendor");
+    }
+
     // --- extract_subprocessors empty root path ---
 
     #[test]
@@ -1164,5 +1961,174 @@ mod tests {
         };
         let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_scheme_no_host() {
+        // URL with scheme but no host (data URI) - parses OK but host_str() returns None
+        assert_eq!(extract_domain_from_url_text("data:text/plain,hello"), None);
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_with_scheme_and_single_label() {
+        // URL that parses but host has no dot
+        assert_eq!(extract_domain_from_url_text("https://localhost/path"), None);
+    }
+
+    #[test]
+    fn test_extract_domain_from_url_text_malformed_scheme() {
+        // Contains :// but is not a valid URL, falls through to last-resort check
+        assert_eq!(
+            extract_domain_from_url_text("ftp://vendor.com"),
+            Some("vendor.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_canonical_asset_lookup_missing_name() {
+        // Asset with id but no name should be skipped
+        let json = serde_json::json!({
+            "_embedded": {
+                "canonical_assets": [
+                    {"id": "ca1"},
+                    {"id": "ca2", "name": "Valid Asset"}
+                ]
+            }
+        });
+        let lookup = build_canonical_asset_lookup(&json);
+        assert_eq!(lookup.len(), 1);
+        assert!(lookup.contains_key("ca2"));
+    }
+
+    #[test]
+    fn test_build_canonical_asset_lookup_missing_id() {
+        // Asset with name but no id should be skipped
+        let json = serde_json::json!({
+            "_embedded": {
+                "canonical_assets": [
+                    {"name": "No ID Asset"},
+                    {"id": "ca1", "name": "Valid"}
+                ]
+            }
+        });
+        let lookup = build_canonical_asset_lookup(&json);
+        assert_eq!(lookup.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_subprocessors_name_too_short_skipped() {
+        // Items with name shorter than 2 chars should be skipped (continue branch)
+        let json = serde_json::json!({
+            "items": [
+                {"name": "A", "url": "https://vendor.com"},
+                {"name": "AB", "url": "https://vendor2.com"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: Some("url".to_string()),
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "vendor2.com");
+    }
+
+    #[test]
+    fn test_extract_subprocessors_no_url_field_uses_org_prefix() {
+        // When url_field is None, domain should be "_org:<name>"
+        let json = serde_json::json!({
+            "items": [
+                {"name": "Vendor Name"}
+            ]
+        });
+        let mapping = ResponseMapping {
+            subprocessors_path: "items".to_string(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: vec![],
+        };
+        let result = extract_subprocessors_from_json(&json, &mapping, "example.com").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].domain, "_org:Vendor Name");
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_errors_not_array() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({
+            "data": {"vendors": []},
+            "errors": "not an array"
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+        // errors is not an array, so as_array() returns None, no error raised
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_graphql_error_without_message_field() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({
+            "data": null,
+            "errors": [{"code": "INTERNAL_ERROR"}]
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_graphql(
+            &client,
+            &mock_server.uri(),
+            "query { test }",
+            &std::collections::HashMap::new(),
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown GraphQL error"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rest_post_without_body() {
+        let mock_server = MockServer::start().await;
+        let response_body = serde_json::json!({"data": []});
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+        let client = reqwest::Client::new();
+        let result = execute_rest(
+            &client,
+            &mock_server.uri(),
+            "POST",
+            None, // No body template
+            &std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
     }
 }

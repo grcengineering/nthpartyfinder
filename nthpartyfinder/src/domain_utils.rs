@@ -258,6 +258,92 @@ mod tests {
         );
     }
 
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn test_normalize_for_dns_lookup_dmarc_prefix() {
+        assert_eq!(
+            normalize_for_dns_lookup("_dmarc.example.com"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_normalize_for_dns_lookup_no_prefix() {
+        assert_eq!(
+            normalize_for_dns_lookup("mail.example.com"),
+            "mail.example.com"
+        );
+    }
+
+    #[test]
+    fn test_normalize_for_dns_lookup_case_insensitive() {
+        assert_eq!(normalize_for_dns_lookup("_SPF.Example.COM"), "example.com");
+    }
+
+    #[test]
+    fn test_is_organizational_domain_email_prefix() {
+        assert!(!is_organizational_domain("email.example.com"));
+    }
+
+    #[test]
+    fn test_is_organizational_domain_domainkey_prefix() {
+        assert!(!is_organizational_domain("_domainkey.example.com"));
+    }
+
+    #[test]
+    fn test_is_organizational_domain_selector_prefix() {
+        assert!(!is_organizational_domain("selector1.example.com"));
+        assert!(!is_organizational_domain("selector2.example.com"));
+    }
+
+    #[test]
+    fn test_is_organizational_domain_dmarc_prefix() {
+        assert!(!is_organizational_domain("dmarc.example.com"));
+        assert!(!is_organizational_domain("_dmarc.example.com"));
+    }
+
+    #[test]
+    fn test_is_organizational_domain_smtp_prefix() {
+        assert!(!is_organizational_domain("smtp.example.com"));
+    }
+
+    #[test]
+    fn test_is_organizational_domain_empty() {
+        // empty string has no parts, first returns None -> true
+        assert!(is_organizational_domain(""));
+    }
+
+    #[test]
+    fn test_extract_base_domain_dmarc_prefix() {
+        assert_eq!(extract_base_domain("_dmarc.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_domainkey_prefix() {
+        assert_eq!(
+            extract_base_domain("selector1._domainkey.example.com"),
+            "example.com"
+        );
+        assert_eq!(
+            extract_base_domain("selector2._domainkey.example.com"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_extract_base_domain_email_prefix() {
+        assert_eq!(extract_base_domain("email.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_single_label() {
+        // Single label domain falls back to original
+        assert_eq!(extract_base_domain("localhost"), "localhost");
+    }
+
     #[test]
     fn test_normalize_for_dns_lookup() {
         assert_eq!(normalize_for_dns_lookup("_spf.mailgun.org"), "mailgun.org");
@@ -274,5 +360,29 @@ mod tests {
         assert!(is_organizational_domain("mailgun.org"));
         assert!(!is_organizational_domain("_spf.mailgun.org"));
         assert!(!is_organizational_domain("spf.mailgun.org"));
+    }
+
+    #[test]
+    fn test_extract_base_domain_smtp_underscore_prefix() {
+        assert_eq!(extract_base_domain("_smtp.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_dmarc_no_underscore_prefix() {
+        assert_eq!(extract_base_domain("dmarc.example.com"), "example.com");
+    }
+
+    #[test]
+    fn test_extract_base_domain_compound_tld_only_two_labels() {
+        // "ac.uk" is a compound TLD with only 2 labels — exercises compound_tlds guard at end
+        assert_eq!(extract_base_domain("ac.uk"), "ac.uk");
+        assert_eq!(extract_base_domain("org.uk"), "org.uk");
+        assert_eq!(extract_base_domain("com.au"), "com.au");
+    }
+
+    #[test]
+    fn test_extract_organizational_domain_exactly_three_parts_compound_tld() {
+        // "bbc.co.uk" — exactly 3 parts with compound TLD returns full domain
+        assert_eq!(extract_base_domain("bbc.co.uk"), "bbc.co.uk");
     }
 }

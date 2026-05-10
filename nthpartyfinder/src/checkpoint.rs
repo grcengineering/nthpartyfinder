@@ -507,6 +507,136 @@ mod tests {
         assert_eq!(summary.max_depth, Some(3));
     }
 
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn test_save_with_timestamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path();
+
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, None, "abc".to_string());
+        let before = checkpoint.created_at;
+
+        // Small delay to ensure timestamp differs
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        checkpoint.save_with_timestamp(output_dir).unwrap();
+
+        // Timestamp should have been updated
+        assert!(checkpoint.created_at >= before);
+
+        // File should exist and be loadable
+        let loaded = Checkpoint::load(output_dir).unwrap();
+        assert_eq!(loaded.root_domain, "example.com");
+    }
+
+    #[test]
+    fn test_checkpoint_summary_display() {
+        let mut checkpoint =
+            Checkpoint::new("example.com".to_string(), None, Some(5), "hash".to_string());
+        checkpoint.mark_completed("d1.com");
+        checkpoint.mark_completed("d2.com");
+        checkpoint.add_pending(PendingDomain {
+            domain: "p1.com".to_string(),
+            depth: 2,
+            customer_domain: "example.com".to_string(),
+            customer_organization: "Example".to_string(),
+        });
+        checkpoint.results_count = 10;
+        checkpoint.current_depth_reached = 3;
+
+        let summary = checkpoint.summary();
+        let display = format!("{}", summary);
+
+        assert!(display.contains("example.com"));
+        assert!(display.contains("2 domains processed"));
+        assert!(display.contains("1 pending"));
+        assert!(display.contains("10 results"));
+        assert!(display.contains("depth 3/5"));
+    }
+
+    #[test]
+    fn test_checkpoint_summary_display_unlimited_depth() {
+        let checkpoint = Checkpoint::new(
+            "test.com".to_string(),
+            None,
+            None, // unlimited
+            "hash".to_string(),
+        );
+
+        let summary = checkpoint.summary();
+        let display = format!("{}", summary);
+        assert!(display.contains("depth 0/unlimited"));
+    }
+
+    #[test]
+    fn test_checkpoint_incompatible_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path();
+
+        // Create a checkpoint, then manually modify its version
+        let checkpoint = Checkpoint::new("example.com".to_string(), None, None, "hash".to_string());
+        checkpoint.save(output_dir).unwrap();
+
+        // Read, modify version, and write back
+        let path = Checkpoint::get_checkpoint_path(output_dir);
+        let content = std::fs::read_to_string(&path).unwrap();
+        let modified = content.replace(
+            &format!("\"version\": {}", CHECKPOINT_VERSION),
+            &format!("\"version\": {}", CHECKPOINT_VERSION + 99),
+        );
+        std::fs::write(&path, modified).unwrap();
+
+        // Loading should fail with incompatible version
+        let result = Checkpoint::load(output_dir);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Incompatible checkpoint version"));
+    }
+
+    #[test]
+    fn test_checkpoint_delete_nonexistent_is_ok() {
+        let temp_dir = TempDir::new().unwrap();
+        let output_dir = temp_dir.path();
+
+        // No checkpoint file exists
+        assert!(!Checkpoint::exists(output_dir));
+
+        // Delete should succeed (no-op)
+        let result = Checkpoint::delete(output_dir);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_checkpoint_exists_false_initially() {
+        let temp_dir = TempDir::new().unwrap();
+        assert!(!Checkpoint::exists(temp_dir.path()));
+    }
+
+    #[test]
+    fn test_checkpoint_get_checkpoint_path() {
+        let path = Checkpoint::get_checkpoint_path(std::path::Path::new("/tmp/test"));
+        assert!(path.to_string_lossy().contains(CHECKPOINT_FILENAME));
+    }
+
+    #[test]
+    fn test_resume_mode_default() {
+        let mode = ResumeMode::default();
+        assert_eq!(mode, ResumeMode::Prompt);
+    }
+
+    #[test]
+    fn test_resume_mode_equality() {
+        assert_eq!(ResumeMode::Prompt, ResumeMode::Prompt);
+        assert_eq!(ResumeMode::AutoResume, ResumeMode::AutoResume);
+        assert_eq!(ResumeMode::Fresh, ResumeMode::Fresh);
+        assert_ne!(ResumeMode::Prompt, ResumeMode::AutoResume);
+        assert_ne!(ResumeMode::Prompt, ResumeMode::Fresh);
+    }
+
     #[test]
     fn test_pop_pending() {
         let mut checkpoint =

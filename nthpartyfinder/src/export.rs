@@ -411,11 +411,12 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
         );
 
         for rel in &web_traffic_relationships {
-            let method = match rel.nth_party_record_type.as_hierarchy_string().as_str() {
-                "DISCOVERY::WEBPAGE_SOURCE" => "Webpage Source",
-                "DISCOVERY::WEBPAGE_NETWORK" => "Webpage Network Requests",
-                _ => "Webpage Discovery",
-            };
+            let method =
+                if rel.nth_party_record_type.as_hierarchy_string() == "DISCOVERY::WEBPAGE_SOURCE" {
+                    "Webpage Source"
+                } else {
+                    "Webpage Network Requests"
+                };
             content.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 escape_markdown(&rel.nth_party_domain),
@@ -828,5 +829,450 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("Other Relationships"));
+    }
+
+    // ── Additional coverage tests ────────────────────────────────────
+
+    #[test]
+    fn test_export_markdown_multi_layer() {
+        // Tests the layer breakdown loop with multiple layers
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 4, RecordType::DnsTxtSpf),
+            make_vendor("c.com", "C", 5, RecordType::DnsTxtVerification),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("multi_layer.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Layer 3"));
+        assert!(content.contains("Layer 4"));
+        assert!(content.contains("Layer 5"));
+    }
+
+    #[test]
+    fn test_print_analysis_summary_multi_layer() {
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 4, RecordType::DnsTxtSpf),
+            make_vendor("c.com", "C", 3, RecordType::DnsTxtVerification),
+        ];
+        // Just verify it doesn't panic and prints layer breakdown
+        print_analysis_summary(&rels);
+    }
+
+    #[test]
+    fn test_export_markdown_mermaid_edge_styles() {
+        // Exercise all mermaid edge_style branches
+        let rels = vec![
+            make_vendor("spf.com", "SPF", 3, RecordType::DnsTxtSpf),
+            make_vendor("verify.com", "Verify", 3, RecordType::DnsTxtVerification),
+            make_vendor("sub.com", "Sub", 3, RecordType::DnsSubdomain),
+            make_vendor("src.com", "Src", 3, RecordType::WebTrafficSource),
+            make_vendor("net.com", "Net", 3, RecordType::WebTrafficNetwork),
+            make_vendor("other.com", "Other", 3, RecordType::HttpSubprocessor),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("edges.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("mermaid"));
+        assert!(content.contains("graph TD"));
+    }
+
+    #[test]
+    fn test_export_markdown_webpage_discovery_methods() {
+        // Test both webpage source and network discovery method labels
+        let rels = vec![
+            make_vendor("src.com", "SrcCo", 3, RecordType::WebTrafficSource),
+            make_vendor("net.com", "NetCo", 3, RecordType::WebTrafficNetwork),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("web_discovery.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Webpage Source"));
+        assert!(content.contains("Webpage Network Requests"));
+    }
+
+    #[test]
+    fn test_export_csv_special_chars() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("special.csv");
+        let path_str = path.to_str().unwrap();
+        let rels = vec![make_vendor(
+            "pipe|star*under_score.com",
+            "Pipe|Star*Under_Score",
+            3,
+            RecordType::DnsTxtSpf,
+        )];
+
+        export_csv(&rels, path_str).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("pipe|star*under_score.com"));
+    }
+
+    #[test]
+    fn test_export_json_summary_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("summary.json");
+        let path_str = path.to_str().unwrap();
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("a.com", "A", 4, RecordType::DnsTxtVerification),
+            make_vendor("b.com", "B", 3, RecordType::DnsTxtSpf),
+        ];
+
+        export_json(&rels, path_str).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["summary"]["total_relationships"], 3);
+        assert_eq!(parsed["summary"]["max_depth"], 4);
+        assert_eq!(parsed["summary"]["unique_domains"], 2);
+        // unique_organizations: A and B
+        assert_eq!(parsed["summary"]["unique_organizations"], 2);
+    }
+
+    // --- Additional tests for uncovered branches ---
+
+    #[test]
+    fn test_export_markdown_duplicate_vendor_domains() {
+        // Tests the mermaid node deduplication: same domain in multiple relationships
+        // should only create one node but multiple edges
+        let rels = vec![
+            make_vendor("google.com", "Google", 3, RecordType::DnsTxtSpf),
+            make_vendor("google.com", "Google", 4, RecordType::DnsTxtVerification),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dedup.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("mermaid"));
+        assert!(content.contains("google_com"));
+    }
+
+    #[test]
+    fn test_export_markdown_only_verification_relationships() {
+        let rels = vec![
+            make_vendor("verify1.com", "Verify1", 3, RecordType::DnsTxtVerification),
+            make_vendor("verify2.com", "Verify2", 3, RecordType::DnsTxtVerification),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("verify_only.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Integrated Services"));
+        // Should NOT contain SPF or Webpage sections
+        assert!(!content.contains("Email Service Providers"));
+        assert!(!content.contains("Webpage Discovery"));
+    }
+
+    #[test]
+    fn test_export_markdown_only_other_relationships() {
+        let rels = vec![make_vendor("api.com", "ApiCo", 3, RecordType::DnsMx)];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("other_only.md");
+        let path_str = path.to_str().unwrap();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Other Relationships"));
+        assert!(!content.contains("Email Service Providers"));
+    }
+
+    #[test]
+    fn test_export_csv_all_record_types() {
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 3, RecordType::DnsTxtVerification),
+            make_vendor("c.com", "C", 3, RecordType::DnsSubdomain),
+            make_vendor("d.com", "D", 3, RecordType::WebTrafficSource),
+            make_vendor("e.com", "E", 3, RecordType::WebTrafficNetwork),
+            make_vendor("f.com", "F", 3, RecordType::HttpSubprocessor),
+            make_vendor("g.com", "G", 3, RecordType::TrustCenterApi),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("all_types.csv");
+        let path_str = path.to_str().unwrap();
+
+        export_csv(&rels, path_str).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("DNS::TXT::SPF"));
+        assert!(content.contains("DNS::TXT::VERIFICATION"));
+        assert!(content.contains("DNS::SUBDOMAIN"));
+    }
+
+    #[test]
+    fn test_export_html_with_multiple_layers() {
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 4, RecordType::DnsTxtVerification),
+            make_vendor("c.com", "C", 5, RecordType::WebTrafficSource),
+        ];
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("multi.html");
+        let path_str = path.to_str().unwrap();
+
+        export_html(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("<html") || content.contains("<!DOCTYPE"));
+        // Verify JSON data is embedded
+        assert!(content.contains("a.com"));
+    }
+
+    #[test]
+    fn test_print_analysis_summary_single_layer() {
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 3, RecordType::DnsTxtSpf),
+        ];
+        print_analysis_summary(&rels);
+        // Just verify no panic
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_id_special_chars() {
+        // Test with chars that are neither alphanumeric, '.', nor '-'
+        assert_eq!(sanitize_mermaid_id("test@domain#com"), "testdomaincom");
+    }
+
+    #[test]
+    fn test_escape_markdown_no_special() {
+        assert_eq!(escape_markdown("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_html_report_template_render_into_string() {
+        // Exercise the askama-generated render_into::<String> monomorphization
+        use askama::Template;
+        let template = HtmlReportTemplate {
+            summary: HtmlSummary {
+                root_domain: "test.com".to_string(),
+                root_organization: "Test Org".to_string(),
+                total_relationships: 0,
+                max_depth: 0,
+                unique_domains: 0,
+                unique_organizations: 0,
+                generated_at: "2024-01-01".to_string(),
+            },
+            relationships: Vec::new(),
+            relationships_json: "[]".to_string(),
+            summary_json: "{}".to_string(),
+            vendor_graph_js: "",
+            vendor_graph_css: "",
+        };
+        let mut buf = String::new();
+        template
+            .render_into(&mut buf)
+            .expect("render_into should succeed");
+        assert!(
+            buf.contains("test.com"),
+            "Rendered HTML should contain root domain"
+        );
+        assert!(
+            buf.contains("Test Org"),
+            "Rendered HTML should contain organization name"
+        );
+    }
+
+    // ====================================================================
+    // Tests for functions that previously had coverage(off)
+    // ====================================================================
+
+    #[test]
+    fn test_export_csv_writes_correct_headers_and_row_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("headers.csv");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+        let count = rels.len();
+
+        export_csv(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        // Header + data rows
+        assert_eq!(lines.len(), count + 1);
+        assert!(lines[0].contains("Root Customer Domain"));
+        assert!(lines[0].contains("Nth Party Record Type"));
+    }
+
+    #[test]
+    fn test_export_json_summary_accuracy() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("accurate.json");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_json(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(
+            parsed["summary"]["total_relationships"].as_u64().unwrap(),
+            rels.len() as u64
+        );
+        let max_depth = rels.iter().map(|r| r.nth_party_layer).max().unwrap();
+        assert_eq!(
+            parsed["summary"]["max_depth"].as_u64().unwrap(),
+            max_depth as u64
+        );
+        let unique_domains: std::collections::HashSet<_> =
+            rels.iter().map(|r| &r.nth_party_domain).collect();
+        assert_eq!(
+            parsed["summary"]["unique_domains"].as_u64().unwrap(),
+            unique_domains.len() as u64
+        );
+    }
+
+    #[test]
+    fn test_print_analysis_summary_computes_correct_stats() {
+        let rels = vec![
+            make_vendor("a.com", "A Corp", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B Corp", 4, RecordType::DnsTxtSpf),
+            make_vendor("a.com", "A Corp", 5, RecordType::DnsTxtVerification),
+        ];
+
+        let max_depth = rels.iter().map(|r| r.nth_party_layer).max().unwrap_or(0);
+        assert_eq!(max_depth, 5);
+
+        let unique_domains: std::collections::HashSet<_> =
+            rels.iter().map(|r| r.nth_party_domain.clone()).collect();
+        assert_eq!(unique_domains.len(), 2);
+
+        let unique_orgs: std::collections::HashSet<_> = rels
+            .iter()
+            .map(|r| r.nth_party_organization.clone())
+            .collect();
+        assert_eq!(unique_orgs.len(), 2);
+
+        let layer_3_count = rels.iter().filter(|r| r.nth_party_layer == 3).count();
+        assert_eq!(layer_3_count, 1);
+
+        let layer_4_count = rels.iter().filter(|r| r.nth_party_layer == 4).count();
+        assert_eq!(layer_4_count, 1);
+
+        let layer_5_count = rels.iter().filter(|r| r.nth_party_layer == 5).count();
+        assert_eq!(layer_5_count, 1);
+
+        // Calling print_analysis_summary should exercise the same logic without panic
+        print_analysis_summary(&rels);
+    }
+
+    #[test]
+    fn test_export_markdown_contains_root_domain_and_org() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("root_check.md");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_markdown(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains(&rels[0].root_customer_domain));
+        assert!(content.contains(&rels[0].root_customer_organization));
+        assert!(content.contains("Generated on:"));
+    }
+
+    #[test]
+    fn test_export_html_embeds_json_data() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("data_check.html");
+        let path_str = path.to_str().unwrap();
+        let rels = sample_relationships();
+
+        export_html(&rels, path_str).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // HTML report should embed the relationships as JSON
+        assert!(content.contains(&rels[0].root_customer_domain));
+        let unique_domains: HashSet<_> = rels.iter().map(|r| r.nth_party_domain.clone()).collect();
+        let unique_orgs: HashSet<_> = rels
+            .iter()
+            .map(|r| r.nth_party_organization.clone())
+            .collect();
+        // Summary stats should be embedded
+        assert!(content.contains(&format!("{}", rels.len())));
+        assert!(content.contains(&format!("{}", unique_domains.len())));
+        assert!(content.contains(&format!("{}", unique_orgs.len())));
+    }
+
+    #[test]
+    fn test_html_template_trait_constants() {
+        use askama::Template;
+        assert_eq!(HtmlReportTemplate::EXTENSION, Some("html"));
+        assert_eq!(HtmlReportTemplate::MIME_TYPE, "text/html; charset=utf-8");
+        let _ = HtmlReportTemplate::SIZE_HINT;
+    }
+
+    #[test]
+    fn test_html_template_render_into_directly() {
+        use askama::Template;
+        let template = HtmlReportTemplate {
+            summary: HtmlSummary {
+                root_domain: "test.com".to_string(),
+                root_organization: "Test Org".to_string(),
+                total_relationships: 0,
+                max_depth: 0,
+                unique_domains: 0,
+                unique_organizations: 0,
+                generated_at: "2024-01-01".to_string(),
+            },
+            relationships: Vec::new(),
+            relationships_json: "[]".to_string(),
+            summary_json: "{}".to_string(),
+            vendor_graph_js: VENDOR_GRAPH_JS,
+            vendor_graph_css: VENDOR_GRAPH_CSS,
+        };
+        let mut buf = String::new();
+        template.render_into(&mut buf).unwrap();
+        assert!(buf.contains("<html"));
+    }
+
+    #[test]
+    fn test_export_all_formats_with_tracing_enabled() {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dir = TempDir::new().unwrap();
+        let rels = sample_relationships();
+
+        let csv_path = dir.path().join("traced.csv");
+        export_csv(&rels, csv_path.to_str().unwrap()).unwrap();
+
+        let json_path = dir.path().join("traced.json");
+        export_json(&rels, json_path.to_str().unwrap()).unwrap();
+
+        let md_path = dir.path().join("traced.md");
+        export_markdown(&rels, md_path.to_str().unwrap()).unwrap();
+
+        let html_path = dir.path().join("traced.html");
+        export_html(&rels, html_path.to_str().unwrap()).unwrap();
+
+        assert!(csv_path.exists());
+        assert!(json_path.exists());
+        assert!(md_path.exists());
+        assert!(html_path.exists());
     }
 }

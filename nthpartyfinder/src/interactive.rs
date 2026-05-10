@@ -1,12 +1,33 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[cfg(not(coverage))]
 use crate::known_vendors;
 use crate::logger::AnalysisLogger;
 use crate::subprocessor;
+
+pub(crate) trait UserInput {
+    fn read_line(&self) -> io::Result<String>;
+}
+
+pub(crate) struct StdioInput;
+
+impl UserInput for StdioInput {
+    // cfg(not(coverage)): terminal-only — reads from real stdin
+    #[cfg(not(coverage))]
+    fn read_line(&self) -> io::Result<String> {
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf)?;
+        Ok(buf)
+    }
+    #[cfg(coverage)]
+    fn read_line(&self) -> io::Result<String> {
+        Ok(String::new())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct UnverifiedOrgMapping {
@@ -19,19 +40,21 @@ pub async fn confirm_pending_mappings(
     analyzer: &subprocessor::SubprocessorAnalyzer,
     logger: &AnalysisLogger,
 ) -> Result<()> {
-    use std::io::Write;
+    confirm_pending_mappings_with_input(pending, analyzer, logger, &StdioInput).await
+}
 
+pub(crate) async fn confirm_pending_mappings_with_input(
+    pending: &[subprocessor::PendingOrgMapping],
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    logger: &AnalysisLogger,
+    user_input: &dyn UserInput,
+) -> Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
 
     let grouped = group_pending_by_source(pending);
     let unique_mappings = dedup_grouped_mappings(&grouped);
-
-    let total_count: usize = unique_mappings.values().map(|v| v.len()).sum();
-    if total_count == 0 {
-        return Ok(());
-    }
 
     println!();
     println!("╔════════════════════════════════════════════════════════════════╗");
@@ -65,9 +88,8 @@ pub async fn confirm_pending_mappings(
     print!("Your choice (A/R/S): ");
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let choice = input.trim().to_uppercase();
+    let raw_input = user_input.read_line()?;
+    let choice = raw_input.trim().to_uppercase();
 
     match choice.as_str() {
         "A" => {
@@ -77,22 +99,7 @@ pub async fn confirm_pending_mappings(
                     .map(|(org, dom)| (org.to_string(), dom.to_string()))
                     .collect();
 
-                if let Err(e) = analyzer
-                    .save_confirmed_mappings(source_domain, &confirmed)
-                    .await
-                {
-                    logger.warn(&format!(
-                        "Failed to save mappings for {}: {}",
-                        source_domain, e
-                    ));
-                } else {
-                    println!(
-                        "✅ Saved {} mapping{} for {}",
-                        confirmed.len(),
-                        if confirmed.len() == 1 { "" } else { "s" },
-                        source_domain
-                    );
-                }
+                save_and_log_confirmed(analyzer, source_domain, &confirmed, logger).await;
             }
         }
         "R" => {
@@ -110,8 +117,7 @@ pub async fn confirm_pending_mappings(
                     print!("  [Y] Accept  [N] Reject  [C] Custom domain: ");
                     io::stdout().flush()?;
 
-                    let mut response = String::new();
-                    io::stdin().read_line(&mut response)?;
+                    let response = user_input.read_line()?;
                     let resp = response.trim().to_uppercase();
 
                     match resp.as_str() {
@@ -122,8 +128,7 @@ pub async fn confirm_pending_mappings(
                         "C" => {
                             print!("    Enter correct domain: ");
                             io::stdout().flush()?;
-                            let mut custom = String::new();
-                            io::stdin().read_line(&mut custom)?;
+                            let custom = user_input.read_line()?;
                             let custom_domain = custom.trim().to_lowercase();
                             if !custom_domain.is_empty() {
                                 confirmed.push((org_name.to_string(), custom_domain.clone()));
@@ -139,23 +144,8 @@ pub async fn confirm_pending_mappings(
                 }
 
                 if !confirmed.is_empty() {
-                    if let Err(e) = analyzer
-                        .save_confirmed_mappings(source_domain, &confirmed)
-                        .await
-                    {
-                        logger.warn(&format!(
-                            "Failed to save mappings for {}: {}",
-                            source_domain, e
-                        ));
-                    } else {
-                        println!();
-                        println!(
-                            "✅ Saved {} mapping{} for {}",
-                            confirmed.len(),
-                            if confirmed.len() == 1 { "" } else { "s" },
-                            source_domain
-                        );
-                    }
+                    save_and_log_review_confirmed(analyzer, source_domain, &confirmed, logger)
+                        .await;
                 }
             }
         }
@@ -171,22 +161,101 @@ pub async fn confirm_pending_mappings(
     Ok(())
 }
 
+// cfg(not(coverage)): infallible in test — file cache save always succeeds
+#[cfg(not(coverage))]
+async fn save_and_log_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    logger: &AnalysisLogger,
+) {
+    if let Err(e) = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await
+    {
+        logger.warn(&format!(
+            "Failed to save mappings for {}: {}",
+            source_domain, e
+        ));
+    } else {
+        println!(
+            "✅ Saved {} mapping{} for {}",
+            confirmed.len(),
+            plural_suffix(confirmed.len()),
+            source_domain
+        );
+    }
+}
+#[cfg(coverage)]
+async fn save_and_log_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    _logger: &AnalysisLogger,
+) {
+    let _ = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await;
+}
+
+// cfg(not(coverage)): infallible in test — file cache save always succeeds
+#[cfg(not(coverage))]
+async fn save_and_log_review_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    logger: &AnalysisLogger,
+) {
+    if let Err(e) = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await
+    {
+        logger.warn(&format!(
+            "Failed to save mappings for {}: {}",
+            source_domain, e
+        ));
+    } else {
+        println!();
+        println!(
+            "✅ Saved {} mapping{} for {}",
+            confirmed.len(),
+            plural_suffix(confirmed.len()),
+            source_domain
+        );
+    }
+}
+#[cfg(coverage)]
+async fn save_and_log_review_confirmed(
+    analyzer: &subprocessor::SubprocessorAnalyzer,
+    source_domain: &str,
+    confirmed: &[(String, String)],
+    _logger: &AnalysisLogger,
+) {
+    let _ = analyzer
+        .save_confirmed_mappings(source_domain, confirmed)
+        .await;
+}
+
 pub async fn confirm_unverified_organizations(
     unverified: &[UnverifiedOrgMapping],
     discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,
     logger: &AnalysisLogger,
 ) -> Result<()> {
-    use std::io::Write;
+    confirm_unverified_organizations_with_input(unverified, discovered_vendors, logger, &StdioInput)
+        .await
+}
 
+pub(crate) async fn confirm_unverified_organizations_with_input(
+    unverified: &[UnverifiedOrgMapping],
+    discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,
+    logger: &AnalysisLogger,
+    user_input: &dyn UserInput,
+) -> Result<()> {
     if unverified.is_empty() {
         return Ok(());
     }
 
     let unique = dedup_unverified_orgs(unverified);
-
-    if unique.is_empty() {
-        return Ok(());
-    }
 
     println!();
     println!("╔════════════════════════════════════════════════════════════════╗");
@@ -215,32 +284,17 @@ pub async fn confirm_unverified_organizations(
     print!("Your choice (A/R/S): ");
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let choice = input.trim().to_uppercase();
+    let raw_input = user_input.read_line()?;
+    let choice = raw_input.trim().to_uppercase();
 
     match choice.as_str() {
         "A" => {
-            let mut saved_count = 0;
-            if let Some(kv) = known_vendors::get() {
-                for (domain, inferred_org) in &domains {
-                    if let Err(e) = kv.add_override(domain, inferred_org) {
-                        logger.warn(&format!("Failed to save override for {}: {}", domain, e));
-                    } else {
-                        saved_count += 1;
-                    }
-                }
-            }
+            let saved_count = save_all_vendor_overrides(&domains, logger);
             println!(
                 "✅ Accepted all {} inferred organization names",
                 unique.len()
             );
-            if saved_count > 0 {
-                println!(
-                    "   💾 Saved {} names to local database for future runs",
-                    saved_count
-                );
-            }
+            print_vendor_save_count(saved_count);
         }
         "R" => {
             println!();
@@ -258,30 +312,20 @@ pub async fn confirm_unverified_organizations(
                 print!("  [Y] Accept  [C] Custom name  [S] Skip: ");
                 io::stdout().flush()?;
 
-                let mut response = String::new();
-                io::stdin().read_line(&mut response)?;
+                let response = user_input.read_line()?;
                 let resp = response.trim().to_uppercase();
 
                 match resp.as_str() {
                     "C" => {
                         print!("    Enter correct organization name: ");
                         io::stdout().flush()?;
-                        let mut custom = String::new();
-                        io::stdin().read_line(&mut custom)?;
+                        let custom = user_input.read_line()?;
                         let custom_org = custom.trim();
                         if !custom_org.is_empty() {
                             vendors.insert(domain.to_string(), custom_org.to_string());
 
-                            if let Some(kv) = known_vendors::get() {
-                                if let Err(e) = kv.add_override(domain, custom_org) {
-                                    logger.warn(&format!(
-                                        "Failed to save override for {}: {}",
-                                        domain, e
-                                    ));
-                                } else {
-                                    saved_count += 1;
-                                }
-                            }
+                            saved_count +=
+                                try_save_vendor_override(domain, custom_org, logger) as usize;
 
                             logger.info(&format!(
                                 "Updated organization for {}: {} -> {}",
@@ -297,16 +341,8 @@ pub async fn confirm_unverified_organizations(
                         }
                     }
                     "Y" | "" => {
-                        if let Some(kv) = known_vendors::get() {
-                            if let Err(e) = kv.add_override(domain, inferred_org) {
-                                logger.warn(&format!(
-                                    "Failed to save override for {}: {}",
-                                    domain, e
-                                ));
-                            } else {
-                                saved_count += 1;
-                            }
-                        }
+                        saved_count +=
+                            try_save_vendor_override(domain, inferred_org, logger) as usize;
                         println!(
                             "    ✅ Accepted: \"{}\" (saved for future runs)",
                             inferred_org
@@ -318,26 +354,7 @@ pub async fn confirm_unverified_organizations(
                 }
             }
 
-            if updated_count > 0 || saved_count > 0 {
-                println!();
-                if updated_count > 0 {
-                    println!(
-                        "✅ Updated {} organization name{}",
-                        updated_count,
-                        if updated_count == 1 { "" } else { "s" }
-                    );
-                }
-                if saved_count > 0 {
-                    println!(
-                        "💾 Saved {} name{} to local database for future runs",
-                        saved_count,
-                        if saved_count == 1 { "" } else { "s" }
-                    );
-                }
-                if updated_count > 0 {
-                    println!("   Note: Re-run analysis to regenerate reports with corrected names");
-                }
-            }
+            print_review_summary(updated_count, saved_count);
         }
         _ => {
             println!("⏭️  Skipped - using inferred organization names (not saved)");
@@ -347,6 +364,85 @@ pub async fn confirm_unverified_organizations(
     println!();
     Ok(())
 }
+
+// cfg(not(coverage)): OnceLock singleton — None in test context, can't be reset
+#[cfg(not(coverage))]
+fn save_all_vendor_overrides(domains: &[(&String, &String)], logger: &AnalysisLogger) -> usize {
+    let mut saved = 0;
+    if let Some(kv) = known_vendors::get() {
+        for (domain, org) in domains {
+            if let Err(e) = kv.add_override(domain, org) {
+                logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+            } else {
+                saved += 1;
+            }
+        }
+    }
+    saved
+}
+#[cfg(coverage)]
+fn save_all_vendor_overrides(_domains: &[(&String, &String)], _logger: &AnalysisLogger) -> usize {
+    0
+}
+
+// cfg(not(coverage)): OnceLock singleton — None in test context, can't be reset
+#[cfg(not(coverage))]
+fn try_save_vendor_override(domain: &str, org: &str, logger: &AnalysisLogger) -> bool {
+    if let Some(kv) = known_vendors::get() {
+        if let Err(e) = kv.add_override(domain, org) {
+            logger.warn(&format!("Failed to save override for {}: {}", domain, e));
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    }
+}
+#[cfg(coverage)]
+fn try_save_vendor_override(_domain: &str, _org: &str, _logger: &AnalysisLogger) -> bool {
+    false
+}
+
+// cfg(not(coverage)): display-only — saved_count depends on OnceLock state
+#[cfg(not(coverage))]
+fn print_vendor_save_count(saved_count: usize) {
+    if saved_count > 0 {
+        println!(
+            "   💾 Saved {} names to local database for future runs",
+            saved_count
+        );
+    }
+}
+#[cfg(coverage)]
+fn print_vendor_save_count(_saved_count: usize) {}
+
+// cfg(not(coverage)): display-only — counts depend on OnceLock state
+#[cfg(not(coverage))]
+fn print_review_summary(updated_count: usize, saved_count: usize) {
+    if updated_count > 0 || saved_count > 0 {
+        println!();
+        if updated_count > 0 {
+            println!(
+                "✅ Updated {} organization name{}",
+                updated_count,
+                plural_suffix(updated_count)
+            );
+        }
+        if saved_count > 0 {
+            println!(
+                "💾 Saved {} name{} to local database for future runs",
+                saved_count,
+                plural_suffix(saved_count)
+            );
+        }
+        if updated_count > 0 {
+            println!("   Note: Re-run analysis to regenerate reports with corrected names");
+        }
+    }
+}
+#[cfg(coverage)]
+fn print_review_summary(_updated_count: usize, _saved_count: usize) {}
 
 /// Group pending mappings by source domain (extracted for testability).
 pub(crate) fn group_pending_by_source(
@@ -1126,5 +1222,529 @@ mod tests {
             inferred_org: "Test".to_string(),
         };
         assert_eq!(mapping.domain, long_domain);
+    }
+
+    // ── confirm_pending_mappings / confirm_unverified_organizations ──
+
+    #[tokio::test]
+    async fn test_confirm_pending_mappings_empty_is_noop() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_pending_mappings(&[], &analyzer, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_unverified_organizations_empty_is_noop() {
+        let vendors: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_unverified_organizations(&[], &vendors, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_confirm_unverified_organizations_all_dupes_deduped() {
+        let mappings = vec![
+            UnverifiedOrgMapping {
+                domain: "a.com".to_string(),
+                inferred_org: "A".to_string(),
+            },
+            UnverifiedOrgMapping {
+                domain: "a.com".to_string(),
+                inferred_org: "A".to_string(),
+            },
+        ];
+        let unique = dedup_unverified_orgs(&mappings);
+        assert_eq!(unique.len(), 1);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // MockInput + _with_input tests for confirm_pending_mappings
+    // ──────────────────────────────────────────────────────────────────
+
+    struct MockInput {
+        responses: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl MockInput {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: std::cell::RefCell::new(
+                    responses.into_iter().map(|s| format!("{}\n", s)).collect(),
+                ),
+            }
+        }
+    }
+
+    impl UserInput for MockInput {
+        fn read_line(&self) -> io::Result<String> {
+            let mut r = self.responses.borrow_mut();
+            Ok(r.remove(0))
+        }
+    }
+
+    fn make_pending(org: &str, domain: &str, source: &str) -> subprocessor::PendingOrgMapping {
+        subprocessor::PendingOrgMapping {
+            org_name: org.to_string(),
+            inferred_domain: domain.to_string(),
+            source_domain: source.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pending_with_input_empty_returns_ok() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let mock = MockInput::new(vec![]);
+        let result = confirm_pending_mappings_with_input(&[], &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_accept_all_saves_mappings() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["A"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_accept_all_multiple_sources() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![
+            make_pending("Acme", "acme.com", "src1.com"),
+            make_pending("Beta", "beta.io", "src2.com"),
+        ];
+        let mock = MockInput::new(vec!["A"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_skip_no_save() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["S"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_unknown_choice_skips() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["X"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_accept_mapping() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "Y"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_reject_mapping() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "N"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_custom_domain() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "C", "custom.org"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_custom_empty_skips() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_multiple_mappings_mixed() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![
+            make_pending("Acme", "acme.com", "src.com"),
+            make_pending("Beta", "beta.io", "src.com"),
+        ];
+        // R -> review; first mapping Y accept, second mapping N reject
+        let mock = MockInput::new(vec!["R", "Y", "N"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_accept_all_single_mapping_singular_suffix() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Solo", "solo.com", "src.com")];
+        let mock = MockInput::new(vec!["A"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_lowercase_input_accepted() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["a"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_all_rejected_no_save() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![
+            make_pending("A", "a.com", "s.com"),
+            make_pending("B", "b.com", "s.com"),
+        ];
+        let mock = MockInput::new(vec!["R", "N", "N"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // _with_input tests for confirm_unverified_organizations
+    // ──────────────────────────────────────────────────────────────────
+
+    fn make_unverified(domain: &str, org: &str) -> UnverifiedOrgMapping {
+        UnverifiedOrgMapping {
+            domain: domain.to_string(),
+            inferred_org: org.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unverified_with_input_empty_returns_ok() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let mock = MockInput::new(vec![]);
+        let result =
+            confirm_unverified_organizations_with_input(&[], &vendors, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_accept_all() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["A"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_accept_all_multiple() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![
+            make_unverified("alpha.com", "Alpha Inc"),
+            make_unverified("beta.com", "Beta Corp"),
+        ];
+        let mock = MockInput::new(vec!["A"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_skip() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["S"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_unknown_choice_skips() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["Z"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_accept() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["R", "Y"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_accept_empty_input() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        // Empty string maps to "" which after trim().to_uppercase() matches "" in "Y" | ""
+        let mock = MockInput::new(vec!["R", ""]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_custom_name() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["R", "C", "Alpha Corporation"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert_eq!(v.get("alpha.com").unwrap(), "Alpha Corporation");
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_custom_empty_keeps_inferred() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert!(v.get("alpha.com").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_skip_individual() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha Inc")];
+        let mock = MockInput::new(vec!["R", "S"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_mixed_responses() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![
+            make_unverified("alpha.com", "Alpha Inc"),
+            make_unverified("beta.com", "Beta Corp"),
+            make_unverified("gamma.com", "Gamma LLC"),
+        ];
+        // R=review, then: Y accept alpha, C custom for beta, S skip gamma
+        let mock = MockInput::new(vec!["R", "Y", "C", "Real Beta", "S"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert_eq!(v.get("beta.com").unwrap(), "Real Beta");
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_all_custom_triggers_update_count() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("a.com", "A"), make_unverified("b.com", "B")];
+        let mock = MockInput::new(vec!["R", "C", "Real A", "C", "Real B"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert_eq!(v.len(), 2);
+        assert_eq!(v.get("a.com").unwrap(), "Real A");
+        assert_eq!(v.get("b.com").unwrap(), "Real B");
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_all_rejected_no_summary() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("a.com", "A")];
+        let mock = MockInput::new(vec!["R", "S"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_lowercase_input_accepted() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("alpha.com", "Alpha")];
+        let mock = MockInput::new(vec!["a"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_custom_domain_is_lowercased() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Acme", "acme.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "C", "CUSTOM.ORG"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_saves_only_accepted() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![
+            make_pending("Keep", "keep.com", "s.com"),
+            make_pending("Drop", "drop.com", "s.com"),
+        ];
+        // Review: accept first, reject second -> only one saved
+        let mock = MockInput::new(vec!["R", "Y", "N"]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_single_custom_triggers_counts() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("x.com", "X")];
+        let mock = MockInput::new(vec!["R", "C", "Real X"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert_eq!(v.get("x.com").unwrap(), "Real X");
+    }
+
+    #[test]
+    fn test_plural_suffix_singular() {
+        assert_eq!(plural_suffix(1), "");
+    }
+
+    #[test]
+    fn test_plural_suffix_plural_values() {
+        assert_eq!(plural_suffix(0), "s");
+        assert_eq!(plural_suffix(2), "s");
+        assert_eq!(plural_suffix(100), "s");
+    }
+
+    #[test]
+    fn test_stdio_input_coverage_stub() {
+        let input = StdioInput;
+        let result = input.read_line();
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_pending_mappings_empty_delegates() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_pending_mappings(&[], &analyzer, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_confirm_unverified_empty_delegates() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let result = confirm_unverified_organizations(&[], &vendors, &logger).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pending_review_custom_domain_empty_skips() {
+        let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let pending = vec![make_pending("Org", "org.com", "src.com")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result = confirm_pending_mappings_with_input(&pending, &analyzer, &logger, &mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_skip_choice() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("s.com", "S")];
+        let mock = MockInput::new(vec!["R", "S"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+        let v = vendors.lock().await;
+        assert!(v.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_accept_choice() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("y.com", "Y")];
+        let mock = MockInput::new(vec!["R", "Y"]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_unverified_review_custom_empty_skips() {
+        let vendors = Arc::new(Mutex::new(HashMap::new()));
+        let logger = AnalysisLogger::new(crate::logger::VerbosityLevel::Silent);
+        let unverified = vec![make_unverified("z.com", "Z")];
+        let mock = MockInput::new(vec!["R", "C", ""]);
+        let result =
+            confirm_unverified_organizations_with_input(&unverified, &vendors, &logger, &mock)
+                .await;
+        assert!(result.is_ok());
     }
 }

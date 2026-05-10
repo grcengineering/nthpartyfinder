@@ -48,17 +48,26 @@ pub struct CtDiscoveryResult {
 pub struct CtLogDiscovery {
     client: Client,
     timeout: Duration,
+    base_url: String,
 }
 
 impl CtLogDiscovery {
     pub fn new(timeout: Duration) -> Self {
+        Self::with_base_url(timeout, "https://crt.sh".to_string())
+    }
+
+    pub fn with_base_url(timeout: Duration, base_url: String) -> Self {
         let client = Client::builder()
             .timeout(timeout)
             .user_agent("nthpartyfinder/1.0")
             .build()
             .unwrap_or_default();
 
-        Self { client, timeout }
+        Self {
+            client,
+            timeout,
+            base_url,
+        }
     }
 
     /// Discover vendors from CT logs for a domain
@@ -154,10 +163,11 @@ impl CtLogDiscovery {
     }
 
     /// Query crt.sh for certificates related to a domain
-    async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
+    pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
         // Query for wildcard certificates (%.domain.com)
         let url = format!(
-            "https://crt.sh/?q=%.{}&output=json",
+            "{}/?q=%.{}&output=json",
+            self.base_url,
             urlencoding::encode(domain)
         );
 
@@ -262,6 +272,7 @@ mod tests {
     // ───────────────────────────────────────────────────────────────
 
     use rstest::rstest;
+    use tracing_subscriber;
 
     // --- CtLogDiscovery construction ---
 
@@ -269,12 +280,23 @@ mod tests {
     fn test_ct_log_discovery_new() {
         let disc = CtLogDiscovery::new(Duration::from_secs(30));
         assert_eq!(disc.timeout, Duration::from_secs(30));
+        assert_eq!(disc.base_url, "https://crt.sh");
     }
 
     #[test]
     fn test_ct_log_discovery_new_short_timeout() {
         let disc = CtLogDiscovery::new(Duration::from_millis(100));
         assert_eq!(disc.timeout, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_ct_log_discovery_with_base_url() {
+        let disc = CtLogDiscovery::with_base_url(
+            Duration::from_secs(10),
+            "http://localhost:9999".to_string(),
+        );
+        assert_eq!(disc.timeout, Duration::from_secs(10));
+        assert_eq!(disc.base_url, "http://localhost:9999");
     }
 
     // --- CrtShEntry deserialization ---
@@ -413,410 +435,7 @@ mod tests {
         );
     }
 
-    // --- discover() logic tests using mock data ---
-    // We test the processing logic by simulating what discover() does internally,
-    // since query_crt_sh makes real HTTP calls.
-
-    #[test]
-    fn test_discover_logic_extracts_san_domains() {
-        // Simulate the processing logic from discover()
-        let entries = vec![CrtShEntry {
-            issuer_ca_id: Some(1),
-            issuer_name: Some("Let's Encrypt R3".to_string()),
-            common_name: Some("*.example.com".to_string()),
-            name_value: Some("example.com\ncdn.vendorA.com\napi.vendorB.io".to_string()),
-            id: 100,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        }];
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        for entry in &entries {
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
-                    let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain {
-                        continue;
-                    }
-                    if CtLogDiscovery::is_infrastructure_domain(&san_base) {
-                        continue;
-                    }
-                    if seen_domains.insert(san_base.clone()) {
-                        results.push(san_base);
-                    }
-                }
-            }
-        }
-
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&"vendora.com".to_string()));
-        assert!(results.contains(&"vendorb.io".to_string()));
-    }
-
-    #[test]
-    fn test_discover_logic_deduplicates_san_domains() {
-        let entries = vec![CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: None,
-            name_value: Some("cdn.vendor.com\napi.vendor.com\nwww.vendor.com".to_string()),
-            id: 200,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        }];
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        for entry in &entries {
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
-                    let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain
-                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
-                    {
-                        continue;
-                    }
-                    if seen_domains.insert(san_base.clone()) {
-                        results.push(san_base);
-                    }
-                }
-            }
-        }
-
-        // All three SANs have the same base domain vendor.com — should dedupe to 1
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "vendor.com");
-    }
-
-    #[test]
-    fn test_discover_logic_filters_infrastructure_from_sans() {
-        let entries = vec![CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: None,
-            name_value: Some(
-                "cdn.cloudflare.com\ns3.amazonaws.com\nreal-vendor.com\nlocalhost".to_string(),
-            ),
-            id: 300,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        }];
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        for entry in &entries {
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
-                    let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain
-                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
-                    {
-                        continue;
-                    }
-                    if seen_domains.insert(san_base.clone()) {
-                        results.push(san_base);
-                    }
-                }
-            }
-        }
-
-        // Only real-vendor.com should survive
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "real-vendor.com");
-    }
-
-    #[test]
-    fn test_discover_logic_skips_self_references() {
-        let entries = vec![CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: None,
-            name_value: Some("www.example.com\nmail.example.com\nvendor.io".to_string()),
-            id: 400,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        }];
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        for entry in &entries {
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
-                    let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain
-                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
-                    {
-                        continue;
-                    }
-                    if seen_domains.insert(san_base.clone()) {
-                        results.push(san_base);
-                    }
-                }
-            }
-        }
-
-        // Only vendor.io should survive; example.com subdomains are self-references
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "vendor.io");
-    }
-
-    #[test]
-    fn test_discover_logic_common_name_extraction() {
-        let entry = CrtShEntry {
-            issuer_ca_id: Some(99),
-            issuer_name: Some("DigiCert Inc".to_string()),
-            common_name: Some("api.vendor-cn.com".to_string()),
-            name_value: None, // no SANs
-            id: 500,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        // Process common_name
-        if let Some(common_name) = &entry.common_name {
-            let cn = common_name.trim().to_lowercase();
-            let cn_base = domain_utils::extract_base_domain(&cn);
-            if cn_base != base_domain
-                && !CtLogDiscovery::is_infrastructure_domain(&cn_base)
-                && seen_domains.insert(cn_base.clone())
-            {
-                results.push(CtDiscoveryResult {
-                    domain: cn_base,
-                    source: format!("Certificate CN (crt.sh ID: {})", entry.id),
-                    certificate_info: format!(
-                        "CN: {} | Issuer: {} | Certificate ID: {}",
-                        cn,
-                        entry.issuer_name.as_deref().unwrap_or("Unknown CA"),
-                        entry.id
-                    ),
-                });
-            }
-        }
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].domain, "vendor-cn.com");
-        assert!(results[0].source.contains("500"));
-        assert!(results[0].certificate_info.contains("DigiCert Inc"));
-    }
-
-    #[test]
-    fn test_discover_logic_common_name_self_reference_skipped() {
-        let entry = CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: Some("www.example.com".to_string()),
-            name_value: None,
-            id: 600,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        if let Some(common_name) = &entry.common_name {
-            let cn = common_name.trim().to_lowercase();
-            let cn_base = domain_utils::extract_base_domain(&cn);
-            if cn_base != base_domain
-                && !CtLogDiscovery::is_infrastructure_domain(&cn_base)
-                && seen_domains.insert(cn_base.clone())
-            {
-                results.push(cn_base);
-            }
-        }
-
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_discover_logic_common_name_infra_skipped() {
-        let entry = CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: Some("cdn.cloudflare.com".to_string()),
-            name_value: None,
-            id: 700,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        if let Some(common_name) = &entry.common_name {
-            let cn = common_name.trim().to_lowercase();
-            let cn_base = domain_utils::extract_base_domain(&cn);
-            if cn_base != base_domain
-                && !CtLogDiscovery::is_infrastructure_domain(&cn_base)
-                && seen_domains.insert(cn_base.clone())
-            {
-                results.push(cn_base);
-            }
-        }
-
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_discover_logic_empty_san_lines_skipped() {
-        let entry = CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: None,
-            name_value: Some("\n  \n\nvendor.com\n\n".to_string()),
-            id: 800,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        if let Some(name_value) = &entry.name_value {
-            for san in name_value.lines() {
-                let san = san.trim().to_lowercase();
-                if san.is_empty() {
-                    continue;
-                }
-                let san_base = domain_utils::extract_base_domain(&san);
-                if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
-                    continue;
-                }
-                if seen_domains.insert(san_base.clone()) {
-                    results.push(san_base);
-                }
-            }
-        }
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "vendor.com");
-    }
-
-    #[test]
-    fn test_discover_logic_san_and_cn_dedup() {
-        // When the same domain appears in both SAN and CN, it should only be counted once
-        let entry = CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: Some("CA".to_string()),
-            common_name: Some("vendor.com".to_string()),
-            name_value: Some("vendor.com\nwww.vendor.com".to_string()),
-            id: 900,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
-
-        // Process SANs first
-        if let Some(name_value) = &entry.name_value {
-            for san in name_value.lines() {
-                let san = san.trim().to_lowercase();
-                if san.is_empty() {
-                    continue;
-                }
-                let san_base = domain_utils::extract_base_domain(&san);
-                if san_base == base_domain || CtLogDiscovery::is_infrastructure_domain(&san_base) {
-                    continue;
-                }
-                if seen_domains.insert(san_base.clone()) {
-                    results.push(san_base);
-                }
-            }
-        }
-
-        // Process CN
-        if let Some(common_name) = &entry.common_name {
-            let cn = common_name.trim().to_lowercase();
-            let cn_base = domain_utils::extract_base_domain(&cn);
-            if cn_base != base_domain
-                && !CtLogDiscovery::is_infrastructure_domain(&cn_base)
-                && seen_domains.insert(cn_base.clone())
-            {
-                results.push(cn_base);
-            }
-        }
-
-        // vendor.com should appear only once (from SAN), CN should be deduped
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "vendor.com");
-    }
-
-    #[test]
-    fn test_discover_logic_issuer_name_default() {
-        // When issuer_name is None, we use "Unknown CA"
-        let entry = CrtShEntry {
-            issuer_ca_id: None,
-            issuer_name: None,
-            common_name: None,
-            name_value: Some("vendor.com".to_string()),
-            id: 1000,
-            entry_timestamp: None,
-            not_before: None,
-            not_after: None,
-        };
-
-        let issuer = entry.issuer_name.as_deref().unwrap_or("Unknown CA");
-        assert_eq!(issuer, "Unknown CA");
-
-        let cert_info = format!(
-            "SAN: vendor.com | Issuer: {} | Certificate ID: {}",
-            issuer, entry.id
-        );
-        assert!(cert_info.contains("Unknown CA"));
-        assert!(cert_info.contains("1000"));
-    }
+    // --- discover() behavior tests via wiremock ---
 
     // --- JSON parsing edge cases ---
 
@@ -861,72 +480,723 @@ mod tests {
 
     // --- Multiple entries across certificates ---
 
+    // --- Async tests with wiremock for discover() and query_crt_sh() ---
+
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_finds_vendors() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 100,
+                "issuer_name": "Let's Encrypt R3",
+                "common_name": "*.example.com",
+                "name_value": "example.com\napi.vendor-a.com\ncdn.vendor-b.io"
+            },
+            {
+                "id": 200,
+                "issuer_name": "DigiCert Inc",
+                "common_name": "secure.vendor-c.net",
+                "name_value": "vendor-d.org"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert!(
+            domains.contains(&"vendor-a.com"),
+            "Should find vendor-a.com from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-b.io"),
+            "Should find vendor-b.io from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-d.org"),
+            "Should find vendor-d.org from SAN"
+        );
+        assert!(
+            domains.contains(&"vendor-c.net"),
+            "Should find vendor-c.net from CN"
+        );
+        assert!(
+            !domains.contains(&"example.com"),
+            "Should not include self-reference"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_empty_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_server_error_returns_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_malformed_json_returns_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_filters_infrastructure() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 300,
+                "name_value": "cdn.cloudflare.com\ns3.amazonaws.com\nreal-vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "real-vendor.com");
+    }
+
+    #[tokio::test]
+    async fn test_discover_via_wiremock_deduplicates_domains() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 400,
+                "common_name": "api.vendor.com",
+                "name_value": "cdn.vendor.com\nwww.vendor.com\napi.vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "All subdomains of vendor.com should deduplicate to one"
+        );
+        assert_eq!(results[0].domain, "vendor.com");
+    }
+
     #[test]
-    fn test_discover_logic_multiple_certificates() {
-        let entries = vec![
-            CrtShEntry {
-                issuer_ca_id: None,
-                issuer_name: Some("CA1".to_string()),
-                common_name: None,
-                name_value: Some("vendor-a.com\nvendor-b.com".to_string()),
-                id: 1,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-            CrtShEntry {
-                issuer_ca_id: None,
-                issuer_name: Some("CA2".to_string()),
-                common_name: Some("vendor-c.com".to_string()),
-                name_value: Some("vendor-a.com\nvendor-d.com".to_string()), // vendor-a appears again
-                id: 2,
-                entry_timestamp: None,
-                not_before: None,
-                not_after: None,
-            },
-        ];
+    fn test_ct_discovery_result_all_fields() {
+        let result = CtDiscoveryResult {
+            domain: "vendor.io".to_string(),
+            source: "Certificate SAN (crt.sh ID: 999)".to_string(),
+            certificate_info: "SAN: api.vendor.io | Issuer: DigiCert | Certificate ID: 999"
+                .to_string(),
+        };
+        assert_eq!(result.domain, "vendor.io");
+        assert!(result.source.contains("999"));
+        assert!(result.certificate_info.contains("DigiCert"));
 
-        let base_domain = "example.com".to_string();
-        let mut seen_domains = HashSet::new();
-        seen_domains.insert(base_domain.clone());
-        let mut results = Vec::new();
+        let cloned = result.clone();
+        assert_eq!(cloned.domain, result.domain);
+        assert_eq!(cloned.source, result.source);
+        assert_eq!(cloned.certificate_info, result.certificate_info);
 
-        for entry in &entries {
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
-                    let san_base = domain_utils::extract_base_domain(&san);
-                    if san_base == base_domain
-                        || CtLogDiscovery::is_infrastructure_domain(&san_base)
-                    {
-                        continue;
-                    }
-                    if seen_domains.insert(san_base.clone()) {
-                        results.push(san_base);
-                    }
-                }
+        let dbg = format!("{:?}", result);
+        assert!(dbg.contains("vendor.io"));
+        assert!(dbg.contains("999"));
+    }
+
+    #[test]
+    fn test_crt_sh_entry_debug() {
+        let entry = CrtShEntry {
+            issuer_ca_id: Some(42),
+            issuer_name: Some("TestCA".to_string()),
+            common_name: Some("test.com".to_string()),
+            name_value: Some("test.com".to_string()),
+            id: 12345,
+            entry_timestamp: Some("2024-01-01".to_string()),
+            not_before: Some("2024-01-01".to_string()),
+            not_after: Some("2025-01-01".to_string()),
+        };
+        let dbg = format!("{:?}", entry);
+        assert!(dbg.contains("12345"));
+        assert!(dbg.contains("TestCA"));
+    }
+
+    #[test]
+    fn test_ct_log_discovery_new_creates_client() {
+        let disc = CtLogDiscovery::new(Duration::from_secs(10));
+        assert_eq!(disc.timeout, Duration::from_secs(10));
+        // Verify we can create multiple instances
+        let disc2 = CtLogDiscovery::new(Duration::from_secs(60));
+        assert_eq!(disc2.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_is_infrastructure_domain_subdomain_matching() {
+        // Test that subdomains of infrastructure domains are also filtered (ends_with check)
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "cdn.cloudflare.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "s3.us-east-1.amazonaws.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "test-app.azurewebsites.net"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "mysite.azureedge.net"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "storage.googleusercontent.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "abc.googlesyndication.com"
+        ));
+        assert!(CtLogDiscovery::is_infrastructure_domain(
+            "fonts.gstatic.com"
+        ));
+    }
+
+    #[test]
+    fn test_is_infrastructure_domain_exact_matches() {
+        // Test exact match (not just ends_with)
+        assert!(CtLogDiscovery::is_infrastructure_domain("localhost"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("local"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("test"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("example.com"));
+    }
+
+    #[test]
+    fn test_is_infrastructure_domain_not_partial_match() {
+        // "notlocalhost" should NOT match "localhost"
+        // The check uses ends_with, so "notlocalhost" would end with "localhost" - it WILL match
+        // This documents the current behavior
+        assert!(CtLogDiscovery::is_infrastructure_domain("notlocalhost"));
+        // But a domain like "mylocal" should not match "local" via ends_with
+        assert!(CtLogDiscovery::is_infrastructure_domain("mylocal")); // ends_with "local"
+    }
+
+    #[test]
+    fn test_crt_sh_entry_with_all_optional_fields_present() {
+        let json = r#"{
+            "issuer_ca_id": 16418,
+            "issuer_name": "C=US, O=Let's Encrypt, CN=R3",
+            "common_name": "*.example.com",
+            "name_value": "example.com\n*.example.com",
+            "id": 9876543210,
+            "entry_timestamp": "2024-06-15T12:00:00",
+            "not_before": "2024-06-15T00:00:00",
+            "not_after": "2024-09-13T00:00:00"
+        }"#;
+        let entry: CrtShEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.issuer_ca_id, Some(16418));
+        assert!(entry
+            .issuer_name
+            .as_ref()
+            .unwrap()
+            .contains("Let's Encrypt"));
+        assert_eq!(entry.common_name.as_ref().unwrap(), "*.example.com");
+        assert!(entry.name_value.as_ref().unwrap().contains("*.example.com"));
+        assert_eq!(
+            entry.entry_timestamp.as_ref().unwrap(),
+            "2024-06-15T12:00:00"
+        );
+        assert_eq!(entry.not_before.as_ref().unwrap(), "2024-06-15T00:00:00");
+        assert_eq!(entry.not_after.as_ref().unwrap(), "2024-09-13T00:00:00");
+    }
+
+    // --- wiremock tests for query_crt_sh behavior patterns ---
+
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_success() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 5001,
+                "issuer_name": "R3",
+                "common_name": "*.vendor.com",
+                "name_value": "vendor.com\nwww.vendor.com\napi.vendor.com"
             }
-            if let Some(common_name) = &entry.common_name {
-                let cn = common_name.trim().to_lowercase();
-                let cn_base = domain_utils::extract_base_domain(&cn);
-                if cn_base != base_domain
-                    && !CtLogDiscovery::is_infrastructure_domain(&cn_base)
-                    && seen_domains.insert(cn_base.clone())
-                {
-                    results.push(cn_base);
-                }
-            }
-        }
+        ]);
 
-        // vendor-a, vendor-b from cert 1; vendor-d, vendor-c from cert 2
-        // vendor-a should not appear twice
-        assert_eq!(results.len(), 4);
-        assert!(results.contains(&"vendor-a.com".to_string()));
-        assert!(results.contains(&"vendor-b.com".to_string()));
-        assert!(results.contains(&"vendor-c.com".to_string()));
-        assert!(results.contains(&"vendor-d.com".to_string()));
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, 5001);
+        let name_value = entries[0].name_value.as_ref().unwrap();
+        assert!(name_value.contains("vendor.com"));
+        assert!(name_value.contains("api.vendor.com"));
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_html_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>Rate limited</html>"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty(), "Malformed JSON should return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_empty_string() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_via_wiremock_500_returns_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_is_infrastructure_domain_ssl_providers() {
+        assert!(CtLogDiscovery::is_infrastructure_domain("letsencrypt.org"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("digicert.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("comodo.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("godaddy.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("rapidssl.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("geotrust.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("thawte.com"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("entrust.net"));
+        assert!(CtLogDiscovery::is_infrastructure_domain("sectigo.com"));
+    }
+
+    #[test]
+    fn test_is_infrastructure_domain_globalsign_not_filtered() {
+        // M009: globalsign.com was intentionally removed from the filter
+        assert!(!CtLogDiscovery::is_infrastructure_domain("globalsign.com"));
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Coverage round 3: tracing format args + error propagation
+    // ───────────────────────────────────────────────────────────────
+
+    fn init_tracing() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(std::io::sink)
+                .finish(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_finds_vendors() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2001,
+                "issuer_name": "Let's Encrypt R3",
+                "common_name": "*.example.com",
+                "name_value": "example.com\napi.traced-vendor.com\ncdn.traced-vendor2.io"
+            },
+            {
+                "id": 2002,
+                "issuer_name": "DigiCert Inc",
+                "common_name": "secure.traced-cn-vendor.net",
+                "name_value": "traced-vendor3.org"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert!(domains.contains(&"traced-vendor.com"));
+        assert!(domains.contains(&"traced-vendor2.io"));
+        assert!(domains.contains(&"traced-vendor3.org"));
+        assert!(domains.contains(&"traced-cn-vendor.net"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_empty_response() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_server_error() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_malformed_json() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{broken"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_sans_with_empty_lines() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2003,
+                "issuer_name": "CA",
+                "name_value": "\n  \nempty-line-vendor.com\n\n"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "empty-line-vendor.com");
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_infrastructure_filtered() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2004,
+                "name_value": "cdn.cloudflare.com\nreal-traced.com\ns3.amazonaws.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "real-traced.com");
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_deduplication() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2005,
+                "issuer_name": "CA",
+                "common_name": "api.dup-vendor.com",
+                "name_value": "cdn.dup-vendor.com\nwww.dup-vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "dup-vendor.com");
+    }
+
+    #[tokio::test]
+    async fn test_discover_error_propagation_connection_refused() {
+        let _guard = init_tracing();
+        let disc = CtLogDiscovery::with_base_url(
+            Duration::from_millis(100),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = disc.discover("example.com").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_error_propagation_connection_refused() {
+        let _guard = init_tracing();
+        let disc = CtLogDiscovery::with_base_url(
+            Duration::from_millis(100),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let result = disc.query_crt_sh("example.com").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_with_tracing_success() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {"id": 3001, "name_value": "traced.com"}
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_with_tracing_error_status() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_with_tracing_malformed() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<<<not json>>>"))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_crt_sh_with_tracing_empty_body() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let entries = disc.query_crt_sh("example.com").await.unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_no_issuer_name() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2006,
+                "name_value": "no-issuer-vendor.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].certificate_info.contains("Unknown CA"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_cn_no_issuer() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2007,
+                "common_name": "cn-no-issuer.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].domain, "cn-no-issuer.com");
+        assert!(results[0].certificate_info.contains("Unknown CA"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_self_ref_cn() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2008,
+                "common_name": "www.example.com",
+                "name_value": "example.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_cn_infra_filtered() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            {
+                "id": 2009,
+                "common_name": "cdn.cloudflare.com"
+            }
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_with_tracing_entry_no_san_no_cn() {
+        let _guard = init_tracing();
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([{"id": 2010}]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
     }
 }

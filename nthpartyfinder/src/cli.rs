@@ -962,6 +962,62 @@ mod tests {
         assert_eq!(args.subfinder_path, Some("/usr/bin/subfinder".to_string()));
     }
 
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn test_num_cpus_returns_positive() {
+        // Test the private num_cpus helper indirectly through validate
+        // with a parallel_jobs value that's exactly at the limit
+        let mut args = default_args();
+        let max_parallel = std::cmp::min(64, Args::num_cpus() * 8);
+        args.parallel_jobs = max_parallel;
+        assert!(args.validate().is_ok());
+
+        // One above the limit should fail
+        args.parallel_jobs = max_parallel + 1;
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn test_get_domain_output_dir_with_colons() {
+        let mut args = default_args();
+        args.output_dir = Some("/base".to_string());
+        args.domain = Some("test:8080".to_string());
+        let dir = args.get_domain_output_dir().unwrap();
+        assert!(dir.contains("test_8080"));
+        assert!(!dir.contains(":"));
+    }
+
+    #[test]
+    fn test_args_dns_only_flag() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--dns-only"]);
+        let args = Args::from(&cli);
+        assert!(args.dns_only);
+    }
+
+    #[test]
+    fn test_args_include_infra_flag() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--include-infra"]);
+        let args = Args::from(&cli);
+        assert!(args.include_infra);
+    }
+
+    #[test]
+    fn test_args_whois_concurrency() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--whois-concurrency", "15"]);
+        let args = Args::from(&cli);
+        assert_eq!(args.whois_concurrency, Some(15));
+    }
+
+    #[test]
+    fn test_args_timeout() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--timeout", "0"]);
+        let args = Args::from(&cli);
+        assert_eq!(args.timeout, Some(0));
+    }
+
     #[test]
     fn cli_parse_batch_output_dir() {
         let cli = Cli::parse_from([
@@ -973,5 +1029,83 @@ mod tests {
         ]);
         let args = Args::from(&cli);
         assert_eq!(args.batch_output_dir, Some("/out".to_string()));
+    }
+
+    #[test]
+    fn cli_default_batch_values() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com"]);
+        assert_eq!(cli.batch_parallel, 1);
+        assert!(!cli.batch_combined);
+        assert!(cli.input_file.is_none());
+        assert!(cli.batch_output_dir.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_args_debug_format() {
+        let args = default_args();
+        let debug_str = format!("{:?}", args);
+        assert!(debug_str.contains("example.com"));
+        assert!(debug_str.contains("csv"));
+        assert!(debug_str.contains("nth_parties"));
+    }
+
+    #[test]
+    fn test_validate_batch_parallel_boundary_values() {
+        let mut args = default_args();
+        args.domain = None;
+        args.input_file = Some("file.csv".to_string());
+
+        args.batch_parallel = 1;
+        assert!(args.validate().is_ok());
+
+        args.batch_parallel = 20;
+        assert!(args.validate().is_ok());
+
+        args.batch_parallel = 21;
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn cli_parse_cache_validate_minimal() {
+        let cli = Cli::parse_from(["nthpartyfinder", "cache", "validate"]);
+        match cli.command {
+            Some(Commands::Cache {
+                action: CacheCommands::Validate { detailed, domain },
+            }) => {
+                assert!(!detailed);
+                assert!(domain.is_none());
+            }
+            _ => panic!("Expected Cache Validate subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_get_domain_output_dir_default_output_dir() {
+        let mut args = default_args();
+        args.output_dir = None;
+        args.domain = Some("test.com".to_string());
+        let dir = args.get_domain_output_dir().unwrap();
+        assert!(dir.contains("reports"));
+        assert!(dir.contains("test_com"));
+    }
+
+    #[test]
+    fn test_args_from_cli_batch_fields() {
+        let cli = Cli::parse_from([
+            "nthpartyfinder",
+            "--input-file",
+            "domains.json",
+            "--batch-output-dir",
+            "/output",
+            "--batch-parallel",
+            "10",
+            "--batch-combined",
+        ]);
+        let args = Args::from(&cli);
+        assert_eq!(args.input_file, Some("domains.json".to_string()));
+        assert_eq!(args.batch_output_dir, Some("/output".to_string()));
+        assert_eq!(args.batch_parallel, 10);
+        assert!(args.batch_combined);
     }
 }

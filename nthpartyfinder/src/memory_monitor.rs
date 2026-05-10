@@ -55,28 +55,45 @@ impl MemoryMonitor {
         let total = self.system.total_memory();
         let used = self.system.used_memory();
 
+        let (level, new_concurrency) = Self::compute_pressure(
+            total,
+            used,
+            self.base_concurrency,
+            self.warning_threshold,
+            self.critical_threshold,
+        );
+
+        self.effective_concurrency
+            .store(new_concurrency, Ordering::Relaxed);
+        (level, new_concurrency)
+    }
+
+    fn compute_pressure(
+        total: u64,
+        used: u64,
+        base_concurrency: usize,
+        warning_threshold: f64,
+        critical_threshold: f64,
+    ) -> (PressureLevel, usize) {
         if total == 0 {
-            // Can't determine memory state — don't throttle
-            return (PressureLevel::Normal, self.base_concurrency);
+            return (PressureLevel::Normal, base_concurrency);
         }
 
         let usage_pct = (used as f64 / total as f64) * 100.0;
-        let level = if usage_pct >= self.critical_threshold {
+        let level = if usage_pct >= critical_threshold {
             PressureLevel::Critical
-        } else if usage_pct >= self.warning_threshold {
+        } else if usage_pct >= warning_threshold {
             PressureLevel::Warning
         } else {
             PressureLevel::Normal
         };
 
         let new_concurrency = match level {
-            PressureLevel::Normal => self.base_concurrency,
-            PressureLevel::Warning => (self.base_concurrency / 2).max(1),
+            PressureLevel::Normal => base_concurrency,
+            PressureLevel::Warning => (base_concurrency / 2).max(1),
             PressureLevel::Critical => 1,
         };
 
-        self.effective_concurrency
-            .store(new_concurrency, Ordering::Relaxed);
         (level, new_concurrency)
     }
 
@@ -95,6 +112,10 @@ impl MemoryMonitor {
         self.system.refresh_memory();
         let total = self.system.total_memory();
         let used = self.system.used_memory();
+        Self::compute_usage_pct(total, used)
+    }
+
+    fn compute_usage_pct(total: u64, used: u64) -> f64 {
         if total == 0 {
             return 0.0;
         }
@@ -133,14 +154,8 @@ mod tests {
     #[test]
     fn test_check_returns_valid_level() {
         let mut monitor = MemoryMonitor::new(10);
-        let (level, concurrency) = monitor.check();
-
-        // We can't control system memory, but we can verify the contract
-        match level {
-            PressureLevel::Normal => assert_eq!(concurrency, 10),
-            PressureLevel::Warning => assert_eq!(concurrency, 5),
-            PressureLevel::Critical => assert_eq!(concurrency, 1),
-        }
+        let (_, concurrency) = monitor.check();
+        assert!((1..=10).contains(&concurrency));
     }
 
     #[test]
@@ -183,13 +198,8 @@ mod tests {
     fn test_base_concurrency_one() {
         let mut monitor = MemoryMonitor::new(1);
         assert_eq!(monitor.base_concurrency(), 1);
-        let (level, concurrency) = monitor.check();
-        // With base=1, warning halves to 0 but max(1)=1, critical=1
-        match level {
-            PressureLevel::Normal => assert_eq!(concurrency, 1),
-            PressureLevel::Warning => assert_eq!(concurrency, 1), // max(0,1) = 1
-            PressureLevel::Critical => assert_eq!(concurrency, 1),
-        }
+        let (_, concurrency) = monitor.check();
+        assert_eq!(concurrency, 1);
     }
 
     #[test]
@@ -226,9 +236,96 @@ mod tests {
     }
 
     #[test]
+    fn test_pressure_level_debug() {
+        // Verify Debug trait works for PressureLevel
+        let level = PressureLevel::Normal;
+        let debug_str = format!("{:?}", level);
+        assert_eq!(debug_str, "Normal");
+
+        let debug_str = format!("{:?}", PressureLevel::Warning);
+        assert_eq!(debug_str, "Warning");
+
+        let debug_str = format!("{:?}", PressureLevel::Critical);
+        assert_eq!(debug_str, "Critical");
+    }
+
+    #[test]
+    fn test_pressure_level_clone() {
+        let level = PressureLevel::Warning;
+        let cloned = level;
+        assert_eq!(level, cloned);
+    }
+
+    #[test]
+    fn test_pressure_level_copy() {
+        let level = PressureLevel::Critical;
+        let copied = level;
+        // Both should still be usable (Copy trait)
+        assert_eq!(level, copied);
+    }
+
+    #[test]
+    fn test_multiple_checks_consistent() {
+        let mut monitor = MemoryMonitor::new(10);
+        // Run check multiple times to verify consistency
+        let (level1, conc1) = monitor.check();
+        let (level2, conc2) = monitor.check();
+        // In the same instant, results should be consistent
+        // (system memory shouldn't change drastically between calls)
+        assert_eq!(level1, level2);
+        assert_eq!(conc1, conc2);
+    }
+
+    #[test]
     fn test_large_base_concurrency() {
         let monitor = MemoryMonitor::new(1000);
         assert_eq!(monitor.base_concurrency(), 1000);
         assert_eq!(monitor.effective_concurrency(), 1000);
+    }
+
+    #[test]
+    fn test_compute_pressure_normal() {
+        let (level, conc) = MemoryMonitor::compute_pressure(100, 50, 10, 80.0, 92.0);
+        assert_eq!(level, PressureLevel::Normal);
+        assert_eq!(conc, 10);
+    }
+
+    #[test]
+    fn test_compute_pressure_warning() {
+        let (level, conc) = MemoryMonitor::compute_pressure(100, 85, 10, 80.0, 92.0);
+        assert_eq!(level, PressureLevel::Warning);
+        assert_eq!(conc, 5);
+    }
+
+    #[test]
+    fn test_compute_pressure_critical() {
+        let (level, conc) = MemoryMonitor::compute_pressure(100, 95, 10, 80.0, 92.0);
+        assert_eq!(level, PressureLevel::Critical);
+        assert_eq!(conc, 1);
+    }
+
+    #[test]
+    fn test_compute_pressure_zero_total() {
+        let (level, conc) = MemoryMonitor::compute_pressure(0, 0, 10, 80.0, 92.0);
+        assert_eq!(level, PressureLevel::Normal);
+        assert_eq!(conc, 10);
+    }
+
+    #[test]
+    fn test_compute_pressure_warning_small_base() {
+        let (level, conc) = MemoryMonitor::compute_pressure(100, 85, 1, 80.0, 92.0);
+        assert_eq!(level, PressureLevel::Warning);
+        assert_eq!(conc, 1); // (1/2).max(1) = 1
+    }
+
+    #[test]
+    fn test_compute_usage_pct_zero_total() {
+        assert_eq!(MemoryMonitor::compute_usage_pct(0, 0), 0.0);
+    }
+
+    #[test]
+    fn test_compute_usage_pct_normal() {
+        let pct = MemoryMonitor::compute_usage_pct(100, 50);
+        assert!((pct - 50.0).abs() < 0.01);
     }
 }

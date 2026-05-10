@@ -389,6 +389,40 @@ mod tests {
         assert!(!disabled.is_enabled());
     }
 
+    // ====================================================================
+    // Additional tests for uncovered paths
+    // ====================================================================
+
+    #[test]
+    fn initialize_when_enabled_creates_file() {
+        let dir = tempdir().unwrap();
+        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "init.com", true);
+        logger.initialize().unwrap();
+
+        // File should exist
+        let path = logger.get_file_path();
+        assert!(std::path::Path::new(path).exists());
+    }
+
+    #[test]
+    fn log_failure_before_initialize_does_not_panic() {
+        let dir = tempdir().unwrap();
+        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
+        // Don't call initialize - writer is None
+        // log_failure should handle None writer gracefully
+        logger.log_failure("test.org", "TXT", "record", Some("svc"), "reason");
+        // No panic means success
+    }
+
+    #[test]
+    fn close_twice_does_not_panic() {
+        let dir = tempdir().unwrap();
+        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
+        logger.initialize().unwrap();
+        logger.close();
+        logger.close(); // Second close should be a no-op
+    }
+
     #[test]
     fn get_file_path_returns_correct_path() {
         let dir = tempdir().unwrap();
@@ -396,5 +430,37 @@ mod tests {
         let path = logger.get_file_path();
         assert!(path.starts_with(dir.path().to_str().unwrap()));
         assert!(path.contains("verification_failures_x_com_"));
+    }
+
+    #[test]
+    fn test_log_failure_lock_contention_skips_write() {
+        let dir = tempdir().unwrap();
+        let logger = VerificationFailureLogger::new(dir.path().to_str().unwrap(), "test.org", true);
+        logger.initialize().unwrap();
+
+        // Hold the mutex lock to simulate contention — try_lock in log_failure will fail
+        let _guard = logger.writer.lock().unwrap();
+
+        // This should silently skip writing due to lock contention
+        logger.log_failure("d", "TXT", "rec", Some("s"), "r");
+
+        drop(_guard);
+        logger.close();
+
+        let contents = fs::read_to_string(logger.get_file_path()).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        // Only header present — data line was skipped due to contention
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_initialize_with_invalid_directory() {
+        let logger = VerificationFailureLogger::new(
+            "/nonexistent/path/that/does/not/exist",
+            "test.org",
+            true,
+        );
+        let result = logger.initialize();
+        assert!(result.is_err());
     }
 }

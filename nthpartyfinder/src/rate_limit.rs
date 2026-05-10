@@ -555,4 +555,78 @@ mod tests {
         let ctx = RateLimitContext::from_config(&config);
         ctx.log_config();
     }
+
+    // --- RateLimiter::acquire async tests ---
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_disabled() {
+        let mut limiter = RateLimiter::new(0);
+        // Should return immediately
+        limiter.acquire().await;
+        assert!(!limiter.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_enabled() {
+        let mut limiter = RateLimiter::new(1000);
+        // High rate, should not wait
+        limiter.acquire().await;
+        limiter.acquire().await;
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_acquire_waits_then_succeeds() {
+        let mut limiter = RateLimiter::new(100);
+        // Exhaust all tokens
+        for _ in 0..100 {
+            limiter.try_acquire();
+        }
+        // Next acquire should wait and then succeed
+        limiter.acquire().await;
+        // If we got here, the acquire loop worked
+    }
+
+    // --- log_config with mixed rates ---
+
+    #[test]
+    fn test_rate_limit_context_log_config_mixed() {
+        // Some limited, some unlimited
+        let config = RateLimitConfig {
+            dns_queries_per_second: 50,
+            http_requests_per_second: 0, // unlimited
+            whois_queries_per_second: 2,
+            ..RateLimitConfig::default()
+        };
+        let ctx = RateLimitContext::from_config(&config);
+        ctx.log_config(); // Should not panic
+    }
+
+    #[tokio::test]
+    async fn test_retry_helper_eventual_success() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let config = RateLimitConfig {
+            max_retries: 5,
+            backoff_base_delay_ms: 1,
+            backoff_max_delay_ms: 10,
+            ..RateLimitConfig::default()
+        };
+        let helper = RetryHelper::new(&config);
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+        let result: Result<i32, String> = helper
+            .with_retry(|| {
+                let c = counter_clone.clone();
+                async move {
+                    let count = c.fetch_add(1, Ordering::SeqCst);
+                    if count < 2 {
+                        Err("transient error".to_string())
+                    } else {
+                        Ok(42)
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
 }

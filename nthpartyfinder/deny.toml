@@ -45,6 +45,38 @@ ignore = [
     #   reverse dependents. No CVEs filed against paste.
     # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
     { id = "RUSTSEC-2024-0436", reason = "compile-time proc-macro only, no runtime attack surface; functionally complete, no known CVEs" },
+
+    # RISK ACCEPTANCE: RUSTSEC-2026-0118 (hickory-proto 0.25.2 — NSEC3 unbounded loop)
+    # Type: vulnerability (DoS via memory exhaustion or panic on debug builds)
+    # Impact: ONLY reachable when DNSSEC validation features are enabled
+    #   (`dnssec-ring` or `dnssec-aws-lc-rs`). nthpartyfinder enables
+    #   `hickory-resolver` with feature `https-ring` only — no DNSSEC.
+    #   The vulnerable NSEC3 closest-encloser proof code path is dead in our build.
+    # Root cause: hickory-proto 0.25.2 transitive via hickory-resolver 0.25.2.
+    #   Upstream fix: code moved to hickory-net 0.26.1; "no fixed upgrade" of
+    #   hickory-proto 0.25.x is available (per RustSec advisory).
+    # Mitigation: DNSSEC features not enabled; vulnerable code unreachable.
+    # Review: re-evaluate when migrating to hickory-resolver 0.26.x.
+    # Accepted: 2026-05-09 by GRC Engineering (PR #5 CI unblock)
+    { id = "RUSTSEC-2026-0118", reason = "DNSSEC validation features (dnssec-ring/aws-lc-rs) not enabled in our hickory-resolver config; vulnerable NSEC3 code path unreachable" },
+
+    # RISK ACCEPTANCE: RUSTSEC-2026-0119 (hickory-proto — O(n²) name compression CPU exhaustion)
+    # Type: vulnerability (CPU DoS amplification during DNS message encoding)
+    # Impact: Two transitive paths in our tree:
+    #   (a) hickory-proto 0.25.2 via hickory-resolver 0.25.2 — used for DNS
+    #       resolution of domains we discover ourselves (controlled inputs from
+    #       our own pipeline; not attacker-supplied messages we encode).
+    #   (b) hickory-proto 0.24.4 via whois-rs 1.6.1 → hickory-client 0.24.4 —
+    #       used only for WHOIS lookups on already-validated domains.
+    # Root cause (a): fixable by upgrading hickory-resolver 0.25→0.26, deferred
+    #   to follow-up to avoid a major-version bump in this release PR.
+    # Root cause (b): whois-rs 1.6.1 is latest; no upstream fix available.
+    # Mitigation: we ENCODE DNS messages only for outbound queries on domains
+    #   we control; we do not parse or re-encode attacker-supplied responses
+    #   in a way that triggers the O(n²) compression scan.
+    # Review: bump hickory-resolver to 0.26.x in a follow-up PR.
+    # Accepted: 2026-05-09 by GRC Engineering (PR #5 CI unblock)
+    { id = "RUSTSEC-2026-0119", reason = "outbound DNS encoding only; no attacker-controlled message encoding path; transitive whois-rs path is latest available" },
 ]
 
 [licenses]
