@@ -881,7 +881,10 @@ garbage
     fn test_get_bundled_binary_path_returns_some() {
         let p = SubfinderDiscovery::get_bundled_binary_path()
             .expect("get_bundled_binary_path should return Some on macOS/Linux/Windows");
-        assert!(p.ends_with("subfinder") || p.ends_with("subfinder.exe"));
+        #[cfg(windows)]
+        assert!(p.ends_with("subfinder.exe"));
+        #[cfg(not(windows))]
+        assert!(p.ends_with("subfinder"));
         let path_str = p.to_string_lossy();
         assert!(
             path_str.contains("nthpartyfinder"),
@@ -927,20 +930,20 @@ garbage
     fn test_get_platform_download_url_contains_platform_info() {
         let url = SubfinderDiscovery::get_platform_download_url()
             .expect("should return Some on supported platform");
-        assert!(
-            url.contains("darwin") || url.contains("linux") || url.contains("windows"),
-            "URL should contain a known platform name"
-        );
+        let has_platform = url.contains("darwin")
+            | url.contains("linux")
+            | url.contains("windows");
+        assert!(has_platform, "URL should contain a known platform name");
     }
 
     #[test]
     fn test_get_platform_download_url_contains_arch() {
         let url = SubfinderDiscovery::get_platform_download_url()
             .expect("should return Some on supported platform");
-        assert!(
-            url.contains("amd64") || url.contains("arm64") || url.contains("386"),
-            "URL should contain a known architecture"
-        );
+        let has_arch = url.contains("amd64")
+            | url.contains("arm64")
+            | url.contains("386");
+        assert!(has_arch, "URL should contain a known architecture");
     }
 
     // ──────────────────────────────────────────────────────────────────
