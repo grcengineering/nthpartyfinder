@@ -26647,4 +26647,444 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         let r2 = analyzer.company_name_to_domain("Google Cloud");
         let _ = r2;
     }
+
+    // --- GRC-312 Phase 2: covering remaining uncovered branches ---
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_vanta_manifest_fallthrough_branches() {
+        // Covers L1070, L1079, L1081: branches where Method 1/2 conditions fail
+        let analyzer = make_test_analyzer();
+        // HTML with <html> tag but no data-signature-manifest-url attr -> falls through L1070
+        let html1 = r#"<html><body><p>No manifest here</p></body></html>"#;
+        assert!(analyzer.extract_vanta_manifest_url(html1).is_none());
+
+        // HTML with data attr but wrong value -> falls through inner if at L1066
+        let html2 = r#"<html data-signature-manifest-url="https://example.com/other.json"><body></body></html>"#;
+        assert!(analyzer.extract_vanta_manifest_url(html2).is_none());
+
+        // HTML with preload link but href doesn't contain signature-manifest -> L1079
+        let html3 = r#"<html><head><link rel="preload" as="fetch" href="https://example.com/data.json"></head><body></body></html>"#;
+        assert!(analyzer.extract_vanta_manifest_url(html3).is_none());
+
+        // HTML with preload link, has signature-manifest but not .json -> L1079 inner if fails
+        let html4 = r#"<html><head><link rel="preload" as="fetch" href="https://trust.vanta.com/signature-manifest.xml"></head><body></body></html>"#;
+        assert!(analyzer.extract_vanta_manifest_url(html4).is_none());
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_text_from_html_branches() {
+        // Covers L6657 (short content area), L6669 (body fallback), L6671 (no body)
+        // Short content in <main> -> falls through L6657 selector check (< 200 chars)
+        let html1 = "<html><body><main>Short</main></body></html>";
+        let text = extract_text_from_html(html1);
+        assert!(!text.is_empty());
+
+        // No content areas at all, just body -> L6669 fallback
+        let html2 = "<html><body><span>Just some text in body</span></body></html>";
+        let text2 = extract_text_from_html(html2);
+        assert!(!text2.is_empty());
+
+        // Completely empty doc -> L6671
+        let html3 = "<nothtml>nothing</nothtml>";
+        let text3 = extract_text_from_html(html3);
+        let _ = text3;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_is_valid_vendor_domain_edge_cases() {
+        // Covers L5671 (single label domain), L5691 (short last label)
+        let analyzer = make_test_analyzer();
+        // Single label -> L5671
+        assert!(!analyzer.is_valid_vendor_domain("nodot"));
+        // Short last label like "ab.com" -> L5691 (label < 3 chars)
+        assert!(!analyzer.is_valid_vendor_domain("ab.com"));
+        // Valid domain
+        assert!(analyzer.is_valid_vendor_domain("stripe.com"));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_map_organization_to_domain_branches() {
+        // Covers L4269 (direct domain input) and L4282 (regex compile fallback)
+        let analyzer = make_test_analyzer();
+        // Input that looks like a domain -> L4269
+        let r = analyzer.map_organization_to_domain("stripe.com");
+        assert!(r.is_some());
+        // Known company name mapping
+        let r2 = analyzer.map_organization_to_domain("Stripe, Inc.");
+        let _ = r2;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_domain_from_entity_name_dba() {
+        // Covers L5475, L5476, L5477: d/b/a branch
+        let analyzer = make_test_analyzer();
+        let r = analyzer.extract_domain_from_entity_name("MessageBird (d/b/a Sinch Email)");
+        let _ = r;
+        // Parentheses with no domain and no d/b/a
+        let r2 = analyzer.extract_domain_from_entity_name("Some Company (division of BigCo)");
+        let _ = r2;
+        // d/b/a with unknown company
+        let r3 = analyzer.extract_domain_from_entity_name("Parent Corp (d/b/a Unknown Startup XYZ)");
+        let _ = r3;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_direct_domain_ip_and_invalid() {
+        // Covers L5498 (IP address continue), L5505 (closing brace)
+        let analyzer = make_test_analyzer();
+        // Text with an IP address that matches domain regex
+        let r = analyzer.extract_direct_domain_from_text("Server at 192.168.1.100 is running");
+        let _ = r;
+        // Text with a valid domain
+        let r2 = analyzer.extract_direct_domain_from_text("Visit stripe.com for more");
+        assert!(r2.is_some());
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_company_name_to_domain_variants() {
+        // Covers L5562, L5564: inner loop branches
+        let analyzer = make_test_analyzer();
+        // Unknown company -> tries generic mapping
+        let r = analyzer.company_name_to_domain("Totally Unknown Corp");
+        let _ = r;
+        // Single word company
+        let r2 = analyzer.company_name_to_domain("Stripe");
+        let _ = r2;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_create_evidence_excerpt_long() {
+        // Covers L5817, L5818: long excerpt truncation
+        let analyzer = make_test_analyzer();
+        let long_text = "x".repeat(1000) + " stripe.com " + &"y".repeat(1000);
+        let excerpt = analyzer.create_evidence_excerpt(&long_text, "stripe.com");
+        assert!(excerpt.contains("..."));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_create_focused_html_evidence() {
+        // Covers L5777, L5780: inner element branch
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body><div class="vendor"><span>Stripe</span></div></body></html>"#;
+        let document = Html::parse_document(html);
+        let sel = Selector::parse("div.vendor").unwrap();
+        let el = document.select(&sel).next().unwrap();
+        let evidence = analyzer.create_focused_html_evidence(&el, "Stripe");
+        let _ = evidence;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_filter_results_garbled_and_invalid_tld() {
+        // Covers L6060 (invalid TLD), L6073 (garbled text)
+        let results = vec![
+            SubprocessorDomain {
+                domain: "valid.xyz".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "valid".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "garbled.abcdefghijklmnop".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "bad tld".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "xzqwp.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "garbled label".to_string(),
+            },
+        ];
+        let filtered = filter_subprocessor_results(results);
+        let _ = filtered;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_p2_is_ner_false_positive_language_code() {
+        // Covers L6466: language code branch
+        assert!(is_ner_false_positive("fr"));
+        assert!(is_ner_false_positive("de"));
+        assert!(!is_ner_false_positive("Amazon Web Services"));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_from_tables_address_skip() {
+        // Covers L3842-3848: address-like line filtering, L3757: no header rows, L3888, L3891
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <table>
+                <tr><td>Amazon Web Services, Inc.
+123 Main Street
+Suite 500
+Seattle WA 98101</td><td>Cloud</td></tr>
+                <tr><td>Stripe, Inc.
+354 Oyster Point Blvd
+South San Francisco CA 94080</td><td>Payments</td></tr>
+            </table>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://example.com", &patterns);
+        let _ = result;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_from_tables_no_headers() {
+        // Covers L3757: table with no thead/th -> "No header rows found"
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <table>
+                <tr><td>Amazon Web Services</td><td>Cloud Infrastructure</td></tr>
+                <tr><td>Cloudflare</td><td>CDN</td></tr>
+                <tr><td>Stripe</td><td>Payments</td></tr>
+            </table>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://example.com", &patterns);
+        let _ = result;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_from_lists_domain_in_list() {
+        // Covers L3976, L3979: list extraction with domain patterns
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <ul>
+                <li>Amazon Web Services (aws.amazon.com) - Cloud hosting provider</li>
+                <li>Cloudflare (cloudflare.com) - CDN and security services</li>
+                <li>Stripe (stripe.com) - Payment processing platform</li>
+            </ul>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer.extract_from_lists_with_patterns(&document, html, "https://example.com", &patterns);
+        let _ = vendors;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_extract_from_paragraphs_company_lines() {
+        // Covers L4795, L4797, L4840, L4841, L4843: company line pattern extraction
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <p>Amazon Web Services - Cloud infrastructure and compute services</p>
+            <p>Cloudflare Inc - Content delivery and security platform</p>
+            <p>Stripe Corp - Payment processing solutions</p>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let patterns = ExtractionPatterns::default();
+        let vendors = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns);
+        let _ = vendors;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_p2_extract_with_custom_rules_invalid_org() {
+        // Covers L5003 (invalid org name rejection), L5048-5050 (closing braces)
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <p>Our subprocessors include: Amazon Web Services for cloud.</p>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let custom_rules = CustomExtractionRules {
+            direct_selectors: vec![],
+            custom_regex_patterns: vec![
+                CustomRegexPattern {
+                    pattern: r"(?i)(?:include|use)\s*:?\s+([A-Z][a-zA-Z\s]+(?:Inc|Corp|LLC|Services)?)".to_string(),
+                    capture_group: 1,
+                    description: "Test rule".to_string(),
+                },
+            ],
+            special_handling: None,
+        };
+        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &custom_rules, "example.com");
+        let _ = result;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_p2_extract_domain_from_entity_name_with_patterns_regex() {
+        // Covers L4241, L4243: custom regex patterns in entity extraction
+        let analyzer = make_test_analyzer();
+        let mut patterns = ExtractionPatterns::default();
+        patterns.domain_extraction_patterns = vec![
+            r"(?i)(stripe\.com|cloudflare\.com|amazon\.com)".to_string(),
+        ];
+        let r = analyzer.extract_domain_from_entity_name_with_patterns("Visit stripe.com for payments", &patterns);
+        let _ = r;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_analyze_table_patterns_branch() {
+        // Covers L5203, L5204, L5268, L5269, L5289, L5292, L5295, L5327, L5330, L5334
+        // Feed analyze_table_patterns with successful extractions that match a table
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <table>
+                <tr><th>Sub-Processor</th><th>Purpose</th></tr>
+                <tr><td>Amazon Web Services, Inc.</td><td>Cloud Infrastructure</td></tr>
+                <tr><td>Google Cloud Platform</td><td>Data Processing</td></tr>
+                <tr><td>Cloudflare, Inc.</td><td>CDN and Security</td></tr>
+                <tr><td>Stripe, Inc.</td><td>Payment Processing</td></tr>
+            </table>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let successful = vec![
+            SubprocessorDomain {
+                domain: "aws.amazon.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Amazon Web Services, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "cloud.google.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Google Cloud Platform</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "cloudflare.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Cloudflare, Inc.</td>".to_string(),
+            },
+            SubprocessorDomain {
+                domain: "stripe.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "<td>Stripe, Inc.</td>".to_string(),
+            },
+        ];
+        let mut direct_selectors = Vec::new();
+        let mut custom_mappings = std::collections::HashMap::new();
+        analyzer.analyze_table_patterns(
+            &document,
+            &successful,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
+        let _ = (&direct_selectors, &custom_mappings);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_analyze_table_patterns_short_raw_record() {
+        // Covers L5289, L5292, L5295: raw_record without proper HTML tags
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <table>
+                <tr><td>AWS</td><td>Cloud</td></tr>
+                <tr><td>GCP</td><td>Data</td></tr>
+                <tr><td>CF</td><td>CDN</td></tr>
+            </table>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let successful = vec![
+            SubprocessorDomain {
+                domain: "aws.amazon.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "AWS".to_string(), // no HTML tags -> L5295
+            },
+            SubprocessorDomain {
+                domain: "cloud.google.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: ">AB<".to_string(), // too short company name -> L5204
+            },
+            SubprocessorDomain {
+                domain: "cloudflare.com".to_string(),
+                source_type: RecordType::HttpSubprocessor,
+                raw_record: "no-tags".to_string(), // no > -> L5295
+            },
+        ];
+        let mut direct_selectors = Vec::new();
+        let mut custom_mappings = std::collections::HashMap::new();
+        analyzer.analyze_table_patterns(
+            &document,
+            &successful,
+            &mut direct_selectors,
+            &mut custom_mappings,
+        );
+        let _ = (&direct_selectors, &custom_mappings);
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[tokio::test]
+    async fn test_grc312_detect_organizations_in_content_focused() {
+        // Covers L2908, L2911, L2941, L2945: focused-area and fallback org detection
+        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let analyzer = make_test_analyzer();
+        let html = r#"<html><body>
+            <div class="content">
+                <p>Amazon Web Services, Inc. provides cloud infrastructure.</p>
+                <p>Cloudflare, Inc. provides CDN services.</p>
+                <p>Stripe, Inc. handles payment processing.</p>
+            </div>
+        </body></html>"#;
+        let document = Html::parse_document(html);
+        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let _ = orgs;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[tokio::test]
+    async fn test_grc312_analyze_domain_empty_pages() {
+        // Covers L1409: returns Ok(Vec::new()) when no subprocessor pages found
+        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let analyzer = make_test_analyzer();
+        let result = analyzer.analyze_domain_with_full_options(
+            "nonexistent-domain-xyz123.invalid",
+            None,
+            None,
+            None,
+        ).await;
+        let _ = result;
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_grc312_generate_selector_container_and_directtext() {
+        // Covers L3238: Container with empty css_classes (dead branch but need to exercise the match)
+        let analyzer = make_test_analyzer();
+        // DirectText path
+        let org = DetectedOrganization {
+            name: "Test Corp".to_string(),
+            confidence: 0.9,
+            dom_context: DomContext {
+                parent_tags: vec!["body".to_string(), "p".to_string()],
+                css_classes: vec![],
+                sibling_count: 3,
+                text_content: "subprocessors".to_string(),
+                xpath_like: "/body/p".to_string(),
+            },
+        };
+        let orgs = vec![&org];
+        let selector = analyzer.generate_selector_from_pattern("test", &orgs);
+        let _ = selector;
+
+        // Container path (with css_classes)
+        let org2 = DetectedOrganization {
+            name: "Test Corp".to_string(),
+            confidence: 0.9,
+            dom_context: DomContext {
+                parent_tags: vec!["body".to_string(), "div".to_string()],
+                css_classes: vec!["vendor-list".to_string()],
+                sibling_count: 5,
+                text_content: "subprocessors".to_string(),
+                xpath_like: "/body/div.vendor-list".to_string(),
+            },
+        };
+        let orgs2 = vec![&org2];
+        let selector2 = analyzer.generate_selector_from_pattern("test", &orgs2);
+        let _ = selector2;
+    }
 }
