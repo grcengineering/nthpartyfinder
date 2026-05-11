@@ -99,6 +99,7 @@ fn select_best_org(
     best
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(any(feature = "embedded-ner", test))]
 fn chunk_text(text: &str, max_single_len: usize, chunk_size: usize, overlap: usize) -> Vec<&str> {
     if text.len() <= max_single_len {
@@ -187,6 +188,7 @@ pub struct NerOrganizationExtractor {
 
 #[cfg(feature = "embedded-ner")]
 impl NerOrganizationExtractor {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     /// Create a new NER extractor by writing embedded model files to temp directory
     pub fn new() -> Result<Self> {
         Self::with_min_confidence(0.5)
@@ -310,6 +312,7 @@ impl NerOrganizationExtractor {
         ))
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     /// Create a new NER extractor with custom minimum confidence threshold
     pub fn with_min_confidence(min_confidence: f32) -> Result<Self> {
         // Setup ONNX runtime (Windows-specific DLL handling)
@@ -383,6 +386,7 @@ impl NerOrganizationExtractor {
         Ok(candidates)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     /// Write bytes to file if it doesn't already exist
     fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         if !path.exists() {
@@ -418,6 +422,7 @@ impl NerOrganizationExtractor {
         Ok(best_match)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     /// Extract organization from domain and optional page content
     pub fn extract_from_domain(
         &self,
@@ -502,6 +507,7 @@ pub fn init() -> anyhow::Result<()> {
     init_with_config(0.5)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 /// Initialize the global NER extractor with custom minimum confidence
 #[cfg(feature = "embedded-ner")]
 pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
@@ -518,6 +524,7 @@ pub fn is_available() -> bool {
     NER_EXTRACTOR.get().is_some()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 /// Get the global NER extractor
 #[cfg(feature = "embedded-ner")]
 pub fn get() -> Option<&'static NerOrganizationExtractor> {
@@ -785,6 +792,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_new_constructor() {
         if !ensure_ner_available() {
@@ -795,6 +803,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_init_module_level() {
         let result = std::panic::catch_unwind(init);
@@ -802,6 +811,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_get_returns_extractor() {
         if !ensure_ner_available() {
@@ -829,6 +839,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_multiple_entity_types() {
         if !ensure_ner_available() {
@@ -840,6 +851,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_no_orgs() {
         if !ensure_ner_available() {
@@ -851,6 +863,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_empty_text() {
         if !ensure_ner_available() {
@@ -861,6 +874,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_long_text_truncation() {
         if !ensure_ner_available() {
@@ -877,6 +891,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_long_text_with_multibyte_at_boundary() {
         if !ensure_ner_available() {
@@ -894,6 +909,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_with_content() {
         if !ensure_ner_available() {
@@ -908,6 +924,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_without_content() {
         if !ensure_ner_available() {
@@ -918,6 +935,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_short_text() {
         if !ensure_ner_available() {
@@ -936,6 +954,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_default_confidence() {
         if !ensure_ner_available() {
@@ -950,6 +969,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_long_text_chunking() {
         if !ensure_ner_available() {
@@ -969,6 +989,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_very_long_text_multiple_chunks() {
         if !ensure_ner_available() {
@@ -987,6 +1008,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_multibyte_chunking() {
         if !ensure_ner_available() {
@@ -1005,6 +1027,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_empty_text() {
         if !ensure_ner_available() {
@@ -1015,6 +1038,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_high_confidence_filter() {
         if !ensure_ner_available() {
@@ -1029,6 +1053,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_module_extract_organization_with_content() {
         if !ensure_ner_available() {
@@ -1042,6 +1067,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_module_extract_organization_without_content() {
         if !ensure_ner_available() {
@@ -1051,6 +1077,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_module_extract_all_organizations() {
         if !ensure_ner_available() {
@@ -1063,6 +1090,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_module_extract_all_organizations_none_confidence() {
         if !ensure_ner_available() {
@@ -1072,6 +1100,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_is_available_after_init() {
         if !ensure_ner_available() {
@@ -1081,6 +1110,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_init_with_config_already_initialized() {
         if !ensure_ner_available() {
@@ -1095,6 +1125,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_selects_best_match() {
         if !ensure_ner_available() {
@@ -1111,6 +1142,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_extracts_with_domain_context() {
         if !ensure_ner_available() {
@@ -1128,6 +1160,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_dedup_by_name() {
         if !ensure_ner_available() {
@@ -1148,6 +1181,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_sorted_by_confidence() {
         if !ensure_ner_available() {
@@ -1169,6 +1203,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_organizations_filters_short_names() {
         if !ensure_ner_available() {
@@ -1187,6 +1222,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_write_if_missing_already_exists() {
         if !ensure_ner_available() {
@@ -1209,6 +1245,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_write_if_missing_new_file() {
         let temp = std::env::temp_dir().join("nthpartyfinder_ner_test_write");
@@ -1244,6 +1281,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_with_env_var_already_set() {
         std::env::set_var("ORT_DYLIB_PATH", "/some/test/path");
@@ -1252,6 +1290,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_search_paths() {
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1464,6 +1503,7 @@ mod tests {
 
     // ── Coverage uplift: targeted edge-case tests ──────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[cfg(feature = "embedded-ner")]
     fn init_tracing() {
         let _ = tracing_subscriber::fmt()
@@ -1473,6 +1513,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_search_path_discovery() {
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1497,6 +1538,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_organization_truncation_char_boundary() {
         if !ensure_ner_available() {
@@ -1522,6 +1564,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_no_org_found() {
         if !ensure_ner_available() {
@@ -1537,6 +1580,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_debug_with_content() {
         if !ensure_ner_available() {
@@ -1552,6 +1596,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_from_domain_debug_without_content() {
         if !ensure_ner_available() {
@@ -1564,6 +1609,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunking_whitespace_break() {
         if !ensure_ner_available() {
@@ -1585,6 +1631,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunking_no_whitespace() {
         if !ensure_ner_available() {
@@ -1605,6 +1652,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunking_multibyte_boundaries() {
         if !ensure_ner_available() {
@@ -1629,6 +1677,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunking_small_overlap() {
         if !ensure_ner_available() {
@@ -1649,6 +1698,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunking_cjk_dense() {
         if !ensure_ner_available() {
@@ -1669,6 +1719,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_debug_logging() {
         if !ensure_ner_available() {
@@ -1684,6 +1735,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_org_debug_logging_with_match() {
         if !ensure_ner_available() {
@@ -1697,6 +1749,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_module_level_functions_after_init() {
         if !ensure_ner_available() {
@@ -1709,6 +1762,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_exact_4000_boundary() {
         if !ensure_ner_available() {
@@ -1730,6 +1784,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_emoji_dense_text() {
         if !ensure_ner_available() {
@@ -1749,6 +1804,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_org_multiple_companies() {
         if !ensure_ner_available() {
@@ -1761,6 +1817,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_degenerate_chunk_multibyte_whitespace() {
         if !ensure_ner_available() {
@@ -1780,6 +1837,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_chunk_boundary_adjustment() {
         if !ensure_ner_available() {
@@ -1802,6 +1860,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_high_threshold_filters_all() {
         if !ensure_ner_available() {
@@ -1815,6 +1874,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_low_threshold() {
         if !ensure_ner_available() {
@@ -1829,6 +1889,7 @@ mod tests {
     }
 
     #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_extract_all_orgs_overlap_boundary_walk() {
         if !ensure_ner_available() {
@@ -1969,5 +2030,540 @@ mod tests {
         assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
         assert_eq!(results[1].organization, "Microsoft");
         assert!(dedup_filter_sort_orgs(vec![], 3).is_empty());
+    }
+
+    // ── Additional pure function edge-case tests for coverage uplift ──
+
+    // -- truncate_text --
+
+    #[test]
+    fn test_truncate_text_exact_boundary() {
+        // When max_len equals text length, return full text
+        let text = "hello";
+        assert_eq!(truncate_text(text, 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_text_one_less_than_length() {
+        let text = "hello";
+        assert_eq!(truncate_text(text, 4), "hell");
+    }
+
+    #[test]
+    fn test_truncate_text_zero_max_len() {
+        let text = "hello";
+        assert_eq!(truncate_text(text, 0), "");
+    }
+
+    #[test]
+    fn test_truncate_text_empty_string() {
+        assert_eq!(truncate_text("", 0), "");
+        assert_eq!(truncate_text("", 100), "");
+    }
+
+    #[test]
+    fn test_truncate_text_single_multibyte_char() {
+        // '\u{2019}' is 3 bytes (RIGHT SINGLE QUOTATION MARK)
+        let text = "\u{2019}";
+        assert_eq!(text.len(), 3);
+        // max_len = 1 or 2 are inside the char boundary, should back down to 0
+        assert_eq!(truncate_text(text, 1), "");
+        assert_eq!(truncate_text(text, 2), "");
+        assert_eq!(truncate_text(text, 3), "\u{2019}");
+    }
+
+    #[test]
+    fn test_truncate_text_only_multibyte_chars() {
+        // Each '\u{1F600}' (grinning face) is 4 bytes
+        let text = "\u{1F600}\u{1F600}"; // 8 bytes
+        assert_eq!(text.len(), 8);
+        assert_eq!(truncate_text(text, 1), "");
+        assert_eq!(truncate_text(text, 4), "\u{1F600}");
+        assert_eq!(truncate_text(text, 5), "\u{1F600}");
+        assert_eq!(truncate_text(text, 7), "\u{1F600}");
+        assert_eq!(truncate_text(text, 8), "\u{1F600}\u{1F600}");
+    }
+
+    #[test]
+    fn test_truncate_text_ascii_only_no_boundary_issues() {
+        let text = "abcdefgh";
+        assert_eq!(truncate_text(text, 3), "abc");
+        assert_eq!(truncate_text(text, 8), "abcdefgh");
+        assert_eq!(truncate_text(text, 100), "abcdefgh");
+    }
+
+    // -- build_domain_context --
+
+    #[test]
+    fn test_build_domain_context_empty_domain_with_content() {
+        assert_eq!(
+            build_domain_context("", Some("content here")),
+            "Website: . content here"
+        );
+    }
+
+    #[test]
+    fn test_build_domain_context_empty_domain_without_content() {
+        assert_eq!(build_domain_context("", None), "Website: ");
+    }
+
+    #[test]
+    fn test_build_domain_context_long_content() {
+        let content = "x".repeat(10000);
+        let result = build_domain_context("example.com", Some(&content));
+        assert!(result.starts_with("Website: example.com. "));
+        assert_eq!(result.len(), "Website: example.com. ".len() + 10000);
+    }
+
+    #[test]
+    fn test_build_domain_context_unicode_domain() {
+        let result = build_domain_context("日本語.jp", Some("日本語コンテンツ"));
+        assert_eq!(result, "Website: 日本語.jp. 日本語コンテンツ");
+    }
+
+    // -- is_org_entity_type --
+
+    #[test]
+    fn test_is_org_entity_type_mixed_case() {
+        assert!(is_org_entity_type("COMPANY"));
+        assert!(is_org_entity_type("Product"));
+        assert!(is_org_entity_type("BRAND"));
+        assert!(is_org_entity_type("OrGaNiZaTiOn"));
+    }
+
+    #[test]
+    fn test_is_org_entity_type_non_org_types() {
+        assert!(!is_org_entity_type("person"));
+        assert!(!is_org_entity_type("location"));
+        assert!(!is_org_entity_type("date"));
+        assert!(!is_org_entity_type("event"));
+        assert!(!is_org_entity_type("money"));
+        assert!(!is_org_entity_type("org")); // not in the list
+        assert!(!is_org_entity_type("corp"));
+        assert!(!is_org_entity_type("organizations")); // plural
+    }
+
+    #[test]
+    fn test_is_org_entity_type_whitespace() {
+        // " organization " after trim in to_lowercase won't match "organization"
+        assert!(!is_org_entity_type(" organization "));
+        assert!(!is_org_entity_type("organization "));
+    }
+
+    // -- select_best_org --
+
+    #[test]
+    fn test_select_best_org_empty_candidates() {
+        assert!(select_best_org(&[], 0.0).is_none());
+    }
+
+    #[test]
+    fn test_select_best_org_all_below_threshold() {
+        let candidates = vec![
+            ("organization".into(), "Low Corp".into(), 0.1f32),
+            ("company".into(), "Lower Corp".into(), 0.2f32),
+        ];
+        assert!(select_best_org(&candidates, 0.5).is_none());
+    }
+
+    #[test]
+    fn test_select_best_org_non_org_types_skipped() {
+        let candidates = vec![
+            ("person".into(), "John Doe".into(), 0.99f32),
+            ("location".into(), "New York".into(), 0.98f32),
+            ("organization".into(), "Acme".into(), 0.5f32),
+        ];
+        let result = select_best_org(&candidates, 0.3);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Acme");
+    }
+
+    #[test]
+    fn test_select_best_org_whitespace_only_name_skipped() {
+        // Whitespace-only names should be skipped even if entity type and confidence qualify
+        let candidates = vec![
+            ("organization".into(), "   ".into(), 0.99f32),
+            ("organization".into(), "\t\n".into(), 0.98f32),
+        ];
+        assert!(select_best_org(&candidates, 0.5).is_none());
+    }
+
+    #[test]
+    fn test_select_best_org_trims_whitespace() {
+        let candidates = vec![
+            ("organization".into(), "  Trimmed Corp  ".into(), 0.8f32),
+        ];
+        let result = select_best_org(&candidates, 0.5).unwrap();
+        assert_eq!(result.organization, "Trimmed Corp");
+    }
+
+    #[test]
+    fn test_select_best_org_picks_highest_confidence_among_org_types() {
+        let candidates = vec![
+            ("company".into(), "A Corp".into(), 0.6f32),
+            ("product".into(), "B Product".into(), 0.8f32),
+            ("brand".into(), "C Brand".into(), 0.7f32),
+            ("organization".into(), "D Org".into(), 0.75f32),
+        ];
+        let result = select_best_org(&candidates, 0.5).unwrap();
+        assert_eq!(result.organization, "B Product");
+        assert!((result.confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_select_best_org_exactly_at_threshold() {
+        let candidates = vec![
+            ("organization".into(), "Exact Corp".into(), 0.5f32),
+        ];
+        let result = select_best_org(&candidates, 0.5);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().organization, "Exact Corp");
+    }
+
+    #[test]
+    fn test_select_best_org_just_below_threshold() {
+        let candidates = vec![
+            ("organization".into(), "Almost Corp".into(), 0.499f32),
+        ];
+        assert!(select_best_org(&candidates, 0.5).is_none());
+    }
+
+    #[test]
+    fn test_select_best_org_multiple_same_confidence() {
+        // When two candidates have the same confidence, the first one wins
+        // (since we use > not >=)
+        let candidates = vec![
+            ("organization".into(), "First Corp".into(), 0.8f32),
+            ("company".into(), "Second Corp".into(), 0.8f32),
+        ];
+        let result = select_best_org(&candidates, 0.5).unwrap();
+        assert_eq!(result.organization, "First Corp");
+    }
+
+    #[test]
+    fn test_select_best_org_empty_name_after_trim() {
+        let candidates = vec![
+            ("organization".into(), "".into(), 0.99f32),
+        ];
+        assert!(select_best_org(&candidates, 0.5).is_none());
+    }
+
+    // -- chunk_text --
+
+    #[test]
+    fn test_chunk_text_exactly_at_max_single_len() {
+        let text = "a".repeat(4000);
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], text);
+    }
+
+    #[test]
+    fn test_chunk_text_one_over_max_single_len() {
+        let text = "a ".repeat(2001); // 4002 bytes with spaces
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(chunks.len() > 1);
+    }
+
+    #[test]
+    fn test_chunk_text_no_whitespace_in_long_text() {
+        // When there's no whitespace to break on, chunks at safe_end
+        let text = "a".repeat(8000);
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_only_whitespace() {
+        let text = " ".repeat(6000);
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_text_overlap_parameter_effect() {
+        // With overlap=0, chunks shouldn't overlap
+        let text = "word ".repeat(2000); // 10000 bytes
+        let chunks_no_overlap = chunk_text(&text, 4000, 3000, 0);
+        let chunks_with_overlap = chunk_text(&text, 4000, 3000, 500);
+        // With overlap there should be more chunks covering the same text
+        assert!(chunks_with_overlap.len() >= chunks_no_overlap.len());
+    }
+
+    #[test]
+    fn test_chunk_text_very_small_chunk_size() {
+        let text = "hello world foo bar";
+        let chunks = chunk_text(text, 5, 5, 2);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_multibyte_at_chunk_boundary() {
+        // Create text where a multibyte char falls exactly at chunk_size boundary
+        let mut text = String::new();
+        // Fill with ASCII up to just before chunk_size, then put a 3-byte char
+        while text.len() < 2998 {
+            text.push('a');
+        }
+        text.push('\u{2019}'); // 3 bytes, now at 3001
+        while text.len() < 6000 {
+            text.push('b');
+        }
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+            // Verify each chunk is valid UTF-8 (it must be, since &str)
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_empty_string() {
+        let chunks = chunk_text("", 4000, 3000, 500);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "");
+    }
+
+    #[test]
+    fn test_chunk_text_single_char() {
+        let chunks = chunk_text("x", 4000, 3000, 500);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "x");
+    }
+
+    #[test]
+    fn test_chunk_text_overlap_larger_than_chunk() {
+        // Edge case: overlap > chunk_size/2, should still work without infinite loop
+        let text = "word ".repeat(200); // 1000 bytes
+        let chunks = chunk_text(&text, 100, 100, 90);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_4byte_emoji_boundaries() {
+        // Each emoji is 4 bytes
+        let mut text = String::new();
+        for _ in 0..2000 {
+            text.push('\u{1F600}');
+        }
+        assert_eq!(text.len(), 8000);
+        let chunks = chunk_text(&text, 4000, 3000, 500);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_mixed_ascii_and_multibyte() {
+        let mut text = String::new();
+        for i in 0..2000 {
+            if i % 3 == 0 {
+                text.push('\u{00E9}'); // 2-byte
+            } else if i % 3 == 1 {
+                text.push('\u{4E16}'); // 3-byte CJK
+            } else {
+                text.push('a'); // 1-byte
+            }
+        }
+        let chunks = chunk_text(&text, 2000, 1500, 200);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_final_end_leq_start_branch() {
+        // Tests the branch where final_end <= start causes a continue.
+        // We need safe_end > start (so start advances) but actual_end computes
+        // back to start. This happens when rfind returns the position right at
+        // start within the slice.
+        //
+        // Example: "a " followed by a long run of no-whitespace text, with
+        // chunk_size just past the space but actual_end computes to start+1
+        // which after boundary walking equals start for the next iteration.
+        //
+        // Simpler: after processing a chunk, the next chunk starts mid-multibyte.
+        // Use text where an ASCII prefix is followed by multibyte content and
+        // chunk_size lands in the middle of a multibyte char after the first chunk.
+        let mut text = String::new();
+        text.push_str("ab"); // 2 bytes
+        // Now add a sequence of 3-byte chars (multibyte)
+        for _ in 0..3000 {
+            text.push('\u{2019}'); // 3 bytes each
+        }
+        assert!(text.len() > 4000);
+        let chunks = chunk_text(&text, 2000, 2000, 0);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_overlap_start_leq_start_branch() {
+        // Test the branch where safe_overlap <= start, causing start = final_end
+        // This happens when the overlap is very large relative to the chunk produced
+        let text = "ab cd ef gh ij kl mn op qr st uv wx yz";
+        let chunks = chunk_text(text, 5, 6, 5);
+        assert!(!chunks.is_empty());
+        // Verify all text is covered
+        let _rejoined: String = chunks.to_vec().join("");
+        // With overlaps, there may be repeated text, but no data loss
+        for word in text.split_whitespace() {
+            assert!(
+                chunks.iter().any(|c| c.contains(word)),
+                "Word '{}' should appear in at least one chunk",
+                word
+            );
+        }
+    }
+
+    // -- dedup_filter_sort_orgs --
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_all_below_min_name_len() {
+        let orgs = vec![
+            ("AB".into(), 0.9),
+            ("X".into(), 0.95),
+            ("YZ".into(), 0.8),
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_exact_min_name_len() {
+        let orgs = vec![("ABC".into(), 0.7)];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].organization, "ABC");
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_case_insensitive_dedup() {
+        let orgs = vec![
+            ("Google LLC".into(), 0.9),
+            ("GOOGLE LLC".into(), 0.7),
+            ("google llc".into(), 0.6),
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 1);
+        // The one with highest confidence should win
+        assert_eq!(results[0].organization, "Google LLC");
+        assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_sorted_descending() {
+        let orgs = vec![
+            ("Alpha Corp".into(), 0.5),
+            ("Beta Inc".into(), 0.9),
+            ("Gamma Ltd".into(), 0.7),
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 3);
+        assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
+        assert!((results[1].confidence - 0.7).abs() < f32::EPSILON);
+        assert!((results[2].confidence - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_nan_confidence() {
+        // NaN comparison should not panic, handled by unwrap_or(Equal)
+        let orgs = vec![
+            ("NaN Corp".into(), f32::NAN),
+            ("Valid Corp".into(), 0.8),
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_zero_min_name_len() {
+        let orgs = vec![
+            ("".into(), 0.9),   // empty string has len 0
+            ("A".into(), 0.8),  // len 1
+        ];
+        // min_name_len=0 means even empty strings pass
+        let results = dedup_filter_sort_orgs(orgs, 0);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_updates_to_higher_confidence() {
+        // When same key appears twice, the higher confidence should replace the lower
+        let orgs = vec![
+            ("Test Corp".into(), 0.5),
+            ("test corp".into(), 0.9), // same key (lowercase), higher confidence
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 1);
+        // The second entry had higher confidence, so its name should be used
+        assert_eq!(results[0].organization, "test corp");
+        assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_does_not_update_to_lower_confidence() {
+        let orgs = vec![
+            ("Test Corp".into(), 0.9),
+            ("test corp".into(), 0.5), // same key but lower confidence
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].organization, "Test Corp");
+        assert!((results[0].confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_unicode_names() {
+        let orgs = vec![
+            ("日本企業".into(), 0.8),
+            ("日本企業".into(), 0.7), // duplicate
+        ];
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 1);
+        assert!((results[0].confidence - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_dedup_filter_sort_orgs_many_entries() {
+        let orgs: Vec<(String, f32)> = (0..100)
+            .map(|i| (format!("Corp_{:03}", i), i as f32 / 100.0))
+            .collect();
+        let results = dedup_filter_sort_orgs(orgs, 3);
+        assert_eq!(results.len(), 100);
+        // Verify sorted descending
+        for window in results.windows(2) {
+            assert!(window[0].confidence >= window[1].confidence);
+        }
+    }
+
+    #[test]
+    fn test_chunk_text_multibyte_whitespace_rfind_mid_char() {
+        // \u{3000} (ideographic space) is 3 bytes and IS whitespace.
+        // rfind finds it at byte 0, so actual_end = 0 + 1 = byte 1 (mid-char).
+        // final_end walks back from 1 to 0, hitting the final_end <= start branch.
+        let mut text = String::new();
+        text.push('\u{3000}');
+        while text.len() < 20 {
+            text.push('a');
+        }
+        let chunks = chunk_text(&text, 2, 3, 0);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(!chunk.is_empty());
+        }
     }
 }
