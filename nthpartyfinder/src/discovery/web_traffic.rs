@@ -86,10 +86,21 @@ impl WebTrafficDiscovery {
     pub async fn analyze_domain(&self, domain: &str) -> Vec<WebTrafficResult> {
         let url = format!("https://{}", domain);
         let target_base_domain = domain_utils::extract_base_domain(domain);
+        self.analyze_domain_url(&url, domain, &target_base_domain)
+            .await
+    }
+
+    /// Internal: run both analysis phases against a pre-built URL.
+    async fn analyze_domain_url(
+        &self,
+        url: &str,
+        domain: &str,
+        target_base_domain: &str,
+    ) -> Vec<WebTrafficResult> {
         let mut all_results: HashMap<String, WebTrafficResult> = HashMap::new();
 
         // Phase 1: Static HTML analysis (fast, no browser needed)
-        match self.analyze_page_source(&url, &target_base_domain).await {
+        match self.analyze_page_source(url, target_base_domain).await {
             Ok(results) => {
                 debug!(
                     "Web traffic: static analysis of {} found {} external domains",
@@ -107,7 +118,7 @@ impl WebTrafficDiscovery {
 
         // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
         match self
-            .analyze_network_traffic(&url, &target_base_domain)
+            .analyze_network_traffic(url, target_base_domain)
             .await
         {
             Ok(results) => {
@@ -117,7 +128,6 @@ impl WebTrafficDiscovery {
                     results.len()
                 );
                 for r in results {
-                    // Network traffic evidence is stronger — overwrite page source if same domain
                     all_results.insert(r.vendor_domain.clone(), r);
                 }
             }
@@ -201,36 +211,7 @@ impl WebTrafficDiscovery {
             network_urls.len()
         );
 
-        let mut results = Vec::new();
-        let mut seen_domains = HashSet::new();
-
-        for url_str in &network_urls {
-            if let Ok(parsed) = Url::parse(url_str) {
-                if let Some(host) = parsed.host_str() {
-                    let base_domain = domain_utils::extract_base_domain(host);
-
-                    // Skip self-references and already-seen domains
-                    if base_domain == target_base_domain
-                        || !seen_domains.insert(base_domain.clone())
-                    {
-                        continue;
-                    }
-
-                    // Skip common browser/infrastructure noise
-                    if is_infrastructure_noise(&base_domain) {
-                        continue;
-                    }
-
-                    results.push(WebTrafficResult {
-                        vendor_domain: base_domain,
-                        source: WebTrafficSource::NetworkTraffic,
-                        evidence: format!("Runtime network request to {}", url_str),
-                    });
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(filter_network_urls(&network_urls, target_base_domain))
     }
 }
 
@@ -292,6 +273,42 @@ pub fn extract_external_domains_from_html(
                         });
                     }
                 }
+            }
+        }
+    }
+
+    results
+}
+
+/// Filter raw network URLs into vendor results, deduplicating, skipping self-references
+/// and infrastructure noise.
+pub fn filter_network_urls(
+    network_urls: &[String],
+    target_base_domain: &str,
+) -> Vec<WebTrafficResult> {
+    let mut results = Vec::new();
+    let mut seen_domains = HashSet::new();
+
+    for url_str in network_urls {
+        if let Ok(parsed) = Url::parse(url_str) {
+            if let Some(host) = parsed.host_str() {
+                let base_domain = domain_utils::extract_base_domain(host);
+
+                if base_domain == target_base_domain
+                    || !seen_domains.insert(base_domain.clone())
+                {
+                    continue;
+                }
+
+                if is_infrastructure_noise(&base_domain) {
+                    continue;
+                }
+
+                results.push(WebTrafficResult {
+                    vendor_domain: base_domain,
+                    source: WebTrafficSource::NetworkTraffic,
+                    evidence: format!("Runtime network request to {}", url_str),
+                });
             }
         }
     }
@@ -853,14 +870,14 @@ mod tests {
     #[test]
     fn test_mixed_case_urls() {
         let html = r#"<script src="HTTPS://CDN.PENDO.IO/Agent.JS"></script>"#;
-        // URL::parse is case-insensitive for scheme, and domain_utils normalizes
         let results = extract_external_domains_from_html(html, "example.com");
-        // This may or may not match depending on regex — the regex expects lowercase "https://"
-        // The inline URL regex should still catch it since it accepts both cases
-        // Note: the SCRIPT_SRC_RE captures the raw URL, Url::parse handles case
-        if !results.is_empty() {
-            assert_eq!(results[0].vendor_domain, "pendo.io");
-        }
+        // SCRIPT_SRC_RE captures the URL regardless of case; Url::parse is case-insensitive
+        // for the scheme. The inline URL regex also matches. Either path finds pendo.io.
+        assert!(
+            !results.is_empty(),
+            "Uppercase URLs should still be matched by at least the inline URL regex"
+        );
+        assert_eq!(results[0].vendor_domain, "pendo.io");
     }
 
     #[test]
@@ -1810,5 +1827,522 @@ mod tests {
         let truncated = truncate_url(&long, 100);
         assert!(truncated.len() <= 103); // 100 chars + "..."
         assert!(truncated.ends_with("..."));
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // filter_network_urls tests
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_network_urls_basic() {
+        let urls = vec![
+            "https://api.segment.io/v1/track".to_string(),
+            "https://cdn.pendo.io/agent.js".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 2);
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(domains.contains(&"segment.io"));
+        assert!(domains.contains(&"pendo.io"));
+        assert!(results
+            .iter()
+            .all(|r| r.source == WebTrafficSource::NetworkTraffic));
+    }
+
+    #[test]
+    fn test_filter_network_urls_skips_self_references() {
+        let urls = vec![
+            "https://cdn.example.com/app.js".to_string(),
+            "https://api.example.com/data".to_string(),
+            "https://cdn.pendo.io/agent.js".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vendor_domain, "pendo.io");
+    }
+
+    #[test]
+    fn test_filter_network_urls_dedup() {
+        let urls = vec![
+            "https://api.segment.io/v1/track".to_string(),
+            "https://cdn.segment.io/analytics.js".to_string(),
+            "https://api.segment.io/v1/identify".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vendor_domain, "segment.io");
+    }
+
+    #[test]
+    fn test_filter_network_urls_infrastructure_noise() {
+        let urls = vec![
+            "https://gstatic.com/recaptcha.js".to_string(),
+            "https://googleapis.com/api/v1".to_string(),
+            "https://w3.org/2000/svg".to_string(),
+            "https://schema.org/Organization".to_string(),
+            "https://ogp.me/ns".to_string(),
+            "https://chromium.org/updates".to_string(),
+            "https://cdn.pendo.io/agent.js".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vendor_domain, "pendo.io");
+    }
+
+    #[test]
+    fn test_filter_network_urls_invalid_urls_skipped() {
+        let urls = vec![
+            "not-a-url".to_string(),
+            "://broken".to_string(),
+            "".to_string(),
+            "https://cdn.pendo.io/agent.js".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vendor_domain, "pendo.io");
+    }
+
+    #[test]
+    fn test_filter_network_urls_empty() {
+        let results = filter_network_urls(&[], "example.com");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filter_network_urls_evidence_format() {
+        let urls = vec!["https://api.stripe.com/v1/charges".to_string()];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert!(results[0]
+            .evidence
+            .contains("Runtime network request to"));
+        assert!(results[0]
+            .evidence
+            .contains("https://api.stripe.com/v1/charges"));
+    }
+
+    #[test]
+    fn test_filter_network_urls_all_self_refs() {
+        let urls = vec![
+            "https://cdn.example.com/app.js".to_string(),
+            "https://api.example.com/data".to_string(),
+            "https://static.example.com/img.png".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_filter_network_urls_url_without_host() {
+        let urls = vec![
+            "data:text/html,<h1>Hi</h1>".to_string(),
+            "javascript:void(0)".to_string(),
+            "mailto:test@example.com".to_string(),
+            "https://cdn.pendo.io/agent.js".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vendor_domain, "pendo.io");
+    }
+
+    #[test]
+    fn test_filter_network_urls_mixed_scenario() {
+        let urls = vec![
+            "https://cdn.example.com/self.js".to_string(),
+            "https://api.segment.io/v1/track".to_string(),
+            "https://cdn.segment.io/analytics.js".to_string(),
+            "https://localhost/debug".to_string(),
+            "not-a-url".to_string(),
+            "https://api.stripe.com/v1/charges".to_string(),
+            "https://w3.org/2000/svg".to_string(),
+            "https://cdn.stripe.com/js/v3".to_string(),
+            "https://app.pendo.io/init".to_string(),
+        ];
+        let results = filter_network_urls(&urls, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert_eq!(domains.len(), 3);
+        assert!(domains.contains(&"segment.io"));
+        assert!(domains.contains(&"stripe.com"));
+        assert!(domains.contains(&"pendo.io"));
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // analyze_domain_url tests (via wiremock)
+    // ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_page_source_success_network_error() {
+        let server = MockServer::start().await;
+        let html = r#"<html><head>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+            <script src="https://cdn.pendo.io/agent.js"></script>
+        </head><body></body></html>"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url(&format!("http://{}", host), &host, &host)
+            .await;
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(
+            domains.contains(&"segment.io"),
+            "Should find segment.io from page source, got: {:?}",
+            domains
+        );
+        assert!(
+            domains.contains(&"pendo.io"),
+            "Should find pendo.io from page source, got: {:?}",
+            domains
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_both_phases_fail() {
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(1),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url("http://127.0.0.1:1", "nonexistent.test", "nonexistent.test")
+            .await;
+        assert!(
+            results.is_empty(),
+            "Both phases failing should return empty results"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_merges_and_deduplicates() {
+        let server = MockServer::start().await;
+        let html = r#"<html><head>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+            <script src="https://cdn.pendo.io/agent.js"></script>
+            <script src="https://js.stripe.com/v3"></script>
+        </head><body></body></html>"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url(&format!("http://{}", host), &host, &host)
+            .await;
+        assert!(results.len() >= 3, "Should find at least 3 vendors");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(domains.contains(&"segment.io"));
+        assert!(domains.contains(&"pendo.io"));
+        assert!(domains.contains(&"stripe.com"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_page_source_error_returns_empty() {
+        let server = MockServer::start().await;
+        // No mock routes → 404
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url(&format!("http://{}", host), &host, &host)
+            .await;
+        // wiremock returns 404 with empty body → reqwest returns Ok, empty body → no vendors
+        assert!(results.is_empty());
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // analyze_domain tests
+    // ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_domain_unreachable_host() {
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(1),
+            network_wait_ms: 100,
+        };
+        let results = discovery.analyze_domain("unreachable.invalid.test").await;
+        assert!(
+            results.is_empty(),
+            "Unreachable domain should return empty results"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // analyze_network_traffic tests
+    // ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_analyze_network_traffic_browser_fails() {
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(1),
+            network_wait_ms: 100,
+        };
+        let result = discovery
+            .analyze_network_traffic("http://127.0.0.1:1", "example.com")
+            .await;
+        // Browser creation or navigation should fail in test environment
+        assert!(
+            result.is_err(),
+            "analyze_network_traffic should fail without a browser"
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Social media debug branch (ensure the skip path is exercised)
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_social_media_link_href_exercises_debug_skip() {
+        let html = r#"
+            <link href="https://www.facebook.com/ourpage" rel="canonical">
+            <link href="https://www.twitter.com/ourpage" rel="alternate">
+            <link href="https://www.instagram.com/ourpage" rel="me">
+            <link href="https://www.tiktok.com/@ourpage" rel="me">
+            <link href="https://www.pinterest.com/ourpage" rel="me">
+            <link href="https://www.reddit.com/r/ourcommunity" rel="me">
+            <link href="https://threads.net/@ourpage" rel="me">
+            <link href="https://mastodon.social/@ourpage" rel="me">
+            <link href="https://discord.com/invite/abc" rel="me">
+            <link href="https://discord.gg/abc" rel="me">
+            <link href="https://www.x.com/ourpage" rel="me">
+            <link href="https://www.youtube.com/c/ourpage" rel="me">
+            <link href="https://www.linkedin.com/company/us" rel="me">
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_social_media_iframe_exercises_debug_skip() {
+        let html = r#"
+            <iframe src="https://www.facebook.com/plugins/post.php?href=123"></iframe>
+            <iframe src="https://www.instagram.com/p/abc/embed/"></iframe>
+            <iframe src="https://www.tiktok.com/embed/123"></iframe>
+            <iframe src="https://www.youtube.com/embed/abc123"></iframe>
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        assert!(
+            results.is_empty(),
+            "Social media iframes should all be filtered"
+        );
+    }
+
+    #[test]
+    fn test_social_media_data_src_exercises_debug_skip() {
+        let html = r#"
+            <div data-src="https://www.facebook.com/embed/post/123"></div>
+            <div data-src="https://www.linkedin.com/embed/feed/123"></div>
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        assert!(
+            results.is_empty(),
+            "Social media data-src should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_social_media_inline_url_exercises_debug_skip() {
+        let html = r#"<script>
+            var fb = "https://www.facebook.com/share?url=test";
+            var tw = "https://twitter.com/intent/tweet?text=hello";
+            var li = "https://www.linkedin.com/shareArticle?mini=true";
+            var yt = "https://www.youtube.com/watch?v=abc123";
+            var ig = "https://www.instagram.com/p/abc123/";
+            var tt = "https://www.tiktok.com/@user/video/123";
+            var pi = "https://pinterest.com/pin/create/button/";
+            var rd = "https://reddit.com/submit?url=test";
+        </script>"#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        assert!(results.is_empty());
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Tests with tracing enabled (covers debug!() macro branches)
+    // ───────────────────────────────────────────────────────────────
+
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_test_writer()
+            .try_init();
+    }
+
+    #[test]
+    fn test_extract_with_tracing_social_media_skip_debug() {
+        init_tracing();
+        let html = r#"
+            <link href="https://www.facebook.com/page" rel="canonical">
+            <iframe src="https://www.youtube.com/embed/abc"></iframe>
+            <div data-src="https://www.instagram.com/p/123"></div>
+            <script>var tw = "https://twitter.com/intent/tweet";</script>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        "#;
+        let results = extract_external_domains_from_html(html, "example.com");
+        let domains: Vec<&str> = results.iter().map(|r| r.vendor_domain.as_str()).collect();
+        assert!(domains.contains(&"segment.io"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_with_tracing_page_source_ok() {
+        init_tracing();
+        let server = MockServer::start().await;
+        let html = r#"<html><head>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        </head></html>"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(5),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url(&format!("http://{}", host), "test.com", &host)
+            .await;
+        assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_with_tracing_both_fail() {
+        init_tracing();
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(1))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(1),
+            network_wait_ms: 100,
+        };
+        let results = discovery
+            .analyze_domain_url("http://127.0.0.1:1", "fail.test", "fail.test")
+            .await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_network_traffic_with_real_browser() {
+        let server = MockServer::start().await;
+        let html = r#"<html><body><h1>Test Page</h1></body></html>"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let url = format!("http://{}:{}", addr.ip(), addr.port());
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(10),
+            network_wait_ms: 500,
+        };
+        // Browser may or may not be available; exercise the path regardless
+        let _ = discovery.analyze_network_traffic(&url, &host).await;
+    }
+
+    #[tokio::test]
+    async fn test_analyze_domain_url_with_browser_ok_path() {
+        let server = MockServer::start().await;
+        let html = r#"<html><head>
+            <script src="https://cdn.segment.io/analytics.js"></script>
+        </head><body><h1>Test</h1></body></html>"#;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html))
+            .mount(&server)
+            .await;
+
+        let addr = server.address();
+        let url = format!("http://{}:{}", addr.ip(), addr.port());
+        let host = format!("{}:{}", addr.ip(), addr.port());
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_secs(10),
+            network_wait_ms: 500,
+        };
+        let results = discovery.analyze_domain_url(&url, "test.local", &host).await;
+        assert!(results.iter().any(|r| r.vendor_domain == "segment.io"));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_page_source_body_read_timeout() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Send HTTP headers with large Content-Length but no body
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+
+        let discovery = WebTrafficDiscovery {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_millis(500))
+                .build()
+                .unwrap(),
+            timeout: Duration::from_millis(500),
+            network_wait_ms: 100,
+        };
+        let result = discovery
+            .analyze_page_source(&format!("http://{}", addr), "example.com")
+            .await;
+        assert!(result.is_err(), "Body read should time out");
     }
 }
