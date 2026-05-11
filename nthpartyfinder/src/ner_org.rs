@@ -233,7 +233,9 @@ impl NerOrganizationExtractor {
 
         for path_opt in search_paths {
             if let Some(path) = path_opt {
-                if path.exists() {
+                if path.file_name() == Some(std::ffi::OsStr::new("onnxruntime.dll"))
+                    && path.exists()
+                {
                     // CRITICAL: Convert to absolute path to avoid loading wrong DLL
                     let abs_path = path.canonicalize().unwrap_or(path.clone());
                     let path_str = abs_path.to_string_lossy().to_string();
@@ -288,7 +290,7 @@ impl NerOrganizationExtractor {
         ];
 
         for path in search_paths.into_iter().flatten() {
-            if path.exists() {
+            if path.file_name() == Some(std::ffi::OsStr::new(lib_name)) && path.exists() {
                 let abs_path = path.canonicalize().unwrap_or(path.clone());
                 let path_str = abs_path.to_string_lossy().to_string();
                 info!("Found ONNX Runtime at: {}", path_str);
@@ -384,9 +386,18 @@ impl NerOrganizationExtractor {
     /// Write bytes to file if it doesn't already exist
     fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         if !path.exists() {
-            let mut file = std::fs::File::create(path)?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("model path has no filename"))?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("model path has no parent"))?;
+            let canonical_parent =
+                std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+            let safe_path = canonical_parent.join(file_name);
+            let mut file = std::fs::File::create(&safe_path)?;
             file.write_all(bytes)?;
-            debug!("Wrote model file: {:?}", path);
+            debug!("Wrote model file: {:?}", safe_path);
         }
         Ok(())
     }

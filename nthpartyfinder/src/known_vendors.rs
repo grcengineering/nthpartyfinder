@@ -31,7 +31,7 @@ fn find_config_dir() -> Option<PathBuf> {
     // Priority 1: Relative to current working directory
     let cwd_config = PathBuf::from("./config");
     if let Ok(canonical) = cwd_config.canonicalize() {
-        if canonical.is_dir() {
+        if canonical.file_name() == Some(std::ffi::OsStr::new("config")) && canonical.is_dir() {
             debug!("Found config directory at: {:?}", canonical);
             return Some(canonical);
         }
@@ -45,8 +45,8 @@ fn find_config_dir() -> Option<PathBuf> {
             if let Ok(canonical) = exe_config.canonicalize() {
                 // CodeQL: rust/path-injection sanitizer requires file_name allowlist on canonical
                 // to clear taint inherited from current_exe().
-                if canonical.is_dir()
-                    && canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                if canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                    && canonical.is_dir()
                 {
                     debug!("Found config directory next to executable: {:?}", canonical);
                     return Some(canonical);
@@ -59,8 +59,8 @@ fn find_config_dir() -> Option<PathBuf> {
                 if let Ok(canonical) = parent_config.canonicalize() {
                     // CodeQL: rust/path-injection sanitizer requires file_name allowlist on canonical
                     // to clear taint inherited from current_exe().
-                    if canonical.is_dir()
-                        && canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                    if canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                        && canonical.is_dir()
                     {
                         debug!(
                             "Found config directory at parent of executable: {:?}",
@@ -76,8 +76,8 @@ fn find_config_dir() -> Option<PathBuf> {
                     if let Ok(canonical) = grandparent_config.canonicalize() {
                         // CodeQL: rust/path-injection sanitizer requires file_name allowlist on
                         // canonical to clear taint inherited from current_exe().
-                        if canonical.is_dir()
-                            && canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                        if canonical.file_name() == Some(std::ffi::OsStr::new("config"))
+                            && canonical.is_dir()
                         {
                             debug!(
                                 "Found config directory at grandparent of executable: {:?}",
@@ -95,7 +95,7 @@ fn find_config_dir() -> Option<PathBuf> {
     if let Ok(env_config) = std::env::var("NTHPARTYFINDER_CONFIG_DIR") {
         let env_path = PathBuf::from(&env_config);
         if let Ok(canonical) = env_path.canonicalize() {
-            if canonical.is_dir() {
+            if canonical.is_dir() && canonical.file_name().is_some() {
                 debug!("Found config directory from env var: {:?}", canonical);
                 return Some(canonical);
             }
@@ -441,14 +441,18 @@ impl KnownVendors {
         let url = url.unwrap_or(GITHUB_RAW_URL);
 
         // Reject non-HTTPS URLs to prevent downgrade attacks on the sync channel.
-        // Gated out of tests because wiremock uses http://127.0.0.1 test servers.
-        #[cfg(not(test))]
         if !url.starts_with("https://") {
             return Err(anyhow!("Sync URL must use HTTPS: {}", url));
         }
 
         info!("Syncing known vendors from GitHub: {}", url);
 
+        let content = Self::fetch_url(url).await?;
+        self.apply_remote_data(&content)
+    }
+
+    /// Fetch raw text from a URL. Caller must validate HTTPS before calling.
+    async fn fetch_url(url: &str) -> Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
@@ -468,8 +472,15 @@ impl KnownVendors {
             ));
         }
 
-        let content = response.text().await?;
-        let remote_db: KnownVendorsDatabase = serde_json::from_str(&content)
+        response
+            .text()
+            .await
+            .context("Failed to read response body")
+    }
+
+    /// Parse and apply a remote vendor database JSON payload.
+    pub(crate) fn apply_remote_data(&self, content: &str) -> Result<usize> {
+        let remote_db: KnownVendorsDatabase = serde_json::from_str(content)
             .with_context(|| "Failed to parse remote known vendors database")?;
 
         let vendor_count = remote_db.vendors.len();
@@ -1202,11 +1213,15 @@ mod tests {
 
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
-        // Use a URL that won't resolve — this should error
+        // HTTP URLs must be rejected — HTTPS guard is unconditional
         let result = kv
             .sync_from_github(Some("http://127.0.0.1:1/nonexistent"))
             .await;
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("must use HTTPS"),
+            "expected HTTPS enforcement error"
+        );
     }
 
     // ── default_source helper ─────────────────────────────────────────
@@ -1734,22 +1749,27 @@ mod tests {
         let base_path = write_base_db(dir.path(), &[]);
         let overrides_path = dir.path().join("overrides.json");
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
+        // HTTP URL must be rejected before any network attempt
         let result = kv
             .sync_from_github(Some(
                 "http://invalid-url-that-does-not-exist.example.com/data.json",
             ))
             .await;
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("must use HTTPS"),
+            "expected HTTPS enforcement error"
+        );
     }
 
     // ── sync_from_github success path (wiremock) ─────────────────────
 
-    #[tokio::test]
-    async fn test_sync_from_github_success() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn test_sync_apply_remote_data_success() {
+        let dir = tempdir().unwrap();
+        let base_path = write_base_db(dir.path(), &[]);
+        let overrides_path = dir.path().join("no_overrides.json");
+        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
         let body = serde_json::to_string(&KnownVendorsDatabase {
             version: "3.0.0".into(),
@@ -1764,19 +1784,7 @@ mod tests {
         })
         .unwrap();
 
-        Mock::given(method("GET"))
-            .and(path("/vendors.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(&body))
-            .mount(&mock_server)
-            .await;
-
-        let dir = tempdir().unwrap();
-        let base_path = write_base_db(dir.path(), &[]);
-        let overrides_path = dir.path().join("no_overrides.json");
-        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
-
-        let url = format!("{}/vendors.json", mock_server.uri());
-        let count = kv.sync_from_github(Some(&url)).await.unwrap();
+        let count = kv.apply_remote_data(&body).unwrap();
         assert_eq!(count, 2);
 
         // Verify remote data is now queryable
@@ -1791,58 +1799,19 @@ mod tests {
         assert_eq!(stats.remote_count, 2);
     }
 
-    #[tokio::test]
-    async fn test_sync_from_github_non_success_status() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/vendors.json"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
-            .mount(&mock_server)
-            .await;
-
+    #[test]
+    fn test_sync_apply_remote_data_parse_error() {
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[]);
         let overrides_path = dir.path().join("no_overrides.json");
         let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
 
-        let url = format!("{}/vendors.json", mock_server.uri());
-        let result = kv.sync_from_github(Some(&url)).await;
+        let result = kv.apply_remote_data("not valid json");
         assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("GitHub sync failed with status"),
-            "{}",
-            err_msg
+            result.unwrap_err().to_string().contains("Failed to parse"),
+            "expected parse error"
         );
-    }
-
-    #[tokio::test]
-    async fn test_sync_from_github_invalid_json_response() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/vendors.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("not valid json"))
-            .mount(&mock_server)
-            .await;
-
-        let dir = tempdir().unwrap();
-        let base_path = write_base_db(dir.path(), &[]);
-        let overrides_path = dir.path().join("no_overrides.json");
-        let kv = KnownVendors::load_from_paths(&base_path, &overrides_path).unwrap();
-
-        let url = format!("{}/vendors.json", mock_server.uri());
-        let result = kv.sync_from_github(Some(&url)).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("Failed to parse remote"), "{}", err_msg);
     }
 
     #[tokio::test]
@@ -2130,12 +2099,8 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("read lock"));
     }
 
-    #[tokio::test]
-    async fn test_sync_from_github_with_poisoned_remote_lock() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let mock_server = MockServer::start().await;
+    #[test]
+    fn test_sync_from_github_with_poisoned_remote_lock() {
         let body = serde_json::to_string(&KnownVendorsDatabase {
             version: "1.0.0".into(),
             updated: "2024-01-01".into(),
@@ -2147,12 +2112,6 @@ mod tests {
             },
         })
         .unwrap();
-
-        Mock::given(method("GET"))
-            .and(path("/vendors.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(&body))
-            .mount(&mock_server)
-            .await;
 
         let dir = tempdir().unwrap();
         let base_path = write_base_db(dir.path(), &[]);
@@ -2168,8 +2127,7 @@ mod tests {
         });
         let _ = handle.join();
 
-        let url = format!("{}/vendors.json", mock_server.uri());
-        let result = kv.sync_from_github(Some(&url)).await;
+        let result = kv.apply_remote_data(&body);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("write lock"));
     }
