@@ -4,6 +4,9 @@ on:
   push:
     tags: ['v*']
 
+env:
+  NER_MODEL_CACHE_KEY: ner-model-v1
+
 defaults:
   run:
     working-directory: nthpartyfinder
@@ -43,6 +46,21 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: nthpartyfinder -> target
+
+      - name: Cache NER model
+        id: cache-ner
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: nthpartyfinder/models
+          key: ${{ env.NER_MODEL_CACHE_KEY }}-${{ hashFiles('nthpartyfinder/scripts/download-model.sh') }}
+      - name: Download NER model (Unix)
+        if: steps.cache-ner.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        run: bash scripts/download-model.sh
+      - name: Download NER model (Windows)
+        if: steps.cache-ner.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        working-directory: nthpartyfinder
+        run: .\scripts\download-model.ps1
 
       - run: cargo build --release --locked --target ${{ matrix.target }}
 
