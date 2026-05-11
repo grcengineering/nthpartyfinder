@@ -70,10 +70,10 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar czf nthpartyfinder-${{ matrix.target }}.tgz nthpartyfinder*
-          if command -v shasum &>/dev/null; then
-            shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
-          else
+          if command -v sha256sum &>/dev/null; then
             sha256sum nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
+          else
+            shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
           fi
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
