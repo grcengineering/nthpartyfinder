@@ -290,9 +290,7 @@ impl NerOrganizationExtractor {
         ];
 
         for path in search_paths.into_iter().flatten() {
-            if path.file_name() == Some(std::ffi::OsStr::new(lib_name))
-                && path.exists()
-            {
+            if path.file_name() == Some(std::ffi::OsStr::new(lib_name)) && path.exists() {
                 let abs_path = path.canonicalize().unwrap_or(path.clone());
                 let path_str = abs_path.to_string_lossy().to_string();
                 info!("Found ONNX Runtime at: {}", path_str);
@@ -394,7 +392,8 @@ impl NerOrganizationExtractor {
             let parent = path
                 .parent()
                 .ok_or_else(|| anyhow::anyhow!("model path has no parent"))?;
-            let canonical_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+            let canonical_parent =
+                std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
             let safe_path = canonical_parent.join(file_name);
             let mut file = std::fs::File::create(&safe_path)?;
             file.write_all(bytes)?;

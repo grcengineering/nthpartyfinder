@@ -472,7 +472,10 @@ impl KnownVendors {
             ));
         }
 
-        response.text().await.context("Failed to read response body")
+        response
+            .text()
+            .await
+            .context("Failed to read response body")
     }
 
     /// Parse and apply a remote vendor database JSON payload.
