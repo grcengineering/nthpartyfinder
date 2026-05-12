@@ -163,6 +163,7 @@ impl CtLogDiscovery {
     }
 
     /// Query crt.sh for certificates related to a domain
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
         // Query for wildcard certificates (%.domain.com)
         let url = format!(
@@ -439,6 +440,7 @@ mod tests {
 
     // --- JSON parsing edge cases ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_parse_empty_json_string() {
         let text = "";

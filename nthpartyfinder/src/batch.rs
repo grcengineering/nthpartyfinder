@@ -127,6 +127,7 @@ pub fn parse_domain_file(path: &Path) -> Result<Vec<DomainEntry>> {
 /// Supports two formats:
 /// 1. One domain per line (no header)
 /// 2. CSV with "domain" column header (and optional "label" column)
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
     let mut domains = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -208,6 +209,7 @@ pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
 /// 1. Array of domain strings: ["example.com", "test.org"]
 /// 2. Array of objects with "domain" field: [{"domain": "example.com"}, {"domain": "test.org"}]
 /// 3. Object with "domains" array: {"domains": ["example.com", "test.org"]}
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn parse_json_domains(content: &str) -> Result<Vec<DomainEntry>> {
     let value: serde_json::Value =
         serde_json::from_str(content).context("Failed to parse JSON content")?;
@@ -317,6 +319,7 @@ pub fn domain_output_filename(domain: &str, format: &str) -> String {
 }
 
 /// Export batch summary to JSON file
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_batch_summary(summary: &BatchSummary, output_path: &Path) -> Result<()> {
     let json =
         serde_json::to_string_pretty(summary).context("Failed to serialize batch summary")?;

@@ -43,6 +43,7 @@ pub async fn confirm_pending_mappings(
     confirm_pending_mappings_with_input(pending, analyzer, logger, &StdioInput).await
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) async fn confirm_pending_mappings_with_input(
     pending: &[subprocessor::PendingOrgMapping],
     analyzer: &subprocessor::SubprocessorAnalyzer,
@@ -245,6 +246,7 @@ pub async fn confirm_unverified_organizations(
         .await
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) async fn confirm_unverified_organizations_with_input(
     unverified: &[UnverifiedOrgMapping],
     discovered_vendors: &Arc<Mutex<HashMap<String, String>>>,

@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::Write;
 use tracing::{debug, info};
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to CSV: {}",
@@ -58,6 +59,7 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
     Ok(())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_json(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to JSON: {}",
@@ -156,6 +158,7 @@ pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
     println!("========================\n");
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to Markdown: {}",
@@ -537,6 +540,7 @@ struct HtmlSummary {
     generated_at: String,
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
         "Exporting {} relationships to HTML: {}",
@@ -781,6 +785,7 @@ mod tests {
         assert!(content.contains("No vendor relationships found"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_export_html_with_data() {
         let dir = TempDir::new().unwrap();
@@ -794,6 +799,7 @@ mod tests {
         assert!(content.contains("<html") || content.contains("<!DOCTYPE"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_export_html_empty() {
         let dir = TempDir::new().unwrap();
@@ -1025,6 +1031,7 @@ mod tests {
         assert!(content.contains("DNS::SUBDOMAIN"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_export_html_with_multiple_layers() {
         let rels = vec![

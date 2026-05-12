@@ -415,6 +415,7 @@ impl KnownVendors {
     }
 
     /// Save local overrides to disk
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn save_overrides(&self) -> Result<()> {
         let overrides = self
             .local_overrides

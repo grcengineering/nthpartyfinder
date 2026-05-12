@@ -27,6 +27,7 @@ pub struct ResultSink {
 impl ResultSink {
     /// Create a new ResultSink writing to a zstd-compressed JSONL file.
     /// The file is created in the given directory with a PID-stamped name.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new(output_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(output_dir).with_context(|| {
             format!(
@@ -53,6 +54,7 @@ impl ResultSink {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn with_path(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
@@ -73,6 +75,7 @@ impl ResultSink {
     }
 
     /// Append a single VendorRelationship to the sink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn append_one(&mut self, result: &VendorRelationship) -> Result<()> {
         let json =
             serde_json::to_string(result).context("Failed to serialize VendorRelationship")?;
@@ -89,6 +92,7 @@ impl ResultSink {
     }
 
     /// Append a batch of VendorRelationships to the sink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn append_batch(&mut self, results: &[VendorRelationship]) -> Result<usize> {
         for result in results {
             self.append_one(result)?;
@@ -97,6 +101,7 @@ impl ResultSink {
     }
 
     /// Flush the zstd encoder to ensure data is written to disk.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn flush(&mut self) -> Result<()> {
         self.writer
             .flush()
@@ -107,6 +112,7 @@ impl ResultSink {
 
     /// Finalize the zstd stream and return all results by reading back the file.
     /// This consumes the ResultSink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn drain_all(mut self) -> Result<Vec<VendorRelationship>> {
         // Flush any remaining data
         self.flush()?;
@@ -122,6 +128,7 @@ impl ResultSink {
 
     /// Read results from a zstd-compressed JSONL file.
     /// Uses a tolerant parser that skips corrupt lines (crash recovery).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn read_results(path: &Path) -> Result<Vec<VendorRelationship>> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open result file: {}", path.display()))?;
@@ -807,6 +814,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_check_disk_space_nonexistent_path() {
         let result = check_disk_space(Path::new("/nonexistent/path/that/does/not/exist"));

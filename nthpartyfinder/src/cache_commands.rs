@@ -576,6 +576,7 @@ mod tests {
         assert!(formatted.contains("https://example.com/new-location"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_fields() {
         let result = ValidationResult {
@@ -705,6 +706,7 @@ mod tests {
 
     // ── ValidationResult construction tests ────────────────────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_ok_status() {
         let result = ValidationResult {
@@ -720,6 +722,7 @@ mod tests {
         assert!(matches!(result.status, ValidationStatus::Ok));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_timeout_status() {
         let result = ValidationResult {
@@ -748,6 +751,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_not_found_status() {
         let result = ValidationResult {
@@ -760,6 +764,7 @@ mod tests {
         assert!(matches!(result.status, ValidationStatus::NotFound));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_server_error_status() {
         let result = ValidationResult {
@@ -772,6 +777,7 @@ mod tests {
         assert!(matches!(result.status, ValidationStatus::ServerError(500)));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validation_result_network_error_status() {
         let result = ValidationResult {

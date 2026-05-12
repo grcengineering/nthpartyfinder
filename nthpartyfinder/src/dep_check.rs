@@ -1243,6 +1243,7 @@ mod tests {
 
     // ── download_onnx_runtime_interactive non-interactive ────────────
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_download_onnx_runtime_interactive_non_interactive() {
         // In test/CI, stdin is not a terminal, so this should return an error

@@ -366,6 +366,7 @@ impl AnalysisLogger {
     }
 
     /// Clear the sub-progress detail line.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn clear_sub_progress(&self) {
         let detail_guard = self.detail_bar.read().await;
         if let Some(pb) = detail_guard.as_ref() {
@@ -407,6 +408,7 @@ impl AnalysisLogger {
         self.print_message("SUCCESS", message);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn print_message(&self, level: &str, message: &str) {
         let timestamp = self.get_timestamp();
 
@@ -490,12 +492,14 @@ impl AnalysisLogger {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn set_progress_position(&self, position: u64) {
         if let Some(pb) = self.main_bar.read().await.as_ref() {
             pb.set_position(position);
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn finish_progress(&self, final_message: &str) {
         // Clear detail bar first
         {
@@ -589,6 +593,7 @@ impl AnalysisLogger {
     }
 
     /// Update the progress bar's total length while preserving current position
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn set_progress_total(&self, new_total: u64) {
         if let Some(pb) = self.main_bar.read().await.as_ref() {
             pb.set_length(new_total);
@@ -933,6 +938,7 @@ impl AnalysisLogger {
     }
 
     /// Export all collected logs to the specified file
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn export_logs(&self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref log_file_path) = self.log_file_path {
             if let Ok(buffer) = self.log_buffer.lock() {

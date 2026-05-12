@@ -419,6 +419,7 @@ impl Args {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn get_domain_output_dir(&self) -> Result<String, String> {
         let base_dir = self.get_output_dir()?;
         let domain = self

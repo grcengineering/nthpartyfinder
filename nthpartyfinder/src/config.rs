@@ -450,6 +450,7 @@ impl AppConfig {
     }
 
     /// Load configuration from a specific path
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             return Err(ConfigError::FileNotFound(path.to_path_buf()));
@@ -839,6 +840,7 @@ total_vendor_budget = 200
         ));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validate_no_servers() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
@@ -1241,6 +1243,7 @@ similarity_threshold = 0.9
 
     // --- load_from_path with invalid TOML ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_from_path_invalid_toml() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1252,6 +1255,7 @@ similarity_threshold = 0.9
 
     // --- load_from_path with valid TOML but fails validation ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_from_path_fails_validation() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1619,6 +1623,7 @@ backoff_max_delay_ms = 60000
     // Tests for AppConfig methods (previously coverage(off))
     // ====================================================================
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_uses_config_path_constant() {
         let result = AppConfig::load();

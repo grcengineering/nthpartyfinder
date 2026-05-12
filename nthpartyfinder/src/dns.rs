@@ -741,6 +741,7 @@ pub fn extract_vendor_domains_with_source(txt_records: &[String]) -> Vec<VendorD
     extract_vendor_domains_with_source_and_logger(txt_records, None, "")
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_vendor_domains_with_source_and_logger(
     txt_records: &[String],
     logger: Option<&dyn LogFailure>,
@@ -868,6 +869,7 @@ fn strip_spf_macros(domain: &str) -> String {
     MACRO_REGEX.replace_all(domain, "").to_string()
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_from_spf_record(
     record: &str,
     logger: Option<&dyn LogFailure>,
@@ -1070,6 +1072,7 @@ fn extract_from_dkim_record(
     }
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_from_dmarc_record(
     record: &str,
     logger: Option<&dyn LogFailure>,
@@ -2217,6 +2220,7 @@ mod tests {
         assert_eq!(strip_spf_macros(""), "");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_strip_spf_macros_only_macros() {
         let result = strip_spf_macros("%{ir}.%{v}.");

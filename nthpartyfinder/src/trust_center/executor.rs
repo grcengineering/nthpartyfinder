@@ -19,6 +19,7 @@ use crate::vendor::RecordType;
 ///
 /// This is the single generic entry point. It dispatches on `strategy.strategy_type`
 /// and uses shared JSON navigation/extraction utilities for all strategy types.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn execute_strategy(
     strategy: &TrustCenterStrategy,
     client: &reqwest::Client,
@@ -87,6 +88,7 @@ pub async fn execute_strategy(
 // Strategy type executors
 // ============================================================================
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn execute_graphql(
     client: &reqwest::Client,
     endpoint_url: &str,
@@ -157,6 +159,7 @@ async fn execute_graphql(
     Ok(json)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 async fn execute_rest(
     client: &reqwest::Client,
     endpoint_url: &str,

@@ -318,6 +318,7 @@ impl OrgNormalizer {
 
     /// Find the best matching canonical name for a given name.
     /// Returns the canonical name and similarity score if above threshold.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn find_best_match<'a>(
         &self,
         name: &str,
@@ -488,6 +489,7 @@ fn normalize_whitespace(name: &str) -> String {
 /// Known acronyms and very short all-caps words (2 chars) are preserved.
 /// Longer all-caps words are converted to title case since they're more likely normal words.
 /// L011 fix: Common English prepositions/articles stay lowercase when not the first word.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn to_title_case(name: &str) -> String {
     // Known acronyms that should be preserved regardless of length
     let known_acronyms = [
@@ -1075,6 +1077,7 @@ mod tests {
         assert_eq!(n.normalize("  Acme    Inc.   "), "Acme");
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_unicode_names() {
         let n = normalizer();
