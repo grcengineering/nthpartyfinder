@@ -26252,9 +26252,8 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         let result = analyzer
             .scrape_subprocessor_page(&url, None, "test-no-results.example")
             .await;
-        match result {
-            Ok(vendors) => assert!(vendors.is_empty()),
-            Err(_) => {}
+        if let Ok(vendors) = result {
+            assert!(vendors.is_empty())
         }
     }
 

@@ -146,9 +146,9 @@ pub fn is_organizational_domain(domain: &str) -> bool {
     ];
 
     let parts: Vec<&str> = domain.split('.').collect();
-    parts.first().map_or(true, |first_part| {
-        !technical_subdomains.contains(first_part)
-    })
+    parts
+        .first()
+        .is_none_or(|first_part| !technical_subdomains.contains(first_part))
 }
 
 #[cfg(test)]

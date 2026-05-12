@@ -2118,10 +2118,7 @@ mod tests {
     fn test_execute_whois_command_various_domains() {
         for domain in &["google.com", "example.net", "nonexistent.invalid"] {
             let result = execute_whois_command(domain);
-            match result {
-                Ok(_data) => {}
-                Err(_) => {}
-            }
+            let _ = result;
         }
     }
 
