@@ -22,6 +22,7 @@ async fn test_subprocessor_analyzer_creation() {
     );
 }
 
+#[cfg(not(coverage_nightly))]
 #[tokio::test]
 async fn test_end_to_end_analysis_with_invalid_domain() {
     // Test analysis with a clearly invalid domain that should not cause crashes
@@ -46,6 +47,7 @@ async fn test_end_to_end_analysis_with_invalid_domain() {
     }
 }
 
+#[cfg(not(coverage_nightly))]
 #[tokio::test]
 async fn test_analysis_timeout_handling() {
     // Test with a domain that might be slow to respond
@@ -216,6 +218,7 @@ async fn test_url_generation_patterns() {
     }
 }
 
+#[cfg(not(coverage_nightly))]
 #[tokio::test]
 async fn test_error_resilience() {
     // Test that subprocessor analysis handles various error conditions gracefully
