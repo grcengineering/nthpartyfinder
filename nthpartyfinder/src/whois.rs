@@ -1600,6 +1600,7 @@ mod tests {
     // Tests for previously-coverage(off) async functions
     // ═══════════════════════════════════════════════════════════════════════════
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_get_organization_with_status_returns_result() {
         let result = get_organization_with_status("google.com").await;
@@ -1685,6 +1686,7 @@ mod tests {
         assert!(!org_name.is_empty());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_nonexistent_tld() {
         let result = try_native_whois("zzz-nonexistent-domain-00000.invalid").await;
@@ -1698,6 +1700,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_does_not_panic() {
         // try_system_whois wraps execute_whois_command in spawn_blocking with a 15s timeout.
@@ -1709,6 +1712,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_timeout_path() {
         // .invalid TLD should hit the error/timeout path on most systems
@@ -1739,6 +1743,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_execute_whois_command_error_on_missing_binary() {
         // On any system, calling the function exercises the for-loop over command paths.
@@ -1754,6 +1759,7 @@ mod tests {
     // GRC-317: Coverage for async function bodies & network I/O paths
     // ═══════════════════════════════════════════════════════════════════════════
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_valid_domain() {
         let result = try_native_whois("example.com").await;
@@ -1771,12 +1777,14 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_simple_tld() {
         let result = try_native_whois("iana.org").await;
         assert!(result.is_ok() || result.is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_valid_domain() {
         let result = try_system_whois("example.com").await;
@@ -2038,6 +2046,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_com_domain() {
         let result = try_native_whois("google.com").await;
@@ -2055,24 +2064,28 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_net_domain() {
         let result = try_native_whois("example.net").await;
         assert!(result.is_ok() || result.is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_org_domain() {
         let result = try_native_whois("example.org").await;
         assert!(result.is_ok() || result.is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_native_whois_unknown_tld() {
         let result = try_native_whois("test.xyz").await;
         assert!(result.is_ok() || result.is_err());
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_known_domain() {
         let result = try_system_whois("google.com").await;
@@ -2082,6 +2095,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_invalid_domain() {
         let result = try_system_whois("x".repeat(255).as_str()).await;

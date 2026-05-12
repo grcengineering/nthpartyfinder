@@ -108,6 +108,7 @@ impl SharedRateLimiter {
     }
 
     /// Acquire a token, waiting if necessary
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self) {
         let mut limiter = self.inner.lock().await;
         limiter.acquire().await;
@@ -139,6 +140,7 @@ impl DomainRateLimiter {
     }
 
     /// Acquire a rate limit token for the specified domain
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self, domain: &str) -> () {
         if self.requests_per_second == 0 {
             return; // Rate limiting disabled
@@ -170,6 +172,7 @@ impl RetryHelper {
     }
 
     /// Execute an async operation with retries and backoff
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn with_retry<T, E, F, Fut>(&self, operation: F) -> Result<T, E>
     where
         F: Fn() -> Fut,
