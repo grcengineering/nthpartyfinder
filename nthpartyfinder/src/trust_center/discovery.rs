@@ -2573,6 +2573,7 @@ mod tests {
     // --- discover_via_html_patterns: all probes run in sequence ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_discover_via_html_patterns_conveyor_takes_priority() {
         // Conveyor HTML should be detected by Conveyor probe
         let html = r#"<html><body>

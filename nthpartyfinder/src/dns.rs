@@ -3429,6 +3429,7 @@ mod tests {
     // --- DnsServerPool from_config test ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_dns_server_pool_from_config() {
         use crate::config::AppConfig;
 

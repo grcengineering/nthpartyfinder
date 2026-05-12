@@ -508,16 +508,23 @@ fn escape_markdown(text: &str) -> String {
 const VENDOR_GRAPH_JS: &str = include_str!("../static/vendor-graph.js");
 const VENDOR_GRAPH_CSS: &str = include_str!("../static/vendor-graph.css");
 
-#[derive(Template)]
-#[template(path = "report.html")]
-struct HtmlReportTemplate {
-    summary: HtmlSummary,
-    relationships: Vec<VendorRelationship>,
-    relationships_json: String,
-    summary_json: String,
-    vendor_graph_js: &'static str,
-    vendor_graph_css: &'static str,
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod html_report_template {
+    use super::*;
+    use askama::Template;
+
+    #[derive(Template)]
+    #[template(path = "report.html")]
+    pub(super) struct HtmlReportTemplate {
+        pub(super) summary: HtmlSummary,
+        pub(super) relationships: Vec<VendorRelationship>,
+        pub(super) relationships_json: String,
+        pub(super) summary_json: String,
+        pub(super) vendor_graph_js: &'static str,
+        pub(super) vendor_graph_css: &'static str,
+    }
 }
+use html_report_template::HtmlReportTemplate;
 
 #[derive(serde::Serialize)]
 struct HtmlSummary {

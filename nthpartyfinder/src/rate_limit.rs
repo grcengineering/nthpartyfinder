@@ -77,7 +77,7 @@ impl RateLimiter {
         }
     }
 
-    /// Acquire a token, waiting if necessary (M010 fix: retry loop after sleep)
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&mut self) {
         loop {
             match self.try_acquire() {

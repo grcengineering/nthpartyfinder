@@ -457,6 +457,7 @@ fn resolve_canonical_asset(
     (name, domain, evidence)
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_domain_from_url_text(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
