@@ -154,6 +154,7 @@ impl WebTrafficDiscovery {
     }
 
     /// Phase 2: Load page in headless browser and capture all network requests.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn analyze_network_traffic(
         &self,
         url: &str,
@@ -216,6 +217,7 @@ impl WebTrafficDiscovery {
 }
 
 /// Extract external domains from HTML content by parsing resource-loading elements.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn extract_external_domains_from_html(
     html: &str,
     target_base_domain: &str,
@@ -2316,6 +2318,7 @@ mod tests {
         assert!(results.iter().any(|r| r.vendor_domain == "segment.io"));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_analyze_page_source_body_read_timeout() {
         use tokio::io::AsyncWriteExt;

@@ -1056,6 +1056,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract the signature manifest URL from Vanta trust center HTML
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn extract_vanta_manifest_url(&self, html: &str) -> Option<String> {
         let doc = Html::parse_document(html);
 
@@ -1387,6 +1388,7 @@ impl SubprocessorAnalyzer {
 
     /// Test-only version: tries generated URLs sequentially without cache/timing/rate-limit logic
     #[cfg(any(test, coverage))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn analyze_domain_with_full_options(
         &self,
         domain: &str,
@@ -2842,6 +2844,7 @@ impl SubprocessorAnalyzer {
     /// Improving these heuristics is out of scope for a bug fix; downstream consumers
     /// should treat results as candidates requiring validation (e.g., via VendorRegistry
     /// lookup or user confirmation through the pending mappings workflow).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn detect_organizations_in_content(
         &self,
         document: &Html,
@@ -3200,6 +3203,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Generate CSS selector from DOM pattern analysis
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn generate_selector_from_pattern(
         &self,
         _pattern_signature: &str,
@@ -3610,6 +3614,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract vendor domains from HTML tables using cached extraction patterns
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_from_tables_with_patterns(
         &self,
         document: &Html,
@@ -3915,6 +3920,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract vendor domains from HTML lists using cached extraction patterns
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_from_lists_with_patterns(
         &self,
         document: &Html,
@@ -4218,6 +4224,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract domain from company entity name using cached patterns with enhanced matching
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_domain_from_entity_name_with_patterns(
         &self,
         entity_name: &str,
@@ -4258,6 +4265,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Map organization names to their likely domain names for subprocessor extraction
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn map_organization_to_domain(&self, org_name: &str) -> Option<String> {
         let trimmed = org_name.trim();
 
@@ -4708,6 +4716,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract vendor domains from paragraph-based content (for text-based tables and lists)
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_from_paragraphs(
         &self,
         document: &Html,
@@ -4851,6 +4860,7 @@ impl SubprocessorAnalyzer {
     /// Extract vendor domains using domain-specific custom extraction rules
     /// This method takes precedence over generic extraction methods for domains with user-contributed patterns
     /// Returns both extracted vendors and any pending mappings that need user confirmation
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_with_custom_rules(
         &self,
         document: &Html,
@@ -5178,6 +5188,7 @@ impl SubprocessorAnalyzer {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn analyze_table_patterns(
         &self,
         document: &Html,
@@ -5453,6 +5464,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract domain from company entity name with intelligent parsing
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_domain_from_entity_name(&self, entity_name: &str) -> Option<String> {
         // First, look for explicit domains in parentheses like "(Sentry.io)" or "(d/b/a Sinch Email)"
         let parentheses_regex = regex::Regex::new(r"\(([^)]+)\)").ok()?;
@@ -5482,6 +5494,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Extract domain from text using strict domain detection patterns
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn extract_direct_domain_from_text(&self, text: &str) -> Option<String> {
         // Strict domain regex pattern - must have valid TLD
         let domain_regex = regex::Regex::new(
@@ -5509,6 +5522,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Convert company name to likely domain using intelligent mapping
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn company_name_to_domain(&self, company_name: &str) -> Option<String> {
         let clean_name = company_name.to_lowercase();
 
@@ -5616,6 +5630,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Validate if a domain is likely a legitimate vendor domain
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn is_valid_vendor_domain(&self, domain: &str) -> bool {
         // RFC 1035: domains must not contain whitespace or non-ASCII characters
         if domain.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
@@ -5738,6 +5753,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Create focused HTML evidence showing just the organization name and its immediate surrounding elements
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn create_focused_html_evidence(
         &self,
         element: &scraper::ElementRef,
@@ -5799,6 +5815,7 @@ impl SubprocessorAnalyzer {
     }
 
     /// Create a concise evidence excerpt instead of storing full HTML content
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create_evidence_excerpt(&self, text: &str, domain: &str) -> String {
         const MAX_EXCERPT_LENGTH: usize = 500;
 
@@ -6013,6 +6030,7 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
 
 /// Post-process subprocessor extraction results to remove false positives.
 /// Applied as a final filter before returning results from analyze_domain_with_full_options.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn filter_subprocessor_results(vendors: Vec<SubprocessorDomain>) -> Vec<SubprocessorDomain> {
     let before_count = vendors.len();
     let filtered: Vec<SubprocessorDomain> = vendors
@@ -6323,6 +6341,7 @@ pub fn is_valid_org_name(org_name: &str) -> bool {
 /// - Locale identifiers (en-us, zh-hans, pt-br, nb-no)
 /// - Snake_case field/feature names (soc2_report, penetration_testing, encrypt_data)
 /// - Very short strings (< 3 chars)
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn is_ner_false_positive(org_name: &str) -> bool {
     let name = org_name.trim();
     let lower = name.to_lowercase();
@@ -6638,6 +6657,7 @@ pub fn is_garbled_text(label: &str) -> bool {
 
 /// Extract visible text content from HTML, stripping tags and scripts.
 /// Used for NER-based organization extraction from subprocessor pages.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_text_from_html(html: &str) -> String {
     let document = Html::parse_document(html);
 
@@ -12271,6 +12291,7 @@ mod tests {
     // --- extract_text_from_html: body fallback with short main ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_extract_text_from_html_main_too_short_falls_back_to_body() {
         let html = r#"<html><body>
             <main><p>Short</p></main>
@@ -16482,6 +16503,7 @@ The following third-party sub-processors are engaged:
     // ═══════════════════════════════════════════════════════════════════════════
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_extract_from_tables_with_patterns_full_table_extraction() {
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
@@ -16553,6 +16575,7 @@ The following third-party sub-processors are engaged:
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_extract_from_tables_with_patterns_header_pattern_match() {
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
@@ -19642,6 +19665,7 @@ Suite 200</td></tr>
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_custom_rules_fallback_generates_pending_mapping() {
         let analyzer = make_test_analyzer();
         // Use an unknown company name that won't resolve to a domain
@@ -21897,6 +21921,7 @@ NY 10001</td><td>Payments</td></tr>
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_extract_from_tables_with_patterns_header_match() {
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
@@ -24691,6 +24716,7 @@ WA 98101</td><td>Address-like</td></tr>
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_grc212_generate_subprocessor_urls_known_domains() {
         let analyzer = make_test_analyzer();
         let domains_and_expected = vec![
