@@ -181,6 +181,7 @@ impl ResultSink {
         &self.path
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn cleanup_orphans(dir: &Path) -> Result<usize> {
         let mut cleaned = 0;
         let pattern = "nthpartyfinder-results-";

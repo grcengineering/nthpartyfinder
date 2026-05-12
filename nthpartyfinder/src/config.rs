@@ -567,6 +567,7 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 

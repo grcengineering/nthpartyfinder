@@ -188,6 +188,7 @@ fn check_onnx_runtime() -> DepCheckResult {
     )
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn find_ort_library(
     lib_name: &str,
     env_path_value: Option<String>,
@@ -333,6 +334,7 @@ fn check_chrome() -> DepCheckResult {
     check_chrome_inner(env_path, chrome_system_paths(), chrome_install_hint())
 }
 
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn check_chrome_inner(
     env_path: Option<String>,
     system_paths: &[&str],

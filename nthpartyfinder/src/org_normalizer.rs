@@ -624,6 +624,7 @@ pub fn normalize(name: &str) -> String {
     }
 }
 #[cfg(coverage)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn init(_config: &crate::config::OrganizationConfig) {}
 
 #[cfg(coverage)]

@@ -437,6 +437,7 @@ impl KnownVendors {
     }
 
     /// Sync with GitHub remote database
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn sync_from_github(&self, url: Option<&str>) -> Result<usize> {
         let url = url.unwrap_or(GITHUB_RAW_URL);
 
@@ -452,6 +453,7 @@ impl KnownVendors {
     }
 
     /// Fetch raw text from a URL. Caller must validate HTTPS before calling.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fetch_url(url: &str) -> Result<String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))

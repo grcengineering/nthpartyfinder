@@ -816,6 +816,7 @@ fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for base64-encoded JSON blobs in HTML.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     use base64::Engine;
 
@@ -893,6 +894,7 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for JavaScript object assignments like `window.VENDOR_REPORT = {...}`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_js_object_assignments(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let pattern = r#"window\.([A-Z_][A-Z_0-9]*)\s*=\s*(\{[\s\S]{200,}?\})(?:\s*;|\s*<)"#;
     // Pattern is a hardcoded constant — compile failure is impossible

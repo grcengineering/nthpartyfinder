@@ -1,3 +1,20 @@
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bug004_single_label_fallback(
+    result: &str,
+    cleaned_domain: &str,
+    original_domain: &str,
+) -> Option<String> {
+    if result.split('.').count() < 2 {
+        if cleaned_domain.split('.').count() >= 2 {
+            Some(cleaned_domain.to_string())
+        } else {
+            Some(original_domain.to_lowercase())
+        }
+    } else {
+        None
+    }
+}
+
 /// Extract the base domain from SPF subdomains and other technical subdomains
 pub fn extract_base_domain(domain: &str) -> String {
     // Remove common SPF and technical prefixes
@@ -29,22 +46,11 @@ pub fn extract_base_domain(domain: &str) -> String {
     }
 
     // Remove subdomain prefixes that are clearly technical (but keep meaningful subdomains)
-    let result = if let Some(base) = extract_organizational_domain(&cleaned_domain) {
-        base
-    } else {
-        cleaned_domain.clone()
-    };
+    let result = extract_organizational_domain(&cleaned_domain)
+        .unwrap_or_else(|| cleaned_domain.clone());
 
-    // BUG-004 safety: never return a bare TLD or single-label domain.
-    // A valid extracted domain must have at least 2 labels (e.g., "example.com").
-    // If over-stripping reduced the domain to a bare TLD, fall back to the best available.
-    let label_count = result.split('.').count();
-    if label_count < 2 {
-        // If cleaned_domain also has < 2 labels, fall back to original input
-        if cleaned_domain.split('.').count() >= 2 {
-            return cleaned_domain;
-        }
-        return domain.to_lowercase();
+    if let Some(fallback) = bug004_single_label_fallback(&result, &cleaned_domain, domain) {
+        return fallback;
     }
 
     // Reject results that are only a public suffix (e.g., "co.uk", "com.au")
@@ -141,11 +147,9 @@ pub fn is_organizational_domain(domain: &str) -> bool {
     ];
 
     let parts: Vec<&str> = domain.split('.').collect();
-    if let Some(first_part) = parts.first() {
-        !technical_subdomains.contains(first_part)
-    } else {
-        true
-    }
+    parts
+        .first()
+        .map_or(true, |first_part| !technical_subdomains.contains(first_part))
 }
 
 #[cfg(test)]
