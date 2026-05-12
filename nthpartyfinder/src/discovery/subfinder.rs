@@ -938,9 +938,7 @@ garbage
     fn test_get_platform_download_url_contains_platform_info() {
         let url = SubfinderDiscovery::get_platform_download_url()
             .expect("should return Some on supported platform");
-        let has_platform = url.contains("darwin")
-            | url.contains("linux")
-            | url.contains("windows");
+        let has_platform = url.contains("darwin") | url.contains("linux") | url.contains("windows");
         assert!(has_platform, "URL should contain a known platform name");
     }
 
@@ -948,9 +946,7 @@ garbage
     fn test_get_platform_download_url_contains_arch() {
         let url = SubfinderDiscovery::get_platform_download_url()
             .expect("should return Some on supported platform");
-        let has_arch = url.contains("amd64")
-            | url.contains("arm64")
-            | url.contains("386");
+        let has_arch = url.contains("amd64") | url.contains("arm64") | url.contains("386");
         assert!(has_arch, "URL should contain a known architecture");
     }
 

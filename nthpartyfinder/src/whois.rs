@@ -1765,13 +1765,20 @@ mod tests {
         let result = try_native_whois("example.com").await;
         match result {
             Ok(data) => {
-                assert!(!data.is_empty(), "WHOIS data should not be empty for example.com");
+                assert!(
+                    !data.is_empty(),
+                    "WHOIS data should not be empty for example.com"
+                );
             }
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("lookup") || msg.contains("timed out") || msg.contains("panicked") || msg.contains("Failed"),
-                    "Error should be descriptive: {}", msg
+                    msg.contains("lookup")
+                        || msg.contains("timed out")
+                        || msg.contains("panicked")
+                        || msg.contains("Failed"),
+                    "Error should be descriptive: {}",
+                    msg
                 );
             }
         }
@@ -1809,8 +1816,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit("google.com", false, 0.6, Some(&ctx)).await;
+        let result = get_organization_with_rate_limit("google.com", false, 0.6, Some(&ctx)).await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -1971,8 +1977,12 @@ mod tests {
     fn test_execute_whois_command_real_domain() {
         let result = execute_whois_command("example.com");
         match &result {
-            Ok(data) => { let _ = data.len(); }
-            Err(e) => { let _ = e.to_string(); }
+            Ok(data) => {
+                let _ = data.len();
+            }
+            Err(e) => {
+                let _ = e.to_string();
+            }
         }
     }
 
@@ -1990,8 +2000,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit("example.com", true, 0.6, Some(&ctx)).await;
+        let result = get_organization_with_rate_limit("example.com", true, 0.6, Some(&ctx)).await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -2007,8 +2016,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit("example.com", true, 0.99, Some(&ctx)).await;
+        let result = get_organization_with_rate_limit("example.com", true, 0.99, Some(&ctx)).await;
         assert!(result.is_ok());
     }
 
@@ -2055,10 +2063,13 @@ mod tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("lookup") || msg.contains("timed out")
-                        || msg.contains("panicked") || msg.contains("Failed")
+                    msg.contains("lookup")
+                        || msg.contains("timed out")
+                        || msg.contains("panicked")
+                        || msg.contains("Failed")
                         || msg.contains("Invalid"),
-                    "Unexpected error: {}", msg
+                    "Unexpected error: {}",
+                    msg
                 );
             }
         }
@@ -2144,7 +2155,8 @@ mod tests {
 
     #[test]
     fn test_extract_registrar_first_placeholder_second_valid() {
-        let whois = "Registrar: Verisign\nSponsoring Registrar: LegitCo Inc\nRegistrar Name: GoDaddy";
+        let whois =
+            "Registrar: Verisign\nSponsoring Registrar: LegitCo Inc\nRegistrar Name: GoDaddy";
         let result = extract_registrar_from_whois(whois);
         assert_eq!(result, Some("LegitCo Inc".to_string()));
     }
@@ -2195,8 +2207,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_get_orgs_with_rate_limit_no_ctx() {
         let domains = vec!["example.com".to_string()];
-        let results =
-            batch_get_organizations_with_rate_limit(domains, false, 0.6, 1, None).await;
+        let results = batch_get_organizations_with_rate_limit(domains, false, 0.6, 1, None).await;
         assert_eq!(results.len(), 1);
     }
 
@@ -2231,10 +2242,13 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit(
-                "zzz-no-vendor-no-web-12345.com", true, 0.6, Some(&ctx)
-            ).await;
+        let result = get_organization_with_rate_limit(
+            "zzz-no-vendor-no-web-12345.com",
+            true,
+            0.6,
+            Some(&ctx),
+        )
+        .await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -2242,9 +2256,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_org_with_status_and_config_full_fallthrough() {
-        let result = get_organization_with_status_and_config(
-            "zzz-no-vendor-no-web-99999.com", true, 0.6
-        ).await;
+        let result =
+            get_organization_with_status_and_config("zzz-no-vendor-no-web-99999.com", true, 0.6)
+                .await;
         assert!(result.is_ok());
         let org = result.unwrap();
         assert!(!org.name.is_empty());
@@ -2252,9 +2266,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_org_with_config_full_fallthrough() {
-        let result = get_organization_with_config(
-            "zzz-no-vendor-no-web-99999.com", true, 0.6
-        ).await;
+        let result =
+            get_organization_with_config("zzz-no-vendor-no-web-99999.com", true, 0.6).await;
         assert!(result.is_ok());
         let org_name = result.unwrap();
         assert!(!org_name.is_empty());
@@ -2283,8 +2296,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit("stripe.com", true, 0.5, Some(&ctx)).await;
+        let result = get_organization_with_rate_limit("stripe.com", true, 0.5, Some(&ctx)).await;
         assert!(result.is_ok());
     }
 
@@ -2310,8 +2322,7 @@ mod tests {
             ..RateLimitConfig::default()
         };
         let ctx = RateLimitContext::from_config(&config);
-        let result =
-            get_organization_with_rate_limit("bbc.co.uk", false, 0.6, Some(&ctx)).await;
+        let result = get_organization_with_rate_limit("bbc.co.uk", false, 0.6, Some(&ctx)).await;
         assert!(result.is_ok());
     }
 

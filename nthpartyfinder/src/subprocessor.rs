@@ -24775,7 +24775,9 @@ WA 98101</td><td>Address-like</td></tr>
     fn test_generate_subprocessor_urls_microsoft_apple_google() {
         let analyzer = make_test_analyzer();
         let ms_urls = analyzer.generate_subprocessor_urls("microsoft.com");
-        assert!(ms_urls.iter().any(|u| u.contains("microsoft.com") || u.contains("go.microsoft")));
+        assert!(ms_urls
+            .iter()
+            .any(|u| u.contains("microsoft.com") || u.contains("go.microsoft")));
         let apple_urls = analyzer.generate_subprocessor_urls("apple.com");
         assert!(!apple_urls.is_empty());
         let google_urls = analyzer.generate_subprocessor_urls("google.com");
@@ -25892,7 +25894,10 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_validate_regex_too_long_with_subscriber() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let long_pattern = "a".repeat(MAX_REGEX_PATTERN_LENGTH + 1);
         let result = validate_and_compile_regex(&long_pattern);
         assert!(result.is_none());
@@ -26021,7 +26026,10 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_table_extraction_with_address_lines() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
         <table>
@@ -26049,7 +26057,10 @@ Seattle, WA 98109</td><td>Cloud</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_table_extraction_ny_ca_address_filter() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
         <table>
@@ -26076,7 +26087,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_table_extraction_no_header_rows() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
         <table>
@@ -26095,7 +26109,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_table_with_header_logging() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
         <table>
@@ -26119,7 +26136,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_with_custom_rules_direct_selectors() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <div class="vendor-list">
@@ -26152,7 +26172,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_with_custom_rules_regex() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <p>We use cloudflare.com for CDN and stripe.com for payments</p>
@@ -26180,7 +26203,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_with_custom_rules_invalid_org() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <div class="vendor">AB</div>
@@ -26237,7 +26263,9 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     async fn test_grc312_clear_organization_cache() {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
-        let result = analyzer.clear_organization_cache("nonexistent.invalid").await;
+        let result = analyzer
+            .clear_organization_cache("nonexistent.invalid")
+            .await;
         let _ = result;
     }
 
@@ -26261,7 +26289,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_grc312_intelligent_analysis_with_orgs() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <div class="subprocessors">
@@ -26274,7 +26305,11 @@ New York, NY 10018</td><td>Monitoring</td></tr>
             </div>
         </body></html>"#;
         let result = analyzer
-            .scrape_with_intelligent_analysis("https://example.com/subprocessors", html, "example.com")
+            .scrape_with_intelligent_analysis(
+                "https://example.com/subprocessors",
+                html,
+                "example.com",
+            )
             .await;
         let _ = result;
     }
@@ -26282,7 +26317,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_grc312_detect_organizations_table() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <table>
@@ -26386,7 +26424,12 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         </table>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let rules = analyzer.generate_domain_specific_patterns(&document, html, &extractions, "example.com");
+        let rules = analyzer.generate_domain_specific_patterns(
+            &document,
+            html,
+            &extractions,
+            "example.com",
+        );
         let _ = rules;
     }
 
@@ -26443,22 +26486,28 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(r#"<html><head><title>Subprocessors</title></head><body>
+                    .set_body_string(
+                        r#"<html><head><title>Subprocessors</title></head><body>
                     <h1>Our Sub-Processors</h1>
                     <table><tr><td>Amazon Web Services, Inc.</td><td>Cloud</td></tr></table>
-                    </body></html>"#)
+                    </body></html>"#,
+                    )
                     .insert_header("content-type", "text/html"),
             )
             .mount(&mock_server)
             .await;
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new();
-        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
+        let analyzer =
+            SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
             .scrape_subprocessor_page(&url, None, "test-html-table.example")
@@ -26472,21 +26521,27 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string(r#"<html><body>
+                    .set_body_string(
+                        r#"<html><body>
                     <ul><li>Cloudflare (cloudflare.com) - CDN</li></ul>
-                    </body></html>"#)
+                    </body></html>"#,
+                    )
                     .insert_header("content-type", "text/html"),
             )
             .mount(&mock_server)
             .await;
         let client = reqwest::Client::new();
         let cache = SubprocessorCache::new();
-        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
+        let analyzer =
+            SubprocessorAnalyzer::with_client_and_cache(client, Arc::new(RwLock::new(cache)));
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
             .scrape_subprocessor_page(&url, None, "test-list.example")
@@ -26497,7 +26552,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_grc312_scrape_page_with_retry_rate_limit() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let mock_server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::any())
             .respond_with(wiremock::ResponseTemplate::new(429))
@@ -26510,7 +26568,12 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         let config = crate::config::RateLimitConfig::default();
         let ctx = RateLimitContext::from_config(&config);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&mock_server.uri(), None, "test-429.example", Some(&ctx))
+            .scrape_subprocessor_page_with_retry(
+                &mock_server.uri(),
+                None,
+                "test-429.example",
+                Some(&ctx),
+            )
             .await;
         let _ = result;
     }
@@ -26518,7 +26581,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_grc312_intelligent_analysis_table_path() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <h1>Sub-Processors</h1>
@@ -26535,7 +26601,11 @@ New York, NY 10018</td><td>Monitoring</td></tr>
             </table>
         </body></html>"#;
         let result = analyzer
-            .scrape_with_intelligent_analysis("https://example.com/subprocessors", html, "example.com")
+            .scrape_with_intelligent_analysis(
+                "https://example.com/subprocessors",
+                html,
+                "example.com",
+            )
             .await;
         let _ = result;
     }
@@ -26543,7 +26613,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_from_paragraphs() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <p>Our sub-processors include:</p>
@@ -26553,14 +26626,22 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_paragraphs(&document, html, "https://example.com/subprocessors", &patterns);
+        let result = analyzer.extract_from_paragraphs(
+            &document,
+            html,
+            "https://example.com/subprocessors",
+            &patterns,
+        );
         let _ = result;
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_from_structured_content() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <div class="vendor-card">
@@ -26583,7 +26664,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_from_tables_with_context() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <p>Our sub-processors include:</p>
@@ -26598,14 +26682,18 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         let mut patterns = ExtractionPatterns::default();
         patterns.table_selectors = vec!["table".to_string()];
         patterns.context_patterns = vec!["sub-processor".to_string()];
-        let result = analyzer.extract_from_tables(&document, html, "https://example.com/subprocessors");
+        let result =
+            analyzer.extract_from_tables(&document, html, "https://example.com/subprocessors");
         let _ = result;
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_vanta_manifest_preload_link() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><head>
             <link rel="preload" as="fetch" href="https://trust.vanta.com/api/signature-manifest.json">
@@ -26618,7 +26706,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_cache_dir_error_path() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let cache = SubprocessorCache::new();
         let _ = cache.cache_dir;
     }
@@ -26626,20 +26717,22 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_grc312_analyze_domain_error_path() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_cache(cache);
         let result = analyzer
-            .analyze_domain_with_full_options(
-                "test-error-path.invalid",
-                None,
-                None,
-                None,
-            )
+            .analyze_domain_with_full_options("test-error-path.invalid", None, None, None)
             .await;
         match result {
-            Ok(v) => { let _ = v.len(); }
-            Err(e) => { let _ = format!("{}", e); }
+            Ok(v) => {
+                let _ = v.len();
+            }
+            Err(e) => {
+                let _ = format!("{}", e);
+            }
         }
     }
 
@@ -26660,7 +26753,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_filter_results_logging() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let results = vec![
             SubprocessorDomain {
                 domain: "valid-vendor.com".to_string(),
@@ -26685,7 +26781,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_extract_domain_from_text_various() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let r1 = analyzer.extract_direct_domain_from_text("Visit cloudflare.com for CDN");
         let _ = r1;
@@ -26698,7 +26797,10 @@ New York, NY 10018</td><td>Monitoring</td></tr>
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_grc312_company_name_to_domain_known() {
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let r1 = analyzer.company_name_to_domain("Amazon Web Services");
         let _ = r1;
@@ -26787,7 +26889,8 @@ New York, NY 10018</td><td>Monitoring</td></tr>
         let r2 = analyzer.extract_domain_from_entity_name("Some Company (division of BigCo)");
         let _ = r2;
         // d/b/a with unknown company
-        let r3 = analyzer.extract_domain_from_entity_name("Parent Corp (d/b/a Unknown Startup XYZ)");
+        let r3 =
+            analyzer.extract_domain_from_entity_name("Parent Corp (d/b/a Unknown Startup XYZ)");
         let _ = r3;
     }
 
@@ -26892,7 +26995,12 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://example.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &document,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         let _ = result;
     }
 
@@ -26910,7 +27018,12 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let result = analyzer.extract_from_tables_with_patterns(&document, html, "https://example.com", &patterns);
+        let result = analyzer.extract_from_tables_with_patterns(
+            &document,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         let _ = result;
     }
 
@@ -26928,7 +27041,12 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let vendors = analyzer.extract_from_lists_with_patterns(&document, html, "https://example.com", &patterns);
+        let vendors = analyzer.extract_from_lists_with_patterns(
+            &document,
+            html,
+            "https://example.com",
+            &patterns,
+        );
         let _ = vendors;
     }
 
@@ -26944,7 +27062,8 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         </body></html>"#;
         let document = Html::parse_document(html);
         let patterns = ExtractionPatterns::default();
-        let vendors = analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns);
+        let vendors =
+            analyzer.extract_from_paragraphs(&document, html, "https://example.com", &patterns);
         let _ = vendors;
     }
 
@@ -26959,16 +27078,21 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         let document = Html::parse_document(html);
         let custom_rules = CustomExtractionRules {
             direct_selectors: vec![],
-            custom_regex_patterns: vec![
-                CustomRegexPattern {
-                    pattern: r"(?i)(?:include|use)\s*:?\s+([A-Z][a-zA-Z\s]+(?:Inc|Corp|LLC|Services)?)".to_string(),
-                    capture_group: 1,
-                    description: "Test rule".to_string(),
-                },
-            ],
+            custom_regex_patterns: vec![CustomRegexPattern {
+                pattern: r"(?i)(?:include|use)\s*:?\s+([A-Z][a-zA-Z\s]+(?:Inc|Corp|LLC|Services)?)"
+                    .to_string(),
+                capture_group: 1,
+                description: "Test rule".to_string(),
+            }],
             special_handling: None,
         };
-        let result = analyzer.extract_with_custom_rules(&document, html, "https://example.com", &custom_rules, "example.com");
+        let result = analyzer.extract_with_custom_rules(
+            &document,
+            html,
+            "https://example.com",
+            &custom_rules,
+            "example.com",
+        );
         let _ = result;
     }
 
@@ -26978,10 +27102,12 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
         // Covers L4241, L4243: custom regex patterns in entity extraction
         let analyzer = make_test_analyzer();
         let mut patterns = ExtractionPatterns::default();
-        patterns.domain_extraction_patterns = vec![
-            r"(?i)(stripe\.com|cloudflare\.com|amazon\.com)".to_string(),
-        ];
-        let r = analyzer.extract_domain_from_entity_name_with_patterns("Visit stripe.com for payments", &patterns);
+        patterns.domain_extraction_patterns =
+            vec![r"(?i)(stripe\.com|cloudflare\.com|amazon\.com)".to_string()];
+        let r = analyzer.extract_domain_from_entity_name_with_patterns(
+            "Visit stripe.com for payments",
+            &patterns,
+        );
         let _ = r;
     }
 
@@ -27079,7 +27205,10 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
     #[tokio::test]
     async fn test_grc312_detect_organizations_in_content_focused() {
         // Covers L2908, L2911, L2941, L2945: focused-area and fallback org detection
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
         let html = r#"<html><body>
             <div class="content">
@@ -27089,7 +27218,9 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
             </div>
         </body></html>"#;
         let document = Html::parse_document(html);
-        let orgs = analyzer.detect_organizations_in_content(&document, html).await;
+        let orgs = analyzer
+            .detect_organizations_in_content(&document, html)
+            .await;
         let _ = orgs;
     }
 
@@ -27097,14 +27228,14 @@ South San Francisco CA 94080</td><td>Payments</td></tr>
     #[tokio::test]
     async fn test_grc312_analyze_domain_empty_pages() {
         // Covers L1409: returns Ok(Vec::new()) when no subprocessor pages found
-        let _ = tracing_subscriber::fmt().with_test_writer().with_max_level(tracing::Level::TRACE).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .try_init();
         let analyzer = make_test_analyzer();
-        let result = analyzer.analyze_domain_with_full_options(
-            "nonexistent-domain-xyz123.invalid",
-            None,
-            None,
-            None,
-        ).await;
+        let result = analyzer
+            .analyze_domain_with_full_options("nonexistent-domain-xyz123.invalid", None, None, None)
+            .await;
         let _ = result;
     }
 

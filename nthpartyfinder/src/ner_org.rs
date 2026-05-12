@@ -2190,9 +2190,7 @@ mod tests {
 
     #[test]
     fn test_select_best_org_trims_whitespace() {
-        let candidates = vec![
-            ("organization".into(), "  Trimmed Corp  ".into(), 0.8f32),
-        ];
+        let candidates = vec![("organization".into(), "  Trimmed Corp  ".into(), 0.8f32)];
         let result = select_best_org(&candidates, 0.5).unwrap();
         assert_eq!(result.organization, "Trimmed Corp");
     }
@@ -2212,9 +2210,7 @@ mod tests {
 
     #[test]
     fn test_select_best_org_exactly_at_threshold() {
-        let candidates = vec![
-            ("organization".into(), "Exact Corp".into(), 0.5f32),
-        ];
+        let candidates = vec![("organization".into(), "Exact Corp".into(), 0.5f32)];
         let result = select_best_org(&candidates, 0.5);
         assert!(result.is_some());
         assert_eq!(result.unwrap().organization, "Exact Corp");
@@ -2222,9 +2218,7 @@ mod tests {
 
     #[test]
     fn test_select_best_org_just_below_threshold() {
-        let candidates = vec![
-            ("organization".into(), "Almost Corp".into(), 0.499f32),
-        ];
+        let candidates = vec![("organization".into(), "Almost Corp".into(), 0.499f32)];
         assert!(select_best_org(&candidates, 0.5).is_none());
     }
 
@@ -2242,9 +2236,7 @@ mod tests {
 
     #[test]
     fn test_select_best_org_empty_name_after_trim() {
-        let candidates = vec![
-            ("organization".into(), "".into(), 0.99f32),
-        ];
+        let candidates = vec![("organization".into(), "".into(), 0.99f32)];
         assert!(select_best_org(&candidates, 0.5).is_none());
     }
 
@@ -2398,7 +2390,7 @@ mod tests {
         // chunk_size lands in the middle of a multibyte char after the first chunk.
         let mut text = String::new();
         text.push_str("ab"); // 2 bytes
-        // Now add a sequence of 3-byte chars (multibyte)
+                             // Now add a sequence of 3-byte chars (multibyte)
         for _ in 0..3000 {
             text.push('\u{2019}'); // 3 bytes each
         }
@@ -2433,11 +2425,7 @@ mod tests {
 
     #[test]
     fn test_dedup_filter_sort_orgs_all_below_min_name_len() {
-        let orgs = vec![
-            ("AB".into(), 0.9),
-            ("X".into(), 0.95),
-            ("YZ".into(), 0.8),
-        ];
+        let orgs = vec![("AB".into(), 0.9), ("X".into(), 0.95), ("YZ".into(), 0.8)];
         let results = dedup_filter_sort_orgs(orgs, 3);
         assert!(results.is_empty());
     }
@@ -2481,10 +2469,7 @@ mod tests {
     #[test]
     fn test_dedup_filter_sort_orgs_nan_confidence() {
         // NaN comparison should not panic, handled by unwrap_or(Equal)
-        let orgs = vec![
-            ("NaN Corp".into(), f32::NAN),
-            ("Valid Corp".into(), 0.8),
-        ];
+        let orgs = vec![("NaN Corp".into(), f32::NAN), ("Valid Corp".into(), 0.8)];
         let results = dedup_filter_sort_orgs(orgs, 3);
         assert_eq!(results.len(), 2);
     }
@@ -2492,8 +2477,8 @@ mod tests {
     #[test]
     fn test_dedup_filter_sort_orgs_zero_min_name_len() {
         let orgs = vec![
-            ("".into(), 0.9),   // empty string has len 0
-            ("A".into(), 0.8),  // len 1
+            ("".into(), 0.9),  // empty string has len 0
+            ("A".into(), 0.8), // len 1
         ];
         // min_name_len=0 means even empty strings pass
         let results = dedup_filter_sort_orgs(orgs, 0);

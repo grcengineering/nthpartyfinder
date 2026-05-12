@@ -117,10 +117,7 @@ impl WebTrafficDiscovery {
         }
 
         // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
-        match self
-            .analyze_network_traffic(url, target_base_domain)
-            .await
-        {
+        match self.analyze_network_traffic(url, target_base_domain).await {
             Ok(results) => {
                 debug!(
                     "Web traffic: network analysis of {} found {} external domains",
@@ -296,9 +293,7 @@ pub fn filter_network_urls(
             if let Some(host) = parsed.host_str() {
                 let base_domain = domain_utils::extract_base_domain(host);
 
-                if base_domain == target_base_domain
-                    || !seen_domains.insert(base_domain.clone())
-                {
+                if base_domain == target_base_domain || !seen_domains.insert(base_domain.clone()) {
                     continue;
                 }
 
@@ -1915,9 +1910,7 @@ mod tests {
         let urls = vec!["https://api.stripe.com/v1/charges".to_string()];
         let results = filter_network_urls(&urls, "example.com");
         assert_eq!(results.len(), 1);
-        assert!(results[0]
-            .evidence
-            .contains("Runtime network request to"));
+        assert!(results[0].evidence.contains("Runtime network request to"));
         assert!(results[0]
             .evidence
             .contains("https://api.stripe.com/v1/charges"));
@@ -2314,7 +2307,9 @@ mod tests {
             timeout: Duration::from_secs(10),
             network_wait_ms: 500,
         };
-        let results = discovery.analyze_domain_url(&url, "test.local", &host).await;
+        let results = discovery
+            .analyze_domain_url(&url, "test.local", &host)
+            .await;
         assert!(results.iter().any(|r| r.vendor_domain == "segment.io"));
     }
 
