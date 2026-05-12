@@ -1,6 +1,6 @@
-use nthpartyfinder::subprocessor::{
-    extract_vendor_domains_from_subprocessors, SubprocessorAnalyzer,
-};
+use nthpartyfinder::subprocessor::SubprocessorAnalyzer;
+#[cfg(not(coverage_nightly))]
+use nthpartyfinder::subprocessor::extract_vendor_domains_from_subprocessors;
 
 #[tokio::test]
 async fn test_subprocessor_analyzer_creation() {
