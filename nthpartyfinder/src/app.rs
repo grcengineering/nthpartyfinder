@@ -340,17 +340,29 @@ pub fn build_batch_domain_args(
 /// Resolve the final output path from a computed default and optional user
 /// override. If `user_input` (trimmed) is empty, use `computed_path`. Otherwise,
 /// treat `user_input` as a directory and join with `output_filename`.
+///
+/// Returns `Err` if the user-provided path contains traversal sequences (`..`).
 pub fn resolve_final_output_path(
     computed_path: &str,
     output_filename: &str,
     user_input: &str,
-) -> String {
+) -> Result<String, String> {
     if user_input.is_empty() {
-        computed_path.to_string()
-    } else {
-        let custom_path = Path::new(user_input).join(output_filename);
-        custom_path.to_string_lossy().to_string()
+        return Ok(computed_path.to_string());
     }
+
+    let input_path = Path::new(user_input);
+    for component in input_path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(format!(
+                "Path traversal detected: '{}' contains '..' components",
+                user_input
+            ));
+        }
+    }
+
+    let custom_path = input_path.join(output_filename);
+    Ok(custom_path.to_string_lossy().to_string())
 }
 
 /// Combined results from new + resumed analysis, deduplicated and filtered.
@@ -968,7 +980,14 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 );
             }
             let user_input = user_input.trim();
-            resolve_final_output_path(&output_path_str, &output_filename, user_input)
+            match resolve_final_output_path(&output_path_str, &output_filename, user_input) {
+                Ok(path) => path,
+                Err(msg) => {
+                    eprintln!("⚠️  {}", msg);
+                    eprintln!("Using default output path instead.");
+                    output_path_str.to_string()
+                }
+            }
         })
     } else {
         logger.info(&format!("Output file: {}", output_path_str));
@@ -3055,21 +3074,43 @@ mod tests {
 
     #[test]
     fn test_resolve_final_output_path_empty_uses_default() {
-        let result = resolve_final_output_path("/tmp/default.csv", "report.csv", "");
+        let result = resolve_final_output_path("/tmp/default.csv", "report.csv", "").unwrap();
         assert_eq!(result, "/tmp/default.csv");
     }
 
     #[test]
     fn test_resolve_final_output_path_custom_dir() {
         let result =
-            resolve_final_output_path("/tmp/default.csv", "report.csv", "/home/user/reports");
+            resolve_final_output_path("/tmp/default.csv", "report.csv", "/home/user/reports")
+                .unwrap();
         assert_eq!(result, "/home/user/reports/report.csv");
     }
 
     #[test]
     fn test_resolve_final_output_path_whitespace_only_uses_default() {
-        let result = resolve_final_output_path("/tmp/out.json", "out.json", "");
+        let result = resolve_final_output_path("/tmp/out.json", "out.json", "").unwrap();
         assert_eq!(result, "/tmp/out.json");
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_rejects_traversal() {
+        let result = resolve_final_output_path("/tmp/out.csv", "report.csv", "../../../etc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Path traversal"));
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_rejects_embedded_traversal() {
+        let result =
+            resolve_final_output_path("/tmp/out.csv", "report.csv", "/home/user/../../etc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_allows_absolute() {
+        let result =
+            resolve_final_output_path("/tmp/out.csv", "report.csv", "/var/reports").unwrap();
+        assert_eq!(result, "/var/reports/report.csv");
     }
 
     // ── assemble_and_filter_results ──────────────────────────────────
