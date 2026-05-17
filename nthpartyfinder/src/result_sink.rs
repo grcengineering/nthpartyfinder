@@ -16,6 +16,13 @@ use crate::vendor::VendorRelationship;
 
 const FLUSH_INTERVAL: usize = 50;
 const ZSTD_LEVEL: i32 = 3;
+/// Never reap a results file younger than this. A live, actively-written sink
+/// has a fresh mtime, so this age guard protects an in-flight sibling process's
+/// file even when PID-liveness detection is unavailable on the platform
+/// (e.g. no `/proc` on macOS/Windows). Without this guard, concurrent
+/// nthpartyfinder processes delete each other's in-flight result sinks,
+/// causing a hard panic at result read-back (lost full scan output).
+const ORPHAN_MIN_AGE_SECS: u64 = 1800;
 
 pub struct ResultSink {
     writer: zstd::stream::write::Encoder<'static, BufWriter<File>>,
@@ -214,8 +221,26 @@ impl ResultSink {
 
                 if let Some(pid_str) = pid_str {
                     if let Ok(pid) = pid_str.parse::<u32>() {
-                        // Check if this PID is still running
-                        if !is_process_running(pid) {
+                        // Never reap our own in-flight file.
+                        if pid == std::process::id() {
+                            continue;
+                        }
+                        // A file is only an orphan if the owning PID is NOT
+                        // running AND it is older than ORPHAN_MIN_AGE_SECS.
+                        // The age guard is the load-bearing safety net: a live
+                        // sibling sink is being actively written (fresh mtime),
+                        // so it survives even where PID liveness can't be
+                        // determined (no /proc on macOS) — which is the bug
+                        // that made concurrent runs delete each other's sinks.
+                        let old_enough = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|mtime| mtime.elapsed().ok())
+                            .map(|age| age.as_secs() >= ORPHAN_MIN_AGE_SECS)
+                            .unwrap_or(false); // unknown age → treat as fresh (do not delete)
+
+                        if old_enough && !is_process_running(pid) {
                             if let Ok(canonical) = entry.path().canonicalize() {
                                 if let Err(e) = std::fs::remove_file(&canonical) {
                                     eprintln!(
@@ -237,10 +262,33 @@ impl ResultSink {
     }
 }
 
-// cfg(not(coverage)): uses /proc which only exists on Linux — result is platform-dependent
+// Portable best-effort liveness. Linux: fast `/proc/<pid>` path. Other Unix
+// (macOS/BSD): `kill -0 <pid>` which succeeds iff the process exists. On ANY
+// uncertainty we return `true` (assume alive) so cleanup never deletes a file
+// that might belong to a live run — the age guard in cleanup_orphans is the
+// primary safety net; this is defense-in-depth against PID reuse.
 #[cfg(not(coverage))]
 fn is_process_running(pid: u32) -> bool {
-    Path::new(&format!("/proc/{}", pid)).exists()
+    #[cfg(target_os = "linux")]
+    {
+        if Path::new(&format!("/proc/{}", pid)).exists() {
+            return true;
+        }
+    }
+    #[cfg(unix)]
+    {
+        return std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(true);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
 }
 #[cfg(coverage)]
 fn is_process_running(_pid: u32) -> bool {
@@ -358,15 +406,30 @@ mod tests {
 
     #[test]
     fn test_orphan_cleanup() {
+        // NOTE: this test previously asserted that a *freshly-written*
+        // results file was deleted (cleaned == 1). That assertion codified
+        // the TF-3 data-loss bug: concurrent runs deleting each other's
+        // in-flight sinks. Correct contract is now: a fresh file is
+        // preserved (age guard); only a genuinely old file with a dead PID
+        // is reaped.
         let tmp = TempDir::new().unwrap();
-
-        // Create a fake orphan file with a non-existent PID
         let orphan_path = tmp.path().join("nthpartyfinder-results-999999.jsonl.zst");
         std::fs::write(&orphan_path, b"fake data").unwrap();
         assert!(orphan_path.exists());
 
+        // Fresh file → must NOT be reaped, even though PID 999999 is dead.
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
-        assert_eq!(cleaned, 1);
+        assert_eq!(cleaned, 0, "a fresh in-flight sink must be preserved");
+        assert!(orphan_path.exists());
+
+        // Backdate it well beyond ORPHAN_MIN_AGE_SECS → now a true orphan.
+        let _ = std::process::Command::new("touch")
+            .arg("-t")
+            .arg("200001010000")
+            .arg(&orphan_path)
+            .status();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 1, "an aged file with a dead PID should be reaped");
         assert!(!orphan_path.exists());
     }
 
@@ -828,13 +891,14 @@ mod tests {
     #[cfg(not(coverage))]
     #[test]
     fn test_is_process_running_current_process() {
+        // The current process is, by definition, running. This MUST hold on
+        // every supported platform — the prior version asserted the macOS
+        // "no /proc → false" defect (root cause of TF-3) as expected behavior.
         let pid = std::process::id();
-        let result = is_process_running(pid);
-        if Path::new("/proc").exists() {
-            assert!(result, "current process should be running");
-        } else {
-            assert!(!result, "without /proc, is_process_running returns false");
-        }
+        assert!(
+            is_process_running(pid),
+            "the current process must be detected as running on every platform"
+        );
     }
 
     // cfg(not(coverage)): /proc platform branch — macOS vs Linux behavior
@@ -901,5 +965,43 @@ mod tests {
         std::fs::write(&bad_name, b"data").unwrap();
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
         assert_eq!(cleaned, 0);
+    }
+
+    /// Regression for TF-3 (result-sink data-loss panic). Concurrent
+    /// nthpartyfinder processes were deleting each other's *in-flight*
+    /// result sinks: `is_process_running()` always returned false off-Linux
+    /// (no `/proc` on macOS), so `cleanup_orphans` treated a live sibling's
+    /// fresh file as a dead orphan and removed it, making the owner panic at
+    /// result read-back and discard the entire scan. A freshly-written
+    /// results file MUST survive cleanup regardless of PID-liveness.
+    #[test]
+    fn test_cleanup_orphans_preserves_fresh_sibling_file() {
+        let tmp = TempDir::new().unwrap();
+        let sibling = tmp
+            .path()
+            .join("nthpartyfinder-results-4000000000.jsonl.zst");
+        std::fs::write(&sibling, b"in-flight results").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0, "fresh in-flight sink must not be reaped");
+        assert!(
+            sibling.exists(),
+            "TF-3 regression: a freshly-written results file was deleted by cleanup_orphans"
+        );
+    }
+
+    /// cleanup_orphans must never delete the current process's own sink file.
+    #[test]
+    fn test_cleanup_orphans_skips_current_pid() {
+        let tmp = TempDir::new().unwrap();
+        let own = tmp
+            .path()
+            .join(format!("nthpartyfinder-results-{}.jsonl.zst", std::process::id()));
+        std::fs::write(&own, b"our own sink").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0);
+        assert!(
+            own.exists(),
+            "cleanup must never delete the current process's own sink"
+        );
     }
 }
