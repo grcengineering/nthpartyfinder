@@ -21,3 +21,9 @@ repos:
         language: system
         pass_filenames: false
         types: [rust]
+
+  # Secret scanning (SSCS B1/B3 — block credentials before they enter history)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

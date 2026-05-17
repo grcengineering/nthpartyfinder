@@ -1,4 +1,8 @@
 [advisories]
+# Auto-flag any ignore entry below that no longer matches a live advisory —
+# guards against the stale-suppression anti-pattern (a real finding hiding in a
+# dead ignore list). cargo-deny >=0.19.x supports this.
+unused-ignored-advisory = "warn"
 # ─── Advisory Triage (GRC-138, 2026-04-29) ───────────────────────────────────
 #
 # Methodology: cargo audit + cargo deny against RustSec advisory-db (1060

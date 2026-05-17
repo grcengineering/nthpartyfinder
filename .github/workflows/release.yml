@@ -81,3 +81,55 @@ jobs:
           files: |
             nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz
             nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz.sha256
+
+      # Per-target digest for SLSA provenance aggregation (B5).
+      - name: Export artifact digest
+        id: digest
+        shell: bash
+        working-directory: nthpartyfinder/target/${{ matrix.target }}/release
+        run: |
+          if command -v sha256sum &>/dev/null; then HASH=$(sha256sum nthpartyfinder-${{ matrix.target }}.tgz);
+          else HASH=$(shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz); fi
+          echo "value=$(echo -n "$HASH" | base64 | tr -d '\n')" >> "$GITHUB_OUTPUT"
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.target }}
+          path: nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz.sha256
+          retention-days: 1
+
+  # ── SLSA provenance (B5 — SLSA v1.2 Build L3 via slsa-github-generator) ────
+  # Aggregate every matrix artifact digest, then emit signed provenance.
+  combine-digests:
+    name: Combine digests
+    needs: build-release
+    runs-on: ubuntu-latest
+    outputs:
+      digests: ${{ steps.combine.outputs.digests }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: digest-*
+          path: digests
+      - id: combine
+        shell: bash
+        run: |
+          # base64(sha256sum lines) for every released .tgz, concatenated.
+          ALL=$(cat digests/*/*.sha256 | sha256sum --check --status 2>/dev/null; \
+                cat digests/*/*.sha256)
+          echo "digests=$(printf '%s' "$ALL" | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+  provenance:
+    needs: combine-digests
+    permissions:
+      actions: read       # read workflow metadata
+      id-token: write     # keyless cosign / Fulcio OIDC
+      contents: write     # attach provenance to the release
+    # NOTE: slsa-github-generator MUST be referenced by semantic tag, not SHA —
+    # its TUF/slsa-verifier trust model binds builder identity to the tag. This
+    # is the one sanctioned non-SHA pin (OpenSSF Scorecard documents this
+    # Pinned-Dependencies exception for slsa-github-generator).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.combine-digests.outputs.digests }}
+      upload-assets: true

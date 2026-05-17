@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # GitHub Actions — keep every SHA-pinned action current (defends the
+  # tj-actions CVE-2025-30066 retroactive-tag-rewrite class: Dependabot
+  # bumps the pinned digest, the pin stays a 40-char SHA).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"
+
+  # Cargo — the crate lives in /nthpartyfinder.
+  - package-ecosystem: "cargo"
+    directory: "/nthpartyfinder"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"

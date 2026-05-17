@@ -40,3 +40,21 @@ models/*.json
 MEMORY/
 .zerg/
 .gsd/
+
+# Credentials / secrets (SSCS B1 secure-by-default — never commit secrets)
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials.json
+credentials.*
+secrets.yaml
+secrets.yml
+.aws/
+.azure/
+*.gpg
+id_rsa
+id_ed25519

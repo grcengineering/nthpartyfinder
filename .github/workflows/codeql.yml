@@ -26,9 +26,13 @@ jobs:
         uses: github/codeql-action/init@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
         with:
           languages: rust
-          build-mode: none
-          # config-file excludes rust/path-injection which produces 28+ false positives;
-          # inline // lgtm suppression is not supported by the Rust CodeQL pack.
+          build-mode: none  # only supported mode for Rust (CodeQL Rust GA, Oct-2025)
+          # NOTE: codeql-config.yml carries NO query exclusions. The earlier
+          # rust/path-injection findings were REMEDIATED IN CODE (commit b9d8609:
+          # "remediate CodeQL rust/path-injection, rust/non-https-url,
+          # actions/missing-workflow-permissions"), not suppressed. The config
+          # file is retained for future query-suite scoping only. CodeQL Rust
+          # does NOT cover OWASP A06 (vulnerable deps) — SCA stays on cargo-deny.
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis

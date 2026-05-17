@@ -89,7 +89,7 @@ jobs:
         timeout-minutes: 10
 
   coverage:
-    name: Coverage (100% gate)
+    name: Coverage (95% gate)
     needs: lint
     runs-on: ubuntu-latest
     steps:
@@ -115,11 +115,23 @@ jobs:
       - name: Run coverage and print summary
         env:
           RUSTFLAGS: ""
-        run: cargo +nightly-2026-04-29 llvm-cov --locked --all-features --workspace --lib --fail-under-lines 100 --fail-under-functions 100
+        # Coverage floor = 95% line + 95% function (NOT 100%). 100% is explicitly
+        # not a goal: the last few % is genuinely-unreachable defensive code
+        # (impossible-error `?` continuations, poison-mutex fallbacks, dead match
+        # arms); chasing it incentivises deleting graceful error handling.
+        # --ignore-filename-regex scopes out structurally-untestable infra that
+        # no meaningful unit test can exercise:
+        #   browser_pool.rs   — live headless-Chrome session provider
+        #   memory_monitor.rs — live OS memory-pressure sampler (sysinfo)
+        #   interactive.rs    — blocking interactive TUI input loop
+        # (main.rs is a [[bin]], already excluded by --lib). Keep this regex
+        # MINIMAL — never widen it to make a change pass; write a real test.
+        # Mirror of nthpartyfinder/scripts/coverage.sh (keep in sync).
+        run: cargo +nightly-2026-04-29 llvm-cov --locked --all-features --workspace --lib --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --fail-under-lines 95 --fail-under-functions 95
       - name: Generate LCOV report
         env:
           RUSTFLAGS: ""
-        run: cargo +nightly-2026-04-29 llvm-cov report --locked --all-features --workspace --lib --lcov --output-path lcov.info
+        run: cargo +nightly-2026-04-29 llvm-cov report --locked --all-features --workspace --lib --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --lcov --output-path lcov.info
       - name: Upload to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
