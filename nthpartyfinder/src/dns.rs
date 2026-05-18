@@ -4103,43 +4103,102 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(coverage)]
     async fn test_try_system_dns_resolver_coverage_stub() {
         let result = try_system_dns_resolver("example.com").await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
+    #[cfg(coverage)]
     async fn test_get_cname_records_with_rate_limit_coverage_stub() {
         let pool = DnsServerPool::default();
         let result = get_cname_records_with_rate_limit("example.com", &pool, None).await;
         assert!(result.is_ok());
     }
 
-    // ── DNS failure counter tracking ─────────────────────────────────
+    // ── DNS failure counter tracking (wiremock, no live DNS) ─────────
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn test_get_txt_records_with_pool_tracked_no_failures() {
-        let pool = DnsServerPool::default();
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let response = build_doh_txt_response("tracked.com", &["v=spf1 ~all"]);
+
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "tracked.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(response)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let counter = AtomicUsize::new(0);
-        let result = get_txt_records_with_pool_tracked("example.com", &pool, &counter).await;
+        let result = get_txt_records_with_pool_tracked("tracked.com", &pool, &counter).await;
         assert!(result.is_ok());
-        // Coverage stub returns Ok(vec![]) without incrementing counter
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn test_get_txt_records_with_rate_limit_counter_none() {
-        let pool = DnsServerPool::default();
-        let result = get_txt_records_with_rate_limit("example.com", &pool, None, None).await;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let response = build_doh_txt_response("counter-none.com", &["v=spf1 ~all"]);
+
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "counter-none.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(response)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let result = get_txt_records_with_rate_limit("counter-none.com", &pool, None, None).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn test_get_txt_records_with_rate_limit_counter_some() {
-        let pool = DnsServerPool::default();
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let response = build_doh_txt_response("counter-some.com", &["v=spf1 ~all"]);
+
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "counter-some.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(response)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let counter = AtomicUsize::new(0);
         let result =
-            get_txt_records_with_rate_limit("example.com", &pool, None, Some(&counter)).await;
+            get_txt_records_with_rate_limit("counter-some.com", &pool, None, Some(&counter)).await;
         assert!(result.is_ok());
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
