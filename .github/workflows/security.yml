@@ -64,18 +64,15 @@ jobs:
           sarif_file: nthpartyfinder/osv.sarif
           category: osv-scanner
 
-  # ── SAST (Opengrep, report-only — gate flip is the scheduled follow-up) ───
-  # Replaces the prior `semgrep scan ... || true` (non-gating theater that
-  # discarded its JSON to an artifact). Opengrep is the OSS SAST engine of
-  # record. Pinned + signature-verified install (never unpinned curl|bash).
-  # IMPORTANT (advisor): a green Opengrep run is NOT proof of correctness —
-  # an empty/zero-rule load also exits 0. We therefore (a) assert rule files
-  # exist and (b) print the loaded-rule count. Report-only NOW; the
-  # `--error --severity ERROR` gate flip is the documented follow-up AFTER a
-  # clean report-only baseline on master (never flip gating before baseline,
-  # else branch protection blocks the campaign's own bugfix merges).
+  # ── SAST (Opengrep, ERROR-severity gate) ─────────────────────────────────
+  # Opengrep is the OSS SAST engine of record. Pinned + signature-verified
+  # install (never unpinned curl|bash). The canary step validates rule
+  # efficacy against a known-bad fixture BEFORE the main scan runs; if
+  # rules stop firing, CI fails immediately. The main scan gates on
+  # ERROR-severity findings only — WARNING findings are reported in SARIF
+  # but do not block.
   sast-opengrep:
-    name: SAST — Opengrep (report-only)
+    name: SAST — Opengrep (ERROR gate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -90,10 +87,20 @@ jobs:
           echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
       - name: Assert local ruleset present (anti empty-ruleset trap)
         run: test -s .opengrep/rules.yml && grep -c '  - id:' .opengrep/rules.yml
-      - name: Run Opengrep (report-only, SARIF)
+      - name: Canary — known-bad fixture must trip ERROR gate
+        run: |
+          if opengrep scan --config .opengrep/rules.yml \
+               --severity ERROR --error tests/fixtures/sast/; then
+            echo "CANARY FAILED: known-bad fixture did not trip --error gate"
+            exit 1
+          fi
+          echo "CANARY PASSED: known-bad fixture correctly tripped ERROR gate"
+      - name: Run Opengrep (ERROR-severity gate, SARIF)
         run: |
           opengrep scan --config .opengrep/rules.yml \
-            --sarif-output=opengrep.sarif --verbose . || true
+            --exclude 'tests/fixtures/sast' \
+            --severity ERROR --error \
+            --sarif-output=opengrep.sarif --verbose .
       - name: Upload Opengrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
