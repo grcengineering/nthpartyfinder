@@ -277,12 +277,12 @@ fn is_process_running(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        return std::process::Command::new("kill")
+        std::process::Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
             .status()
             .map(|s| s.success())
-            .unwrap_or(true);
+            .unwrap_or(true)
     }
     #[cfg(not(unix))]
     {
@@ -993,9 +993,10 @@ mod tests {
     #[test]
     fn test_cleanup_orphans_skips_current_pid() {
         let tmp = TempDir::new().unwrap();
-        let own = tmp
-            .path()
-            .join(format!("nthpartyfinder-results-{}.jsonl.zst", std::process::id()));
+        let own = tmp.path().join(format!(
+            "nthpartyfinder-results-{}.jsonl.zst",
+            std::process::id()
+        ));
         std::fs::write(&own, b"our own sink").unwrap();
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
         assert_eq!(cleaned, 0);
