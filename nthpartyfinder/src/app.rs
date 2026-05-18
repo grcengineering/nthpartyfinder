@@ -268,25 +268,14 @@ pub fn process_config_result(
 ) -> ConfigOutcome {
     match load_result {
         Ok(cfg) => ConfigOutcome::Ready(Box::new(cfg)),
-        Err(ConfigError::FileNotFound(path)) => match prompt_result {
+        Err(ConfigError::FileNotFound(_path)) => match prompt_result {
             Some(Ok(Some(created_path))) => ConfigOutcome::CreatedNew(created_path),
-            Some(Ok(None)) => ConfigOutcome::Exit {
-                message: format!(
-                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
-                    path.display()
-                ),
-                code: 1,
-            },
-            Some(Err(e)) => ConfigOutcome::Exit {
-                message: format!("Failed to create configuration file: {}", e),
-                code: 1,
-            },
-            None => ConfigOutcome::Exit {
-                message: format!(
-                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
-                    path.display()
-                ),
-                code: 1,
+            _ => match AppConfig::load_default() {
+                Ok(cfg) => ConfigOutcome::Ready(Box::new(cfg)),
+                Err(e) => ConfigOutcome::Exit {
+                    message: format!("Failed to load embedded default configuration: {}", e),
+                    code: 1,
+                },
             },
         },
         Err(e) => ConfigOutcome::Exit {
@@ -1756,6 +1745,10 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
+    if logger.has_dns_failures() && unique_vendors == 0 {
+        bail!(AppExitCode(3));
+    }
+
     Ok(())
 }
 
@@ -2925,10 +2918,7 @@ mod tests {
             Err(ConfigError::FileNotFound(PathBuf::from("/etc/config.toml"))),
             Some(Ok(None)),
         );
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("not found"));
-        assert!(message.contains("--init"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
     }
 
     #[test]
@@ -2937,18 +2927,32 @@ mod tests {
             Err(ConfigError::FileNotFound(PathBuf::from("/missing"))),
             Some(Err("permission denied".to_string())),
         );
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("permission denied"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
     }
 
     #[test]
     fn test_process_config_result_file_not_found_no_prompt() {
         let result =
             process_config_result(Err(ConfigError::FileNotFound(PathBuf::from("/conf"))), None);
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("not found"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
+    }
+
+    #[test]
+    fn test_zero_config_fallback_uses_valid_defaults() {
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from(
+                "./config/nthpartyfinder.toml",
+            ))),
+            None,
+        );
+        match result {
+            ConfigOutcome::Ready(cfg) => {
+                assert!(cfg.validate().is_ok(), "Fallback defaults must validate");
+                assert!(!cfg.http.user_agent.is_empty());
+                assert!(!cfg.dns.doh_servers.is_empty() || !cfg.dns.dns_servers.is_empty());
+            }
+            other => panic!("Expected Ready with defaults, got {:?}", other),
+        }
     }
 
     #[test]
@@ -3298,5 +3302,13 @@ mod tests {
             make_relationship("c.com", "Gamma", "e.com", RecordType::DnsTxtSpf, "ev3"),
         ];
         assert_eq!(count_unique_vendors(&results), 3);
+    }
+
+    // ── DNS failure exit code ───────────────────────────────────────
+
+    #[test]
+    fn test_app_exit_code_3_display() {
+        let code = AppExitCode(3);
+        assert_eq!(format!("{}", code), "exit code 3");
     }
 }

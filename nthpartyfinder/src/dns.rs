@@ -529,7 +529,15 @@ pub async fn get_txt_records_with_pool(
     domain: &str,
     dns_pool: &DnsServerPool,
 ) -> Result<Vec<String>> {
-    get_txt_records_with_rate_limit(domain, dns_pool, None).await
+    get_txt_records_with_rate_limit(domain, dns_pool, None, None).await
+}
+
+pub async fn get_txt_records_with_pool_tracked(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+    dns_failure_counter: &AtomicUsize,
+) -> Result<Vec<String>> {
+    get_txt_records_with_rate_limit(domain, dns_pool, None, Some(dns_failure_counter)).await
 }
 
 // cfg(not(coverage)): performs live DNS lookups racing DoH and traditional DNS — requires network
@@ -538,6 +546,7 @@ pub async fn get_txt_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
     rate_limit_ctx: Option<&RateLimitContext>,
+    dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
@@ -635,6 +644,9 @@ pub async fn get_txt_records_with_rate_limit(
         }
         Err(e) => {
             warn!("All DNS resolution failed for {} — returning empty results to continue analysis. Last error: {}", domain, e);
+            if let Some(counter) = dns_failure_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(vec![])
         }
     }
@@ -645,6 +657,7 @@ pub async fn get_txt_records_with_rate_limit(
     _domain: &str,
     _dns_pool: &DnsServerPool,
     _rate_limit_ctx: Option<&RateLimitContext>,
+    _dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
     Ok(vec![])
 }
@@ -3189,7 +3202,7 @@ mod tests {
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let records = get_txt_records_with_rate_limit("ratelimit.com", &pool, None)
+        let records = get_txt_records_with_rate_limit("ratelimit.com", &pool, None, None)
             .await
             .unwrap();
 
@@ -3230,7 +3243,7 @@ mod tests {
             backoff_max_delay_ms: 1000,
         };
         let ctx = RateLimitContext::from_config(&rate_config);
-        let records = get_txt_records_with_rate_limit("limited.com", &pool, Some(&ctx))
+        let records = get_txt_records_with_rate_limit("limited.com", &pool, Some(&ctx), None)
             .await
             .unwrap();
 
@@ -4099,6 +4112,34 @@ mod tests {
     async fn test_get_cname_records_with_rate_limit_coverage_stub() {
         let pool = DnsServerPool::default();
         let result = get_cname_records_with_rate_limit("example.com", &pool, None).await;
+        assert!(result.is_ok());
+    }
+
+    // ── DNS failure counter tracking ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_txt_records_with_pool_tracked_no_failures() {
+        let pool = DnsServerPool::default();
+        let counter = AtomicUsize::new(0);
+        let result = get_txt_records_with_pool_tracked("example.com", &pool, &counter).await;
+        assert!(result.is_ok());
+        // Coverage stub returns Ok(vec![]) without incrementing counter
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_txt_records_with_rate_limit_counter_none() {
+        let pool = DnsServerPool::default();
+        let result = get_txt_records_with_rate_limit("example.com", &pool, None, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_txt_records_with_rate_limit_counter_some() {
+        let pool = DnsServerPool::default();
+        let counter = AtomicUsize::new(0);
+        let result =
+            get_txt_records_with_rate_limit("example.com", &pool, None, Some(&counter)).await;
         assert!(result.is_ok());
     }
 }
