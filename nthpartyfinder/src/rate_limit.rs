@@ -81,12 +81,12 @@ impl RateLimiter {
     pub async fn acquire(&mut self) {
         loop {
             match self.try_acquire() {
-                None => return, // Token acquired
+                None => return, // Permit acquired
                 Some(wait_duration) => {
-                    debug!("Rate limiter waiting {:?} for token", wait_duration);
+                    debug!("Rate limiter waiting {:?} for permit", wait_duration);
                     sleep(wait_duration).await;
-                    // Re-check after sleep - token may still not be available
-                    // if other tasks consumed tokens during our sleep
+                    // Re-check after sleep - permit may still not be available
+                    // if other tasks consumed permits during our sleep
                 }
             }
         }

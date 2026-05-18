@@ -16,29 +16,14 @@ defaults:
     working-directory: nthpartyfinder
 
 jobs:
-  dependency-audit:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        run: |
-          cargo audit \
-            --ignore RUSTSEC-2026-0097 \
-            --ignore RUSTSEC-2024-0421 \
-            --ignore RUSTSEC-2025-0057 \
-            --ignore RUSTSEC-2025-0119 \
-            --ignore RUSTSEC-2024-0436 \
-            --ignore RUSTSEC-2025-0134 \
-            --ignore RUSTSEC-2026-0118 \
-            --ignore RUSTSEC-2026-0119 \
-            --deny warnings
-
+  # ── SCA GATE (blocking) ──────────────────────────────────────────────────
+  # cargo-deny is the single SCA gate (2026 posture: cargo-audit's maintainer
+  # stepped back Mar-2025; cargo-deny + RustSec DB is the recommended Rust
+  # advisory/license/source gate). Documented risk-acceptances live in
+  # deny.toml [advisories] as structured { id, reason } entries with full
+  # rationale; `unused-ignored-advisory = "warn"` auto-flags stale ignores.
   cargo-deny:
-    name: Cargo Deny
+    name: Cargo Deny (SCA gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -48,17 +33,87 @@ jobs:
           manifest-path: nthpartyfinder/Cargo.toml
           arguments: --all-features
 
-  sast-scan:
-    name: SAST Scan
+  # ── SCA BREADTH (OSV, report-only) ───────────────────────────────────────
+  # Second independent engine over the OSV DB (no arbitrary-code-exec path).
+  # Report-only by design: cargo-deny above is the gate; this widens coverage
+  # and surfaces SARIF without a second blocking flip mid-campaign.
+  osv-scanner:
+    name: OSV Scanner (report-only)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Install Semgrep
-        run: pip install semgrep
-      - name: Run Semgrep
-        run: semgrep scan --config "p/rust" --config "p/security-audit" . --json > sast-results.json || true
-      - name: Upload SAST results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Run osv-scanner
+        continue-on-error: true
+        uses: google/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
-          name: sast-results
-          path: nthpartyfinder/sast-results.json
+          scan-args: |-
+            --lockfile=nthpartyfinder/Cargo.lock
+            --format=sarif
+            --output=osv.sarif
+      - name: Upload OSV SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        with:
+          sarif_file: nthpartyfinder/osv.sarif
+          category: osv-scanner
+
+  # ── SAST (Opengrep, ERROR-severity gate) ─────────────────────────────────
+  # Opengrep is the OSS SAST engine of record. Pinned + signature-verified
+  # install (never unpinned curl|bash). The canary step validates rule
+  # efficacy against a known-bad fixture BEFORE the main scan runs; if
+  # rules stop firing, CI fails immediately. The main scan gates on
+  # ERROR-severity findings only — WARNING findings are reported in SARIF
+  # but do not block.
+  sast-opengrep:
+    name: SAST — Opengrep (ERROR gate)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Opengrep (pinned + signature-verified)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.21.0/install.sh \
+            -o install-opengrep.sh
+          bash install-opengrep.sh -v v1.21.0 --verify-signatures
+          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+      - name: Assert local ruleset present (anti empty-ruleset trap)
+        run: test -s .opengrep/rules.yml && grep -c '  - id:' .opengrep/rules.yml
+      - name: Canary — known-bad fixture must trip ERROR gate
+        run: |
+          if opengrep scan --config .opengrep/rules.yml \
+               --severity ERROR --error tests/fixtures/sast/; then
+            echo "CANARY FAILED: known-bad fixture did not trip --error gate"
+            exit 1
+          fi
+          echo "CANARY PASSED: known-bad fixture correctly tripped ERROR gate"
+      - name: Run Opengrep (ERROR-severity gate, SARIF)
+        run: |
+          opengrep scan --config .opengrep/rules.yml \
+            --exclude 'tests/fixtures/sast' \
+            --severity ERROR --error \
+            --sarif-output=opengrep.sarif --verbose .
+      - name: Upload Opengrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        with:
+          sarif_file: nthpartyfinder/opengrep.sarif
+          category: opengrep
+
+  # ── SECRET SCANNING (blocking — secrets must never merge) ─────────────────
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0  # full history so a leaked-then-deleted secret is caught
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
