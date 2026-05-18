@@ -104,6 +104,9 @@ jobs:
     name: Combine digests
     needs: build-release
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     outputs:
       digests: ${{ steps.combine.outputs.digests }}
     steps:
@@ -112,12 +115,9 @@ jobs:
           pattern: digest-*
           path: digests
       - id: combine
-        shell: bash
         run: |
-          # base64(sha256sum lines) for every released .tgz, concatenated.
-          ALL=$(cat digests/*/*.sha256 | sha256sum --check --status 2>/dev/null; \
-                cat digests/*/*.sha256)
-          echo "digests=$(printf '%s' "$ALL" | base64 -w0)" >> "$GITHUB_OUTPUT"
+          cat digests/*/*.sha256 > all-digests.txt
+          echo "digests=$(base64 -w0 < all-digests.txt)" >> "$GITHUB_OUTPUT"
 
   provenance:
     needs: combine-digests
