@@ -1529,6 +1529,13 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     let analysis_timeout = compute_analysis_timeout(args.timeout);
     let analysis_timeout_secs = analysis_timeout.map(|d| d.as_secs()).unwrap_or(0);
 
+    if let Some(duration) = analysis_timeout {
+        logger.warn(&format!(
+            "Analysis timeout active: {}s. Use --timeout 0 to disable.",
+            duration.as_secs()
+        ));
+    }
+
     let analysis_future = analysis::discover_nth_parties(
         domain,
         args.depth,
@@ -1588,9 +1595,10 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                     "Analysis exceeded the {} second timeout.",
                     analysis_timeout_secs
                 );
-                eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
+                eprintln!("Partial progress has been saved as a checkpoint. Re-run with --resume to continue.");
                 eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
-                bail!(AppExitCode(1));
+                eprintln!("To disable the timeout entirely: --timeout 0");
+                bail!(AppExitCode(142));
             }
         }
     } else {
@@ -3310,5 +3318,13 @@ mod tests {
     fn test_app_exit_code_3_display() {
         let code = AppExitCode(3);
         assert_eq!(format!("{}", code), "exit code 3");
+    }
+
+    // ── Timeout exit code ────────────────────────────────────────────
+
+    #[test]
+    fn test_app_exit_code_142_timeout_display() {
+        let code = AppExitCode(142);
+        assert_eq!(format!("{}", code), "exit code 142");
     }
 }
