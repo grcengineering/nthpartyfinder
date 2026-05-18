@@ -449,6 +449,13 @@ impl AppConfig {
         Self::load_from_path(Path::new(CONFIG_PATH))
     }
 
+    /// Parse the embedded default configuration (fallback when no config file exists)
+    pub fn load_default() -> Result<Self, ConfigError> {
+        let config: AppConfig = toml::from_str(DEFAULT_CONFIG)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Load configuration from a specific path
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
@@ -631,6 +638,13 @@ mod tests {
     fn test_default_config_validates() {
         let config: AppConfig = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert!(config.validate().is_ok(), "Default config should validate");
+    }
+
+    #[test]
+    fn test_load_default_returns_valid_config() {
+        let config = AppConfig::load_default().expect("Embedded defaults must parse and validate");
+        assert!(!config.http.user_agent.is_empty());
+        assert!(!config.dns.doh_servers.is_empty());
     }
 
     #[test]
