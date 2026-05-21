@@ -497,7 +497,7 @@ pub async fn run() -> Result<()> {
 // filter_infra_providers, compute_analysis_timeout, build_full_output_path,
 // collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
+pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
             Ok(path) => {
@@ -576,10 +576,17 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
             for msg in format_dep_check_warnings(&results) {
                 eprintln!("⚠️  {}", msg);
             }
+            let ort_unavailable = results
+                .iter()
+                .any(|r| r.name == "ONNX Runtime" && !r.available);
+            if ort_unavailable {
+                eprintln!("⚠️  ONNX Runtime not available — continuing without NER (--disable-slm implied).");
+                args.disable_slm = true;
+            }
         }
         Err(e) => {
-            eprintln!("❌ Missing required dependency:\n{}", e);
-            bail!(AppExitCode(1));
+            eprintln!("⚠️  Dependency issue: {}", e);
+            eprintln!("   Continuing with reduced functionality.");
         }
     }
 

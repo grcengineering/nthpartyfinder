@@ -143,12 +143,8 @@ fn collect_dep_results(
     whois_result: DepCheckResult,
 ) -> Result<Vec<DepCheckResult>, String> {
     let mut results = Vec::new();
-    let mut errors = Vec::new();
 
     if let Some(ort) = ort_result {
-        if !ort.available {
-            errors.push(ort.message.clone().unwrap_or_default());
-        }
         results.push(ort);
     }
 
@@ -161,10 +157,6 @@ fn collect_dep_results(
     }
 
     results.push(whois_result);
-
-    if !errors.is_empty() {
-        return Err(errors.join("\n\n"));
-    }
 
     Ok(results)
 }
@@ -180,10 +172,12 @@ fn check_onnx_runtime() -> DepCheckResult {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let cwd = std::env::current_dir().ok();
     find_ort_library(
         ort_lib_name(),
         env_path_value,
         exe_dir,
+        cwd,
         std::path::Path::new("/usr/local/lib"),
     )
 }
@@ -193,39 +187,12 @@ fn find_ort_library(
     lib_name: &str,
     env_path_value: Option<String>,
     exe_dir: Option<PathBuf>,
+    cwd: Option<PathBuf>,
     system_lib_dir: &std::path::Path,
 ) -> DepCheckResult {
     if let Some(ref path) = env_path_value {
-        let candidate = std::path::Path::new(path);
-        let has_parent_component = candidate
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
-        let filename_matches = candidate
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n == lib_name)
-            .unwrap_or(false);
-
-        if candidate.is_absolute() && !has_parent_component && filename_matches {
-            // Canonicalize and re-verify filename on the canonical value to clear taint
-            // (CodeQL: rust/path-injection sanitizer requires allowlist comparison on canonical).
-            // canonicalize() also implicitly checks existence — Ok means the file exists.
-            if let Ok(canonical) = candidate.canonicalize() {
-                if canonical
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n == lib_name)
-                    .unwrap_or(false)
-                    && canonical.exists()
-                {
-                    return DepCheckResult {
-                        name: "ONNX Runtime",
-                        available: true,
-                        required: true,
-                        message: Some(format!("Found at ORT_DYLIB_PATH={}", path)),
-                    };
-                }
-            }
+        if let Some(result) = resolve_ort_env_path(path, lib_name, cwd.as_deref()) {
+            return result;
         }
     }
 
@@ -249,6 +216,19 @@ fn find_ort_library(
                 available: true,
                 required: true,
                 message: Some(format!("Found at: {}", abs.display())),
+            };
+        }
+    }
+
+    if let Some(ref dir) = cwd {
+        if let Some(path) = find_ort_in_directory(dir, lib_name) {
+            let abs = path.canonicalize().unwrap_or(path.clone());
+            std::env::set_var("ORT_DYLIB_PATH", &abs);
+            return DepCheckResult {
+                name: "ONNX Runtime",
+                available: true,
+                required: true,
+                message: Some(format!("Found in working directory: {}", abs.display())),
             };
         }
     }
@@ -283,6 +263,81 @@ fn find_ort_library(
             download_url, lib_name
         )),
     }
+}
+
+/// Resolve ORT_DYLIB_PATH: handles absolute file paths, relative paths, and directory paths.
+fn resolve_ort_env_path(
+    path: &str,
+    lib_name: &str,
+    cwd: Option<&std::path::Path>,
+) -> Option<DepCheckResult> {
+    let candidate = std::path::Path::new(path);
+
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else if let Some(cwd) = cwd {
+        cwd.join(candidate)
+    } else {
+        return None;
+    };
+
+    let has_parent_component = resolved
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if has_parent_component {
+        return None;
+    }
+
+    let filename_matches = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == lib_name)
+        .unwrap_or(false);
+
+    if filename_matches {
+        if let Ok(canonical) = resolved.canonicalize() {
+            if canonical
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == lib_name)
+                .unwrap_or(false)
+                && canonical.exists()
+            {
+                return Some(DepCheckResult {
+                    name: "ONNX Runtime",
+                    available: true,
+                    required: true,
+                    message: Some(format!("Found at ORT_DYLIB_PATH={}", path)),
+                });
+            }
+        }
+    }
+
+    if resolved.is_dir() {
+        let direct = resolved.join(lib_name);
+        if direct.exists() {
+            let abs = direct.canonicalize().unwrap_or(direct.clone());
+            std::env::set_var("ORT_DYLIB_PATH", &abs);
+            return Some(DepCheckResult {
+                name: "ONNX Runtime",
+                available: true,
+                required: true,
+                message: Some(format!("Found at ORT_DYLIB_PATH={}", abs.display())),
+            });
+        }
+        if let Some(found) = find_ort_in_directory(&resolved, lib_name) {
+            let abs = found.canonicalize().unwrap_or(found.clone());
+            std::env::set_var("ORT_DYLIB_PATH", &abs);
+            return Some(DepCheckResult {
+                name: "ONNX Runtime",
+                available: true,
+                required: true,
+                message: Some(format!("Found at ORT_DYLIB_PATH={}", abs.display())),
+            });
+        }
+    }
+
+    None
 }
 
 /// Find ONNX Runtime library in a directory (including versioned subdirs).
@@ -1695,7 +1750,7 @@ mod tests {
     // ── collect_dep_results ──────────────────────────────────────
 
     #[test]
-    fn test_collect_dep_results_ort_unavailable_produces_error() {
+    fn test_collect_dep_results_ort_unavailable_returns_ok_with_unavailable() {
         let ort = Some(DepCheckResult {
             name: "ONNX Runtime",
             available: false,
@@ -1709,12 +1764,14 @@ mod tests {
             message: Some("found".into()),
         };
         let result = collect_dep_results(ort, None, None, whois);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("ONNX not found test msg"));
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        let ort_result = results.iter().find(|r| r.name == "ONNX Runtime").unwrap();
+        assert!(!ort_result.available);
     }
 
     #[test]
-    fn test_collect_dep_results_ort_unavailable_no_message() {
+    fn test_collect_dep_results_ort_unavailable_no_message_still_ok() {
         let ort = Some(DepCheckResult {
             name: "ONNX Runtime",
             available: false,
@@ -1728,7 +1785,7 @@ mod tests {
             message: Some("ok".into()),
         };
         let result = collect_dep_results(ort, None, None, whois);
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1809,6 +1866,7 @@ mod tests {
             "libonnxruntime.dylib",
             Some(lib.to_str().unwrap().to_string()),
             None,
+            None,
             std::path::Path::new("/nonexistent"),
         );
         assert!(result.available);
@@ -1820,6 +1878,7 @@ mod tests {
         let result = find_ort_library(
             "libonnxruntime.dylib",
             Some("/nonexistent/lib.dylib".into()),
+            None,
             None,
             std::path::Path::new("/nonexistent"),
         );
@@ -1836,6 +1895,7 @@ mod tests {
             "libonnxruntime.dylib",
             None,
             Some(dir.path().to_path_buf()),
+            None,
             std::path::Path::new("/nonexistent"),
         );
         assert!(result.available);
@@ -1856,6 +1916,7 @@ mod tests {
             "libonnxruntime.dylib",
             None,
             Some(dir.path().to_path_buf()),
+            None,
             std::path::Path::new("/nonexistent"),
         );
         assert!(result.available);
@@ -1867,7 +1928,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("libonnxruntime.dylib"), b"fake").unwrap();
 
-        let result = find_ort_library("libonnxruntime.dylib", None, None, dir.path());
+        let result = find_ort_library("libonnxruntime.dylib", None, None, None, dir.path());
         assert!(result.available);
         assert!(result.message.unwrap().contains("Found at"));
     }
@@ -1878,12 +1939,150 @@ mod tests {
             "libonnxruntime.dylib",
             None,
             None,
+            None,
             std::path::Path::new("/nonexistent"),
         );
         assert!(!result.available);
         let msg = result.message.unwrap();
         assert!(msg.contains("ONNX Runtime not found"));
         assert!(msg.contains("install"));
+    }
+
+    // ── CWD search tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_find_ort_library_in_cwd_ort_subdir() {
+        let dir = tempdir().unwrap();
+        let ort_lib = dir.path().join("onnxruntime-osx-arm64-1.20.1").join("lib");
+        std::fs::create_dir_all(&ort_lib).unwrap();
+        std::fs::write(ort_lib.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = find_ort_library(
+            "libonnxruntime.dylib",
+            None,
+            None,
+            Some(dir.path().to_path_buf()),
+            std::path::Path::new("/nonexistent"),
+        );
+        assert!(result.available);
+        assert!(result.message.unwrap().contains("working directory"));
+    }
+
+    #[test]
+    fn test_find_ort_library_cwd_not_searched_when_exe_dir_finds_it() {
+        let exe_dir = tempdir().unwrap();
+        let cwd_dir = tempdir().unwrap();
+        let lib = exe_dir.path().join("libonnxruntime.dylib");
+        std::fs::write(&lib, b"fake").unwrap();
+
+        let result = find_ort_library(
+            "libonnxruntime.dylib",
+            None,
+            Some(exe_dir.path().to_path_buf()),
+            Some(cwd_dir.path().to_path_buf()),
+            std::path::Path::new("/nonexistent"),
+        );
+        assert!(result.available);
+        assert!(result.message.unwrap().contains("next to executable"));
+    }
+
+    // ── resolve_ort_env_path tests ───────────────────────────────
+
+    #[test]
+    fn test_resolve_ort_env_path_absolute_file() {
+        let dir = tempdir().unwrap();
+        let lib = dir.path().join("libonnxruntime.dylib");
+        std::fs::write(&lib, b"fake").unwrap();
+
+        let result = resolve_ort_env_path(lib.to_str().unwrap(), "libonnxruntime.dylib", None);
+        assert!(result.is_some());
+        assert!(result.unwrap().available);
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_relative_file_with_cwd() {
+        let dir = tempdir().unwrap();
+        let lib = dir.path().join("libonnxruntime.dylib");
+        std::fs::write(&lib, b"fake").unwrap();
+
+        let result = resolve_ort_env_path(
+            "libonnxruntime.dylib",
+            "libonnxruntime.dylib",
+            Some(dir.path()),
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().available);
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_relative_without_cwd_returns_none() {
+        let result = resolve_ort_env_path(
+            "relative/libonnxruntime.dylib",
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_directory_with_lib_inside() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = resolve_ort_env_path(
+            dir.path().to_str().unwrap(),
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().available);
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_directory_with_ort_subdir() {
+        let dir = tempdir().unwrap();
+        let ort_lib = dir.path().join("onnxruntime-v1").join("lib");
+        std::fs::create_dir_all(&ort_lib).unwrap();
+        std::fs::write(ort_lib.join("libonnxruntime.dylib"), b"fake").unwrap();
+
+        let result = resolve_ort_env_path(
+            dir.path().to_str().unwrap(),
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().available);
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_with_parent_component_rejected() {
+        let result = resolve_ort_env_path(
+            "/some/path/../libonnxruntime.dylib",
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_nonexistent_file() {
+        let result = resolve_ort_env_path(
+            "/nonexistent/libonnxruntime.dylib",
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_ort_env_path_empty_directory() {
+        let dir = tempdir().unwrap();
+        let result = resolve_ort_env_path(
+            dir.path().to_str().unwrap(),
+            "libonnxruntime.dylib",
+            None,
+        );
+        assert!(result.is_none());
     }
 
     // ── check_chrome_inner ───────────────────────────────────────
