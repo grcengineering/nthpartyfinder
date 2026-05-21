@@ -2029,11 +2029,8 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("libonnxruntime.dylib"), b"fake").unwrap();
 
-        let result = resolve_ort_env_path(
-            dir.path().to_str().unwrap(),
-            "libonnxruntime.dylib",
-            None,
-        );
+        let result =
+            resolve_ort_env_path(dir.path().to_str().unwrap(), "libonnxruntime.dylib", None);
         assert!(result.is_some());
         assert!(result.unwrap().available);
     }
@@ -2045,11 +2042,8 @@ mod tests {
         std::fs::create_dir_all(&ort_lib).unwrap();
         std::fs::write(ort_lib.join("libonnxruntime.dylib"), b"fake").unwrap();
 
-        let result = resolve_ort_env_path(
-            dir.path().to_str().unwrap(),
-            "libonnxruntime.dylib",
-            None,
-        );
+        let result =
+            resolve_ort_env_path(dir.path().to_str().unwrap(), "libonnxruntime.dylib", None);
         assert!(result.is_some());
         assert!(result.unwrap().available);
     }
@@ -2077,11 +2071,8 @@ mod tests {
     #[test]
     fn test_resolve_ort_env_path_empty_directory() {
         let dir = tempdir().unwrap();
-        let result = resolve_ort_env_path(
-            dir.path().to_str().unwrap(),
-            "libonnxruntime.dylib",
-            None,
-        );
+        let result =
+            resolve_ort_env_path(dir.path().to_str().unwrap(), "libonnxruntime.dylib", None);
         assert!(result.is_none());
     }
 
