@@ -2748,6 +2748,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(coverage)]
     async fn test_discover_via_network_interception_coverage_stub() {
         let result = discover_via_network_interception("https://example.com").await;
         assert!(result.is_ok());
