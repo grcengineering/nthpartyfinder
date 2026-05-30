@@ -1,13 +1,12 @@
 use crate::config::AppConfig;
 use crate::domain_utils;
-use crate::rate_limit::RateLimitContext;
+use crate::rate_limit::{RateLimitContext, SharedRateLimiter};
 use crate::vendor::RecordType;
 use anyhow::Result;
 use hickory_resolver::config::{
     LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts,
 };
-use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -95,6 +94,15 @@ pub struct DnsServerPool {
     current_doh_index: AtomicUsize,
     current_dns_index: AtomicUsize,
     client: reqwest::Client,
+    /// Per-process DNS rate limiter (GRC-367): acquired before every outbound DoH/DNS
+    /// request so the configured `dns_queries_per_second` is actually enforced. Previously
+    /// the limiter was dead code (callers always passed `None`), letting sustained
+    /// concurrency trip DoH-provider 429s that were then mis-read as empty answers.
+    dns_limiter: SharedRateLimiter,
+    /// Max DoH provider rotations on a throttle (429/5xx) before giving up.
+    max_dns_retries: u32,
+    /// Base backoff (ms) between throttled DoH retries.
+    backoff_base_ms: u64,
 }
 
 impl DnsServerPool {
@@ -136,6 +144,9 @@ impl DnsServerPool {
             current_doh_index: AtomicUsize::new(0),
             current_dns_index: AtomicUsize::new(0),
             client,
+            dns_limiter: SharedRateLimiter::new(config.rate_limits.dns_queries_per_second),
+            max_dns_retries: config.rate_limits.max_retries,
+            backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
         }
     }
 
@@ -199,6 +210,9 @@ impl DnsServerPool {
             current_doh_index: AtomicUsize::new(0),
             current_dns_index: AtomicUsize::new(0),
             client,
+            dns_limiter: SharedRateLimiter::new(50), // matches config default_dns_queries_per_second
+            max_dns_retries: 3,
+            backoff_base_ms: 500,
         }
     }
 }
@@ -252,6 +266,9 @@ impl DnsServerPool {
             current_doh_index: AtomicUsize::new(0),
             current_dns_index: AtomicUsize::new(0),
             client,
+            dns_limiter: SharedRateLimiter::new(1000), // effectively unthrottled for tests
+            max_dns_retries: 3,
+            backoff_base_ms: 1, // fast backoff so rotation tests run quickly
         }
     }
 }
@@ -277,16 +294,27 @@ impl DnsServerPool {
         // Create DNS query in wire format
         let query_params = [("name", domain), ("type", "TXT")];
 
-        let response = self
+        let http_response = self
             .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
             .timeout(std::time::Duration::from_secs(server.timeout_secs))
             .send()
-            .await?
-            .json::<Value>()
             .await?;
+        // GRC-367: a throttle (429) or provider 5xx MUST surface as a distinct error —
+        // never be parsed into an empty answer, which the caller would otherwise mistake
+        // for "this domain has no records" and report as a false-negative 0-vendor result.
+        let status = http_response.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            return Err(anyhow::anyhow!(
+                "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
+                server.name,
+                status,
+                domain
+            ));
+        }
+        let response = http_response.json::<Value>().await?;
 
         let mut records = Vec::new();
 
@@ -332,16 +360,25 @@ impl DnsServerPool {
 
         let query_params = [("name", domain), ("type", "CNAME")];
 
-        let response = self
+        let http_response = self
             .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
             .timeout(std::time::Duration::from_secs(server.timeout_secs))
             .send()
-            .await?
-            .json::<Value>()
             .await?;
+        // GRC-367: surface DoH throttle/5xx as a distinct error, never an empty answer.
+        let status = http_response.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            return Err(anyhow::anyhow!(
+                "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
+                server.name,
+                status,
+                domain
+            ));
+        }
+        let response = http_response.json::<Value>().await?;
 
         let mut records = Vec::new();
 
@@ -376,15 +413,58 @@ impl DnsServerPool {
         Ok(vec![])
     }
 
+    /// GRC-367: DoH TXT lookup with throttle-aware retry + provider rotation.
+    /// On a throttle (429/5xx) it backs off and rotates to the next DoH provider, up to
+    /// `max_dns_retries` times, instead of giving up after a single provider. A non-throttle
+    /// error (parse/transport) stops retrying immediately. This is what makes a 429 recover
+    /// (rotate to a healthy provider) instead of collapsing into a false-negative empty result.
+    #[cfg(not(coverage))]
+    async fn doh_txt_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
+        let attempts = ((self.max_dns_retries as usize) + 1)
+            .min(self.doh_servers.len().max(1))
+            .max(1);
+        let mut last_err: Option<anyhow::Error> = None;
+        for i in 0..attempts {
+            let server = self.next_doh_server().clone();
+            match self.doh_txt_lookup(domain, &server).await {
+                Ok(records) => return Ok(records),
+                Err(e) => {
+                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    last_err = Some(e);
+                    if throttled && i + 1 < attempts {
+                        let delay = self.backoff_base_ms.saturating_mul(1u64 << i);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("DoH TXT lookup failed for {}", domain)))
+    }
+
+    #[cfg(coverage)]
+    async fn doh_txt_lookup_resilient(&self, _domain: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// GRC-367: acquire a permit from the pool's per-process DNS rate limiter. Called on the
+    /// production hot path so `dns_queries_per_second` is enforced even when no explicit
+    /// RateLimitContext is threaded through (the limiter was previously dead code).
+    pub async fn acquire_dns_permit(&self) {
+        self.dns_limiter.acquire().await;
+    }
+
     /// Create a traditional DNS resolver for the given server config (C002 fix: returns Result)
     fn create_dns_resolver(
         &self,
         server: &DnsServerConfig,
         use_tcp: bool,
     ) -> Result<TokioResolver> {
-        let mut config = ResolverConfig::new();
-
-        let socket_addr = server.address.parse().map_err(|e| {
+        // 0.26: NameServerConfig takes an IpAddr (port 53 is the resolver default).
+        // The configured address is "ip:53"; parse to SocketAddr and take the IP to
+        // preserve the prior behavior (always resolving against the standard DNS port).
+        let socket_addr: std::net::SocketAddr = server.address.parse().map_err(|e| {
             anyhow::anyhow!(
                 "Invalid DNS server address '{}' for server '{}': {}",
                 server.address,
@@ -392,19 +472,18 @@ impl DnsServerPool {
                 e
             )
         })?;
+        let ns_ip = socket_addr.ip();
 
-        config.add_name_server(NameServerConfig {
-            socket_addr,
-            protocol: if use_tcp {
-                Protocol::Tcp
-            } else {
-                Protocol::Udp
-            },
-            tls_dns_name: None,
-            trust_negative_responses: true,
-            bind_addr: None,
-            http_endpoint: None,
-        });
+        // 0.26: protocol is chosen via the NameServerConfig constructor instead of a
+        // separate Protocol field. udp() / tcp() match the prior UDP/TCP selection.
+        let name_server = if use_tcp {
+            NameServerConfig::tcp(ns_ip)
+        } else {
+            NameServerConfig::udp(ns_ip)
+        };
+
+        // 0.26: ResolverConfig::new() is gone — build via from_parts(domain, search, servers).
+        let config = ResolverConfig::from_parts(None, vec![], vec![name_server]);
 
         let mut opts = ResolverOpts::default();
         opts.timeout = std::time::Duration::from_secs(server.timeout_secs);
@@ -412,13 +491,14 @@ impl DnsServerPool {
         opts.edns0 = true;
         opts.use_hosts_file = ResolveHosts::Never;
         opts.ip_strategy = LookupIpStrategy::Ipv4thenIpv6; // Prefer IPv4 for speed
-        opts.validate = false;
         opts.num_concurrent_reqs = 4; // Increased concurrency
 
+        // 0.26: the builder now returns Result (build() can fail constructing the
+        // runtime), so propagate with `?`.
         Ok(
-            TokioResolver::builder_with_config(config, TokioConnectionProvider::default())
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
                 .with_options(opts)
-                .build(),
+                .build()?,
         )
     }
 
@@ -462,7 +542,14 @@ impl DnsServerPool {
             )
             .await
             {
-                let records: Vec<String> = txt_lookup.iter().map(|r| r.to_string()).collect();
+                // 0.26: Lookup no longer exposes .iter() over RData — iterate the
+                // answer Records and render each record's RData (record.data()) to
+                // preserve the previous per-RData string output.
+                let records: Vec<String> = txt_lookup
+                    .answers()
+                    .iter()
+                    .map(|r| r.data.to_string())
+                    .collect();
                 return Ok(records);
             }
         }
@@ -499,9 +586,12 @@ impl DnsServerPool {
             .await
             {
                 use hickory_resolver::proto::rr::RData;
+                // 0.26: Lookup::record_iter() is gone — iterate answers() (&[Record])
+                // and match on each record's RData via record.data().
                 let records: Vec<String> = lookup
-                    .record_iter()
-                    .filter_map(|r| match r.data() {
+                    .answers()
+                    .iter()
+                    .filter_map(|r| match &r.data {
                         RData::CNAME(ref cname) => {
                             Some(cname.to_string().trim_end_matches('.').to_string())
                         }
@@ -551,6 +641,10 @@ pub async fn get_txt_records_with_rate_limit(
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
+    } else {
+        // GRC-367: no explicit context → use the pool's own per-process limiter so the
+        // configured dns_queries_per_second is actually enforced on the production hot path.
+        dns_pool.acquire_dns_permit().await;
     }
 
     debug!("Querying TXT records for domain: {}", domain);
@@ -563,10 +657,11 @@ pub async fn get_txt_records_with_rate_limit(
 
     // Spawn DoH lookup
     let doh_fut = async {
-        match dns_pool.doh_txt_lookup(domain, doh_server).await {
+        // GRC-367: resilient lookup retries/rotates DoH providers on throttle (429/5xx)
+        // instead of collapsing a throttle into an empty (false-negative) answer.
+        match dns_pool.doh_txt_lookup_resilient(domain).await {
             Ok(records) if !records.is_empty() => Some(records),
-            Ok(_) => None,
-            Err(_) => None,
+            _ => None,
         }
     };
 
@@ -578,7 +673,12 @@ pub async fn get_txt_records_with_rate_limit(
         };
         match resolver.txt_lookup(domain).await {
             Ok(txt_lookup) => {
-                let records: Vec<String> = txt_lookup.iter().map(|r| r.to_string()).collect();
+                // 0.26: iterate answer Records and render each record's RData.
+                let records: Vec<String> = txt_lookup
+                    .answers()
+                    .iter()
+                    .map(|r| r.data.to_string())
+                    .collect();
                 if records.is_empty() {
                     None
                 } else {
@@ -665,10 +765,16 @@ pub async fn get_txt_records_with_rate_limit(
 // cfg(not(coverage)): performs live DNS lookup via system resolver — requires network
 #[cfg(not(coverage))]
 async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
-    let resolver = TokioResolver::builder_tokio()?.build();
+    // 0.26: builder_tokio() returns Result and build() now also returns Result.
+    let resolver = TokioResolver::builder_tokio()?.build()?;
 
     let txt_lookup = resolver.txt_lookup(domain).await?;
-    let records: Vec<String> = txt_lookup.iter().map(|record| record.to_string()).collect();
+    // 0.26: iterate answer Records and render each record's RData.
+    let records: Vec<String> = txt_lookup
+        .answers()
+        .iter()
+        .map(|record| record.data.to_string())
+        .collect();
 
     Ok(records)
 }
@@ -705,6 +811,9 @@ pub async fn get_cname_records_with_rate_limit(
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
+    } else {
+        // GRC-367: enforce the pool's per-process DNS limiter on the production path.
+        dns_pool.acquire_dns_permit().await;
     }
 
     debug!("Querying CNAME records for domain: {}", domain);
@@ -4200,5 +4309,79 @@ mod tests {
             get_txt_records_with_rate_limit("counter-some.com", &pool, None, Some(&counter)).await;
         assert!(result.is_ok());
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    // ── GRC-367: throttle (429) must never masquerade as an empty answer ──────────
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_throttle_returns_error_not_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // DoH provider is throttling (HTTP 429) — must surface as an error, NOT Ok(empty).
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_txt_lookup("throttled.example", &doh_server).await;
+        assert!(
+            result.is_err(),
+            "a 429 throttle must surface as an error, never a silent Ok(empty)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_THROTTLE"),
+            "throttle error must be tagged DNS_THROTTLE so the caller can retry/rotate"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_resilient_rotates_past_throttle() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Provider 1 always throttles (429); provider 2 returns a valid TXT answer.
+        let throttling = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&throttling)
+            .await;
+
+        let healthy = MockServer::start().await;
+        let body = build_doh_txt_response(
+            "rotated.example",
+            &["v=spf1 include:mail.rotated.example ~all"],
+        );
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&healthy)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", throttling.uri()),
+            format!("{}/dns-query", healthy.uri()),
+        ]);
+        // First provider 429s; resilient lookup must back off and rotate to the healthy one.
+        let result = pool.doh_txt_lookup_resilient("rotated.example").await;
+        assert!(
+            result.is_ok(),
+            "resilient lookup must rotate past the 429 provider to a healthy one"
+        );
+        assert!(
+            !result.unwrap().is_empty(),
+            "rotation to the healthy provider must return TXT records, not a false-negative empty"
+        );
     }
 }

@@ -528,7 +528,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
         _ => None,
     };
-    let _app_config = match process_config_result(load_result, prompt_result) {
+    let mut _app_config = match process_config_result(load_result, prompt_result) {
         ConfigOutcome::Ready(cfg) => *cfg,
         ConfigOutcome::CreatedNew(path) => {
             println!(
@@ -543,6 +543,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             bail!(AppExitCode(code));
         }
     };
+
+    // GRC-367: honor --dns-rate-limit by overriding the configured DNS qps before any
+    // DnsServerPool is built (every pool-construction site reads from this config), so the
+    // now-live per-process limiter is actually controllable from the CLI.
+    if let Some(rl) = args.dns_rate_limit {
+        _app_config.rate_limits.dns_queries_per_second = rl;
+    }
 
     eprintln!("  Checking dependencies...");
     #[cfg(feature = "embedded-ner")]
