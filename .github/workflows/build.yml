@@ -131,7 +131,9 @@ jobs:
       - name: Generate LCOV report
         env:
           RUSTFLAGS: ""
-        run: cargo +nightly-2026-04-29 llvm-cov report --locked --all-features --workspace --lib --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --lcov --output-path lcov.info
+        # `report` re-emits from data collected by the gate step above; build/feature-selection
+        # flags (--all-features/--workspace/--lib/--locked) are invalid for the `report` subcommand.
+        run: cargo +nightly-2026-04-29 llvm-cov report --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --lcov --output-path lcov.info
       - name: Upload to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:

@@ -67,48 +67,65 @@ fn setup_config_dir(tmp: &TempDir) {
 // Regression: missing config must not hang (the original bug)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// REGRESSION TEST: When no config file exists and stdin is not a TTY
-/// (assert_cmd pipes stdin), the binary must exit quickly with an error —
-/// not block on a hidden interactive prompt behind the progress bar.
-///
-/// Before the fix, the progress bar started BEFORE config loading.
-/// `prompt_create_config()` issued a "Create default config? [Y/n]" prompt
-/// that was overwritten by the progress bar's steady-tick redraws, causing
-/// the binary to appear stuck at "0% Initializing..." while silently
-/// waiting on stdin.
+/// REGRESSION (GRC-364 / TF-1): When no config file exists and stdin is not a
+/// TTY, the binary must NOT hang on a hidden interactive "Create default config?"
+/// prompt behind the progress bar. The zero-config fix made a missing config fall
+/// back to embedded defaults and proceed, so this asserts the fallback (proceeds
+/// past config loading without a prompt-hang), not the old hard-exit.
 #[test]
-fn test_missing_config_exits_fast_not_hangs() {
+fn test_missing_config_zero_config_fallback_no_prompt_hang() {
     let tmp = TempDir::new().expect("create temp dir");
 
-    // Run from a directory with NO config/ subdirectory.
-    // The binary should detect missing config, see non-interactive stdin,
-    // and exit with an error within the timeout.
-    nthpartyfinder()
+    // No config/ subdirectory: the binary must fall back to embedded defaults and
+    // proceed. `--timeout 1` bounds the scan; assertions are on startup stderr,
+    // which appears before any scan work regardless of network speed.
+    let output = nthpartyfinder()
         .current_dir(tmp.path())
-        .arg("--domain")
-        .arg("example.com")
-        .timeout(std::time::Duration::from_secs(10))
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("Configuration file not found")
-                .or(predicate::str::contains("Run with --init")),
-        );
+        .args(["--domain", "example.com", "--timeout", "1"])
+        .timeout(std::time::Duration::from_secs(20))
+        .output()
+        .expect("binary should run, not hang on a prompt");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Zero-config fallback proceeds past config loading...
+    assert!(
+        stderr.contains("Loading configuration"),
+        "should reach config loading, got: {}",
+        stderr
+    );
+    // ...and never blocks on the interactive create-config prompt in non-TTY mode.
+    assert!(
+        !stderr.contains("Create default config?"),
+        "must not block on interactive prompt, got: {}",
+        stderr
+    );
 }
 
-/// Verify the error message includes actionable guidance.
+/// GRC-364: a missing config no longer hard-exits with a "--init" suggestion;
+/// it transparently uses embedded defaults. Guards against regressing to the old
+/// fatal "Configuration file not found" path.
 #[test]
-fn test_missing_config_suggests_init_flag() {
+fn test_missing_config_uses_embedded_defaults() {
     let tmp = TempDir::new().expect("create temp dir");
 
-    nthpartyfinder()
+    let output = nthpartyfinder()
         .current_dir(tmp.path())
-        .arg("--domain")
-        .arg("example.com")
-        .timeout(std::time::Duration::from_secs(10))
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--init"));
+        .args(["--domain", "example.com", "--timeout", "1"])
+        .timeout(std::time::Duration::from_secs(20))
+        .output()
+        .expect("binary should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !stderr.contains("Configuration file not found"),
+        "zero-config fallback must not emit a fatal config-not-found error, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("Checking dependencies"),
+        "should proceed past config (zero-config) into dependency checks, got: {}",
+        stderr
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,34 +209,33 @@ fn test_valid_config_completes_initialization() {
 // Startup ordering: config error appears BEFORE any progress bar output
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Verify that when config is missing, the error message appears without
-/// any progress bar artifacts (no "Initializing..." in output).
-/// This confirms config loading runs before the progress bar starts.
+/// Config resolution (now zero-config fallback per GRC-364) runs BEFORE the
+/// progress bar/scan starts, so a missing config never produces a prompt hidden
+/// behind progress redraws. Asserts the config phase appears and no interactive
+/// prompt or "Initializing..." progress artifact precedes it.
 #[test]
-fn test_config_error_before_progress_bar() {
+fn test_config_resolution_runs_before_progress_bar() {
     let tmp = TempDir::new().expect("create temp dir");
 
     let output = nthpartyfinder()
         .current_dir(tmp.path())
-        .arg("--domain")
-        .arg("example.com")
-        .timeout(std::time::Duration::from_secs(10))
+        .args(["--domain", "example.com", "--timeout", "1"])
+        .timeout(std::time::Duration::from_secs(20))
         .output()
         .expect("binary should run");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Config error should be present
+    // The config phase is present (resolved before any progress bar)...
     assert!(
-        stderr.contains("Configuration file not found"),
-        "should report missing config, got: {}",
+        stderr.contains("Loading configuration"),
+        "config phase should be present, got: {}",
         stderr
     );
-
-    // Progress bar should NOT have started — no "Initializing..." in output
+    // ...and no interactive create-config prompt appears in non-TTY mode.
     assert!(
-        !stderr.contains("Initializing..."),
-        "progress bar should not start before config loads, got: {}",
+        !stderr.contains("Create default config?"),
+        "no interactive prompt should appear before config resolves, got: {}",
         stderr
     );
 }
