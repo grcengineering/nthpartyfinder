@@ -726,7 +726,16 @@ pub async fn discover_nth_parties(
                                             "Running subfinder for {} ({}/{} subdomains: {})",
                                             root_domain, i + 1, total, subdomain
                                         )).await;
-                                        let (txt_records, cname_records) = dns_pool.get_txt_and_cname_fast(&subdomain).await;
+                                        // GRC-367 (fix 1): thread the shared DNS failure counter
+                                        // (same source as the root path) so a throttle on this
+                                        // high-concurrency subdomain path is visible to the
+                                        // exit-3 guard instead of silently producing empty results.
+                                        let (txt_records, cname_records) = dns_pool
+                                            .get_txt_and_cname_fast(
+                                                &subdomain,
+                                                logger_sub.dns_failure_counter(),
+                                            )
+                                            .await;
 
                                         let mut txt_vendors = Vec::new();
                                         let mut cname_vendors = Vec::new();

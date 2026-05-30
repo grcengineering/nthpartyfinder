@@ -413,6 +413,36 @@ impl DnsServerPool {
         Ok(vec![])
     }
 
+    /// GRC-367: number of provider attempts a resilient lookup may make (1 + retries,
+    /// bounded by the number of DoH providers actually configured).
+    fn resilient_attempts(&self) -> usize {
+        ((self.max_dns_retries as usize) + 1)
+            .min(self.doh_servers.len().max(1))
+            .max(1)
+    }
+
+    /// GRC-367 (fix 5): in-race backoff between throttled DoH rotations.
+    ///
+    /// The TXT/CNAME race wraps the resilient lookup in a 3-second `tokio::time::timeout`.
+    /// The original `backoff_base_ms << i` used the production base of 1000ms, so the very
+    /// first 1000ms + second 2000ms sleep blew the 3s budget and only ~1 rotation could fit
+    /// — defeating the whole point of rotation under throttle. Here we derive a short in-race
+    /// base (the configured base, capped at 200ms); use an OVERFLOW-SAFE shift (`checked_shl`
+    /// saturating to `u64::MAX`) so a provider count >= 64 can never panic/wrap; and cap each
+    /// individual sleep at 500ms. With a 200ms base this yields 200ms, 400ms, 500ms(cap)…,
+    /// letting 2-3 rotations comfortably complete inside the 3s race window.
+    #[cfg(not(coverage))]
+    fn in_race_backoff(&self, attempt_index: usize) -> std::time::Duration {
+        const IN_RACE_BASE_CAP_MS: u64 = 200;
+        const IN_RACE_DELAY_CAP_MS: u64 = 500;
+        let base = self.backoff_base_ms.min(IN_RACE_BASE_CAP_MS);
+        // Overflow-safe: shl that would overflow saturates to u64::MAX, then saturating_mul
+        // keeps the multiply in-range; finally clamp to the per-sleep cap.
+        let multiplier = 1u64.checked_shl(attempt_index as u32).unwrap_or(u64::MAX);
+        let delay = base.saturating_mul(multiplier).min(IN_RACE_DELAY_CAP_MS);
+        std::time::Duration::from_millis(delay)
+    }
+
     /// GRC-367: DoH TXT lookup with throttle-aware retry + provider rotation.
     /// On a throttle (429/5xx) it backs off and rotates to the next DoH provider, up to
     /// `max_dns_retries` times, instead of giving up after a single provider. A non-throttle
@@ -420,9 +450,7 @@ impl DnsServerPool {
     /// (rotate to a healthy provider) instead of collapsing into a false-negative empty result.
     #[cfg(not(coverage))]
     async fn doh_txt_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
-        let attempts = ((self.max_dns_retries as usize) + 1)
-            .min(self.doh_servers.len().max(1))
-            .max(1);
+        let attempts = self.resilient_attempts();
         let mut last_err: Option<anyhow::Error> = None;
         for i in 0..attempts {
             let server = self.next_doh_server().clone();
@@ -432,8 +460,8 @@ impl DnsServerPool {
                     let throttled = e.to_string().contains("DNS_THROTTLE");
                     last_err = Some(e);
                     if throttled && i + 1 < attempts {
-                        let delay = self.backoff_base_ms.saturating_mul(1u64 << i);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
+                        tokio::time::sleep(self.in_race_backoff(i)).await;
                         continue;
                     }
                     break;
@@ -445,6 +473,44 @@ impl DnsServerPool {
 
     #[cfg(coverage)]
     async fn doh_txt_lookup_resilient(&self, _domain: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    /// GRC-367 (fix 2): DoH CNAME lookup with throttle-aware retry + provider rotation,
+    /// mirroring `doh_txt_lookup_resilient`. On a throttle (429/5xx) it backs off (using the
+    /// same short, overflow-safe `in_race_backoff`) and rotates to the next DoH provider,
+    /// up to `max_dns_retries` times. A non-throttle error stops retrying immediately.
+    ///
+    /// This lets the CNAME path RECOVER from a single throttling provider instead of the old
+    /// `get_cname_records_with_rate_limit` behavior of collapsing any failure into `Ok(empty)`
+    /// — which made a throttle indistinguishable from a genuine "this domain has no CNAME".
+    /// On a genuine no-CNAME the inner lookup returns `Ok(vec![])`, which we propagate as-is;
+    /// only an all-providers-throttle surfaces as a `DNS_THROTTLE` error.
+    #[cfg(not(coverage))]
+    async fn doh_cname_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
+        let attempts = self.resilient_attempts();
+        let mut last_err: Option<anyhow::Error> = None;
+        for i in 0..attempts {
+            let server = self.next_doh_server().clone();
+            match self.doh_cname_lookup(domain, &server).await {
+                Ok(records) => return Ok(records),
+                Err(e) => {
+                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    last_err = Some(e);
+                    if throttled && i + 1 < attempts {
+                        // fix 5: same short, overflow-safe backoff as the TXT path.
+                        tokio::time::sleep(self.in_race_backoff(i)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("DoH CNAME lookup failed for {}", domain)))
+    }
+
+    #[cfg(coverage)]
+    async fn doh_cname_lookup_resilient(&self, _domain: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
 
@@ -502,38 +568,99 @@ impl DnsServerPool {
         )
     }
 
+    /// GRC-367 (fix 1): subdomain fast path — the highest-concurrency DNS path
+    /// (`buffer_unordered(50)` over every discovered subdomain in analysis.rs).
+    ///
+    /// Previously this path (a) never acquired a DNS permit, so it bypassed the limiter
+    /// entirely; (b) called the non-resilient `doh_*_lookup` directly so a single throttling
+    /// provider was never rotated past; and (c) collapsed `DNS_THROTTLE` into an empty answer
+    /// via `_ => {}` + `unwrap_or_default()`, threading no failure counter — making throttles
+    /// invisible to the exit-3 guard (`has_dns_failures() && unique_vendors == 0`).
+    ///
+    /// Now it acquires a permit before any DoH call, uses the resilient (rotate + backoff)
+    /// lookups, and threads `dns_failure_counter` so a throttle that survives ALL providers
+    /// increments it. A genuine empty answer (no records) still returns empty without
+    /// touching the counter.
     // cfg(not(coverage)): performs live DNS lookups via DoH and traditional DNS — requires network
     #[cfg(not(coverage))]
-    pub async fn get_txt_and_cname_fast(&self, domain: &str) -> (Vec<String>, Vec<String>) {
+    pub async fn get_txt_and_cname_fast(
+        &self,
+        domain: &str,
+        dns_failure_counter: &AtomicUsize,
+    ) -> (Vec<String>, Vec<String>) {
+        // fix 1: enforce the per-process DNS limiter on this hot path (was bypassed entirely).
+        self.acquire_dns_permit().await;
+
         let (txt_result, cname_result) =
             tokio::join!(self.fast_txt_lookup(domain), self.fast_cname_lookup(domain),);
-        (
-            txt_result.unwrap_or_default(),
-            cname_result.unwrap_or_default(),
-        )
+
+        // fix 1: a surviving throttle on EITHER record type increments the failure counter
+        // so the exit-3 guard can distinguish "throttled into emptiness" from "genuinely empty".
+        let txt = match txt_result {
+            Ok(records) => records,
+            Err(e) => {
+                if e.to_string().contains("DNS_THROTTLE") {
+                    dns_failure_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                Vec::new()
+            }
+        };
+        let cname = match cname_result {
+            Ok(records) => records,
+            Err(e) => {
+                if e.to_string().contains("DNS_THROTTLE") {
+                    dns_failure_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                Vec::new()
+            }
+        };
+        (txt, cname)
     }
 
     #[cfg(coverage)]
-    pub async fn get_txt_and_cname_fast(&self, _domain: &str) -> (Vec<String>, Vec<String>) {
+    pub async fn get_txt_and_cname_fast(
+        &self,
+        _domain: &str,
+        _dns_failure_counter: &AtomicUsize,
+    ) -> (Vec<String>, Vec<String>) {
         (vec![], vec![])
     }
 
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
     async fn fast_txt_lookup(&self, domain: &str) -> Result<Vec<String>> {
-        // Try DoH first with a single attempt
-        let doh_server = self.next_doh_server();
+        // fix 1: resilient lookup rotates/backs off past a throttling provider instead of
+        // letting a single 429 collapse into a false-negative empty. A surviving throttle
+        // propagates as a DNS_THROTTLE error so the caller can count it.
         match tokio::time::timeout(
-            std::time::Duration::from_millis(2000),
-            self.doh_txt_lookup(domain, doh_server),
+            std::time::Duration::from_secs(3),
+            self.doh_txt_lookup_resilient(domain),
         )
         .await
         {
             Ok(Ok(records)) if !records.is_empty() => return Ok(records),
+            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+                // DoH was throttled across all providers — try DNS fallback, but if that also
+                // yields nothing, surface the throttle rather than a silent empty.
+                if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+                    return Ok(records);
+                }
+                return Err(e);
+            }
             _ => {}
         }
 
         // Fallback to traditional DNS (single attempt, UDP only)
+        if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+            return Ok(records);
+        }
+
+        Ok(vec![])
+    }
+
+    // cfg(not(coverage)): performs live DNS lookup — requires network
+    #[cfg(not(coverage))]
+    async fn fast_dns_txt_fallback(&self, domain: &str) -> Option<Vec<String>> {
         let dns_server = self.next_dns_server();
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(txt_lookup)) = tokio::time::timeout(
@@ -550,11 +677,12 @@ impl DnsServerPool {
                     .iter()
                     .map(|r| r.data.to_string())
                     .collect();
-                return Ok(records);
+                if !records.is_empty() {
+                    return Some(records);
+                }
             }
         }
-
-        Ok(vec![])
+        None
     }
 
     #[cfg(coverage)]
@@ -565,18 +693,34 @@ impl DnsServerPool {
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
     async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
-        let doh_server = self.next_doh_server();
+        // fix 1: resilient CNAME lookup (rotate + backoff) instead of a single direct call.
         match tokio::time::timeout(
-            std::time::Duration::from_millis(2000),
-            self.doh_cname_lookup(domain, doh_server),
+            std::time::Duration::from_secs(3),
+            self.doh_cname_lookup_resilient(domain),
         )
         .await
         {
             Ok(Ok(records)) if !records.is_empty() => return Ok(records),
+            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+                if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+                    return Ok(records);
+                }
+                return Err(e);
+            }
             _ => {}
         }
 
         // Fallback to traditional DNS
+        if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+            return Ok(records);
+        }
+
+        Ok(vec![])
+    }
+
+    // cfg(not(coverage)): performs live DNS lookup — requires network
+    #[cfg(not(coverage))]
+    async fn fast_dns_cname_fallback(&self, domain: &str) -> Option<Vec<String>> {
         let dns_server = self.next_dns_server();
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(lookup)) = tokio::time::timeout(
@@ -598,11 +742,12 @@ impl DnsServerPool {
                         _ => None,
                     })
                     .collect();
-                return Ok(records);
+                if !records.is_empty() {
+                    return Some(records);
+                }
             }
         }
-
-        Ok(vec![])
+        None
     }
 
     #[cfg(coverage)]
@@ -790,7 +935,7 @@ pub async fn get_cname_records_with_pool(
     domain: &str,
     dns_pool: &DnsServerPool,
 ) -> Result<Vec<String>> {
-    get_cname_records_with_rate_limit(domain, dns_pool, None).await
+    get_cname_records_with_rate_limit(domain, dns_pool, None, None).await
 }
 
 #[cfg(coverage)]
@@ -801,12 +946,34 @@ pub async fn get_cname_records_with_pool(
     Ok(vec![])
 }
 
+/// GRC-367 (fix 2): CNAME lookup that threads the DNS failure counter, mirroring
+/// `get_txt_records_with_pool_tracked`. An all-providers-throttle increments the counter
+/// instead of being lost as `Ok(empty)`.
+#[cfg(not(coverage))]
+pub async fn get_cname_records_with_pool_tracked(
+    domain: &str,
+    dns_pool: &DnsServerPool,
+    dns_failure_counter: &AtomicUsize,
+) -> Result<Vec<String>> {
+    get_cname_records_with_rate_limit(domain, dns_pool, None, Some(dns_failure_counter)).await
+}
+
+#[cfg(coverage)]
+pub async fn get_cname_records_with_pool_tracked(
+    _domain: &str,
+    _dns_pool: &DnsServerPool,
+    _dns_failure_counter: &AtomicUsize,
+) -> Result<Vec<String>> {
+    Ok(vec![])
+}
+
 // cfg(not(coverage)): performs live DNS lookup via DoH — requires network
 #[cfg(not(coverage))]
 pub async fn get_cname_records_with_rate_limit(
     domain: &str,
     dns_pool: &DnsServerPool,
     rate_limit_ctx: Option<&RateLimitContext>,
+    dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
@@ -818,28 +985,46 @@ pub async fn get_cname_records_with_rate_limit(
 
     debug!("Querying CNAME records for domain: {}", domain);
 
-    // Single DoH attempt with short timeout — CNAME absence is normal
-    let doh_server = dns_pool.next_doh_server();
+    // GRC-367 (fix 2): use the resilient (rotate + backoff) CNAME lookup so a single
+    // throttling provider is rotated past instead of collapsing every failure into
+    // `Ok(empty)`. The race is bounded by a 3s timeout — matching the TXT path — which the
+    // short in-race backoff (fix 5) is sized to allow 2-3 rotations within.
     match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        dns_pool.doh_cname_lookup(domain, doh_server),
+        std::time::Duration::from_secs(3),
+        dns_pool.doh_cname_lookup_resilient(domain),
     )
     .await
     {
+        // Genuine answer: records present.
         Ok(Ok(records)) if !records.is_empty() => {
             debug!(
-                "DoH successful: Found {} CNAME records for {} via {}",
+                "DoH successful: Found {} CNAME records for {}",
                 records.len(),
-                domain,
-                doh_server.name
+                domain
             );
-            return Ok(records);
+            Ok(records)
         }
-        _ => {}
+        // Genuine no-CNAME (NoData/NXDOMAIN): the resilient lookup succeeded but returned
+        // no records. This is the normal "CNAME absence is normal" case — return empty WITHOUT
+        // touching the failure counter.
+        Ok(Ok(_)) => Ok(vec![]),
+        // All providers throttled (429/5xx surviving rotation). This is a FALSE-NEGATIVE risk,
+        // NOT a genuine absence — count it so the exit-3 guard can see it, then return empty so
+        // analysis continues (consistent with the TXT path's degrade-but-record behavior).
+        Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+            warn!(
+                "CNAME lookup for {} throttled across all DoH providers — recording failure: {}",
+                domain, e
+            );
+            if let Some(counter) = dns_failure_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(vec![])
+        }
+        // Non-throttle error (parse/transport) or overall timeout: not a throttle, treat as a
+        // normal no-CNAME outcome (unchanged from prior behavior for these cases).
+        _ => Ok(vec![]),
     }
-
-    // No CNAME found is normal for most domains
-    Ok(vec![])
 }
 
 #[cfg(coverage)]
@@ -847,6 +1032,7 @@ pub async fn get_cname_records_with_rate_limit(
     _domain: &str,
     _dns_pool: &DnsServerPool,
     _rate_limit_ctx: Option<&RateLimitContext>,
+    _dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
     Ok(vec![])
 }
@@ -3261,17 +3447,33 @@ mod tests {
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let (txt_records, cname_records) = pool.get_txt_and_cname_fast("fast.com").await;
+        let counter = AtomicUsize::new(0);
+        let (txt_records, cname_records) = pool.get_txt_and_cname_fast("fast.com", &counter).await;
 
         assert!(!txt_records.is_empty());
         assert!(!cname_records.is_empty());
+        // A successful lookup must NOT register a DNS failure.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "successful fast lookup must not increment the failure counter"
+        );
     }
 
+    // GRC-367 (fix 6): the old assertion-free `test_get_txt_and_cname_fast_doh_failure`
+    // mounted a 500 and asserted NOTHING (`let _ = …`) — it locked in the very bug the audit
+    // found (a throttle silently collapsing to empty on the subdomain fast path). Rewritten to
+    // assert the POST-FIX behavior: a 429/5xx that survives all DoH providers (and the dead
+    // 127.0.0.1 DNS fallback in tests) is SURFACED via the failure counter, never silently empty.
     #[tokio::test]
-    async fn test_get_txt_and_cname_fast_doh_failure() {
+    #[cfg(not(coverage))]
+    async fn test_get_txt_and_cname_fast_throttle_increments_failure_counter() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        // Single DoH provider that always 5xx-throttles (a DNS_THROTTLE per the doh_*_lookup
+        // contract). The test DNS fallback target (127.0.0.1:53) won't answer, so the throttle
+        // cannot be masked by a fallback success.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
@@ -3279,12 +3481,21 @@ mod tests {
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let (txt_records, cname_records) = pool.get_txt_and_cname_fast("failing.invalid").await;
+        let counter = AtomicUsize::new(0);
+        let (txt_records, cname_records) = pool
+            .get_txt_and_cname_fast("failing.invalid", &counter)
+            .await;
 
-        // Both should return empty vec on failure (unwrap_or_default)
-        // They may or may not be empty depending on DNS fallback
-        let _ = txt_records;
-        let _ = cname_records;
+        // Records are empty (analysis still continues), but the throttle is NOT silent: the
+        // shared counter is incremented so the exit-3 guard can see it. One increment per
+        // record type (TXT + CNAME) that was throttled across all providers.
+        assert!(txt_records.is_empty());
+        assert!(cname_records.is_empty());
+        assert!(
+            counter.load(Ordering::Relaxed) >= 1,
+            "a throttle surviving all providers on the subdomain fast path MUST increment the \
+             DNS failure counter, not collapse silently into an empty result"
+        );
     }
 
     // --- get_txt_records_with_rate_limit tests ---
@@ -3383,7 +3594,7 @@ mod tests {
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let records = get_cname_records_with_rate_limit("cname-rl.com", &pool, None)
+        let records = get_cname_records_with_rate_limit("cname-rl.com", &pool, None, None)
             .await
             .unwrap();
 
@@ -3425,9 +3636,10 @@ mod tests {
             backoff_max_delay_ms: 1000,
         };
         let ctx = RateLimitContext::from_config(&rate_config);
-        let records = get_cname_records_with_rate_limit("cname-limited.com", &pool, Some(&ctx))
-            .await
-            .unwrap();
+        let records =
+            get_cname_records_with_rate_limit("cname-limited.com", &pool, Some(&ctx), None)
+                .await
+                .unwrap();
 
         assert_eq!(records.len(), 1);
     }
@@ -3598,21 +3810,32 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn test_fast_txt_lookup_doh_failure_dns_fallback() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        // DoH returns empty/error
+        // Only DoH provider returns 500 (a throttle/5xx); no healthy provider to rotate to and
+        // the test UDP fallback (127.0.0.1:53) is unreachable.
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let result = pool.fast_txt_lookup("nonexistent.invalid").await.unwrap();
-        // Will fall back to DNS then return empty
-        let _ = result;
+        // GRC-367 fix 1: a surviving throttle on the subdomain fast path MUST surface as a
+        // DNS_THROTTLE error (so get_txt_and_cname_fast counts it toward the exit-3 guard),
+        // never be silently swallowed into an empty answer.
+        let result = pool.fast_txt_lookup("nonexistent.invalid").await;
+        assert!(
+            result.is_err(),
+            "5xx throttle must surface, not be swallowed into Ok(empty)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_THROTTLE"),
+            "surfaced error must be tagged DNS_THROTTLE"
+        );
     }
 
     #[tokio::test]
@@ -3644,6 +3867,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(coverage))]
     async fn test_fast_cname_lookup_doh_failure_dns_fallback() {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -3655,8 +3879,16 @@ mod tests {
             .await;
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
-        let result = pool.fast_cname_lookup("nonexistent.invalid").await.unwrap();
-        let _ = result;
+        // GRC-367 fix 2: a CNAME-path throttle must surface as DNS_THROTTLE, not Ok(empty).
+        let result = pool.fast_cname_lookup("nonexistent.invalid").await;
+        assert!(
+            result.is_err(),
+            "5xx throttle must surface, not be swallowed into Ok(empty)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_THROTTLE"),
+            "surfaced error must be tagged DNS_THROTTLE"
+        );
     }
 
     // --- get_txt_records (without pool) ---
@@ -4222,7 +4454,7 @@ mod tests {
     #[cfg(coverage)]
     async fn test_get_cname_records_with_rate_limit_coverage_stub() {
         let pool = DnsServerPool::default();
-        let result = get_cname_records_with_rate_limit("example.com", &pool, None).await;
+        let result = get_cname_records_with_rate_limit("example.com", &pool, None, None).await;
         assert!(result.is_ok());
     }
 
@@ -4382,6 +4614,224 @@ mod tests {
         assert!(
             !result.unwrap().is_empty(),
             "rotation to the healthy provider must return TXT records, not a false-negative empty"
+        );
+    }
+
+    // ── GRC-367 (fix 2 + fix 6): CNAME throttle handling ──────────────────────────
+
+    // doh_cname_lookup must surface a 429 throttle as a DNS_THROTTLE error (mirroring the
+    // TXT path), never silently as Ok(empty) — that's the distinction the resilient layer
+    // and the failure counter depend on.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_cname_lookup_throttle_429_returns_error_not_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool
+            .doh_cname_lookup("throttled.example", &doh_server)
+            .await;
+        assert!(
+            result.is_err(),
+            "a 429 CNAME throttle must surface as an error, never a silent Ok(empty)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_THROTTLE"),
+            "CNAME throttle error must be tagged DNS_THROTTLE so the caller can rotate/count"
+        );
+    }
+
+    // Same contract for a provider 5xx (server error).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_cname_lookup_throttle_5xx_returns_error_not_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_cname_lookup("err5xx.example", &doh_server).await;
+        assert!(
+            result.is_err(),
+            "a 5xx CNAME response must surface as an error, never a silent Ok(empty)"
+        );
+        assert!(result.unwrap_err().to_string().contains("DNS_THROTTLE"));
+    }
+
+    // doh_cname_lookup_resilient must rotate past a throttling provider to a healthy one,
+    // mirroring the TXT resilient path.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_cname_lookup_resilient_rotates_past_throttle() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let throttling = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&throttling)
+            .await;
+
+        let healthy = MockServer::start().await;
+        let body = build_doh_cname_response("rotated.example", &["cdn.rotated.example"]);
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&healthy)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", throttling.uri()),
+            format!("{}/dns-query", healthy.uri()),
+        ]);
+        let result = pool.doh_cname_lookup_resilient("rotated.example").await;
+        assert!(
+            result.is_ok(),
+            "resilient CNAME lookup must rotate past the 429 provider"
+        );
+        let records = result.unwrap();
+        assert_eq!(
+            records,
+            vec!["cdn.rotated.example".to_string()],
+            "rotation must return the healthy provider's CNAME, not a false-negative empty"
+        );
+    }
+
+    // get_cname_records_with_rate_limit must NOT return Ok(empty) "CNAME absent" on an
+    // all-providers-throttle — it must record the failure via the counter (the core fix 2 bug).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_cname_records_with_rate_limit_throttle_counts_not_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Both providers 429 → throttle survives rotation.
+        let p1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p2)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", p1.uri()),
+            format!("{}/dns-query", p2.uri()),
+        ]);
+        let counter = AtomicUsize::new(0);
+        let result =
+            get_cname_records_with_rate_limit("throttled.example", &pool, None, Some(&counter))
+                .await;
+        // It still returns Ok(empty) so analysis continues, but the throttle is NOT silent.
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "an all-providers-throttle on the CNAME root path must increment the failure \
+             counter, NOT be mistaken for a genuine 'CNAME absent' (Ok(empty)) result"
+        );
+    }
+
+    // A GENUINE no-CNAME (provider answers 200 with an empty Answer) must map to Ok(empty)
+    // WITHOUT touching the counter — "CNAME absence is normal".
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_cname_records_with_rate_limit_genuine_absence_no_count() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = build_doh_empty_response("no-cname.example");
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let counter = AtomicUsize::new(0);
+        let result =
+            get_cname_records_with_rate_limit("no-cname.example", &pool, None, Some(&counter))
+                .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "a genuine no-CNAME answer is normal and must NOT increment the failure counter"
+        );
+    }
+
+    // get_txt_records_with_rate_limit under all-providers-429 (DoH throttled, DNS fallback and
+    // system resolver unavailable in tests) must increment the failure counter rather than
+    // silently returning an empty TXT set — the TXT-root analogue of the subdomain-path fix.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_txt_records_with_rate_limit_all_throttled_counts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let p1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p2)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", p1.uri()),
+            format!("{}/dns-query", p2.uri()),
+        ]);
+        let counter = AtomicUsize::new(0);
+        // DoH is throttled across both providers; the 127.0.0.1 DNS fallback and the system
+        // resolver cannot answer "throttled.invalid", so the only outcome is the recorded
+        // failure path (Ok(empty) + counter incremented).
+        let result =
+            get_txt_records_with_rate_limit("throttled.invalid", &pool, None, Some(&counter)).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            1,
+            "a throttle that defeats every DoH provider and the DNS/system fallback must \
+             increment the failure counter so the exit-3 guard sees it"
         );
     }
 }

@@ -107,11 +107,43 @@ impl SharedRateLimiter {
         }
     }
 
-    /// Acquire a token, waiting if necessary
+    /// Acquire a token, waiting if necessary.
+    ///
+    /// GRC-367 (fix 3): the tokio `Mutex` guard is NEVER held across the `sleep().await`.
+    /// The previous implementation locked the inner limiter and then called
+    /// `RateLimiter::acquire().await` (which sleeps internally) WHILE STILL HOLDING THE GUARD —
+    /// so the single shared `dns_limiter` serialized every DNS task for the entire backoff
+    /// window during a throttle, the likely cause of the observed cross-the-board slowness.
+    ///
+    /// Here we instead compute the needed wait under the lock via the non-async
+    /// `try_acquire()`, DROP the guard, sleep outside the lock, then re-loop. Token-bucket
+    /// semantics are preserved exactly (the same refill + `tokens -= 1.0` accounting runs
+    /// under the lock each iteration); only the *waiting* moved outside the critical section.
+    /// The public signature is unchanged, so the HTTP and WHOIS limiters that also use
+    /// `SharedRateLimiter` get the same fix transparently with no API change.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self) {
-        let mut limiter = self.inner.lock().await;
-        limiter.acquire().await;
+        loop {
+            let wait = {
+                // Critical section: refill + attempt to take a token. Guard is released at the
+                // end of this block (before any await) by going out of scope.
+                let mut limiter = self.inner.lock().await;
+                limiter.try_acquire()
+            };
+
+            match wait {
+                None => return, // Token acquired (or limiter disabled) — done.
+                Some(wait_duration) => {
+                    debug!(
+                        "Rate limiter waiting {:?} for token (lock released)",
+                        wait_duration
+                    );
+                    sleep(wait_duration).await;
+                    // Re-loop: other tasks may have consumed the refilled tokens while we slept,
+                    // so we must re-check under the lock rather than assume a token is free.
+                }
+            }
+        }
     }
 
     /// Check if rate limiting is enabled

@@ -296,6 +296,11 @@ pub fn format_dep_check_warnings(results: &[dep_check::DepCheckResult]) -> Vec<S
 }
 
 /// Build CLI argument vector for a batch-mode subprocess invocation.
+///
+/// GRC-367 (fix 4): `dns_rate_limit` is forwarded as `--dns-rate-limit <n>` when set.
+/// Previously this argument was dropped entirely, so every batch child reverted to the
+/// config-default DNS qps — silently ignoring an operator's explicit `--dns-rate-limit`
+/// (the throttle they set precisely to avoid the 429s GRC-367 is about).
 pub fn build_batch_domain_args(
     domain: &str,
     format: &str,
@@ -303,6 +308,7 @@ pub fn build_batch_domain_args(
     dns_only: bool,
     batch_combined: bool,
     output_base: &Path,
+    dns_rate_limit: Option<u32>,
 ) -> Vec<String> {
     let mut cmd_args = vec![
         "nthpartyfinder".to_string(),
@@ -317,6 +323,11 @@ pub fn build_batch_domain_args(
     }
     if dns_only {
         cmd_args.push("--dns-only".to_string());
+    }
+    // fix 4: propagate the operator-supplied DNS rate limit to each batch child.
+    if let Some(rl) = dns_rate_limit {
+        cmd_args.push("--dns-rate-limit".to_string());
+        cmd_args.push(rl.to_string());
     }
     if !batch_combined {
         let domain_dir = output_base.join(domain.replace('.', "_"));
@@ -821,6 +832,8 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             let dns_only = args.dns_only;
             let output_base = output_base.to_path_buf();
             let batch_combined = args.batch_combined;
+            // fix 4: capture the operator's DNS rate limit so it is forwarded to the child.
+            let dns_rate_limit = args.dns_rate_limit;
             let results = results.clone();
             let logger = logger.clone();
 
@@ -837,6 +850,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                     dns_only,
                     batch_combined,
                     &output_base,
+                    dns_rate_limit,
                 );
                 if !batch_combined {
                     let domain_dir = output_base.join(domain.replace('.', "_"));
@@ -3055,6 +3069,7 @@ mod tests {
             false,
             true, // batch_combined = true → no --output-dir
             Path::new("/tmp/output"),
+            None, // no dns rate limit
         );
         assert_eq!(
             args,
@@ -3064,8 +3079,15 @@ mod tests {
 
     #[test]
     fn test_build_batch_domain_args_with_depth_and_dns_only() {
-        let args =
-            build_batch_domain_args("test.org", "json", Some(3), true, true, Path::new("/out"));
+        let args = build_batch_domain_args(
+            "test.org",
+            "json",
+            Some(3),
+            true,
+            true,
+            Path::new("/out"),
+            None,
+        );
         assert_eq!(
             args,
             vec![
@@ -3090,10 +3112,58 @@ mod tests {
             false,
             false, // not combined → adds --output-dir
             Path::new("/reports"),
+            None,
         );
         assert!(args.contains(&"--output-dir".to_string()));
         let idx = args.iter().position(|a| a == "--output-dir").unwrap();
         assert!(args[idx + 1].contains("sub_example_com"));
+    }
+
+    // GRC-367 (fix 4): an operator-supplied --dns-rate-limit MUST be forwarded to each batch
+    // child; previously it was dropped and the child reverted to the config default.
+    #[test]
+    fn test_build_batch_domain_args_forwards_dns_rate_limit() {
+        let args = build_batch_domain_args(
+            "example.com",
+            "csv",
+            None,
+            false,
+            true,
+            Path::new("/tmp/output"),
+            Some(7), // operator pinned DNS to 7 qps
+        );
+        assert!(
+            args.contains(&"--dns-rate-limit".to_string()),
+            "the --dns-rate-limit flag must be forwarded to the batch child"
+        );
+        let idx = args
+            .iter()
+            .position(|a| a == "--dns-rate-limit")
+            .expect("flag present");
+        assert_eq!(
+            args[idx + 1],
+            "7",
+            "the forwarded value must match the operator-supplied qps"
+        );
+    }
+
+    // The flag must be ABSENT when no rate limit was supplied (so the child uses its config
+    // default rather than a spurious 0/override).
+    #[test]
+    fn test_build_batch_domain_args_omits_dns_rate_limit_when_none() {
+        let args = build_batch_domain_args(
+            "example.com",
+            "csv",
+            None,
+            false,
+            true,
+            Path::new("/tmp/output"),
+            None,
+        );
+        assert!(
+            !args.contains(&"--dns-rate-limit".to_string()),
+            "no --dns-rate-limit flag should be emitted when the operator did not set one"
+        );
     }
 
     // ── resolve_final_output_path ────────────────────────────────────
