@@ -97,6 +97,11 @@ impl RateLimiter {
 #[derive(Debug, Clone)]
 pub struct SharedRateLimiter {
     inner: Arc<Mutex<RateLimiter>>,
+    /// GRC-367 (fix 3): monotonic per-call sequence used to derive a cheap, dependency-free,
+    /// DETERMINISTIC jitter (sequence mod a small window) so that under a burst the waiters do
+    /// not all wake, recompute a near-zero wait, and tight-spin in lock-step. De-synchronizing
+    /// the recomputed sleeps spreads lock re-acquisition across a few ms instead of a thundering herd.
+    jitter_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SharedRateLimiter {
@@ -104,6 +109,7 @@ impl SharedRateLimiter {
     pub fn new(requests_per_second: u32) -> Self {
         Self {
             inner: Arc::new(Mutex::new(RateLimiter::new(requests_per_second))),
+            jitter_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -121,8 +127,22 @@ impl SharedRateLimiter {
     /// under the lock each iteration); only the *waiting* moved outside the critical section.
     /// The public signature is unchanged, so the HTTP and WHOIS limiters that also use
     /// `SharedRateLimiter` get the same fix transparently with no API change.
+    ///
+    /// GRC-367 (fix 3): under a burst, the prior implementation let every waiter wake at once,
+    /// recompute a near-zero `wait`, and tight-spin re-acquiring the lock (a busy-spin thundering
+    /// herd). We now (a) FLOOR each recomputed sleep at `MIN_BACKOFF` so a near-zero wait still
+    /// yields the scheduler a real interval, and (b) add a small DETERMINISTIC per-call jitter
+    /// (a monotonic sequence mod a few ms) so waiters de-synchronize instead of waking in
+    /// lock-step. Token-bucket accounting is unchanged — only the *wait* is shaped.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self) {
+        // Minimum sleep applied to any non-zero recomputed wait, so a near-zero wait under burst
+        // can't degenerate into a tight re-lock spin.
+        const MIN_BACKOFF: Duration = Duration::from_millis(2);
+        // Jitter window (ms): each waiter adds `seq % JITTER_WINDOW_MS` to its sleep, spreading
+        // the herd across a few ms. Kept tiny so it never materially changes the effective rate.
+        const JITTER_WINDOW_MS: u64 = 3;
+
         loop {
             let wait = {
                 // Critical section: refill + attempt to take a token. Guard is released at the
@@ -134,11 +154,19 @@ impl SharedRateLimiter {
             match wait {
                 None => return, // Token acquired (or limiter disabled) — done.
                 Some(wait_duration) => {
+                    // Deterministic jitter from a monotonic per-call sequence (no rng dependency).
+                    let seq = self
+                        .jitter_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let jitter = Duration::from_millis(seq % JITTER_WINDOW_MS);
+                    // Floor the wait, then add jitter, so two waiters that computed the same
+                    // near-zero wait re-attempt the lock at slightly different times.
+                    let effective = wait_duration.max(MIN_BACKOFF) + jitter;
                     debug!(
-                        "Rate limiter waiting {:?} for token (lock released)",
-                        wait_duration
+                        "Rate limiter waiting {:?} for token (lock released, floored+jittered from {:?})",
+                        effective, wait_duration
                     );
-                    sleep(wait_duration).await;
+                    sleep(effective).await;
                     // Re-loop: other tasks may have consumed the refilled tokens while we slept,
                     // so we must re-check under the lock rather than assume a token is free.
                 }

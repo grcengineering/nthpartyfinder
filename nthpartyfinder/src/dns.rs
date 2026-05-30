@@ -103,6 +103,14 @@ pub struct DnsServerPool {
     max_dns_retries: u32,
     /// Base backoff (ms) between throttled DoH retries.
     backoff_base_ms: u64,
+    /// GRC-367 (fix 1): the SINGLE choke-point throttle counter. When wired up via
+    /// `with_failure_counter` (production: to `logger.dns_failure_counter_arc()`), every DoH
+    /// throttle on EVERY path — TXT root, subdomain fast, CNAME, and the SPF include-chain
+    /// recursion (`resolve_spf_includes_recursive` → `get_txt_records_with_pool` →
+    /// `doh_txt_lookup`) — increments the same atomic the exit-3 guard reads. `None` in tests
+    /// that don't opt in. This is the authoritative source of truth for throttle visibility;
+    /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
+    failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl DnsServerPool {
@@ -147,6 +155,7 @@ impl DnsServerPool {
             dns_limiter: SharedRateLimiter::new(config.rate_limits.dns_queries_per_second),
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
+            failure_counter: None,
         }
     }
 
@@ -213,6 +222,29 @@ impl DnsServerPool {
             dns_limiter: SharedRateLimiter::new(50), // matches config default_dns_queries_per_second
             max_dns_retries: 3,
             backoff_base_ms: 500,
+            failure_counter: None,
+        }
+    }
+
+    /// GRC-367 (fix 1): wire the pool's choke-point throttle counter to a shared atomic
+    /// (production: `logger.dns_failure_counter_arc()`). After this, `note_throttle()` — called
+    /// inside `doh_txt_lookup`/`doh_cname_lookup` on a 429/5xx — increments this atomic on every
+    /// DoH path, including the previously-untracked SPF include-chain recursion. Builder-style so
+    /// the production construction sites stay one expression: `from_config(&cfg).with_failure_counter(..)`.
+    pub fn with_failure_counter(
+        mut self,
+        c: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.failure_counter = Some(c);
+        self
+    }
+
+    /// GRC-367 (fix 1): the choke-point increment. A no-op until `with_failure_counter` has been
+    /// called, so tests that don't opt in are unaffected. Called from both DoH lookups the instant
+    /// a throttle (429/5xx) is detected — making throttle visibility path-independent.
+    fn note_throttle(&self) {
+        if let Some(c) = &self.failure_counter {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -269,6 +301,7 @@ impl DnsServerPool {
             dns_limiter: SharedRateLimiter::new(1000), // effectively unthrottled for tests
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
+            failure_counter: None,
         }
     }
 }
@@ -307,6 +340,10 @@ impl DnsServerPool {
         // for "this domain has no records" and report as a false-negative 0-vendor result.
         let status = http_response.status();
         if status.as_u16() == 429 || status.is_server_error() {
+            // GRC-367 (fix 1): count the throttle at the choke-point BEFORE returning, so every
+            // path that reaches a DoH TXT lookup (incl. SPF include recursion) is tracked once
+            // and for all against the exit-3 counter.
+            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
                 server.name,
@@ -371,6 +408,9 @@ impl DnsServerPool {
         // GRC-367: surface DoH throttle/5xx as a distinct error, never an empty answer.
         let status = http_response.status();
         if status.as_u16() == 429 || status.is_server_error() {
+            // GRC-367 (fix 1): choke-point throttle count for the CNAME path (mirrors the TXT
+            // path) — increment before returning so it is visible to the exit-3 guard.
+            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
                 server.name,
@@ -415,6 +455,10 @@ impl DnsServerPool {
 
     /// GRC-367: number of provider attempts a resilient lookup may make (1 + retries,
     /// bounded by the number of DoH providers actually configured).
+    ///
+    /// GRC-367 (fix 4): only the `#[cfg(not(coverage))]` resilient lookups call this, so it
+    /// is gated identically — otherwise it is a dead-code warning under the coverage profile.
+    #[cfg(not(coverage))]
     fn resilient_attempts(&self) -> usize {
         ((self.max_dns_retries as usize) + 1)
             .min(self.doh_servers.len().max(1))
@@ -946,26 +990,9 @@ pub async fn get_cname_records_with_pool(
     Ok(vec![])
 }
 
-/// GRC-367 (fix 2): CNAME lookup that threads the DNS failure counter, mirroring
-/// `get_txt_records_with_pool_tracked`. An all-providers-throttle increments the counter
-/// instead of being lost as `Ok(empty)`.
-#[cfg(not(coverage))]
-pub async fn get_cname_records_with_pool_tracked(
-    domain: &str,
-    dns_pool: &DnsServerPool,
-    dns_failure_counter: &AtomicUsize,
-) -> Result<Vec<String>> {
-    get_cname_records_with_rate_limit(domain, dns_pool, None, Some(dns_failure_counter)).await
-}
-
-#[cfg(coverage)]
-pub async fn get_cname_records_with_pool_tracked(
-    _domain: &str,
-    _dns_pool: &DnsServerPool,
-    _dns_failure_counter: &AtomicUsize,
-) -> Result<Vec<String>> {
-    Ok(vec![])
-}
+// GRC-367 (fix 4): `get_cname_records_with_pool_tracked` removed — it had zero callers in src,
+// tests, examples, and benches. The CNAME throttle is now tracked at the pool choke-point
+// (`note_throttle` in `doh_cname_lookup`); a separate threaded-counter CNAME wrapper is dead.
 
 // cfg(not(coverage)): performs live DNS lookup via DoH — requires network
 #[cfg(not(coverage))]
@@ -4793,9 +4820,14 @@ mod tests {
         );
     }
 
-    // get_txt_records_with_rate_limit under all-providers-429 (DoH throttled, DNS fallback and
-    // system resolver unavailable in tests) must increment the failure counter rather than
-    // silently returning an empty TXT set — the TXT-root analogue of the subdomain-path fix.
+    // GRC-367 (fix 2): a throttle that survives ALL DoH providers must (a) surface as a
+    // DNS_THROTTLE error and (b) increment the pool's choke-point counter — verified WITHOUT
+    // touching the system resolver. The previous version of this test drove the outer
+    // `get_txt_records_with_rate_limit`, which on an all-throttle falls through to
+    // `try_system_dns_resolver("throttled.invalid")` — a REAL network query that violated the
+    // no-live-DNS invariant. We now drive `doh_txt_lookup_resilient` directly against a
+    // wiremock 429, so the only DNS traffic is to the in-process mock and the choke-point count
+    // is observed at its source.
     #[tokio::test]
     #[cfg(not(coverage))]
     async fn test_get_txt_records_with_rate_limit_all_throttled_counts() {
@@ -4815,23 +4847,31 @@ mod tests {
             .mount(&p2)
             .await;
 
+        let test_counter = std::sync::Arc::new(AtomicUsize::new(0));
         let pool = DnsServerPool::with_test_urls(vec![
             format!("{}/dns-query", p1.uri()),
             format!("{}/dns-query", p2.uri()),
-        ]);
-        let counter = AtomicUsize::new(0);
-        // DoH is throttled across both providers; the 127.0.0.1 DNS fallback and the system
-        // resolver cannot answer "throttled.invalid", so the only outcome is the recorded
-        // failure path (Ok(empty) + counter incremented).
-        let result =
-            get_txt_records_with_rate_limit("throttled.invalid", &pool, None, Some(&counter)).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
-        assert_eq!(
-            counter.load(Ordering::Relaxed),
-            1,
-            "a throttle that defeats every DoH provider and the DNS/system fallback must \
-             increment the failure counter so the exit-3 guard sees it"
+        ])
+        .with_failure_counter(std::sync::Arc::clone(&test_counter));
+
+        // Drive the resilient DoH lookup directly: both providers 429, so the throttle survives
+        // rotation and surfaces as a DNS_THROTTLE error. No DNS/system fallback is reached.
+        let result = pool.doh_txt_lookup_resilient("throttled.invalid").await;
+        assert!(
+            result.is_err(),
+            "an all-providers 429 must surface as an error"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("DNS_THROTTLE"),
+            "the surfaced error must be a DNS_THROTTLE, got: {err}"
+        );
+        // Both providers 429'd, so the choke-point fired once per provider attempt; the exit-3
+        // guard only needs `> 0`, so we assert it was reached at least once.
+        assert!(
+            test_counter.load(Ordering::Relaxed) >= 1,
+            "a throttle defeating every DoH provider must increment the pool's choke-point \
+             counter so the exit-3 guard sees it — without any live system-resolver query"
         );
     }
 }

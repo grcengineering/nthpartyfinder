@@ -685,6 +685,14 @@ impl AnalysisLogger {
         &self.dns_failures
     }
 
+    /// GRC-367 (fix 1): hand the *shared* `Arc` over the DNS-failure counter to the
+    /// `DnsServerPool` via `with_failure_counter`, so a DoH throttle counted at the pool
+    /// choke-point (`note_throttle` inside `doh_*_lookup`) increments the SAME atomic this
+    /// logger reads for `has_dns_failures()` — the value the exit-3 false-negative guard checks.
+    pub fn dns_failure_counter_arc(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.dns_failures)
+    }
+
     pub fn record_output_file(&self, path: &str) {
         let mut metadata = self
             .analysis_metadata

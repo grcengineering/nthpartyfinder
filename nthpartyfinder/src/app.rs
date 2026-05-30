@@ -1230,7 +1230,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     let processed_domains = Arc::new(Mutex::new(processed_domains_set));
     let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
 
-    let dns_pool = Arc::new(dns::DnsServerPool::from_config(&_app_config));
+    // GRC-367 (fix 1): wire the pool's choke-point throttle counter to the SAME atomic the
+    // exit-3 guard reads (`logger.has_dns_failures()`), so a DoH throttle on any path — incl.
+    // the SPF include-chain recursion — is counted once at the source.
+    let dns_pool = Arc::new(
+        dns::DnsServerPool::from_config(&_app_config)
+            .with_failure_counter(logger.dns_failure_counter_arc()),
+    );
     logger.debug(&format!(
         "Initialized DNS server pool with {} DoH servers and {} DNS servers",
         _app_config.dns.doh_servers.len(),
@@ -2067,7 +2073,12 @@ async fn analyze_single_domain_for_batch(
     let discovered_vendors = Arc::new(Mutex::new(HashMap::new()));
     let processed_domains = Arc::new(Mutex::new(HashSet::new()));
     let semaphore = Arc::new(Semaphore::new(parallel_jobs));
-    let dns_pool = Arc::new(dns::DnsServerPool::from_config(app_config));
+    // GRC-367 (fix 1): same choke-point wiring as the primary path — the locally constructed
+    // `logger` owns the DNS-failure counter this pool increments on throttle.
+    let dns_pool = Arc::new(
+        dns::DnsServerPool::from_config(app_config)
+            .with_failure_counter(logger.dns_failure_counter_arc()),
+    );
     let recursive_semaphore = Arc::new(Semaphore::new(parallel_jobs.min(10)));
 
     let root_customer_domain = entry.domain.clone();
