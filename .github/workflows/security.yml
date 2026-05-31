@@ -144,4 +144,8 @@ jobs:
           chmod +x gitleaks
           # `working-directory: nthpartyfinder` (workflow defaults) makes this
           # step's CWD the subdir, so scan the whole repo via `--source ..`.
-          ./gitleaks detect --source .. --no-banner --redact --exit-code 1
+          # `--config ../.gitleaks.toml` is the repo-root config: it extends the
+          # full default ruleset and allowlists ONLY documented false positives
+          # (public model checksums + DNS test fixtures); see that file. Every
+          # real secret rule stays active + BLOCKING via `--exit-code 1`.
+          ./gitleaks detect --source .. --config ../.gitleaks.toml --no-banner --redact --exit-code 1
