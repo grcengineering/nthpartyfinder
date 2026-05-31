@@ -156,6 +156,11 @@ pub struct Cli {
 
     /// Analysis timeout in seconds (default: 600). Use 0 for no timeout.
     /// Overrides NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
+    /// The default suits a depth-1 scan; depth 3+ or cold-cache runs routinely
+    /// exceed 600s (e.g. ~1500-3000s), so raise this (e.g. --timeout 1800) or
+    /// disable it (--timeout 0) for deep scans. The output format does not
+    /// change discovery time. On timeout the scan exits non-zero with a
+    /// checkpoint rather than emitting an empty report.
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
 

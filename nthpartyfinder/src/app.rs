@@ -32,6 +32,14 @@ use crate::whois;
 
 use std::path::PathBuf;
 
+/// Process exit code carried as an error so `run_inner` can bubble it up to
+/// `main` for a clean `std::process::exit`.
+///
+/// Known codes:
+/// - `1` — generic failure (config error, analysis timeout, batch failure)
+/// - `2` — invalid CLI arguments
+/// - `4` — analysis results could not be read back from the disk sink
+/// - `130` — interrupted by the user (SIGINT)
 #[derive(Debug)]
 pub struct AppExitCode(pub i32);
 
@@ -1601,16 +1609,38 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
             let _ = sink.flush();
             sink_path = sink.path().to_path_buf();
         }
-        match Arc::try_unwrap(result_sink) {
-            Ok(mutex) => {
-                let sink = mutex.into_inner();
-                sink.drain_all()
-                    .expect("Failed to read results from disk sink")
-            }
+        let drained = match Arc::try_unwrap(result_sink) {
+            Ok(mutex) => mutex.into_inner().drain_all(),
             Err(_arc) => {
                 logger.debug("ResultSink has outstanding references, reading from file path");
                 ResultSink::read_results(&sink_path)
-                    .expect("Failed to read results from disk sink file")
+            }
+        };
+        match drained {
+            Ok(results) => results,
+            // Fail loudly instead of panicking. A genuinely empty scan returns an
+            // intact (zero-row) file here, so reaching this arm means the sink
+            // file was unreadable or missing — historically because a concurrent
+            // run deleted the shared /tmp sink (GRC-500). Never silently emit an
+            // empty report in that case.
+            Err(e) => {
+                logger.error(&format!(
+                    "Failed to read analysis results from disk sink {}: {}",
+                    sink_path.display(),
+                    e
+                ));
+                eprintln!();
+                eprintln!(
+                    "Failed to read analysis results from the disk sink at {}.",
+                    sink_path.display()
+                );
+                eprintln!("The result file was missing or unreadable, so no report was written.");
+                eprintln!(
+                    "This can happen when a concurrent nthpartyfinder run removes the shared \
+                     /tmp sink file. Re-run the scan, and when running scans in parallel give \
+                     each its own --output-dir."
+                );
+                bail!(AppExitCode(4));
             }
         }
     };
