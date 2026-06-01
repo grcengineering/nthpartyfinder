@@ -40,7 +40,7 @@ scraper = "0.26"
 indicatif = { version = "0.18", features = ["tokio"] }
 urlencoding = "2.1"
 ctrlc = "3.4"
-colored = "2.1"
+colored = "3.1"
 # DNS over HTTPS support
 hickory-resolver = { version = "0.26", features = ["https-ring"] }
 # Headless browser for JavaScript content
