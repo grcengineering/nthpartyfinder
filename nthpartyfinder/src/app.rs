@@ -295,6 +295,108 @@ pub fn format_dep_check_warnings(results: &[dep_check::DepCheckResult]) -> Vec<S
         .collect()
 }
 
+/// What to do about the runtime-fetched NER model before NER init. Pure routing
+/// so the decision is unit-testable without stdin, the network, or the filesystem.
+#[cfg(all(feature = "runtime-ner", not(feature = "embedded-ner")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFetchAction {
+    /// NER is not wanted — do nothing.
+    Skip,
+    /// Model is already cached and SHA-256-verified — do nothing.
+    AlreadyCached,
+    /// Wanted + not cached, running non-interactively with no consent flag: warn
+    /// and disable NER rather than hang on a hidden prompt (GRC-364 discipline).
+    SkipNonInteractive,
+    /// Wanted + not cached: fetch it. `assume_yes` skips the interactive prompt
+    /// (set by `--download-ner-model`); otherwise the fetch path prompts `[y/N]`.
+    Fetch { assume_yes: bool },
+}
+
+/// Decide what to do about the runtime NER model. Pure function of: whether NER is
+/// wanted, whether the model is already cached+valid, whether the operator passed
+/// `--download-ner-model`, and whether stdin is an interactive terminal. The
+/// precedence (not-wanted → cached → explicit-flag → interactive → non-interactive)
+/// guarantees we never prompt when unwanted/cached and never hang when headless.
+#[cfg(all(feature = "runtime-ner", not(feature = "embedded-ner")))]
+pub fn decide_model_action(
+    slm_wanted: bool,
+    cached_and_valid: bool,
+    download_flag: bool,
+    is_terminal: bool,
+) -> ModelFetchAction {
+    if !slm_wanted {
+        ModelFetchAction::Skip
+    } else if cached_and_valid {
+        ModelFetchAction::AlreadyCached
+    } else if download_flag {
+        ModelFetchAction::Fetch { assume_yes: true }
+    } else if is_terminal {
+        ModelFetchAction::Fetch { assume_yes: false }
+    } else {
+        ModelFetchAction::SkipNonInteractive
+    }
+}
+
+#[cfg(all(test, feature = "runtime-ner", not(feature = "embedded-ner")))]
+mod model_action_tests {
+    use super::{decide_model_action, ModelFetchAction};
+
+    #[test]
+    fn ner_not_wanted_is_skip() {
+        // slm_wanted=false short-circuits regardless of the other inputs.
+        assert_eq!(
+            decide_model_action(false, false, false, false),
+            ModelFetchAction::Skip
+        );
+        assert_eq!(
+            decide_model_action(false, true, true, true),
+            ModelFetchAction::Skip
+        );
+    }
+
+    #[test]
+    fn cached_valid_is_already_cached() {
+        assert_eq!(
+            decide_model_action(true, true, false, false),
+            ModelFetchAction::AlreadyCached
+        );
+        // A cached+valid model wins over both the download flag and a TTY.
+        assert_eq!(
+            decide_model_action(true, true, true, true),
+            ModelFetchAction::AlreadyCached
+        );
+    }
+
+    #[test]
+    fn download_flag_fetches_without_prompt() {
+        assert_eq!(
+            decide_model_action(true, false, true, false),
+            ModelFetchAction::Fetch { assume_yes: true }
+        );
+        // The explicit flag wins even on a TTY — no prompt.
+        assert_eq!(
+            decide_model_action(true, false, true, true),
+            ModelFetchAction::Fetch { assume_yes: true }
+        );
+    }
+
+    #[test]
+    fn interactive_no_flag_fetches_with_prompt() {
+        assert_eq!(
+            decide_model_action(true, false, false, true),
+            ModelFetchAction::Fetch { assume_yes: false }
+        );
+    }
+
+    #[test]
+    fn noninteractive_no_flag_skips_without_hanging() {
+        assert_eq!(
+            decide_model_action(true, false, false, false),
+            ModelFetchAction::SkipNonInteractive
+        );
+    }
+}
+
 /// Build CLI argument vector for a batch-mode subprocess invocation.
 ///
 /// GRC-367 (fix 4): `dns_rate_limit` is forwarded as `--dns-rate-limit <n>` when set.
@@ -563,7 +665,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     }
 
     eprintln!("  Checking dependencies...");
-    #[cfg(feature = "embedded-ner")]
+    #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
     {
         let slm_wanted =
             args.enable_slm || (!args.disable_slm && _app_config.discovery.ner_enabled);
@@ -575,6 +677,44 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                     Err(e) => {
                         eprintln!("⚠️  {}", e);
                         eprintln!("   Continuing without NER (--disable-slm implied).");
+                    }
+                }
+            }
+        }
+    }
+
+    // runtime-ner only: the NER model is not embedded, so ensure it is present
+    // (consent-gated, SHA-256-verified) before NER init. embedded-ner builds skip
+    // this entirely — the model is baked into the binary. If both features are on,
+    // embedded-ner wins and this block is compiled out.
+    #[cfg(all(feature = "runtime-ner", not(feature = "embedded-ner")))]
+    {
+        let slm_wanted =
+            args.enable_slm || (!args.disable_slm && _app_config.discovery.ner_enabled);
+        let action = decide_model_action(
+            slm_wanted,
+            crate::model_fetch::is_model_cached_and_valid(),
+            args.download_ner_model,
+            std::io::stdin().is_terminal(),
+        );
+        match action {
+            ModelFetchAction::Skip => {}
+            ModelFetchAction::AlreadyCached => {}
+            ModelFetchAction::SkipNonInteractive => {
+                eprintln!(
+                    "⚠️  NER model (~183 MB) not installed and running non-interactively. \
+                     Re-run with --download-ner-model to fetch it, or --disable-slm to silence \
+                     this. Continuing without NER."
+                );
+                args.disable_slm = true;
+            }
+            ModelFetchAction::Fetch { assume_yes } => {
+                match crate::model_fetch::ensure_model_available(assume_yes).await {
+                    Ok(_path) => {}
+                    Err(e) => {
+                        eprintln!("⚠️  {}", e);
+                        eprintln!("   Continuing without NER (--disable-slm implied).");
+                        args.disable_slm = true;
                     }
                 }
             }
@@ -617,7 +757,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.start_init_progress(5).await;
 
-    #[cfg(feature = "embedded-ner")]
+    #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
     let ner_bg_handle = if !args.disable_slm {
         Some(tokio::task::spawn_blocking(|| {
             crate::ner_org::init_with_config(0.6)
@@ -713,7 +853,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         .complete_init_step("Feature detection complete")
         .await;
 
-    #[cfg(feature = "embedded-ner")]
+    #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
     {
         if let Some(handle) = ner_bg_handle {
             match handle.await {
@@ -739,7 +879,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 .await;
         }
     }
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     {
         logger.complete_init_step("NER not compiled in").await;
     }
@@ -2182,6 +2322,7 @@ mod tests {
             log_file: None,
             enable_slm: false,
             disable_slm: false,
+            download_ner_model: false,
             enable_web_org: false,
             disable_web_org: false,
             no_color: false,

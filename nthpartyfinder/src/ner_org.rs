@@ -1,31 +1,43 @@
-//! Embedded NER-based organization extraction
+//! NER-based organization extraction.
 //!
-//! This module uses GLiNER (via gline-rs) to extract organization names
-//! from web page content. The model is embedded in the binary at compile time.
+//! This module uses GLiNER (via gline-rs) to extract organization names from web
+//! page content. The same inference engine backs two model-delivery modes,
+//! selected by Cargo feature:
+//!
+//!   * `embedded-ner` — the model is baked into the binary via `include_bytes!`
+//!     and written to a temp dir at runtime (self-contained, offline).
+//!   * `runtime-ner`  — the model is fetched at runtime (consent-gated,
+//!     SHA-256-verified by [`crate::model_fetch`]) and loaded from the on-disk
+//!     cache directory. No bytes are embedded, keeping the crate crates.io-sized.
+//!
+//! When both features are enabled, `embedded-ner` wins (the compile-time embed is
+//! preferred and the runtime-load path is compiled out).
 //!
 //! On Windows, the ONNX Runtime DLL must be available. Set ORT_DYLIB_PATH
 //! environment variable or place onnxruntime.dll next to the executable.
 
-#[cfg(feature = "embedded-ner")]
+// "NER enabled" = either delivery mode is on. The real extractor + public API
+// compile under this; the stubs compile when neither is on.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use anyhow::{anyhow, Result};
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use gliner::model::input::text::TextInput;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use gliner::model::params::Parameters;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use gliner::model::pipeline::span::SpanMode;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use gliner::model::GLiNER;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use orp::params::RuntimeParameters;
 #[cfg(feature = "embedded-ner")]
 use std::io::Write;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use std::sync::OnceLock;
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use tracing::{debug, info};
 
-/// Model bytes embedded at compile time
+/// Model bytes embedded at compile time (only when `embedded-ner` is selected).
 #[cfg(feature = "embedded-ner")]
 static MODEL_BYTES: &[u8] = include_bytes!("../models/gliner_small.onnx");
 
@@ -48,7 +60,7 @@ pub struct NerOrgResult {
 // Pure logic functions — testable without ONNX runtime
 // ============================================================================
 
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn truncate_text(text: &str, max_len: usize) -> &str {
     if text.len() <= max_len {
         return text;
@@ -60,7 +72,7 @@ fn truncate_text(text: &str, max_len: usize) -> &str {
     &text[..end]
 }
 
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn build_domain_context(domain: &str, page_content: Option<&str>) -> String {
     match page_content {
         Some(content) => format!("Website: {}. {}", domain, content),
@@ -68,7 +80,7 @@ fn build_domain_context(domain: &str, page_content: Option<&str>) -> String {
     }
 }
 
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn is_org_entity_type(entity_type: &str) -> bool {
     matches!(
         entity_type.to_lowercase().as_str(),
@@ -76,7 +88,7 @@ fn is_org_entity_type(entity_type: &str) -> bool {
     )
 }
 
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn select_best_org(
     candidates: &[(String, String, f32)],
     min_confidence: f32,
@@ -100,7 +112,7 @@ fn select_best_org(
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn chunk_text(text: &str, max_single_len: usize, chunk_size: usize, overlap: usize) -> Vec<&str> {
     if text.len() <= max_single_len {
         return vec![text];
@@ -148,7 +160,7 @@ fn chunk_text(text: &str, max_single_len: usize, chunk_size: usize, overlap: usi
     result
 }
 
-#[cfg(any(feature = "embedded-ner", test))]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
 fn dedup_filter_sort_orgs(orgs: Vec<(String, f32)>, min_name_len: usize) -> Vec<NerOrgResult> {
     let mut map: std::collections::HashMap<String, NerOrgResult> = std::collections::HashMap::new();
     for (name, confidence) in orgs {
@@ -176,20 +188,20 @@ fn dedup_filter_sort_orgs(orgs: Vec<(String, f32)>, min_name_len: usize) -> Vec<
 }
 
 /// Global NER extractor instance
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 static NER_EXTRACTOR: OnceLock<NerOrganizationExtractor> = OnceLock::new();
 
-/// NER organization extractor using embedded GLiNER model
-#[cfg(feature = "embedded-ner")]
+/// NER organization extractor backed by a GLiNER model.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub struct NerOrganizationExtractor {
     model: GLiNER<SpanMode>,
     min_confidence: f32,
 }
 
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 impl NerOrganizationExtractor {
     #[cfg_attr(coverage_nightly, coverage(off))]
-    /// Create a new NER extractor by writing embedded model files to temp directory
+    /// Create a new NER extractor with the default confidence threshold.
     pub fn new() -> Result<Self> {
         Self::with_min_confidence(0.5)
     }
@@ -312,8 +324,10 @@ impl NerOrganizationExtractor {
         ))
     }
 
+    #[cfg(feature = "embedded-ner")]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    /// Create a new NER extractor with custom minimum confidence threshold
+    /// Create a new NER extractor by writing the embedded model files to a temp
+    /// directory and loading GLiNER from there. (`embedded-ner` mode.)
     pub fn with_min_confidence(min_confidence: f32) -> Result<Self> {
         // Setup ONNX runtime (Windows-specific DLL handling)
         Self::setup_onnx_runtime()?;
@@ -336,6 +350,37 @@ impl NerOrganizationExtractor {
         let model = Self::create_model(&tokenizer_path, &model_path)?;
 
         info!("NER model initialized successfully");
+
+        Ok(Self {
+            model,
+            min_confidence,
+        })
+    }
+
+    #[cfg(all(feature = "runtime-ner", not(feature = "embedded-ner")))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    /// Create a new NER extractor by loading GLiNER directly from the runtime
+    /// model cache directory. (`runtime-ner` mode.) The model must already be
+    /// present and verified — `app.rs` runs the consent-gated fetch
+    /// (`model_fetch::ensure_model_available`) before NER init, so by the time
+    /// this is called the three files are on disk in `model_dir_path()`.
+    pub fn with_min_confidence(min_confidence: f32) -> Result<Self> {
+        // Setup ONNX runtime (Windows-specific DLL handling)
+        Self::setup_onnx_runtime()?;
+
+        let model_dir = crate::model_fetch::model_dir_path()
+            .map_err(|e| anyhow!("Could not resolve NER model cache dir: {}", e))?;
+
+        // No temp write needed: load straight from the verified cache. gline-rs
+        // takes file paths, so we hand it the cached files directly.
+        let model_path = model_dir.join("gliner_small.onnx");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+
+        debug!("Loading NER model from cache dir {:?}", model_dir);
+
+        let model = Self::create_model(&tokenizer_path, &model_path)?;
+
+        info!("NER model initialized successfully (runtime cache)");
 
         Ok(Self {
             model,
@@ -386,6 +431,7 @@ impl NerOrganizationExtractor {
         Ok(candidates)
     }
 
+    #[cfg(feature = "embedded-ner")]
     #[cfg_attr(coverage_nightly, coverage(off))]
     /// Write bytes to file if it doesn't already exist
     fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
@@ -502,14 +548,14 @@ impl NerOrganizationExtractor {
 // ============================================================================
 
 /// Initialize the global NER extractor
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub fn init() -> anyhow::Result<()> {
     init_with_config(0.5)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 /// Initialize the global NER extractor with custom minimum confidence
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
     let extractor = NerOrganizationExtractor::with_min_confidence(min_confidence)?;
     NER_EXTRACTOR
@@ -519,20 +565,20 @@ pub fn init_with_config(min_confidence: f32) -> anyhow::Result<()> {
 }
 
 /// Check if NER is available (model loaded successfully)
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub fn is_available() -> bool {
     NER_EXTRACTOR.get().is_some()
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 /// Get the global NER extractor
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub fn get() -> Option<&'static NerOrganizationExtractor> {
     NER_EXTRACTOR.get()
 }
 
 /// Extract organization using the global NER extractor
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 #[cfg_attr(coverage_nightly, coverage(off))] // coverage: OnceLock singleton — None branch unreachable after init()
 pub fn extract_organization(
     domain: &str,
@@ -546,7 +592,7 @@ pub fn extract_organization(
 
 /// Extract all organizations from text using the global NER extractor.
 /// Returns all detected organizations above min_confidence threshold.
-#[cfg(feature = "embedded-ner")]
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 #[cfg_attr(coverage_nightly, coverage(off))] // coverage: OnceLock singleton — None branch unreachable after init()
 pub fn extract_all_organizations(
     text: &str,
@@ -559,29 +605,29 @@ pub fn extract_all_organizations(
 }
 
 // ============================================================================
-// Stub implementations when embedded-ner feature is disabled
+// Stub implementations when NER is disabled (neither delivery mode selected)
 // ============================================================================
 
 /// Stub: Initialize the global NER extractor (no-op when disabled)
-#[cfg(not(feature = "embedded-ner"))]
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 pub fn init() -> anyhow::Result<()> {
     Ok(())
 }
 
 /// Stub: Initialize with config (no-op when disabled)
-#[cfg(not(feature = "embedded-ner"))]
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 pub fn init_with_config(_min_confidence: f32) -> anyhow::Result<()> {
     Ok(())
 }
 
 /// Stub: Check if NER is available (always false when disabled)
-#[cfg(not(feature = "embedded-ner"))]
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 pub fn is_available() -> bool {
     false
 }
 
 /// Stub: Extract organization (always returns None when disabled)
-#[cfg(not(feature = "embedded-ner"))]
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 pub fn extract_organization(
     _domain: &str,
     _page_content: Option<&str>,
@@ -590,7 +636,7 @@ pub fn extract_organization(
 }
 
 /// Stub: Extract all organizations (always returns empty when disabled)
-#[cfg(not(feature = "embedded-ner"))]
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 pub fn extract_all_organizations(
     _text: &str,
     _min_confidence: Option<f32>,
@@ -684,7 +730,7 @@ mod tests {
 
     // ── Stub function tests (when embedded-ner is disabled) ───────────
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_functions() {
         assert!(!is_available());
@@ -692,14 +738,14 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_init() {
         // init should succeed (no-op)
         assert!(init().is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_init_with_config() {
         assert!(init_with_config(0.3).is_ok());
@@ -707,13 +753,13 @@ mod tests {
         assert!(init_with_config(1.0).is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_is_available() {
         assert!(!is_available());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_organization_with_content() {
         let result =
@@ -721,28 +767,28 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_organization_none_content() {
         let result = extract_organization("test.com", None).unwrap();
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_organizations() {
         let result = extract_all_organizations("Some text about Microsoft", None).unwrap();
         assert!(result.is_empty());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_organizations_with_confidence() {
         let result = extract_all_organizations("Some text about Google", Some(0.8)).unwrap();
         assert!(result.is_empty());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_organization_various_domains() {
         // Verify stubs handle any domain input gracefully
@@ -760,14 +806,14 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_empty_text() {
         let result = extract_all_organizations("", None).unwrap();
         assert!(result.is_empty());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_long_text() {
         let long_text = "word ".repeat(10_000);
@@ -1388,7 +1434,7 @@ mod tests {
 
     // ── Stub function additional tests ───────────────────────────────
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_init_multiple_times() {
         // Stubs should be idempotent
@@ -1397,7 +1443,7 @@ mod tests {
         assert!(init().is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_init_with_config_extreme_values() {
         assert!(init_with_config(-1.0).is_ok());
@@ -1406,35 +1452,35 @@ mod tests {
         assert!(init_with_config(f32::INFINITY).is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_organization_empty_domain() {
         let result = extract_organization("", None).unwrap();
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_organization_with_empty_content() {
         let result = extract_organization("test.com", Some("")).unwrap();
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_organizations_zero_confidence() {
         let result = extract_all_organizations("text", Some(0.0)).unwrap();
         assert!(result.is_empty());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_extract_all_organizations_negative_confidence() {
         let result = extract_all_organizations("text", Some(-1.0)).unwrap();
         assert!(result.is_empty());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stub_is_available_consistently_false() {
         for _ in 0..10 {
@@ -1444,7 +1490,7 @@ mod tests {
 
     // --- Tests for previously-coverage(off) stub functions ---
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stripped_init_returns_ok_and_is_idempotent() {
         assert!(init().is_ok());
@@ -1452,7 +1498,7 @@ mod tests {
         assert!(init().is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stripped_init_with_config_ignores_all_thresholds() {
         assert!(init_with_config(0.0).is_ok());
@@ -1463,7 +1509,7 @@ mod tests {
         assert!(init_with_config(f32::NAN).is_ok());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stripped_is_available_always_false_after_init() {
         let _ = init();
@@ -1472,7 +1518,7 @@ mod tests {
         assert!(!is_available());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stripped_extract_organization_returns_none_for_all_inputs() {
         let _ = init();
@@ -1486,7 +1532,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[cfg(not(feature = "embedded-ner"))]
+    #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
     #[test]
     fn test_stripped_extract_all_organizations_returns_empty_for_all_inputs() {
         let _ = init();

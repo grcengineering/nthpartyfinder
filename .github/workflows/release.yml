@@ -63,7 +63,11 @@ jobs:
         working-directory: nthpartyfinder
         run: .\scripts\download-model.ps1
 
-      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Release binaries stay SELF-CONTAINED: the crate default is now `runtime-ner`
+      # (model fetched at runtime for crates.io installs), but downloadable binaries
+      # must work offline, so build with `embedded-ner` to bake the model in via
+      # include_bytes! (the download-model.sh step above provides the files).
+      - run: cargo build --release --locked --target ${{ matrix.target }} --no-default-features --features embedded-ner
 
       - name: Package
         shell: bash
