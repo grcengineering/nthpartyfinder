@@ -48,7 +48,7 @@ headless_chrome = "1.0"
 # AI-powered content analysis
 fancy-regex = "0.13"
 rayon = "1.8"
-which = "6"
+which = "8"
 zip = "0.6"
 # Disk-backed result storage with compression (memory efficiency)
 zstd = "0.13"
