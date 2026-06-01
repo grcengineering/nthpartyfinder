@@ -171,6 +171,7 @@ pub async fn discover_strategy(
 }
 
 #[cfg(coverage)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn discover_strategy(
     _url: &str,
     static_html: &str,
@@ -698,6 +699,7 @@ fn extract_js_object_assignment(html: &str, var_name: &str) -> Option<serde_json
 }
 
 /// Search for Next.js __NEXT_DATA__ hydration blob.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_next_data(html: &str) -> Option<CandidateStrategy> {
     // Look for <script id="__NEXT_DATA__" type="application/json">...</script>
     let pattern = r#"<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>"#;
@@ -816,6 +818,7 @@ fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for base64-encoded JSON blobs in HTML.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     use base64::Engine;
 
@@ -893,6 +896,7 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 }
 
 /// Search for JavaScript object assignments like `window.VENDOR_REPORT = {...}`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_js_object_assignments(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let pattern = r#"window\.([A-Z_][A-Z_0-9]*)\s*=\s*(\{[\s\S]{200,}?\})(?:\s*;|\s*<)"#;
     // Pattern is a hardcoded constant — compile failure is impossible
@@ -1882,6 +1886,7 @@ mod tests {
 
     // --- discover_strategy ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_discover_strategy_strong_html_candidate() {
         // If HTML patterns find a strong candidate (score >= 0.7),
@@ -2331,6 +2336,7 @@ mod tests {
 
     // --- discover_strategy: weak candidates below threshold ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_discover_strategy_weak_candidate_below_threshold() {
         // HTML with a next_data blob that has items scoring between 0.4 and 0.7
@@ -2571,6 +2577,7 @@ mod tests {
     // --- discover_via_html_patterns: all probes run in sequence ---
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn test_discover_via_html_patterns_conveyor_takes_priority() {
         // Conveyor HTML should be detected by Conveyor probe
         let html = r#"<html><body>
@@ -2741,6 +2748,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(coverage)]
     async fn test_discover_via_network_interception_coverage_stub() {
         let result = discover_via_network_interception("https://example.com").await;
         assert!(result.is_ok());

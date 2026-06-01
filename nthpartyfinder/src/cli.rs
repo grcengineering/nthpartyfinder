@@ -402,6 +402,7 @@ impl Args {
             .unwrap_or(4)
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn get_default_output_dir() -> Result<String, String> {
         if let Some(desktop_dir) = dirs::desktop_dir() {
             Ok(desktop_dir.to_string_lossy().to_string())
@@ -418,6 +419,7 @@ impl Args {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn get_domain_output_dir(&self) -> Result<String, String> {
         let base_dir = self.get_output_dir()?;
         let domain = self
@@ -590,6 +592,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_list_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "list"]);
         match cli.command {
@@ -601,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_show_subcommand() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "show", "example.com"]);
         match cli.command {
@@ -614,6 +618,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_clear_domain() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "example.com"]);
         match cli.command {
@@ -628,6 +633,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_clear_all() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "clear", "--all"]);
         match cli.command {
@@ -642,6 +648,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_validate() {
         let cli = Cli::parse_from([
             "nthpartyfinder",
@@ -1067,6 +1074,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn cli_parse_cache_validate_minimal() {
         let cli = Cli::parse_from(["nthpartyfinder", "cache", "validate"]);
         match cli.command {

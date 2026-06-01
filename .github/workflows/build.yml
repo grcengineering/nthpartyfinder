@@ -89,13 +89,14 @@ jobs:
         timeout-minutes: 10
 
   coverage:
-    name: Code Coverage
+    name: Coverage (95% gate)
     needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
         with:
+          toolchain: nightly-2026-04-29
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@4c6ee9b0c14666cb5ccda351bcaf3b49e9bd74f4 # cargo-llvm-cov
@@ -111,8 +112,28 @@ jobs:
       - name: Download NER model
         if: steps.cache-ner.outputs.cache-hit != 'true'
         run: bash scripts/download-model.sh
-      - name: Generate coverage
-        run: cargo llvm-cov --locked --all-features --workspace --fail-under-lines 70 --lcov --output-path lcov.info
+      - name: Run coverage and print summary
+        env:
+          RUSTFLAGS: ""
+        # Coverage floor = 95% line + 95% function (NOT 100%). 100% is explicitly
+        # not a goal: the last few % is genuinely-unreachable defensive code
+        # (impossible-error `?` continuations, poison-mutex fallbacks, dead match
+        # arms); chasing it incentivises deleting graceful error handling.
+        # --ignore-filename-regex scopes out structurally-untestable infra that
+        # no meaningful unit test can exercise:
+        #   browser_pool.rs   — live headless-Chrome session provider
+        #   memory_monitor.rs — live OS memory-pressure sampler (sysinfo)
+        #   interactive.rs    — blocking interactive TUI input loop
+        # (main.rs is a [[bin]], already excluded by --lib). Keep this regex
+        # MINIMAL — never widen it to make a change pass; write a real test.
+        # Mirror of nthpartyfinder/scripts/coverage.sh (keep in sync).
+        run: cargo +nightly-2026-04-29 llvm-cov --locked --all-features --workspace --lib --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --fail-under-lines 95 --fail-under-functions 95
+      - name: Generate LCOV report
+        env:
+          RUSTFLAGS: ""
+        # `report` re-emits from data collected by the gate step above; build/feature-selection
+        # flags (--all-features/--workspace/--lib/--locked) are invalid for the `report` subcommand.
+        run: cargo +nightly-2026-04-29 llvm-cov report --ignore-filename-regex '(browser_pool|memory_monitor|interactive)\.rs$' --lcov --output-path lcov.info
       - name: Upload to Codecov
         uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:

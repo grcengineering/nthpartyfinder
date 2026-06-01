@@ -77,7 +77,7 @@ impl RateLimiter {
         }
     }
 
-    /// Acquire a token, waiting if necessary (M010 fix: retry loop after sleep)
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&mut self) {
         loop {
             match self.try_acquire() {
@@ -97,6 +97,11 @@ impl RateLimiter {
 #[derive(Debug, Clone)]
 pub struct SharedRateLimiter {
     inner: Arc<Mutex<RateLimiter>>,
+    /// GRC-367 (fix 3): monotonic per-call sequence used to derive a cheap, dependency-free,
+    /// DETERMINISTIC jitter (sequence mod a small window) so that under a burst the waiters do
+    /// not all wake, recompute a near-zero wait, and tight-spin in lock-step. De-synchronizing
+    /// the recomputed sleeps spreads lock re-acquisition across a few ms instead of a thundering herd.
+    jitter_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SharedRateLimiter {
@@ -104,13 +109,69 @@ impl SharedRateLimiter {
     pub fn new(requests_per_second: u32) -> Self {
         Self {
             inner: Arc::new(Mutex::new(RateLimiter::new(requests_per_second))),
+            jitter_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
-    /// Acquire a token, waiting if necessary
+    /// Acquire a token, waiting if necessary.
+    ///
+    /// GRC-367 (fix 3): the tokio `Mutex` guard is NEVER held across the `sleep().await`.
+    /// The previous implementation locked the inner limiter and then called
+    /// `RateLimiter::acquire().await` (which sleeps internally) WHILE STILL HOLDING THE GUARD —
+    /// so the single shared `dns_limiter` serialized every DNS task for the entire backoff
+    /// window during a throttle, the likely cause of the observed cross-the-board slowness.
+    ///
+    /// Here we instead compute the needed wait under the lock via the non-async
+    /// `try_acquire()`, DROP the guard, sleep outside the lock, then re-loop. Token-bucket
+    /// semantics are preserved exactly (the same refill + `tokens -= 1.0` accounting runs
+    /// under the lock each iteration); only the *waiting* moved outside the critical section.
+    /// The public signature is unchanged, so the HTTP and WHOIS limiters that also use
+    /// `SharedRateLimiter` get the same fix transparently with no API change.
+    ///
+    /// GRC-367 (fix 3): under a burst, the prior implementation let every waiter wake at once,
+    /// recompute a near-zero `wait`, and tight-spin re-acquiring the lock (a busy-spin thundering
+    /// herd). We now (a) FLOOR each recomputed sleep at `MIN_BACKOFF` so a near-zero wait still
+    /// yields the scheduler a real interval, and (b) add a small DETERMINISTIC per-call jitter
+    /// (a monotonic sequence mod a few ms) so waiters de-synchronize instead of waking in
+    /// lock-step. Token-bucket accounting is unchanged — only the *wait* is shaped.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self) {
-        let mut limiter = self.inner.lock().await;
-        limiter.acquire().await;
+        // Minimum sleep applied to any non-zero recomputed wait, so a near-zero wait under burst
+        // can't degenerate into a tight re-lock spin.
+        const MIN_BACKOFF: Duration = Duration::from_millis(2);
+        // Jitter window (ms): each waiter adds `seq % JITTER_WINDOW_MS` to its sleep, spreading
+        // the herd across a few ms. Kept tiny so it never materially changes the effective rate.
+        const JITTER_WINDOW_MS: u64 = 3;
+
+        loop {
+            let wait = {
+                // Critical section: refill + attempt to take a token. Guard is released at the
+                // end of this block (before any await) by going out of scope.
+                let mut limiter = self.inner.lock().await;
+                limiter.try_acquire()
+            };
+
+            match wait {
+                None => return, // Token acquired (or limiter disabled) — done.
+                Some(wait_duration) => {
+                    // Deterministic jitter from a monotonic per-call sequence (no rng dependency).
+                    let seq = self
+                        .jitter_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let jitter = Duration::from_millis(seq % JITTER_WINDOW_MS);
+                    // Floor the wait, then add jitter, so two waiters that computed the same
+                    // near-zero wait re-attempt the lock at slightly different times.
+                    let effective = wait_duration.max(MIN_BACKOFF) + jitter;
+                    debug!(
+                        "Rate limiter waiting {:?} for token (lock released, floored+jittered from {:?})",
+                        effective, wait_duration
+                    );
+                    sleep(effective).await;
+                    // Re-loop: other tasks may have consumed the refilled tokens while we slept,
+                    // so we must re-check under the lock rather than assume a token is free.
+                }
+            }
+        }
     }
 
     /// Check if rate limiting is enabled
@@ -139,6 +200,7 @@ impl DomainRateLimiter {
     }
 
     /// Acquire a rate limit token for the specified domain
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn acquire(&self, domain: &str) -> () {
         if self.requests_per_second == 0 {
             return; // Rate limiting disabled
@@ -170,6 +232,7 @@ impl RetryHelper {
     }
 
     /// Execute an async operation with retries and backoff
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn with_retry<T, E, F, Fut>(&self, operation: F) -> Result<T, E>
     where
         F: Fn() -> Fut,

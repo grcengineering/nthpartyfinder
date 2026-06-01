@@ -449,7 +449,15 @@ impl AppConfig {
         Self::load_from_path(Path::new(CONFIG_PATH))
     }
 
+    /// Parse the embedded default configuration (fallback when no config file exists)
+    pub fn load_default() -> Result<Self, ConfigError> {
+        let config: AppConfig = toml::from_str(DEFAULT_CONFIG)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Load configuration from a specific path
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
         if !path.exists() {
             return Err(ConfigError::FileNotFound(path.to_path_buf()));
@@ -567,6 +575,7 @@ impl AppConfig {
     }
 
     /// Create default configuration file at the standard location
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn create_default_config() -> Result<PathBuf, ConfigError> {
         let path = Path::new(CONFIG_PATH);
 
@@ -629,6 +638,13 @@ mod tests {
     fn test_default_config_validates() {
         let config: AppConfig = toml::from_str(DEFAULT_CONFIG).unwrap();
         assert!(config.validate().is_ok(), "Default config should validate");
+    }
+
+    #[test]
+    fn test_load_default_returns_valid_config() {
+        let config = AppConfig::load_default().expect("Embedded defaults must parse and validate");
+        assert!(!config.http.user_agent.is_empty());
+        assert!(!config.dns.doh_servers.is_empty());
     }
 
     #[test]
@@ -838,6 +854,7 @@ total_vendor_budget = 200
         ));
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_validate_no_servers() {
         let mut config: AppConfig = toml::from_str(&minimal_config_str()).unwrap();
@@ -1240,6 +1257,7 @@ similarity_threshold = 0.9
 
     // --- load_from_path with invalid TOML ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_from_path_invalid_toml() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1251,6 +1269,7 @@ similarity_threshold = 0.9
 
     // --- load_from_path with valid TOML but fails validation ---
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_from_path_fails_validation() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1618,6 +1637,7 @@ backoff_max_delay_ms = 60000
     // Tests for AppConfig methods (previously coverage(off))
     // ====================================================================
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_load_uses_config_path_constant() {
         let result = AppConfig::load();

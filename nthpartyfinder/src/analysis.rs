@@ -533,7 +533,10 @@ pub async fn discover_nth_parties(
     }
     logger.log_dns_lookup_start(domain);
 
-    let txt_records = match dns::get_txt_records_with_pool(domain, &dns_pool).await {
+    let dns_counter = logger.dns_failure_counter();
+    let txt_records = match dns::get_txt_records_with_pool_tracked(domain, &dns_pool, dns_counter)
+        .await
+    {
         Ok(records) if !records.is_empty() => records,
         first_result => {
             if current_depth == 1 {
@@ -541,7 +544,7 @@ pub async fn discover_nth_parties(
                     "Root domain {} returned 0 TXT records on first attempt, retrying...",
                     domain
                 ));
-                match dns::get_txt_records_with_pool(domain, &dns_pool).await {
+                match dns::get_txt_records_with_pool_tracked(domain, &dns_pool, dns_counter).await {
                     Ok(retry_records) if !retry_records.is_empty() => {
                         logger.info(&format!(
                             "DNS retry succeeded: found {} TXT records for {} on second attempt",
@@ -723,7 +726,16 @@ pub async fn discover_nth_parties(
                                             "Running subfinder for {} ({}/{} subdomains: {})",
                                             root_domain, i + 1, total, subdomain
                                         )).await;
-                                        let (txt_records, cname_records) = dns_pool.get_txt_and_cname_fast(&subdomain).await;
+                                        // GRC-367 (fix 1): thread the shared DNS failure counter
+                                        // (same source as the root path) so a throttle on this
+                                        // high-concurrency subdomain path is visible to the
+                                        // exit-3 guard instead of silently producing empty results.
+                                        let (txt_records, cname_records) = dns_pool
+                                            .get_txt_and_cname_fast(
+                                                &subdomain,
+                                                logger_sub.dns_failure_counter(),
+                                            )
+                                            .await;
 
                                         let mut txt_vendors = Vec::new();
                                         let mut cname_vendors = Vec::new();
@@ -1381,7 +1393,10 @@ pub async fn discover_nth_parties_minimal(
 
     let mut results = Vec::new();
 
-    if let Ok(txt_records) = dns::get_txt_records_with_pool(domain, &dns_pool).await {
+    if let Ok(txt_records) =
+        dns::get_txt_records_with_pool_tracked(domain, &dns_pool, logger.dns_failure_counter())
+            .await
+    {
         let mut vendor_domains_with_source = dns::extract_vendor_domains_with_source_and_logger(
             &txt_records,
             Some(verification_logger),
