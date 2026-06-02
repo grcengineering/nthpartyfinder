@@ -44,7 +44,8 @@ impl VerificationFailureLogger {
             return Ok(());
         }
 
-        let mut writer_guard = self.writer.lock().unwrap();
+        // Poison recovery: a panic in another writer must not crash logging.
+        let mut writer_guard = self.writer.lock().unwrap_or_else(|p| p.into_inner());
         let file = OpenOptions::new()
             .create(true)
             .write(true)

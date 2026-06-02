@@ -223,7 +223,12 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
                     if let Ok(body_obj) = fetch_body() {
                         let body_str = &body_obj.body;
                         if body_str.len() > 50 && body_str.len() < 5_000_000 {
-                            let mut collected = responses_clone.lock().unwrap();
+                            // Recover from a poisoned lock rather than panicking:
+                            // the guarded Vec is a plain response accumulator and
+                            // stays valid even if a peer thread panicked.
+                            let mut collected = responses_clone
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
                             collected.push(InterceptedResponse {
                                 url: resp_url.clone(),
                                 status: status as u16,
@@ -250,9 +255,13 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
         // Wait for async API calls to complete
         std::thread::sleep(Duration::from_millis(3000));
 
-        // Deregister and collect results
+        // Deregister and collect results. Recover from a poisoned lock rather
+        // than panicking; the accumulated responses remain valid.
         let _ = tab.deregister_response_handling("trust_center_discovery");
-        let collected = responses.lock().unwrap().clone();
+        let collected = responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         Ok(collected)
     });
 
@@ -398,8 +407,9 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 
     // Parse __NEXT_DATA__ to extract the SafeBase structure
     let pattern = r#"<script\s+id="__NEXT_DATA__"[^>]*>([\s\S]*?)</script>"#;
-    // Pattern is a hardcoded constant — compile failure is impossible
-    let regex = fancy_regex::Regex::new(pattern).unwrap();
+    // Pattern is a hardcoded constant — compile failure is impossible.
+    let regex = fancy_regex::Regex::new(pattern)
+        .expect("__NEXT_DATA__ extraction pattern is a valid compile-time regex literal");
 
     let json_str = match regex.captures(html).ok().flatten().and_then(|c| c.get(1)) {
         Some(m) => m.as_str(),
@@ -427,7 +437,9 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     };
 
     // products is guaranteed to be an object by the is_object() guard above
-    let products_map = products.as_object().unwrap();
+    let products_map = products
+        .as_object()
+        .expect("products is a JSON object (verified by is_object() guard above)");
 
     debug!("SafeBase: found {} products", products_map.len());
 
@@ -466,7 +478,9 @@ fn probe_safebase(html: &str, candidates: &mut Vec<CandidateStrategy>) {
         };
 
         // items is guaranteed to be an object by the is_object() guard above
-        let items_map = items.as_object().unwrap();
+        let items_map = items
+            .as_object()
+            .expect("items is a JSON object (verified by is_object() guard above)");
 
         for (item_uid, item_data) in items_map {
             let list_entries = match item_data.get("listEntries").and_then(|v| v.as_array()) {
@@ -756,8 +770,9 @@ fn probe_next_data(html: &str) -> Option<CandidateStrategy> {
 /// Search for <script type="application/json"> tags containing subprocessor data.
 fn probe_json_script_tags(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let document = scraper::Html::parse_document(html);
-    // Selector is a hardcoded constant — parse failure is impossible
-    let selector = scraper::Selector::parse(r#"script[type="application/json"]"#).unwrap();
+    // Selector is a hardcoded constant — parse failure is impossible.
+    let selector = scraper::Selector::parse(r#"script[type="application/json"]"#)
+        .expect(r#""script[type=\"application/json\"]" is a valid compile-time CSS selector"#);
 
     for (idx, script) in document.select(&selector).enumerate() {
         let text: String = script.text().collect();
@@ -829,8 +844,9 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     ];
 
     for pattern in &patterns {
-        // All patterns are hardcoded constants — compile failure is impossible
-        let regex = fancy_regex::Regex::new(pattern).unwrap();
+        // All patterns are hardcoded constants — compile failure is impossible.
+        let regex = fancy_regex::Regex::new(pattern)
+            .expect("base64 extraction pattern is a valid compile-time regex literal");
         let mut search_start = 0;
         while search_start < html.len() {
             let search_slice = &html[search_start..];
@@ -899,8 +915,9 @@ fn probe_base64_blobs(html: &str, candidates: &mut Vec<CandidateStrategy>) {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn probe_js_object_assignments(html: &str, candidates: &mut Vec<CandidateStrategy>) {
     let pattern = r#"window\.([A-Z_][A-Z_0-9]*)\s*=\s*(\{[\s\S]{200,}?\})(?:\s*;|\s*<)"#;
-    // Pattern is a hardcoded constant — compile failure is impossible
-    let regex = fancy_regex::Regex::new(pattern).unwrap();
+    // Pattern is a hardcoded constant — compile failure is impossible.
+    let regex = fancy_regex::Regex::new(pattern)
+        .expect("window.* object-assignment pattern is a valid compile-time regex literal");
 
     let mut search_start = 0;
     while search_start < html.len() {

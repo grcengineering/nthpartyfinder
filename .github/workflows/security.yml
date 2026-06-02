@@ -71,18 +71,18 @@ jobs:
           sarif_file: nthpartyfinder/osv.sarif
           category: osv-scanner
 
-  # ── SAST (Opengrep, report-only — gate flip is the scheduled follow-up) ───
+  # ── SAST (Opengrep — GATES on ERROR-severity findings) ───────────────────
   # Replaces the prior `semgrep scan ... || true` (non-gating theater that
   # discarded its JSON to an artifact). Opengrep is the OSS SAST engine of
   # record. Pinned + signature-verified install (never unpinned curl|bash).
   # IMPORTANT (advisor): a green Opengrep run is NOT proof of correctness —
   # an empty/zero-rule load also exits 0. We therefore (a) assert rule files
-  # exist and (b) print the loaded-rule count. Report-only NOW; the
-  # `--error --severity ERROR` gate flip is the documented follow-up AFTER a
-  # clean report-only baseline on master (never flip gating before baseline,
-  # else branch protection blocks the campaign's own bugfix merges).
+  # exist and (b) print the loaded-rule count. GATING policy: ERROR-severity
+  # rules (e.g. sensitive-data-in-logs) BLOCK the PR (parsed from the SARIF);
+  # WARNING-severity rules (no-unwrap/no-eprintln) remain report-only quality
+  # signals so warning noise never blocks a merge.
   sast-opengrep:
-    name: SAST — Opengrep (report-only)
+    name: SAST — Opengrep (gates on ERROR)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -102,10 +102,19 @@ jobs:
           echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
       - name: Assert local ruleset present (anti empty-ruleset trap)
         run: test -s .opengrep/rules.yml && grep -c '  - id:' .opengrep/rules.yml
-      - name: Run Opengrep (report-only, SARIF)
+      - name: Run Opengrep (full SARIF for the dashboard — all severities)
         run: |
           opengrep scan --config .opengrep/rules.yml \
             --sarif-output=opengrep.sarif --verbose . || true
+      - name: Opengrep GATE — fail on ERROR-severity findings
+        # WARNING-severity rules (no-unwrap-in-prod / no-eprintln-in-prod) stay
+        # report-only quality signals. ERROR-severity rules (e.g.
+        # sensitive-data-in-logs) BLOCK the PR. SARIF maps severity ERROR -> level
+        # "error"; we parse the SARIF rather than rely on scanner exit-code flags.
+        run: |
+          errs=$(jq '[.runs[].results[]? | select(.level=="error")] | length' opengrep.sarif)
+          echo "Opengrep ERROR-severity findings: $errs"
+          test "$errs" -eq 0
       - name: Upload Opengrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18

@@ -13,10 +13,11 @@ fn help_flag_shows_usage() {
 #[test]
 fn version_flag_shows_version() {
     let (mut cmd, _tmp) = isolated_run();
+    // Assert against the crate's actual version so this never goes stale on a bump.
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("1.0.0"));
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "nthpartyfinder"
-version = "1.0.1"
+version = "1.1.1"
 edition = "2021"
 description = "A cross-platform CLI tool for identifying Nth party vendor relationships through DNS analysis"
 authors = ["Security Community"]
@@ -54,15 +54,33 @@ zip = "0.6"
 zstd = "0.13"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.32"
-# Embedded NER for organization extraction (replaces Ollama SLM)
+# Integrity verification for the runtime-fetched NER model
+sha2 = "0.10"
+hex = "0.4"
+# NER for organization extraction (replaces Ollama SLM)
 # Using load-dynamic to avoid Windows linking issues with ONNX Runtime
 gline-rs = { version = "1.0", optional = true }
 orp = { version = "0.9.2", optional = true, features = ["load-dynamic"] }
 
 [features]
-# NER is included by default. Use --no-default-features to exclude it for smaller builds.
-default = ["embedded-ner"]
+# NER organization extraction. Two delivery modes share one inference engine
+# (gline-rs + orp); they differ only in how the GLiNER model files reach disk.
+#
+#   runtime-ner  (default) — model is NOT embedded in the binary. It is fetched
+#                            at runtime (consent-gated, SHA-256-verified) from our
+#                            GitHub release and cached on disk. This keeps the crate
+#                            small enough to publish to crates.io and to
+#                            `cargo install` without shipping a ~175 MB blob.
+#   embedded-ner           — model is baked into the binary via include_bytes! for
+#                            fully self-contained release binaries (offline, no fetch).
+#                            Opt-in: `--no-default-features --features embedded-ner`.
+#
+# Both may be enabled simultaneously; embedded-ner wins (the compile-time embed is
+# preferred and the runtime fetch path is compiled out). Use --no-default-features
+# with neither for a smaller build that has no NER at all.
+default = ["runtime-ner"]
 embedded-ner = ["gline-rs", "orp"]
+runtime-ner = ["gline-rs", "orp"]
 
 [dev-dependencies]
 tokio-test = "0.4"
