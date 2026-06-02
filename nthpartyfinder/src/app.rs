@@ -923,7 +923,11 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     });
 
     if args.is_batch_mode() {
-        let input_path = std::path::Path::new(args.input_file.as_ref().unwrap());
+        let input_path = std::path::Path::new(
+            args.input_file
+                .as_ref()
+                .expect("is_batch_mode() guarantees input_file is Some"),
+        );
         let domains = match batch::parse_domain_file(input_path) {
             Ok(d) if d.is_empty() => {
                 eprintln!("error: no valid domains found in {}", input_path.display());
@@ -978,7 +982,10 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             let logger = logger.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .expect("batch concurrency semaphore is never closed");
                 let domain_start = std::time::Instant::now();
 
                 logger.info(&format!("Batch: starting analysis of {}", domain));
@@ -997,11 +1004,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                     let _ = std::fs::create_dir_all(&domain_dir);
                 }
 
-                let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(&cmd_args[1..])
-                    .env("NO_COLOR", "1")
-                    .output()
-                    .await;
+                let output = tokio::process::Command::new(
+                    std::env::current_exe()
+                        .expect("current_exe must be resolvable to spawn batch workers"),
+                )
+                .args(&cmd_args[1..])
+                .env("NO_COLOR", "1")
+                .output()
+                .await;
 
                 let duration = domain_start.elapsed().as_secs_f64();
 
@@ -1062,7 +1072,11 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
         summary.domain_results = Arc::try_unwrap(results)
             .unwrap_or_else(|arc| {
-                let guard = arc.try_lock().unwrap();
+                // All worker tasks have completed above, so the lock is uncontended.
+                // (tokio's Mutex has no poisoning; try_lock cannot WouldBlock here.)
+                let guard = arc
+                    .try_lock()
+                    .expect("uncontended: all batch worker tasks have completed");
                 Mutex::new(guard.clone())
             })
             .into_inner();
@@ -1127,7 +1141,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             println!("📁 Output file will be saved to: {}", output_path_str);
             println!();
             print!("Press Enter to continue or type a different directory path: ");
-            io::Write::flush(&mut io::stdout()).unwrap();
+            let _ = io::Write::flush(&mut io::stdout());
 
             let mut user_input = String::new();
             if let Err(e) = input.read_line(&mut user_input) {
@@ -1216,7 +1230,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
                                 if is_compatible {
                                     print!("Resume from checkpoint? [Y/n]: ");
-                                    io::Write::flush(&mut io::stdout()).unwrap();
+                                    let _ = io::Write::flush(&mut io::stdout());
 
                                     let mut resume_input = String::new();
                                     let _ = input.read_line(&mut resume_input);
@@ -1233,7 +1247,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                                     println!("Checkpoint is incompatible with current settings.");
                                     println!("   (Different domain or analysis options)");
                                     print!("Delete checkpoint and start fresh? [Y/n]: ");
-                                    io::Write::flush(&mut io::stdout()).unwrap();
+                                    let _ = io::Write::flush(&mut io::stdout());
 
                                     let mut delete_input = String::new();
                                     let _ = input.read_line(&mut delete_input);
@@ -2005,7 +2019,7 @@ pub async fn run_batch_analysis(
     println!();
 
     print!("Press Enter to start batch analysis or Ctrl+C to cancel: ");
-    io::Write::flush(&mut io::stdout()).unwrap();
+    let _ = io::Write::flush(&mut io::stdout());
     let mut line_buf = String::new();
     let _ = input.read_line(&mut line_buf);
     println!();
@@ -2035,7 +2049,10 @@ pub async fn run_batch_analysis(
         let entry = entry.clone();
 
         async move {
-            let _permit = batch_sem.acquire().await.unwrap();
+            let _permit = batch_sem
+                .acquire()
+                .await
+                .expect("batch concurrency semaphore is never closed");
             let domain_start = std::time::Instant::now();
 
             println!(

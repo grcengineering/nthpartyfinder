@@ -97,7 +97,7 @@ fn select_best_org(
     for (entity_type, org_name, confidence) in candidates {
         if is_org_entity_type(entity_type)
             && *confidence >= min_confidence
-            && (best.is_none() || *confidence > best.as_ref().unwrap().confidence)
+            && best.as_ref().is_none_or(|b| *confidence > b.confidence)
         {
             let trimmed = org_name.trim();
             if !trimmed.is_empty() {
@@ -167,7 +167,7 @@ fn dedup_filter_sort_orgs(orgs: Vec<(String, f32)>, min_name_len: usize) -> Vec<
         if name.len() >= min_name_len {
             let key = name.to_lowercase();
             let existing = map.get(&key);
-            if existing.is_none() || existing.unwrap().confidence < confidence {
+            if existing.is_none_or(|e| e.confidence < confidence) {
                 map.insert(
                     key,
                     NerOrgResult {

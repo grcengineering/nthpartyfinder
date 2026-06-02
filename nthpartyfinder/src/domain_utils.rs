@@ -46,7 +46,10 @@ pub fn extract_base_domain(domain: &str) -> String {
     }
 
     // Remove subdomain prefixes that are clearly technical (but keep meaningful subdomains)
-    let result = extract_organizational_domain(&cleaned_domain).unwrap();
+    // Fall back to the cleaned input if org-domain extraction yields nothing,
+    // rather than panicking on malformed/unusual domain input.
+    let result =
+        extract_organizational_domain(&cleaned_domain).unwrap_or_else(|| cleaned_domain.clone());
 
     if let Some(fallback) = bug004_single_label_fallback(&result, &cleaned_domain, domain) {
         return fallback;

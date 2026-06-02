@@ -721,7 +721,10 @@ pub async fn batch_get_organizations_with_rate_limit(
             let rate_limit_ctx_opt = rate_limit_ctx_opt.clone();
             async move {
                 // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .expect("whois concurrency semaphore is never closed");
 
                 debug!("WHOIS lookup {}/{}: {}", index + 1, total_domains, domain);
 
@@ -820,7 +823,10 @@ where
             let callback = &progress_callback;
 
             async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = semaphore
+                    .acquire()
+                    .await
+                    .expect("whois concurrency semaphore is never closed");
 
                 // Update progress
                 let current = {

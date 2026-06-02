@@ -364,7 +364,12 @@ fn extract_from_opengraph(document: &Html) -> Option<WebOrgResult> {
         if handle.len() > 2 && !handle.contains(' ') {
             // Convert handle to title case as potential org name.
             // Safety: handle.len() > 2 guarantees at least one char, so indexing is safe.
-            let first_upper: String = handle.chars().next().unwrap().to_uppercase().collect();
+            let first_upper: String = handle
+                .chars()
+                .next()
+                .expect("handle.len() > 2 guarantees at least one char")
+                .to_uppercase()
+                .collect();
             let org_name = first_upper + &handle[1..];
 
             return Some(WebOrgResult {
