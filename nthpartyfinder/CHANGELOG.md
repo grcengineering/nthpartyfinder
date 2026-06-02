@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.1] - 2026-06-02
+
+### Security
+- Patched transitive dependency CVEs: openssl 0.10.78 → 0.10.80 (CVE-2026-42327 [high] OCSP UB,
+  CVE-2026-44662 + CVE-2026-45784 AES-KW heap/OOB) and tar 0.4.45 → 0.4.46 (GHSA-3pv8-6f4r-ffg2).
+- Eliminated all 62 production `.unwrap()` calls (panic-safety): poison-recovery for locks,
+  graceful fallbacks on malformed DNS/WHOIS/web input, documented `.expect()` for provable
+  invariants. Test-code unwraps are unchanged (idiomatic).
+
+### Changed
+- CI/supply-chain hardening: least-privilege `permissions:` on all workflows; Opengrep SAST now
+  gates on ERROR-severity findings; the `no-unwrap-in-prod` lint is scoped to production code
+  (excludes `#[cfg(test)]` modules); added SECURITY.md and a pre-push git hook
+  (`scripts/install-git-hooks.sh`) that runs fmt/clippy/cargo-deny/gitleaks before every push.
+
 ## [1.1.0] - 2026-06-01
 
 ### Added
