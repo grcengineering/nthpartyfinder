@@ -4,6 +4,10 @@ on:
   push:
     tags: ['v*']
 
+# Least-privilege default; each job widens to exactly what it needs.
+permissions:
+  contents: read
+
 env:
   NER_MODEL_CACHE_KEY: ner-model-v1
 
@@ -108,6 +112,8 @@ jobs:
     name: Combine digests
     needs: build-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: .
