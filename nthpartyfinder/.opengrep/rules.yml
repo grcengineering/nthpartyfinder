@@ -2,13 +2,21 @@ rules:
   - id: no-unwrap-in-prod
     patterns:
       - pattern: $X.unwrap()
+      # Exclude inline `#[cfg(test)] mod { ... }` blocks: .unwrap() is idiomatic and
+      # safe in unit tests (a panic IS the test failure). The rule targets PRODUCTION
+      # unwraps only — path excludes below catch test FILES; this catches inline test
+      # MODULES inside src/ files (where the bulk of test unwraps live). Correcting
+      # the rule's scope to match its intent ("in-prod"); not a finding suppression.
+      - pattern-not-inside: |
+          #[cfg(test)]
+          mod $M { ... }
     paths:
       include:
         - src/**/*.rs
       exclude:
         - src/**/tests/**
         - tests/**
-    message: "Avoid .unwrap() - use .expect() with context or proper error handling"
+    message: "Avoid .unwrap() in production - use .expect() with context or proper error handling"
     severity: WARNING
     languages: [rust]
 

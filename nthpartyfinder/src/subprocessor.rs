@@ -87,29 +87,46 @@ fn validate_and_compile_regex(pattern: &str) -> Option<regex::Regex> {
 }
 
 // Compile CSS selectors once at startup for performance (fixes B015).
-// Safety (L006): All .unwrap() calls below are safe because the selector strings are
-// compile-time constants containing valid CSS selectors. Selector::parse() only fails
-// on malformed CSS selector syntax, which cannot occur with these hardcoded values.
-static DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("div").unwrap());
+// Safety (L006): The .expect() calls below cannot fail because the selector
+// strings are compile-time constants containing valid CSS selectors.
+// Selector::parse() only fails on malformed CSS selector syntax, which cannot
+// occur with these hardcoded values. .expect() documents the invariant at the
+// call site (vs. a bare .unwrap()).
+static DIV_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("div").expect("\"div\" is a valid compile-time CSS selector"));
 
-static ALL_ELEMENTS_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("*").unwrap());
+static ALL_ELEMENTS_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("*").expect("\"*\" is a valid compile-time CSS selector"));
 
-static PARAGRAPH_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("p").unwrap());
+static PARAGRAPH_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("p").expect("\"p\" is a valid compile-time CSS selector"));
 
-static HEADER_ROW_SELECTOR: Lazy<Selector> =
-    Lazy::new(|| Selector::parse("thead tr, tr:first-child").unwrap());
+static HEADER_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("thead tr, tr:first-child")
+        .expect("\"thead tr, tr:first-child\" is a valid compile-time CSS selector")
+});
 
-static HEADER_CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("th, td").unwrap());
+static HEADER_CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("th, td").expect("\"th, td\" is a valid compile-time CSS selector")
+});
 
-static DATA_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("tbody tr, tr").unwrap());
+static DATA_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("tbody tr, tr").expect("\"tbody tr, tr\" is a valid compile-time CSS selector")
+});
 
-static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("td, th").unwrap());
+static CELL_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("td, th").expect("\"td, th\" is a valid compile-time CSS selector")
+});
 
-static TH_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("th").unwrap());
+static TH_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("th").expect("\"th\" is a valid compile-time CSS selector"));
 
-static PARAGRAPH_DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("p, div").unwrap());
+static PARAGRAPH_DIV_SELECTOR: Lazy<Selector> = Lazy::new(|| {
+    Selector::parse("p, div").expect("\"p, div\" is a valid compile-time CSS selector")
+});
 
-static TR_SELECTOR: Lazy<Selector> = Lazy::new(|| Selector::parse("tr").unwrap());
+static TR_SELECTOR: Lazy<Selector> =
+    Lazy::new(|| Selector::parse("tr").expect("\"tr\" is a valid compile-time CSS selector"));
 
 /// Represents a discovered subprocessor from web page analysis
 #[derive(Debug, Clone)]
@@ -2096,12 +2113,23 @@ impl SubprocessorAnalyzer {
         }
 
         let response = response.ok_or_else(|| {
-            anyhow::anyhow!(
-                "All {} HTTP attempts failed for URL {}: {}",
-                max_retries,
-                url,
-                last_error.unwrap()
-            )
+            // `last_error` is normally Some here (every attempt that failed set
+            // it), but a config with `max_retries == 0` skips the loop entirely,
+            // leaving it None. Format defensively instead of unwrapping so a
+            // misconfigured retry count can never panic the scan.
+            match last_error {
+                Some(e) => anyhow::anyhow!(
+                    "All {} HTTP attempts failed for URL {}: {}",
+                    max_retries,
+                    url,
+                    e
+                ),
+                None => anyhow::anyhow!(
+                    "No HTTP attempt was made for URL {} (max_retries = {})",
+                    url,
+                    max_retries
+                ),
+            }
         })?;
 
         if !response.status().is_success() {

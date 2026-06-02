@@ -18,47 +18,81 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 // Compile regex patterns once at startup for performance (fixes B020)
-static MACRO_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?").unwrap());
+static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"%\{[a-zA-Z]+[0-9]*[a-zA-Z]*\}\.?")
+        .expect("MACRO_REGEX is a valid compile-time regex literal")
+});
 
-static DOMAIN_VERIFICATION_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([a-zA-Z0-9]+)(?:-domain)?-verification=").unwrap());
+static DOMAIN_VERIFICATION_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([a-zA-Z0-9]+)(?:-domain)?-verification=")
+        .expect("DOMAIN_VERIFICATION_REGEX is a valid compile-time regex literal")
+});
 
-static VERIFICATION_PREFIX_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"verification-([a-zA-Z0-9]+)=").unwrap());
+static VERIFICATION_PREFIX_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"verification-([a-zA-Z0-9]+)=")
+        .expect("VERIFICATION_PREFIX_REGEX is a valid compile-time regex literal")
+});
 
-static SITE_VERIFICATION_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([a-zA-Z0-9]+)-site-verification=").unwrap());
+static SITE_VERIFICATION_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([a-zA-Z0-9]+)-site-verification=")
+        .expect("SITE_VERIFICATION_REGEX is a valid compile-time regex literal")
+});
 
-static PROVIDER_VERIFY_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"([A-Z0-9]+)_verify_").unwrap());
+static PROVIDER_VERIFY_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"([A-Z0-9]+)_verify_")
+        .expect("PROVIDER_VERIFY_REGEX is a valid compile-time regex literal")
+});
 
 // M016: Underscores are intentionally allowed at the start of labels to support
 // SPF/DMARC/DKIM underscore-prefixed subdomains (e.g., _spf.google.com, _dmarc.domain.com,
 // _domainkey.domain.com). This is correct per RFC 7208 and RFC 6376.
 static DOMAIN_VALIDATION_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$").unwrap()
+    Regex::new(r"^[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62}(\.[a-zA-Z0-9_][a-zA-Z0-9\-_]{0,62})*$")
+        .expect("DOMAIN_VALIDATION_REGEX is a valid compile-time regex literal")
 });
 
 // DMARC mailto: extraction regex (fixes B020)
-static MAILTO_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)").unwrap());
+static MAILTO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"mailto:([^@,\s]+@)?([^,;\s]+)")
+        .expect("MAILTO_REGEX is a valid compile-time regex literal")
+});
 
 // SP_TAG_REGEX removed - sp= contains policy values, not domains (C001 fix)
 
 // Pre-compiled SPF mechanism regexes to avoid recompilation in loops (H001 fix)
-static SPF_INCLUDE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"include:\s*([^\s]+)").unwrap());
-static SPF_REDIRECT_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"redirect=\s*([^\s]+)").unwrap());
-static SPF_A_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"a:\s*([^\s]+)").unwrap());
-static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"mx:\s*([^\s]+)").unwrap());
-static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"exists:\s*([^\s]+)").unwrap());
+static SPF_INCLUDE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"include:\s*([^\s]+)")
+        .expect("SPF_INCLUDE_REGEX is a valid compile-time regex literal")
+});
+static SPF_REDIRECT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"redirect=\s*([^\s]+)")
+        .expect("SPF_REDIRECT_REGEX is a valid compile-time regex literal")
+});
+static SPF_A_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"a:\s*([^\s]+)").expect("SPF_A_REGEX is a valid compile-time regex literal")
+});
+static SPF_MX_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"mx:\s*([^\s]+)").expect("SPF_MX_REGEX is a valid compile-time regex literal")
+});
+static SPF_EXISTS_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"exists:\s*([^\s]+)")
+        .expect("SPF_EXISTS_REGEX is a valid compile-time regex literal")
+});
 // M003: ptr: mechanism contains a domain (unlike ip4:/ip6: which contain IP addresses)
-static SPF_PTR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"ptr:\s*([^\s]+)").unwrap());
+static SPF_PTR_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"ptr:\s*([^\s]+)").expect("SPF_PTR_REGEX is a valid compile-time regex literal")
+});
 
 // Pre-compiled DKIM pattern regexes (H002 fix)
-static DKIM_P_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"p=([A-Za-z0-9+/=]+)").unwrap());
-static DKIM_H_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"h=([^;]+)").unwrap());
-static DKIM_S_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"s=([^;]+)").unwrap());
+static DKIM_P_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"p=([A-Za-z0-9+/=]+)").expect("DKIM_P_REGEX is a valid compile-time regex literal")
+});
+static DKIM_H_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"h=([^;]+)").expect("DKIM_H_REGEX is a valid compile-time regex literal")
+});
+static DKIM_S_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"s=([^;]+)").expect("DKIM_S_REGEX is a valid compile-time regex literal")
+});
 
 pub trait LogFailure {
     fn log_failure(

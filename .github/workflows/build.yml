@@ -84,8 +84,12 @@ jobs:
       - name: Download NER model
         if: steps.cache-ner.outputs.cache-hit != 'true'
         run: bash scripts/download-model.sh
+      # --all-features so the NER integration tests (tests/ner_org_tests.rs etc.)
+      # run with the embedded model. The crate default is now `runtime-ner`, under
+      # which those NER paths are gated off; embedded-ner (via --all-features, with
+      # the model downloaded above) keeps that integration coverage.
       - name: Run integration tests
-        run: cargo test --test "*" --locked --verbose
+        run: cargo test --test "*" --locked --all-features --verbose
         timeout-minutes: 10
 
   coverage:

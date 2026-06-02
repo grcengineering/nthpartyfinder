@@ -40,20 +40,31 @@ pub enum WebTrafficSource {
 }
 
 /// Regex patterns for extracting external resource URLs from HTML.
-static SCRIPT_SRC_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"<script[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
-static LINK_HREF_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"<link[^>]+href\s*=\s*["']([^"']+)["']"#).unwrap());
-static IMG_SRC_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"<img[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
-static IFRAME_SRC_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"<iframe[^>]+src\s*=\s*["']([^"']+)["']"#).unwrap());
+static SCRIPT_SRC_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"<script[^>]+src\s*=\s*["']([^"']+)["']"#)
+        .expect("SCRIPT_SRC_RE is a valid compile-time regex literal")
+});
+static LINK_HREF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"<link[^>]+href\s*=\s*["']([^"']+)["']"#)
+        .expect("LINK_HREF_RE is a valid compile-time regex literal")
+});
+static IMG_SRC_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"<img[^>]+src\s*=\s*["']([^"']+)["']"#)
+        .expect("IMG_SRC_RE is a valid compile-time regex literal")
+});
+static IFRAME_SRC_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"<iframe[^>]+src\s*=\s*["']([^"']+)["']"#)
+        .expect("IFRAME_SRC_RE is a valid compile-time regex literal")
+});
 // Catch data-src, data-href, and other lazy-loading attributes
-static DATA_SRC_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"data-(?:src|href)\s*=\s*["'](https?://[^"']+)["']"#).unwrap());
+static DATA_SRC_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"data-(?:src|href)\s*=\s*["'](https?://[^"']+)["']"#)
+        .expect("DATA_SRC_RE is a valid compile-time regex literal")
+});
 // Inline JavaScript URL patterns (e.g., fetch("https://..."), new Image().src = "https://...")
 static INLINE_URL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"["'](https?://[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}[^"']*?)["']"#).unwrap()
+    Regex::new(r#"["'](https?://[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}[^"']*?)["']"#)
+        .expect("INLINE_URL_RE is a valid compile-time regex literal")
 });
 
 /// The main web traffic discovery struct.
@@ -194,9 +205,15 @@ impl WebTrafficDiscovery {
             // (self-hosted SDKs like Pendo, DataDog init and phone home during this period)
             std::thread::sleep(Duration::from_millis(wait_ms));
 
-            // Deregister and collect
+            // Deregister and collect. Recover from a poisoned mutex rather than
+            // panicking: the guarded Vec<String> is a plain URL accumulator, so
+            // its contents stay valid even if a peer thread panicked while holding
+            // the lock. A GRC tool must not abort a scan over a poisoned lock.
             let _ = tab.deregister_response_handling("web_traffic_discovery");
-            let urls = captured_urls.lock().unwrap().clone();
+            let urls = captured_urls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
             Ok(urls)
         });
 
