@@ -49,7 +49,7 @@ headless_chrome = "1.0"
 fancy-regex = "0.13"
 rayon = "1.8"
 which = "6"
-zip = "0.6"
+zip = "8.6"
 # Disk-backed result storage with compression (memory efficiency)
 zstd = "0.13"
 # System memory monitoring for pressure-based throttling
