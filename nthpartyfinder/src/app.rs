@@ -157,6 +157,45 @@ pub fn filter_infra_providers(
     }
 }
 
+/// Whether a discovery source is passive web-traffic scanning (page source or
+/// runtime network requests). Marketing/tracking suppression is scoped to these
+/// sources so disclosed subprocessor-page listings are never dropped (GRC-501).
+fn is_web_traffic_source(record_type: &crate::vendor::RecordType) -> bool {
+    use crate::vendor::RecordType;
+    matches!(
+        record_type,
+        RecordType::WebTrafficSource | RecordType::WebTrafficNetwork
+    )
+}
+
+/// Suppress social / ad-network / marketing-pixel domains that were discovered
+/// *only* via passive web-traffic scanning (GRC-501). These are tracking
+/// endpoints, not data subprocessors, and are the dominant false-positive class
+/// after TF5 triage. Suppression is gated on `include_infra` (the same flag that
+/// keeps common-denominator noise) so `--include-infra` shows the full picture,
+/// and is scoped by discovery source so a domain disclosed on an actual
+/// subprocessor page (`HttpSubprocessor`) is retained.
+/// Returns (filtered results, number removed).
+pub fn filter_marketing_tracking(
+    results: Vec<VendorRelationship>,
+    include_infra: bool,
+) -> (Vec<VendorRelationship>, usize) {
+    if include_infra {
+        (results, 0)
+    } else {
+        let before = results.len();
+        let filtered: Vec<VendorRelationship> = results
+            .into_iter()
+            .filter(|r| {
+                !(analysis::is_marketing_tracking_domain(&r.nth_party_domain)
+                    && is_web_traffic_source(&r.nth_party_record_type))
+            })
+            .collect();
+        let removed = before - filtered.len();
+        (filtered, removed)
+    }
+}
+
 /// Compute the analysis timeout from CLI args and environment variable.
 /// Returns None if timeout is disabled (0), otherwise the Duration.
 pub fn compute_analysis_timeout(cli_timeout: Option<u64>) -> Option<std::time::Duration> {
@@ -474,9 +513,11 @@ pub struct AssembledResults {
     pub raw_count: usize,
     pub dedup_count: usize,
     pub infra_removed: usize,
+    pub marketing_removed: usize,
 }
 
-/// Combine new and resumed results, deduplicate, and optionally filter infra.
+/// Combine new and resumed results, deduplicate, and optionally filter infra
+/// and web-traffic-sourced marketing/tracking false positives (GRC-501).
 pub fn assemble_and_filter_results(
     new_results: Vec<VendorRelationship>,
     resumed_results: Vec<VendorRelationship>,
@@ -487,11 +528,13 @@ pub fn assemble_and_filter_results(
     let (deduped, raw_count) = deduplicate_results(all_results);
     let dedup_count = deduped.len();
     let (filtered, infra_removed) = filter_infra_providers(deduped, include_infra);
+    let (filtered, marketing_removed) = filter_marketing_tracking(filtered, include_infra);
     AssembledResults {
         results: filtered,
         raw_count,
         dedup_count,
         infra_removed,
+        marketing_removed,
     }
 }
 
@@ -1861,6 +1904,12 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         logger.info(&format!(
             "Filtered {} common infra provider entries (use --include-infra to include)",
             assembled.infra_removed
+        ));
+    }
+    if assembled.marketing_removed > 0 {
+        logger.info(&format!(
+            "Suppressed {} social/ad-network marketing-tracking entries from web traffic (use --include-infra to include)",
+            assembled.marketing_removed
         ));
     }
     let results = assembled.results;
@@ -3442,6 +3491,88 @@ mod tests {
         let assembled = assemble_and_filter_results(new, vec![], true);
         assert_eq!(assembled.results.len(), 2);
         assert_eq!(assembled.infra_removed, 0);
+    }
+
+    // ── filter_marketing_tracking (GRC-501) ─────────────────────────
+
+    #[test]
+    fn test_filter_marketing_tracking_suppresses_web_traffic_social() {
+        // facebook.com discovered via web traffic is a tracking pixel, not a
+        // subprocessor — it must be suppressed.
+        let results = vec![
+            make_relationship(
+                "facebook.com",
+                "Meta",
+                "shop.com",
+                RecordType::WebTrafficNetwork,
+                "https://connect.facebook.net/en_US/fbevents.js",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "shop.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+        ];
+        let (filtered, removed) = filter_marketing_tracking(results, false);
+        assert_eq!(removed, 1);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].nth_party_domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_filter_marketing_tracking_keeps_disclosed_subprocessor() {
+        // facebook.com listed on a real subprocessor page is a legitimately
+        // disclosed relationship and must be retained.
+        let results = vec![make_relationship(
+            "facebook.com",
+            "Meta",
+            "shop.com",
+            RecordType::HttpSubprocessor,
+            "listed on /subprocessors",
+        )];
+        let (filtered, removed) = filter_marketing_tracking(results, false);
+        assert_eq!(removed, 0);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_marketing_tracking_respects_include_infra() {
+        let results = vec![make_relationship(
+            "doubleclick.net",
+            "Google",
+            "shop.com",
+            RecordType::WebTrafficSource,
+            "ad pixel",
+        )];
+        let (filtered, removed) = filter_marketing_tracking(results, true);
+        assert_eq!(removed, 0);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_assemble_and_filter_results_suppresses_marketing() {
+        let new = vec![
+            make_relationship(
+                "licdn.com",
+                "LinkedIn",
+                "shop.com",
+                RecordType::WebTrafficNetwork,
+                "insight tag",
+            ),
+            make_relationship(
+                "stripe.com",
+                "Stripe",
+                "shop.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+        ];
+        let assembled = assemble_and_filter_results(new, vec![], false);
+        assert_eq!(assembled.marketing_removed, 1);
+        assert_eq!(assembled.results.len(), 1);
+        assert_eq!(assembled.results[0].nth_party_domain, "stripe.com");
     }
 
     // ── dispatch_export ──────────────────────────────────────────────

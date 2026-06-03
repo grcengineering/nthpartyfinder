@@ -173,6 +173,76 @@ pub fn is_common_denominator(domain: &str) -> bool {
         .any(|&cd| domain == cd || domain.ends_with(&format!(".{}", cd)))
 }
 
+/// Social / ad-network / marketing-pixel domains that are the dominant
+/// false-positive class when discovered via passive web-traffic scanning
+/// (GRC-501). These are tracking/marketing endpoints, not data subprocessors,
+/// so when they surface only because a page loads a pixel or SDK they should be
+/// suppressed rather than counted.
+///
+/// NOTE: this classifier is intentionally source-agnostic. Callers MUST gate
+/// suppression on the discovery source (web-traffic only) — a domain like
+/// `facebook.com` that appears on a company's *published subprocessor page*
+/// (`RecordType::HttpSubprocessor`) is a legitimately-disclosed relationship and
+/// must NOT be suppressed. See `app::filter_marketing_tracking`.
+pub fn is_marketing_tracking_domain(domain: &str) -> bool {
+    let marketing_tracking = [
+        // Meta / Facebook
+        "facebook.com",
+        "facebook.net",
+        "fbcdn.net",
+        "fbsbx.com",
+        // LinkedIn
+        "licdn.com",
+        // Twitter / X advertising + click tracking
+        "ads-twitter.com",
+        "analytics.twitter.com",
+        "t.co",
+        // TikTok
+        "tiktok.com",
+        "tiktokcdn.com",
+        "ttwstatic.com",
+        // Reddit advertising / static
+        "redditstatic.com",
+        "redditmedia.com",
+        // Snap
+        "snapchat.com",
+        "sc-static.net",
+        // Google Marketing Platform / DoubleClick
+        "doubleclick.net",
+    ];
+
+    marketing_tracking
+        .iter()
+        .any(|&m| domain == m || domain.ends_with(&format!(".{}", m)))
+}
+
+/// Groups of base domains that belong to the same organization. When a scan of
+/// one member surfaces another member as a "vendor", it is really a
+/// self-reference (alternate landing / marketing / registrar-of-record domain),
+/// not a third party (GRC-501). Each inner slice is one organization's domain
+/// family; membership is symmetric.
+const KNOWN_SELF_ALIAS_GROUPS: &[&[&str]] = &[
+    // Klaviyo: primary domain + hosted landing-page / alt domains
+    &["klaviyo.com", "myklpages.com", "klaviyomail.com"],
+    // MarkMonitor: corporate registrar + its registrar-of-record landing domain
+    &["markmonitor.com", "saasbee.com"],
+];
+
+/// Whether `vendor_domain` and `customer_domain` resolve to the same
+/// organization via a known alias group (GRC-501). Compared on base domains so
+/// subdomains (e.g. `www.myklpages.com`) are handled. Returns false for an
+/// exact base-domain match, which is already covered by the plain base check.
+pub fn is_known_self_alias(vendor_domain: &str, customer_domain: &str) -> bool {
+    let vendor_base = domain_utils::extract_base_domain(vendor_domain);
+    let customer_base = domain_utils::extract_base_domain(customer_domain);
+    if vendor_base == customer_base {
+        return false;
+    }
+    KNOWN_SELF_ALIAS_GROUPS.iter().any(|group| {
+        group.iter().any(|&d| d == vendor_base) && group.iter().any(|&d| d == customer_base)
+    })
+}
+
 pub fn is_likely_inferred_org(domain: &str, org: &str) -> bool {
     let base = domain.split('.').next().unwrap_or(domain).to_lowercase();
     let org_lower = org.to_lowercase();
@@ -356,7 +426,7 @@ pub fn compute_pressure_delay_ms(pressure_level: u8) -> u64 {
 pub fn should_skip_self_reference(vendor_domain: &str, customer_domain: &str) -> bool {
     let base_domain = domain_utils::extract_base_domain(vendor_domain);
     let customer_base_domain = domain_utils::extract_base_domain(customer_domain);
-    base_domain == customer_base_domain
+    base_domain == customer_base_domain || is_known_self_alias(vendor_domain, customer_domain)
 }
 
 /// Resolve organization names from the discovered vendors map with domain fallback.
@@ -2697,6 +2767,61 @@ mod tests {
             "mail.google.com",
             "example.com"
         ));
+    }
+
+    // ── GRC-501: marketing/tracking + self-alias classifiers ────────
+
+    #[test]
+    fn test_is_marketing_tracking_domain_positive() {
+        for d in [
+            "facebook.com",
+            "connect.facebook.net",
+            "licdn.com",
+            "ads-twitter.com",
+            "tiktok.com",
+            "redditstatic.com",
+            "snapchat.com",
+            "sc-static.net",
+            "doubleclick.net",
+            "stats.g.doubleclick.net",
+        ] {
+            assert!(is_marketing_tracking_domain(d), "expected marketing: {d}");
+        }
+    }
+
+    #[test]
+    fn test_is_marketing_tracking_domain_negative() {
+        // Real subprocessors / unrelated domains must not match.
+        for d in ["stripe.com", "github.com", "notfacebook.com", "example.com"] {
+            assert!(!is_marketing_tracking_domain(d), "unexpected match: {d}");
+        }
+    }
+
+    #[test]
+    fn test_is_known_self_alias_matches_group() {
+        // Klaviyo landing/alt domains resolve to the same org.
+        assert!(is_known_self_alias("myklpages.com", "klaviyo.com"));
+        assert!(is_known_self_alias("www.myklpages.com", "klaviyo.com"));
+        assert!(is_known_self_alias("klaviyomail.com", "klaviyo.com"));
+        // MarkMonitor registrar landing domain.
+        assert!(is_known_self_alias("saasbee.com", "markmonitor.com"));
+    }
+
+    #[test]
+    fn test_is_known_self_alias_non_matches() {
+        // Different orgs, and exact base matches (handled elsewhere), are false.
+        assert!(!is_known_self_alias("stripe.com", "klaviyo.com"));
+        assert!(!is_known_self_alias("klaviyo.com", "klaviyo.com"));
+        assert!(!is_known_self_alias("myklpages.com", "markmonitor.com"));
+    }
+
+    #[test]
+    fn test_should_skip_self_reference_known_alias() {
+        // The alias map extends self-reference suppression beyond exact base.
+        assert!(should_skip_self_reference("myklpages.com", "klaviyo.com"));
+        assert!(should_skip_self_reference("saasbee.com", "markmonitor.com"));
+        // A genuine third party is still kept.
+        assert!(!should_skip_self_reference("pendo.io", "klaviyo.com"));
     }
 
     #[test]
