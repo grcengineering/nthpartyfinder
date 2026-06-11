@@ -83,3 +83,6 @@ venv/
 env/
 ENV/
 .venv/
+
+# scan-run cache artifacts (GRC-367 audit)
+cache/

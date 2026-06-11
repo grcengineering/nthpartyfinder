@@ -1,6 +1,6 @@
 [package]
 name = "nthpartyfinder"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "A cross-platform CLI tool for identifying Nth party vendor relationships through DNS analysis"
 authors = ["Security Community"]
@@ -42,7 +42,7 @@ urlencoding = "2.1"
 ctrlc = "3.4"
 colored = "2.1"
 # DNS over HTTPS support
-hickory-resolver = { version = "0.25", features = ["https-ring"] }
+hickory-resolver = { version = "0.26", features = ["https-ring"] }
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis

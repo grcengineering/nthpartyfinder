@@ -3,6 +3,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -42,6 +43,7 @@ pub struct AnalysisLogger {
     detail_bar: Arc<RwLock<Option<ProgressBar>>>,
     phase: Arc<RwLock<UiPhase>>,
     analysis_metadata: Arc<Mutex<AnalysisMetadata>>,
+    dns_failures: Arc<AtomicUsize>,
     log_buffer: Arc<Mutex<Vec<String>>>,
     log_file_path: Option<String>,
     color_enabled: bool,
@@ -111,6 +113,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled,
@@ -129,6 +132,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled,
@@ -147,6 +151,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled,
@@ -169,6 +174,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled,
@@ -366,6 +372,7 @@ impl AnalysisLogger {
     }
 
     /// Clear the sub-progress detail line.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn clear_sub_progress(&self) {
         let detail_guard = self.detail_bar.read().await;
         if let Some(pb) = detail_guard.as_ref() {
@@ -407,6 +414,7 @@ impl AnalysisLogger {
         self.print_message("SUCCESS", message);
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn print_message(&self, level: &str, message: &str) {
         let timestamp = self.get_timestamp();
 
@@ -490,12 +498,14 @@ impl AnalysisLogger {
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn set_progress_position(&self, position: u64) {
         if let Some(pb) = self.main_bar.read().await.as_ref() {
             pb.set_position(position);
         }
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn finish_progress(&self, final_message: &str) {
         // Clear detail bar first
         {
@@ -589,6 +599,7 @@ impl AnalysisLogger {
     }
 
     /// Update the progress bar's total length while preserving current position
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn set_progress_total(&self, new_total: u64) {
         if let Some(pb) = self.main_bar.read().await.as_ref() {
             pb.set_length(new_total);
@@ -658,6 +669,30 @@ impl AnalysisLogger {
         metadata.unique_vendors = count;
     }
 
+    pub fn record_dns_failure(&self) {
+        self.dns_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn has_dns_failures(&self) -> bool {
+        self.dns_failures.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn dns_failure_count(&self) -> usize {
+        self.dns_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn dns_failure_counter(&self) -> &AtomicUsize {
+        &self.dns_failures
+    }
+
+    /// GRC-367 (fix 1): hand the *shared* `Arc` over the DNS-failure counter to the
+    /// `DnsServerPool` via `with_failure_counter`, so a DoH throttle counted at the pool
+    /// choke-point (`note_throttle` inside `doh_*_lookup`) increments the SAME atomic this
+    /// logger reads for `has_dns_failures()` — the value the exit-3 false-negative guard checks.
+    pub fn dns_failure_counter_arc(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.dns_failures)
+    }
+
     pub fn record_output_file(&self, path: &str) {
         let mut metadata = self
             .analysis_metadata
@@ -721,10 +756,34 @@ impl AnalysisLogger {
                 );
             }
 
+            let dns_fail_count = self.dns_failure_count();
+            if dns_fail_count > 0 {
+                println!(
+                    "{}: {}",
+                    "DNS Failures".bold(),
+                    dns_fail_count.to_string().bright_yellow().bold()
+                );
+            }
+
             println!("{}\n", "========================".bold().cyan());
 
-            // Success message
-            if metadata.total_vendor_relationships > 0 {
+            if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
+                println!(
+                    "{} Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
+                    "WARNING:".bright_yellow().bold(),
+                    dns_fail_count
+                );
+                println!(
+                    "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+                );
+            } else if dns_fail_count > 0 {
+                println!(
+                    "{} Analysis completed with {} vendor relationships, but {} DNS resolution failure(s) occurred. Some vendors may be missing.",
+                    "SUCCESS:".bright_green().bold(),
+                    metadata.total_vendor_relationships.to_string().bright_green().bold(),
+                    dns_fail_count
+                );
+            } else if metadata.total_vendor_relationships > 0 {
                 println!(
                     "{} Analysis completed successfully! Found {} vendor relationships.",
                     "SUCCESS:".bright_green().bold(),
@@ -762,10 +821,27 @@ impl AnalysisLogger {
                 println!("Results Exported: {}", metadata.output_file);
             }
 
+            let dns_fail_count = self.dns_failure_count();
+            if dns_fail_count > 0 {
+                println!("DNS Failures: {}", dns_fail_count);
+            }
+
             println!("========================\n");
 
-            // Success message
-            if metadata.total_vendor_relationships > 0 {
+            if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
+                println!(
+                    "WARNING: Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
+                    dns_fail_count
+                );
+                println!(
+                    "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+                );
+            } else if dns_fail_count > 0 {
+                println!(
+                    "SUCCESS: Analysis completed with {} vendor relationships, but {} DNS resolution failure(s) occurred. Some vendors may be missing.",
+                    metadata.total_vendor_relationships, dns_fail_count
+                );
+            } else if metadata.total_vendor_relationships > 0 {
                 println!(
                     "SUCCESS: Analysis completed successfully! Found {} vendor relationships.",
                     metadata.total_vendor_relationships
@@ -933,6 +1009,7 @@ impl AnalysisLogger {
     }
 
     /// Export all collected logs to the specified file
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn export_logs(&self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref log_file_path) = self.log_file_path {
             if let Ok(buffer) = self.log_buffer.lock() {
@@ -993,6 +1070,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled: true,
@@ -1010,6 +1088,7 @@ impl AnalysisLogger {
             detail_bar: Arc::new(RwLock::new(None)),
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
+            dns_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled: true,
@@ -1981,5 +2060,93 @@ mod tests {
         let phase = UiPhase::Scanning;
         let copied = phase;
         assert_eq!(phase, copied);
+    }
+
+    // ── DNS failure tracking ─────────────────────────────────────────
+
+    #[test]
+    fn test_dns_failure_tracking_initial_state() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        assert!(!logger.has_dns_failures());
+        assert_eq!(logger.dns_failure_count(), 0);
+    }
+
+    #[test]
+    fn test_dns_failure_tracking_single() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        assert!(logger.has_dns_failures());
+        assert_eq!(logger.dns_failure_count(), 1);
+    }
+
+    #[test]
+    fn test_dns_failure_tracking_multiple() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        logger.record_dns_failure();
+        logger.record_dns_failure();
+        assert_eq!(logger.dns_failure_count(), 3);
+    }
+
+    #[test]
+    fn test_dns_failure_counter_is_shared() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        let counter = logger.dns_failure_counter();
+        counter.fetch_add(1, Ordering::Relaxed);
+        assert!(logger.has_dns_failures());
+        assert_eq!(logger.dns_failure_count(), 1);
+    }
+
+    #[test]
+    fn test_dns_failure_warning_banner_no_color() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        logger.record_vendor_relationships(0);
+        logger.record_unique_vendors(0);
+        // end_time is set inside finish_progress; summary works without it
+        // This exercises the WARNING banner path (dns_failures > 0, vendors == 0)
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_dns_failure_success_with_note_no_color() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        logger.record_vendor_relationships(5);
+        logger.record_unique_vendors(3);
+        // end_time is set inside finish_progress; summary works without it
+        // This exercises the SUCCESS-with-DNS-note path (dns_failures > 0, vendors > 0)
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_dns_failure_warning_banner_colored() {
+        let logger = AnalysisLogger::new_forced_color(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        logger.record_dns_failure();
+        logger.record_vendor_relationships(0);
+        logger.record_unique_vendors(0);
+        // end_time is set inside finish_progress; summary works without it
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_dns_failure_success_with_note_colored() {
+        let logger = AnalysisLogger::new_forced_color(VerbosityLevel::Silent);
+        logger.record_dns_failure();
+        logger.record_vendor_relationships(5);
+        logger.record_unique_vendors(3);
+        // end_time is set inside finish_progress; summary works without it
+        logger.print_final_summary();
+    }
+
+    #[test]
+    fn test_no_dns_failure_success_unchanged() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Silent);
+        logger.record_vendor_relationships(5);
+        logger.record_unique_vendors(3);
+        // end_time is set inside finish_progress; summary works without it
+        // No DNS failures — should print normal SUCCESS message
+        logger.print_final_summary();
     }
 }

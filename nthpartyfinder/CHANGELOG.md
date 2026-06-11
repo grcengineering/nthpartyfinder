@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Fixed
+- Default DoH server list replaced with verified JSON-API endpoints. Google's
+  JSON DoH API lives at `/resolve` — `/dns-query` is RFC-8484 wire format and
+  returns HTTP 400 for `application/dns-json`; Quad9 and OpenDNS do not serve
+  the JSON GET API at all. 3 of 4 default DoH servers therefore failed every
+  query, degrading DNS performance and risking false-negative vendor results.
+  Cloudflare/Google IP-literal endpoints added (no DNS bootstrap dependency
+  when UDP/53 is blocked).
 - GRC-500: `cleanup_orphans` deleted the live result-sink files of
   concurrently-running scans on macOS/Windows. `is_process_running` checked
   `/proc/{pid}` (Linux-only), so every PID read as "not running" off Linux and
@@ -19,6 +26,26 @@
 - `--timeout` help now explains that depth-3+/cold-cache scans routinely exceed
   the 600s default (raise it or use `--timeout 0`) and that the output format
   does not affect discovery time.
+
+## [1.0.1] - 2026-05-30
+
+### Fixed
+- GRC-367: DNS-under-concurrency false negatives. DoH throttling (429/5xx) is now detected and
+  surfaced as a distinct error (never parsed into an empty answer); the per-process DNS rate
+  limiter is wired onto the production hot path; provider rotation + backoff on throttle; and
+  throttles are counted at the DoH choke-point so every path (TXT, CNAME, subdomain fan-out,
+  SPF include-chain recursion) feeds the exit-3 false-negative guard. `SharedRateLimiter` no
+  longer holds its lock across an `await`.
+- GRC-368: bumped hickory-resolver 0.25.2 → 0.26.1, clearing RUSTSEC-2026-0118 and the
+  resolver path of RUSTSEC-2026-0119 (the whois-rs 1.6.1 transitive path has no upstream fix
+  and remains documented in deny.toml).
+
+### Changed
+- `--dns-rate-limit` is now enforced (was previously dead config) and forwarded to batch-mode
+  child processes.
+
+### Known issues
+- Batch mode lacks an exit-3 DNS-throttle guard (tracked as GRC-497).
 
 ## [1.0.0] - 2026-04-28
 

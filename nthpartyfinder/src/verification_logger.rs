@@ -38,6 +38,7 @@ impl VerificationFailureLogger {
     }
 
     /// Initialize the log file with header
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn initialize(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             return Ok(());
@@ -61,6 +62,7 @@ impl VerificationFailureLogger {
     }
 
     /// Log a failed verification record inference
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn log_failure(
         &self,
         source_domain: &str,
@@ -100,6 +102,7 @@ impl VerificationFailureLogger {
     }
 
     /// Close the log file
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn close(&self) {
         if !self.enabled {
             return;

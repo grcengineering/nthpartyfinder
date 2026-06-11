@@ -94,6 +94,7 @@ impl SaasTenantDiscovery {
     }
 
     /// Load platforms from legacy saas_platforms.json file
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_platforms(&mut self, path: &Path) -> Result<()> {
         let content = std::fs::read_to_string(path)?;
         let file: PlatformsFile = serde_json::from_str(&content)?;

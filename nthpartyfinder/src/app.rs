@@ -276,25 +276,14 @@ pub fn process_config_result(
 ) -> ConfigOutcome {
     match load_result {
         Ok(cfg) => ConfigOutcome::Ready(Box::new(cfg)),
-        Err(ConfigError::FileNotFound(path)) => match prompt_result {
+        Err(ConfigError::FileNotFound(_path)) => match prompt_result {
             Some(Ok(Some(created_path))) => ConfigOutcome::CreatedNew(created_path),
-            Some(Ok(None)) => ConfigOutcome::Exit {
-                message: format!(
-                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
-                    path.display()
-                ),
-                code: 1,
-            },
-            Some(Err(e)) => ConfigOutcome::Exit {
-                message: format!("Failed to create configuration file: {}", e),
-                code: 1,
-            },
-            None => ConfigOutcome::Exit {
-                message: format!(
-                    "Configuration file not found at: {}. Run with --init to create a default configuration file.",
-                    path.display()
-                ),
-                code: 1,
+            _ => match AppConfig::load_default() {
+                Ok(cfg) => ConfigOutcome::Ready(Box::new(cfg)),
+                Err(e) => ConfigOutcome::Exit {
+                    message: format!("Failed to load embedded default configuration: {}", e),
+                    code: 1,
+                },
             },
         },
         Err(e) => ConfigOutcome::Exit {
@@ -315,6 +304,11 @@ pub fn format_dep_check_warnings(results: &[dep_check::DepCheckResult]) -> Vec<S
 }
 
 /// Build CLI argument vector for a batch-mode subprocess invocation.
+///
+/// GRC-367 (fix 4): `dns_rate_limit` is forwarded as `--dns-rate-limit <n>` when set.
+/// Previously this argument was dropped entirely, so every batch child reverted to the
+/// config-default DNS qps — silently ignoring an operator's explicit `--dns-rate-limit`
+/// (the throttle they set precisely to avoid the 429s GRC-367 is about).
 pub fn build_batch_domain_args(
     domain: &str,
     format: &str,
@@ -322,6 +316,7 @@ pub fn build_batch_domain_args(
     dns_only: bool,
     batch_combined: bool,
     output_base: &Path,
+    dns_rate_limit: Option<u32>,
 ) -> Vec<String> {
     let mut cmd_args = vec![
         "nthpartyfinder".to_string(),
@@ -337,6 +332,11 @@ pub fn build_batch_domain_args(
     if dns_only {
         cmd_args.push("--dns-only".to_string());
     }
+    // fix 4: propagate the operator-supplied DNS rate limit to each batch child.
+    if let Some(rl) = dns_rate_limit {
+        cmd_args.push("--dns-rate-limit".to_string());
+        cmd_args.push(rl.to_string());
+    }
     if !batch_combined {
         let domain_dir = output_base.join(domain.replace('.', "_"));
         cmd_args.push("--output-dir".to_string());
@@ -348,17 +348,29 @@ pub fn build_batch_domain_args(
 /// Resolve the final output path from a computed default and optional user
 /// override. If `user_input` (trimmed) is empty, use `computed_path`. Otherwise,
 /// treat `user_input` as a directory and join with `output_filename`.
+///
+/// Returns `Err` if the user-provided path contains traversal sequences (`..`).
 pub fn resolve_final_output_path(
     computed_path: &str,
     output_filename: &str,
     user_input: &str,
-) -> String {
+) -> Result<String, String> {
     if user_input.is_empty() {
-        computed_path.to_string()
-    } else {
-        let custom_path = Path::new(user_input).join(output_filename);
-        custom_path.to_string_lossy().to_string()
+        return Ok(computed_path.to_string());
     }
+
+    let input_path = Path::new(user_input);
+    for component in input_path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(format!(
+                "Path traversal detected: '{}' contains '..' components",
+                user_input
+            ));
+        }
+    }
+
+    let custom_path = input_path.join(output_filename);
+    Ok(custom_path.to_string_lossy().to_string())
 }
 
 /// Combined results from new + resumed analysis, deduplicated and filtered.
@@ -504,7 +516,7 @@ pub async fn run() -> Result<()> {
 // filter_infra_providers, compute_analysis_timeout, build_full_output_path,
 // collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
+pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
         match AppConfig::create_default_config() {
             Ok(path) => {
@@ -535,7 +547,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
         }
         _ => None,
     };
-    let _app_config = match process_config_result(load_result, prompt_result) {
+    let mut _app_config = match process_config_result(load_result, prompt_result) {
         ConfigOutcome::Ready(cfg) => *cfg,
         ConfigOutcome::CreatedNew(path) => {
             println!(
@@ -550,6 +562,13 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
             bail!(AppExitCode(code));
         }
     };
+
+    // GRC-367: honor --dns-rate-limit by overriding the configured DNS qps before any
+    // DnsServerPool is built (every pool-construction site reads from this config), so the
+    // now-live per-process limiter is actually controllable from the CLI.
+    if let Some(rl) = args.dns_rate_limit {
+        _app_config.rate_limits.dns_queries_per_second = rl;
+    }
 
     eprintln!("  Checking dependencies...");
     #[cfg(feature = "embedded-ner")]
@@ -583,10 +602,17 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
             for msg in format_dep_check_warnings(&results) {
                 eprintln!("⚠️  {}", msg);
             }
+            let ort_unavailable = results
+                .iter()
+                .any(|r| r.name == "ONNX Runtime" && !r.available);
+            if ort_unavailable {
+                eprintln!("⚠️  ONNX Runtime not available — continuing without NER (--disable-slm implied).");
+                args.disable_slm = true;
+            }
         }
         Err(e) => {
-            eprintln!("❌ Missing required dependency:\n{}", e);
-            bail!(AppExitCode(1));
+            eprintln!("⚠️  Dependency issue: {}", e);
+            eprintln!("   Continuing with reduced functionality.");
         }
     }
 
@@ -814,6 +840,8 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
             let dns_only = args.dns_only;
             let output_base = output_base.to_path_buf();
             let batch_combined = args.batch_combined;
+            // fix 4: capture the operator's DNS rate limit so it is forwarded to the child.
+            let dns_rate_limit = args.dns_rate_limit;
             let results = results.clone();
             let logger = logger.clone();
 
@@ -830,6 +858,7 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                     dns_only,
                     batch_combined,
                     &output_base,
+                    dns_rate_limit,
                 );
                 if !batch_combined {
                     let domain_dir = output_base.join(domain.replace('.', "_"));
@@ -976,7 +1005,14 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 );
             }
             let user_input = user_input.trim();
-            resolve_final_output_path(&output_path_str, &output_filename, user_input)
+            match resolve_final_output_path(&output_path_str, &output_filename, user_input) {
+                Ok(path) => path,
+                Err(msg) => {
+                    eprintln!("⚠️  {}", msg);
+                    eprintln!("Using default output path instead.");
+                    output_path_str.to_string()
+                }
+            }
         })
     } else {
         logger.info(&format!("Output file: {}", output_path_str));
@@ -1202,7 +1238,13 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     let processed_domains = Arc::new(Mutex::new(processed_domains_set));
     let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
 
-    let dns_pool = Arc::new(dns::DnsServerPool::from_config(&_app_config));
+    // GRC-367 (fix 1): wire the pool's choke-point throttle counter to the SAME atomic the
+    // exit-3 guard reads (`logger.has_dns_failures()`), so a DoH throttle on any path — incl.
+    // the SPF include-chain recursion — is counted once at the source.
+    let dns_pool = Arc::new(
+        dns::DnsServerPool::from_config(&_app_config)
+            .with_failure_counter(logger.dns_failure_counter_arc()),
+    );
     logger.debug(&format!(
         "Initialized DNS server pool with {} DoH servers and {} DNS servers",
         _app_config.dns.doh_servers.len(),
@@ -1529,6 +1571,13 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
     let analysis_timeout = compute_analysis_timeout(args.timeout);
     let analysis_timeout_secs = analysis_timeout.map(|d| d.as_secs()).unwrap_or(0);
 
+    if let Some(duration) = analysis_timeout {
+        logger.warn(&format!(
+            "Analysis timeout active: {}s. Use --timeout 0 to disable.",
+            duration.as_secs()
+        ));
+    }
+
     let analysis_future = analysis::discover_nth_parties(
         domain,
         args.depth,
@@ -1588,9 +1637,10 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                     "Analysis exceeded the {} second timeout.",
                     analysis_timeout_secs
                 );
-                eprintln!("Partial progress has been saved as a checkpoint. Re-run to resume.");
+                eprintln!("Partial progress has been saved as a checkpoint. Re-run with --resume to continue.");
                 eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
-                bail!(AppExitCode(1));
+                eprintln!("To disable the timeout entirely: --timeout 0");
+                bail!(AppExitCode(142));
             }
         }
     } else {
@@ -1765,6 +1815,10 @@ pub async fn run_inner(args: Args, input: &dyn InputSource) -> Result<()> {
                 eprintln!("⚠️ Warning: Failed to export logs: {}", e);
             }
         }
+    }
+
+    if logger.has_dns_failures() && unique_vendors == 0 {
+        bail!(AppExitCode(3));
     }
 
     Ok(())
@@ -2049,7 +2103,12 @@ async fn analyze_single_domain_for_batch(
     let discovered_vendors = Arc::new(Mutex::new(HashMap::new()));
     let processed_domains = Arc::new(Mutex::new(HashSet::new()));
     let semaphore = Arc::new(Semaphore::new(parallel_jobs));
-    let dns_pool = Arc::new(dns::DnsServerPool::from_config(app_config));
+    // GRC-367 (fix 1): same choke-point wiring as the primary path — the locally constructed
+    // `logger` owns the DNS-failure counter this pool increments on throttle.
+    let dns_pool = Arc::new(
+        dns::DnsServerPool::from_config(app_config)
+            .with_failure_counter(logger.dns_failure_counter_arc()),
+    );
     let recursive_semaphore = Arc::new(Semaphore::new(parallel_jobs.min(10)));
 
     let root_customer_domain = entry.domain.clone();
@@ -2936,10 +2995,7 @@ mod tests {
             Err(ConfigError::FileNotFound(PathBuf::from("/etc/config.toml"))),
             Some(Ok(None)),
         );
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("not found"));
-        assert!(message.contains("--init"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
     }
 
     #[test]
@@ -2948,18 +3004,32 @@ mod tests {
             Err(ConfigError::FileNotFound(PathBuf::from("/missing"))),
             Some(Err("permission denied".to_string())),
         );
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("permission denied"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
     }
 
     #[test]
     fn test_process_config_result_file_not_found_no_prompt() {
         let result =
             process_config_result(Err(ConfigError::FileNotFound(PathBuf::from("/conf"))), None);
-        let (message, code) = unwrap_config_exit(result);
-        assert_eq!(code, 1);
-        assert!(message.contains("not found"));
+        assert!(matches!(result, ConfigOutcome::Ready(_)));
+    }
+
+    #[test]
+    fn test_zero_config_fallback_uses_valid_defaults() {
+        let result = process_config_result(
+            Err(ConfigError::FileNotFound(PathBuf::from(
+                "./config/nthpartyfinder.toml",
+            ))),
+            None,
+        );
+        match result {
+            ConfigOutcome::Ready(cfg) => {
+                assert!(cfg.validate().is_ok(), "Fallback defaults must validate");
+                assert!(!cfg.http.user_agent.is_empty());
+                assert!(!cfg.dns.doh_servers.is_empty() || !cfg.dns.dns_servers.is_empty());
+            }
+            other => panic!("Expected Ready with defaults, got {:?}", other),
+        }
     }
 
     #[test]
@@ -3040,6 +3110,7 @@ mod tests {
             false,
             true, // batch_combined = true → no --output-dir
             Path::new("/tmp/output"),
+            None, // no dns rate limit
         );
         assert_eq!(
             args,
@@ -3049,8 +3120,15 @@ mod tests {
 
     #[test]
     fn test_build_batch_domain_args_with_depth_and_dns_only() {
-        let args =
-            build_batch_domain_args("test.org", "json", Some(3), true, true, Path::new("/out"));
+        let args = build_batch_domain_args(
+            "test.org",
+            "json",
+            Some(3),
+            true,
+            true,
+            Path::new("/out"),
+            None,
+        );
         assert_eq!(
             args,
             vec![
@@ -3075,31 +3153,101 @@ mod tests {
             false,
             false, // not combined → adds --output-dir
             Path::new("/reports"),
+            None,
         );
         assert!(args.contains(&"--output-dir".to_string()));
         let idx = args.iter().position(|a| a == "--output-dir").unwrap();
         assert!(args[idx + 1].contains("sub_example_com"));
     }
 
+    // GRC-367 (fix 4): an operator-supplied --dns-rate-limit MUST be forwarded to each batch
+    // child; previously it was dropped and the child reverted to the config default.
+    #[test]
+    fn test_build_batch_domain_args_forwards_dns_rate_limit() {
+        let args = build_batch_domain_args(
+            "example.com",
+            "csv",
+            None,
+            false,
+            true,
+            Path::new("/tmp/output"),
+            Some(7), // operator pinned DNS to 7 qps
+        );
+        assert!(
+            args.contains(&"--dns-rate-limit".to_string()),
+            "the --dns-rate-limit flag must be forwarded to the batch child"
+        );
+        let idx = args
+            .iter()
+            .position(|a| a == "--dns-rate-limit")
+            .expect("flag present");
+        assert_eq!(
+            args[idx + 1],
+            "7",
+            "the forwarded value must match the operator-supplied qps"
+        );
+    }
+
+    // The flag must be ABSENT when no rate limit was supplied (so the child uses its config
+    // default rather than a spurious 0/override).
+    #[test]
+    fn test_build_batch_domain_args_omits_dns_rate_limit_when_none() {
+        let args = build_batch_domain_args(
+            "example.com",
+            "csv",
+            None,
+            false,
+            true,
+            Path::new("/tmp/output"),
+            None,
+        );
+        assert!(
+            !args.contains(&"--dns-rate-limit".to_string()),
+            "no --dns-rate-limit flag should be emitted when the operator did not set one"
+        );
+    }
+
     // ── resolve_final_output_path ────────────────────────────────────
 
     #[test]
     fn test_resolve_final_output_path_empty_uses_default() {
-        let result = resolve_final_output_path("/tmp/default.csv", "report.csv", "");
+        let result = resolve_final_output_path("/tmp/default.csv", "report.csv", "").unwrap();
         assert_eq!(result, "/tmp/default.csv");
     }
 
     #[test]
     fn test_resolve_final_output_path_custom_dir() {
         let result =
-            resolve_final_output_path("/tmp/default.csv", "report.csv", "/home/user/reports");
+            resolve_final_output_path("/tmp/default.csv", "report.csv", "/home/user/reports")
+                .unwrap();
         assert_eq!(result, "/home/user/reports/report.csv");
     }
 
     #[test]
     fn test_resolve_final_output_path_whitespace_only_uses_default() {
-        let result = resolve_final_output_path("/tmp/out.json", "out.json", "");
+        let result = resolve_final_output_path("/tmp/out.json", "out.json", "").unwrap();
         assert_eq!(result, "/tmp/out.json");
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_rejects_traversal() {
+        let result = resolve_final_output_path("/tmp/out.csv", "report.csv", "../../../etc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Path traversal"));
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_rejects_embedded_traversal() {
+        let result =
+            resolve_final_output_path("/tmp/out.csv", "report.csv", "/home/user/../../etc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_final_output_path_allows_absolute() {
+        let result =
+            resolve_final_output_path("/tmp/out.csv", "report.csv", "/var/reports").unwrap();
+        assert_eq!(result, "/var/reports/report.csv");
     }
 
     // ── assemble_and_filter_results ──────────────────────────────────
@@ -3287,5 +3435,21 @@ mod tests {
             make_relationship("c.com", "Gamma", "e.com", RecordType::DnsTxtSpf, "ev3"),
         ];
         assert_eq!(count_unique_vendors(&results), 3);
+    }
+
+    // ── DNS failure exit code ───────────────────────────────────────
+
+    #[test]
+    fn test_app_exit_code_3_display() {
+        let code = AppExitCode(3);
+        assert_eq!(format!("{}", code), "exit code 3");
+    }
+
+    // ── Timeout exit code ────────────────────────────────────────────
+
+    #[test]
+    fn test_app_exit_code_142_timeout_display() {
+        let code = AppExitCode(142);
+        assert_eq!(format!("{}", code), "exit code 142");
     }
 }

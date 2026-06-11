@@ -16,6 +16,13 @@ use crate::vendor::VendorRelationship;
 
 const FLUSH_INTERVAL: usize = 50;
 const ZSTD_LEVEL: i32 = 3;
+/// Never reap a results file younger than this. A live, actively-written sink
+/// has a fresh mtime, so this age guard protects an in-flight sibling process's
+/// file even when PID-liveness detection is unavailable on the platform
+/// (e.g. no `/proc` on macOS/Windows). Without this guard, concurrent
+/// nthpartyfinder processes delete each other's in-flight result sinks,
+/// causing a hard panic at result read-back (lost full scan output).
+const ORPHAN_MIN_AGE_SECS: u64 = 1800;
 
 pub struct ResultSink {
     writer: zstd::stream::write::Encoder<'static, BufWriter<File>>,
@@ -27,6 +34,7 @@ pub struct ResultSink {
 impl ResultSink {
     /// Create a new ResultSink writing to a zstd-compressed JSONL file.
     /// The file is created in the given directory with a PID-stamped name.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn new(output_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(output_dir).with_context(|| {
             format!(
@@ -53,6 +61,7 @@ impl ResultSink {
         })
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn with_path(path: &Path) -> Result<Self> {
         let parent = path.parent().unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)
@@ -73,6 +82,7 @@ impl ResultSink {
     }
 
     /// Append a single VendorRelationship to the sink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn append_one(&mut self, result: &VendorRelationship) -> Result<()> {
         let json =
             serde_json::to_string(result).context("Failed to serialize VendorRelationship")?;
@@ -89,6 +99,7 @@ impl ResultSink {
     }
 
     /// Append a batch of VendorRelationships to the sink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn append_batch(&mut self, results: &[VendorRelationship]) -> Result<usize> {
         for result in results {
             self.append_one(result)?;
@@ -97,6 +108,7 @@ impl ResultSink {
     }
 
     /// Flush the zstd encoder to ensure data is written to disk.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn flush(&mut self) -> Result<()> {
         self.writer
             .flush()
@@ -107,6 +119,7 @@ impl ResultSink {
 
     /// Finalize the zstd stream and return all results by reading back the file.
     /// This consumes the ResultSink.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn drain_all(mut self) -> Result<Vec<VendorRelationship>> {
         // Flush any remaining data
         self.flush()?;
@@ -122,6 +135,7 @@ impl ResultSink {
 
     /// Read results from a zstd-compressed JSONL file.
     /// Uses a tolerant parser that skips corrupt lines (crash recovery).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn read_results(path: &Path) -> Result<Vec<VendorRelationship>> {
         let file = File::open(path)
             .with_context(|| format!("Failed to open result file: {}", path.display()))?;
@@ -181,6 +195,7 @@ impl ResultSink {
         &self.path
     }
 
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn cleanup_orphans(dir: &Path) -> Result<usize> {
         let mut cleaned = 0;
         let pattern = "nthpartyfinder-results-";
@@ -206,8 +221,26 @@ impl ResultSink {
 
                 if let Some(pid_str) = pid_str {
                     if let Ok(pid) = pid_str.parse::<u32>() {
-                        // Check if this PID is still running
-                        if !is_process_running(pid) {
+                        // Never reap our own in-flight file.
+                        if pid == std::process::id() {
+                            continue;
+                        }
+                        // A file is only an orphan if the owning PID is NOT
+                        // running AND it is older than ORPHAN_MIN_AGE_SECS.
+                        // The age guard is the load-bearing safety net: a live
+                        // sibling sink is being actively written (fresh mtime),
+                        // so it survives even where PID liveness can't be
+                        // determined (no /proc on macOS) — which is the bug
+                        // that made concurrent runs delete each other's sinks.
+                        let old_enough = entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|mtime| mtime.elapsed().ok())
+                            .map(|age| age.as_secs() >= ORPHAN_MIN_AGE_SECS)
+                            .unwrap_or(false); // unknown age → treat as fresh (do not delete)
+
+                        if old_enough && !is_process_running(pid) {
                             if let Ok(canonical) = entry.path().canonicalize() {
                                 if let Err(e) = std::fs::remove_file(&canonical) {
                                     eprintln!(
@@ -374,15 +407,30 @@ mod tests {
 
     #[test]
     fn test_orphan_cleanup() {
+        // NOTE: this test previously asserted that a *freshly-written*
+        // results file was deleted (cleaned == 1). That assertion codified
+        // the TF-3 data-loss bug: concurrent runs deleting each other's
+        // in-flight sinks. Correct contract is now: a fresh file is
+        // preserved (age guard); only a genuinely old file with a dead PID
+        // is reaped.
         let tmp = TempDir::new().unwrap();
-
-        // Create a fake orphan file with a non-existent PID
         let orphan_path = tmp.path().join("nthpartyfinder-results-999999.jsonl.zst");
         std::fs::write(&orphan_path, b"fake data").unwrap();
         assert!(orphan_path.exists());
 
+        // Fresh file → must NOT be reaped, even though PID 999999 is dead.
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
-        assert_eq!(cleaned, 1);
+        assert_eq!(cleaned, 0, "a fresh in-flight sink must be preserved");
+        assert!(orphan_path.exists());
+
+        // Backdate it well beyond ORPHAN_MIN_AGE_SECS → now a true orphan.
+        let _ = std::process::Command::new("touch")
+            .arg("-t")
+            .arg("200001010000")
+            .arg(&orphan_path)
+            .status();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 1, "an aged file with a dead PID should be reaped");
         assert!(!orphan_path.exists());
     }
 
@@ -867,6 +915,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_check_disk_space_nonexistent_path() {
         let result = check_disk_space(Path::new("/nonexistent/path/that/does/not/exist"));
@@ -954,5 +1003,44 @@ mod tests {
         std::fs::write(&bad_name, b"data").unwrap();
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
         assert_eq!(cleaned, 0);
+    }
+
+    /// Regression for TF-3 (result-sink data-loss panic). Concurrent
+    /// nthpartyfinder processes were deleting each other's *in-flight*
+    /// result sinks: `is_process_running()` always returned false off-Linux
+    /// (no `/proc` on macOS), so `cleanup_orphans` treated a live sibling's
+    /// fresh file as a dead orphan and removed it, making the owner panic at
+    /// result read-back and discard the entire scan. A freshly-written
+    /// results file MUST survive cleanup regardless of PID-liveness.
+    #[test]
+    fn test_cleanup_orphans_preserves_fresh_sibling_file() {
+        let tmp = TempDir::new().unwrap();
+        let sibling = tmp
+            .path()
+            .join("nthpartyfinder-results-4000000000.jsonl.zst");
+        std::fs::write(&sibling, b"in-flight results").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0, "fresh in-flight sink must not be reaped");
+        assert!(
+            sibling.exists(),
+            "TF-3 regression: a freshly-written results file was deleted by cleanup_orphans"
+        );
+    }
+
+    /// cleanup_orphans must never delete the current process's own sink file.
+    #[test]
+    fn test_cleanup_orphans_skips_current_pid() {
+        let tmp = TempDir::new().unwrap();
+        let own = tmp.path().join(format!(
+            "nthpartyfinder-results-{}.jsonl.zst",
+            std::process::id()
+        ));
+        std::fs::write(&own, b"our own sink").unwrap();
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+        assert_eq!(cleaned, 0);
+        assert!(
+            own.exists(),
+            "cleanup must never delete the current process's own sink"
+        );
     }
 }

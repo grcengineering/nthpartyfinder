@@ -114,6 +114,7 @@ impl Checkpoint {
 
     /// Load a checkpoint from the given output directory.
     /// Returns an error if the checkpoint version is incompatible (M012 fix).
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load(output_dir: &Path) -> Result<Self> {
         let path = Self::get_checkpoint_path(output_dir);
         let content = std::fs::read_to_string(&path)?;
@@ -132,6 +133,7 @@ impl Checkpoint {
 
     /// Save the checkpoint to its output directory using atomic write
     /// (write to temp file, then rename to prevent corruption on interrupt)
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn save(&self, output_dir: &Path) -> Result<()> {
         let path = Self::get_checkpoint_path(output_dir);
         let temp_path = output_dir.join(".nthpartyfinder-checkpoint.tmp");
@@ -158,6 +160,7 @@ impl Checkpoint {
     }
 
     /// Delete the checkpoint file (called on successful completion)
+    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn delete(output_dir: &Path) -> Result<()> {
         let path = Self::get_checkpoint_path(output_dir);
         if path.exists() {

@@ -16,29 +16,18 @@ defaults:
     working-directory: nthpartyfinder
 
 jobs:
-  dependency-audit:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        run: |
-          cargo audit \
-            --ignore RUSTSEC-2026-0097 \
-            --ignore RUSTSEC-2024-0421 \
-            --ignore RUSTSEC-2025-0057 \
-            --ignore RUSTSEC-2025-0119 \
-            --ignore RUSTSEC-2024-0436 \
-            --ignore RUSTSEC-2025-0134 \
-            --ignore RUSTSEC-2026-0118 \
-            --ignore RUSTSEC-2026-0119 \
-            --deny warnings
-
+  # ── SCA GATE (blocking) ──────────────────────────────────────────────────
+  # cargo-deny is the single SCA gate (2026 posture: cargo-audit's maintainer
+  # stepped back Mar-2025; cargo-deny + RustSec DB is the recommended Rust
+  # advisory/license/source gate). Documented risk-acceptances live in
+  # deny.toml [advisories] as structured { id, reason } entries with full
+  # rationale; `unused-ignored-advisory = "warn"` auto-flags stale ignores.
+  # The previous standalone `cargo audit --ignore <8 IDs>` step was REMOVED:
+  # it duplicated deny.toml's suppression AND re-silenced 3 advisories deny.toml
+  # already marks RESOLVED (dead ignore entries — the exact stale-suppression
+  # anti-pattern the zero-suppression rule targets).
   cargo-deny:
-    name: Cargo Deny
+    name: Cargo Deny (SCA gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -48,17 +37,115 @@ jobs:
           manifest-path: nthpartyfinder/Cargo.toml
           arguments: --all-features
 
-  sast-scan:
-    name: SAST Scan
+  # ── SCA BREADTH (OSV, report-only) ───────────────────────────────────────
+  # Second independent engine over the OSV DB (no arbitrary-code-exec path).
+  # Report-only by design: cargo-deny above is the gate; this widens coverage
+  # and surfaces SARIF without a second blocking flip mid-campaign.
+  osv-scanner:
+    name: OSV Scanner (report-only)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Install Semgrep
-        run: pip install semgrep
-      - name: Run Semgrep
-        run: semgrep scan --config "p/rust" --config "p/security-audit" . --json > sast-results.json || true
-      - name: Upload SAST results
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Run osv-scanner
+        continue-on-error: true
+        # The repo-root action.yml is a stub with NO `runs:` section ("Top level
+        # 'runs:' section is required"). The real Docker action lives at the
+        # `osv-scanner-action/` subpath; same pinned commit, which IS tag v2.3.8.
+        # NB: this is a Docker `uses:` action — it runs at GITHUB_WORKSPACE (repo
+        # root), NOT under `defaults.run.working-directory`. Paths below are
+        # therefore repo-root-relative, and --output writes where the upload
+        # step reads it (nthpartyfinder/osv.sarif).
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
-          name: sast-results
-          path: nthpartyfinder/sast-results.json
+          scan-args: |-
+            --lockfile=nthpartyfinder/Cargo.lock
+            --format=sarif
+            --output=nthpartyfinder/osv.sarif
+      - name: Upload OSV SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        with:
+          sarif_file: nthpartyfinder/osv.sarif
+          category: osv-scanner
+
+  # ── SAST (Opengrep, report-only — gate flip is the scheduled follow-up) ───
+  # Replaces the prior `semgrep scan ... || true` (non-gating theater that
+  # discarded its JSON to an artifact). Opengrep is the OSS SAST engine of
+  # record. Pinned + signature-verified install (never unpinned curl|bash).
+  # IMPORTANT (advisor): a green Opengrep run is NOT proof of correctness —
+  # an empty/zero-rule load also exits 0. We therefore (a) assert rule files
+  # exist and (b) print the loaded-rule count. Report-only NOW; the
+  # `--error --severity ERROR` gate flip is the documented follow-up AFTER a
+  # clean report-only baseline on master (never flip gating before baseline,
+  # else branch protection blocks the campaign's own bugfix merges).
+  sast-opengrep:
+    name: SAST — Opengrep (report-only)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # cosign must be on PATH BEFORE the Opengrep installer runs — its
+      # `--verify-signatures` flag shells out to cosign and otherwise fails with
+      # "cosign is required for --verify-signatures but is not installed."
+      - name: Install cosign (for Opengrep signature verification)
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - name: Install Opengrep (pinned + signature-verified)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.21.0/install.sh \
+            -o install-opengrep.sh
+          bash install-opengrep.sh -v v1.21.0 --verify-signatures
+          echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
+      - name: Assert local ruleset present (anti empty-ruleset trap)
+        run: test -s .opengrep/rules.yml && grep -c '  - id:' .opengrep/rules.yml
+      - name: Run Opengrep (report-only, SARIF)
+        run: |
+          opengrep scan --config .opengrep/rules.yml \
+            --sarif-output=opengrep.sarif --verbose . || true
+      - name: Upload Opengrep SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        with:
+          sarif_file: nthpartyfinder/opengrep.sarif
+          category: opengrep
+
+  # ── SECRET SCANNING (blocking — secrets must never merge) ─────────────────
+  secret-scan:
+    name: Secret Scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0  # full history so a leaked-then-deleted secret is caught
+      # gitleaks-ACTION requires a paid GITLEAKS_LICENSE for orgs and silently
+      # no-ops without it. We use the FREE gitleaks CLI instead: download a
+      # pinned release tarball, verify its SHA256 against the published
+      # checksum, then run `detect` with `--exit-code 1` so the job FAILS
+      # (blocks the merge) when any secret is found, and passes otherwise.
+      - name: Download + verify + run gitleaks (BLOCKING)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          # sha256 of gitleaks_8.30.1_linux_x64.tar.gz, from the release's
+          # published gitleaks_8.30.1_checksums.txt.
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          curl -fsSL "$url" -o "$tarball"
+          echo "${GITLEAKS_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" gitleaks
+          chmod +x gitleaks
+          # `working-directory: nthpartyfinder` (workflow defaults) makes this
+          # step's CWD the subdir, so scan the whole repo via `--source ..`.
+          # `--config ../.gitleaks.toml` is the repo-root config: it extends the
+          # full default ruleset and allowlists ONLY documented false positives
+          # (public model checksums + DNS test fixtures); see that file. Every
+          # real secret rule stays active + BLOCKING via `--exit-code 1`.
+          ./gitleaks detect --source .. --config ../.gitleaks.toml --no-banner --redact --exit-code 1

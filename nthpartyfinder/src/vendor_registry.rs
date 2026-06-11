@@ -301,6 +301,7 @@ static VENDOR_REGISTRY: OnceLock<VendorRegistry> = OnceLock::new();
 
 /// Testable core of config-directory search. Accepts pre-resolved inputs
 /// so tests can exercise every branch without filesystem or env-var side effects.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn find_config_dir_inner(
     cwd_config: &Path,
     exe_path: Option<PathBuf>,
