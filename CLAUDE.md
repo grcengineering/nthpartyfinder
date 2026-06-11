@@ -1,6 +1,6 @@
 # nthpartyfinder — project rules
 
-- **Always invoke cargo via the full path `~/.cargo/bin/cargo`** in agent shells on this machine. Bare `cargo` gets wrapped through the Socket Firewall proxy (`sfw`, a package-manager network filter); when its proxy degrades it MITMs loopback wiremock test traffic (405 "Connection Required" pages) and hangs live-network tests indefinitely. CI does not have this wrapper — full-path local + CI green is the authoritative pair.
+- Bare `cargo` on this machine is wrapped through Socket Firewall (`sfw` — supply-chain network filter) via a scoped zshrc function. Fixed 2026-06-11: `NO_PROXY=localhost,127.0.0.1,::1` exempts loopback (wiremock tests pass through the wrapper), and never-network subcommands (`fmt`/`clean`/`--version`) skip the ~0.4s wrapper overhead. If sfw ever wedges again (symptom: 405 "Socket Firewall Connection Required" on local test servers, or hanging live-network tests), fall back to `~/.cargo/bin/cargo` and check the proxy env it injects with `sfw sh -c 'env | grep -i proxy'`.
 - **The project ISA at `./ISA.md` is the system of record** — read it at task start (criteria, decisions, verification history, open follow-ups TF-RERUN/TF-COV/TF-SLSA/TF-CATO/TF-SILENT).
 - **Run `cargo test` from `nthpartyfinder/`** (the crate dir), not the repo root.
 - No live DNS in the unit/integration suite (wiremock only; live smoke tests are `#[ignore]`-gated). DoH endpoints must serve the JSON GET API (`application/dns-json`) — verify any new provider live before adding it.
