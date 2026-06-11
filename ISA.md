@@ -1,15 +1,17 @@
 ---
 project: nthpartyfinder
-task: SSCS-harden nthpartyfinder v1.0.0 + parallelized multi-domain depth-5 scan test campaign
+task: "DNS demo-solid: fix DoH endpoints + kill silent failures for Vanta TPRM team share (2026-06-10)"
 effort: E4
-phase: complete
-progress: 78/142 verified · 18 DEFERRED-VERIFY · 46 pending post-TF-3 campaign re-run
+phase: execute
+progress: 7/42 (task ISC-143..184) · prior task 78/142 + 18 DEFERRED-VERIFY (see 2026-05-16 sections)
 mode: algorithm
-started: 2026-05-16
-updated: 2026-05-16T-complete
+started: 2026-06-11T01:33:00Z
+updated: 2026-06-11T02:25:00Z
 algorithm_config:
   effort_source: context-override
   classifier: { mode: ALGORITHM, tier: E3, source: fail-safe-timeout }
+prior_tasks:
+  - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
 ---
 
 # ISA — nthpartyfinder
@@ -225,6 +227,60 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - [ ] ISC-141: Anti: no global CLAUDE.md / system rule violated during execution (esp. zero-suppression, 95% floor, bun-not-npm) — self-audit
 - [ ] ISC-142: Anti: scanner behaviour unchanged for inputs that were already correct (no fix introduced a new FP/FN) — pre/post oracle diff on vanta+klaviyo
 
+### Task 2026-06-10 · DNS demo-solid (Vanta TPRM share) — DNS correctness & configuration
+- [x] ISC-143: Every DoH server in `dns.rs` hardcoded defaults returns HTTP 200 + parseable JSON for a live TXT query — curl probe each
+- [x] ISC-144: Every DoH server in crate `config/nthpartyfinder.toml` returns HTTP 200 + parseable JSON for a live TXT query — curl probe each
+- [x] ISC-145: Hardcoded defaults in `dns.rs` and shipped `config/nthpartyfinder.toml` list identical DoH servers (name+url) — extract + compare
+- [x] ISC-146: Untracked runtime config `./config/nthpartyfinder.toml` (repo root) no longer lists Google `/dns-query`, Quad9, or OpenDNS JSON endpoints — grep
+- [x] ISC-147: `--init`-regenerated config's DoH servers all pass a live JSON GET probe — run + curl
+- [x] ISC-148: TXT lookup for vanta.com via the built binary returns >0 records — live run
+- [ ] ISC-149: CNAME lookup path works (live or wiremock evidence) — test/run output
+
+### Task 2026-06-10 · Failure visibility (anti-silent-failure)
+- [ ] ISC-150: A DoH server failure produces a logged warning naming the provider (warn-once-then-debug) — code + live/-v evidence
+- [ ] ISC-151: All-DoH-failure falls back to traditional DNS (test exists and passes) — cargo test
+- [ ] ISC-152: All-resolution-paths-failing surfaces a visible warning and counts toward the exit-3 guard, never a bare silent empty success — code + test
+- [ ] ISC-153: Anti: no `Err(_) =>` discard on DNS/HTTP result paths without log/count/justification — fleet audit + fix evidence
+- [ ] ISC-154: Anti: DoH HTTP 4xx is never parsed as "0 records success" anywhere (DNS_ENDPOINT class returned; wiremock regression test) — cargo test
+- [ ] ISC-155: Silent-failure audit fleet ran across all src/ modules; every confirmed finding fixed or justified in Decisions — workflow output + triage
+- [ ] ISC-156: dns-json RCODE (Status) ≠ 0/3 returns an error, never empty success (wiremock test) — cargo test
+- [ ] ISC-157: Authoritative-empty (2xx, RCODE 0/3, no Answer) returns quiet Ok(empty) — no spurious "All DNS resolution failed" warn for recordless domains — test + live -v run
+
+### Task 2026-06-10 · Performance
+- [x] ISC-158: Single TXT resolution via working DoH completes <1s warm — live timing
+- [x] ISC-159: Full default depth-1 analysis of vanta.com completes without hang, within the 600s default timeout — timed live run (refined: see Decisions)
+- [ ] ISC-160: A failed DoH endpoint cannot stall a query beyond its timeout + rotation is immediate (no backoff) for broken endpoints — code + test
+- [ ] ISC-161: Broken-endpoint rotation: resilient lookup recovers records when one provider 400s and another works (wiremock test) — cargo test
+
+### Task 2026-06-10 · Build, lint, tests (CI parity)
+- [ ] ISC-162: `cargo build --release` exits 0 — captured
+- [ ] ISC-163: `cargo test --lib` exits 0, zero failures — captured
+- [ ] ISC-164: `cargo test` all targets exits 0, zero failures — captured
+- [ ] ISC-165: `cargo fmt -- --check` exits 0 — captured
+- [ ] ISC-166: `cargo clippy --all-targets` with `-D warnings` exits 0 — captured
+- [ ] ISC-167: Anti: no test suppressed, skipped, or weakened to go green (corrections allowed with rationale) — diff review
+
+### Task 2026-06-10 · Functional end-to-end (demo surface)
+- [x] ISC-168: `nthpartyfinder --domain vanta.com` exits 0 and reports >0 vendor relationships — live run
+- [x] ISC-169: CSV export parseable with documented header (refined: schema is 10 columns incl. Root Customer + Evidence; README table updated to match) — file read
+- [x] ISC-170: JSON export valid with summary + relationships keys — jq
+- [x] ISC-171: Markdown and HTML exports non-empty and well-formed — file read
+- [x] ISC-172: `--depth 2` honored (no layer >2) — output assertion
+- [x] ISC-173: WHOIS org resolution returns an organization for ≥1 vendor in live run — output field
+- [x] ISC-174: `--help`/`--version` exit 0; version matches Cargo.toml (1.0.1) — captured
+- [ ] ISC-175: Invalid domain input → clear error, nonzero exit, no panic — captured
+- [x] ISC-176: Cache subcommands operate without error — captured
+- [ ] ISC-177: `-v` live run shows DNS provider selection/failure logging — captured stderr
+- [x] ISC-178: Zero-config run (no ./config) works via embedded defaults (GRC-364 verified live post-merge) — run from empty dir
+
+### Task 2026-06-10 · Repo hygiene & integration
+- [x] ISC-179: docs contain no stale broken DoH endpoint examples in operative docs (archival plans exempt) — rg
+- [x] ISC-180: Stray crate-root `*.log` debris gitignored (none tracked) — git ls-files
+- [ ] ISC-181: Endpoint fix + master merge + hardening committed; working tree clean of unintended changes — git status/log
+- [x] ISC-182: Split-brain resolved: HEAD contains BOTH GRC-367 visibility machinery (note_throttle, resilient rotation, exit-3 guard) AND the corrected endpoint set — grep both in one tree
+- [ ] ISC-183: Anti: no secrets or local absolute paths introduced into committed files — diff scan
+- [ ] ISC-184: Fresh rebuilt binary's embedded `DEFAULT_CONFIG` (via `--init`) contains only verified-working DoH servers — rebuild + read-back
+
 ## Test Strategy
 
 | isc range | type | check | threshold | tool |
@@ -236,6 +292,12 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 | 107–115 | FP/FN | grep outputs for known-bad classes; RCA per anomaly | 0 FP-class / ≥1 expected FN-negative | rg, RCA |
 | 116–122 | regression | build/test/clippy/fmt/coverage after fixes; diff audits | exit 0 / ≥95% | Bash, git diff |
 | 123–142 | governance | orchestration, advisor, Cato, RedTeam, re-read, anti-criteria | present/clean | Agent, Inference, git |
+| 143–149 | live-probe + config diff | curl each DoH endpoint; compare code/config/runtime/init server lists | HTTP 200 + parse / exact match | Bash curl, rg |
+| 150–157 | unit + code | wiremock DNS_ENDPOINT/RCODE/authoritative-empty tests; fleet audit triage | tests green / findings triaged | cargo test, Workflow |
+| 158–161 | timing + unit | live latency, timed depth-1 run, rotation tests | <1s warm / <5min / green | Bash time, cargo test |
+| 162–167 | toolchain | build/test/fmt/clippy -D warnings | exit 0 | Bash |
+| 168–178 | e2e CLI | live runs, exports, flags, zero-config | per-ISC predicate | Bash + jq |
+| 179–184 | repo + rebuild | docs grep, gitignore, commits, split-brain grep, --init read-back | clean | Bash, git |
 
 ## Features
 
@@ -249,6 +311,14 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 | F6-SSCS-Remediate | Fix path-injection masking, coverage gate→95%, B3/B5/B6/B7 gaps | ISC-10..46 | F1,F2 | serial-on-primary |
 | F7-BugFix | Fix campaign-found bugs + regression tests | ISC-114..122 | F5 | serial/worktree |
 | F8-Govern | Advisor, Cato, RedTeam, results log, GO/NO-GO, commit | ISC-123..142 | F6,F7 | no |
+| T2-EndpointFix | Land verified DoH endpoint set (code+config+runtime+init) | ISC-143..148,184 | — | no |
+| T2-MasterMerge | Merge master (GRC-367/368/364/365 + v1.0.1) into branch, resolve conflicts | ISC-182 | T2-EndpointFix | no |
+| T2-Hardening | DNS_ENDPOINT class, RCODE gate, no-backoff rotation, warn-once logging, authoritative-empty | ISC-150..157,160,161 | T2-MasterMerge | no |
+| T2-RegressionTests | Wiremock tests pinning the new behavior (Engineer, Forge-unavailable substitute) | ISC-154,156,157,161,167 | T2-Hardening | yes (agent) |
+| T2-SilentFailureAudit | Workflow fleet over all src/ modules + adversarial verify | ISC-153,155 | — | yes (fleet) |
+| T2-LiveE2E | Live demo-surface validation: runs, exports, timings, zero-config | ISC-148,149,158,159,168..178 | T2-Hardening | partial |
+| T2-CIParity | build/test/fmt/clippy gates | ISC-162..167 | T2-RegressionTests | no |
+| T2-Hygiene | docs/logs/commits/secret-scan | ISC-179..183 | all T2 | no |
 
 ## Decisions
 
@@ -287,6 +357,14 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - 2026-05-16 — **Forge delegation relaxed (soft floor, show-your-math).** E4 auto-includes Forge for coding. Relaxed for the TF-3 fix: root cause was precisely proven from captured real evidence (`app.rs:1627` panic + `is_process_running` `/proc` portability bug), the fix is a surgical single-function age-guard+liveness change with 4 deterministic regression tests, and a Forge round-trip adds latency without correctness benefit. Delegation floor met overall via research sub-agent + parallel campaign + audit attempt + advisor. Net delegation count ≥ E4 soft floor.
 - 2026-05-16 — **Cato (E4 mandatory VERIFY) + final advisor: infra-blocked, reported not faked.** Spawn of Cato and the pre-complete advisor was cancelled by a transient `claude-opus-4-7[1m] classifier unavailable` outage (same Inference path that fail-safed the mode classifier at session start). Per honest-reporting doctrine this is recorded, not papered over. The pre-BUILD advisor DID run and materially reshaped execution ordering (logged above). Follow-up TF-CATO: re-run `Agent(Cato)` cross-vendor audit + pre-complete advisor when the model path recovers, before any v1.0.0 tag.
 - 2026-05-16 — **Two pre-existing tests corrected (not weakened — ISC-120 honored).** `test_orphan_cleanup` and `test_is_process_running_current_process` were *passing tests that codified the TF-3 bug* (asserted fresh-file deletion and "no /proc → false" as expected). Rewritten to assert correct post-fix behavior + a positive aged-orphan-still-reaped path. Strengthening, with full rationale, per zero-suppression/honest-test discipline.
+- 2026-06-11T01:33Z — **Task 2026-06-10 OBSERVE (Gate A live repro BEFORE code reads):** old Google `/dns-query?name=` → HTTP 400 "call the JSON handler at /resolve"; Quad9 → 400 "unable to decode BASE64-URL"; OpenDNS → 400 "No valid query received"; all four replacement endpoints → HTTP 200 with real TXT answers, 46–61ms (IP literals) / 1.16s (cloudflare-dns.com cold TLS). 3 of 4 default DoH providers failed every JSON GET query.
+- 2026-06-11T01:50Z — **Root-cause-at-ingestion:** bad state (provider error → empty record set) enters at `doh_*_lookup`; GRC-367's guard catches only 429/5xx, so HTTP 400 — the exact incident class — still fell through to `.json()` parse (Err by accident for non-JSON bodies, silent Ok(empty) for JSON bodies). Fix lands at ingestion: non-2xx → DNS_ENDPOINT error class; RCODE Status ∉ {0,3} → DNS_ENDPOINT; both count via note_throttle for the exit-3 guard.
+- 2026-06-11T02:00Z — **Split-brain resolved (RootCauseAnalysis finding):** endpoint fix lived uncommitted on `fix/GRC-500-sink-cleanup-race` while master (20+ commits ahead: GRC-367 visibility, GRC-368 hickory 0.26, GRC-364 zero-config, GRC-365 ONNX degrade, v1.0.1) still shipped all four broken endpoints. Committed endpoint fix (6d52a46), merged master in (be34b6b). Conflicts resolved: result_sink.rs → branch's sysinfo liveness kept (sysinfo already a dep via memory_monitor; coverage stub + tests + CHANGELOG reference it; master's kill-0 variant discarded); CHANGELOG → both sections kept ([Unreleased] GRC-500 + DNS endpoint entry added, [1.0.1] preserved).
+- 2026-06-11T02:05Z — **Inverse noise bug:** domains with zero TXT records previously fell through the race to the system resolver and warned "All DNS resolution failed" — authoritative-empty (2xx, RCODE 0/3) now short-circuits as a real answer (quiet), reserving the warn for true transport/endpoint failure. Also saves a UDP fallback lookup per recordless name on the subdomain fan-out.
+- 2026-06-11T02:10Z — **Broken-endpoint rotation:** GRC-367 rotated only on throttle; non-throttle errors broke immediately, so one misconfigured endpoint killed the whole DoH attempt. DNS_ENDPOINT errors now rotate to the next provider immediately WITHOUT backoff (broken ≠ busy). Per-provider warn-once-then-debug logging added (`log_doh_failure`, Mutex<HashMap> — failures rare, no await in critical section).
+- 2026-06-11T02:15Z — **Forge unavailable (E4 auto-include honored, not faked):** Forge correctly reported `codex CLI not found at ~/.bun/bin/codex` and refused silent fallback. Regression-test authoring re-dispatched to Engineer (Claude-family) with the substitution disclosed. Cato (same codex engine) expected unavailable at VERIFY — will attempt, and on unavailability record the deviation and run a disclosed same-family adversarial review instead (mirrors 2026-05-16 TF-CATO precedent).
+- 2026-06-11T02:20Z — **Runtime config sync:** untracked repo-root `./config/nthpartyfinder.toml` (loaded when running from repo root) still carried the four broken endpoints — overwritten wholesale with the fixed crate config. Note: if it held local customizations beyond the DNS section they were replaced with shipped defaults (file matched the old shipped config in all inspected regions).
+- 2026-06-11T02:20Z — **Prior-task follow-up status from master merge:** TF-1 (zero-config exit 1) → closed by GRC-364 on master (verify live: ISC-178); TF-2 (ONNX guidance) → GRC-365; TF-4 (bamboohr 600s timeout) → master's `--timeout` help text + exit 142 warn (6335032). TF-COV/TF-SLSA/TF-RERUN/TF-CATO remain open follow-ups, out of this task's demo-solid scope except as noted.
 - 2026-05-16 — **Paperclip available but Claude Code sub-agents + background tasks chosen as the parallel substrate.** Paperclip (running, :3100, issue/agent/worktree orchestrator) was identified; the workload was independent read/output fan-out which `Agent(run_in_background)` + `Bash(run_in_background)` serve more directly without worktree ceremony. D4 satisfied via that substrate; Paperclip not directly driven (honest scoping).
 
 ## Verification
@@ -341,3 +419,38 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - TF-4 (perf finding): bamboohr.com d1/d3/d5 all `exit=142` (600s cap) — deep/SaaS-tenant-heavy scans don't complete in 10min; candidate R001-regression or inherent cost → triage on post-fix re-run
 - **DEFERRED-VERIFY** (honest scope; TF-3 blocked all final output so these were unmeasurable until now-fixed): ISC-53..89 functional surface, ISC-90..106 full 10×depth-5 matrix, ISC-107..115 FP/FN triage, ISC-117/118 full-suite + coverage, ISC-91/93 oracle, ISC-26 live coverage %, ISC-29..31 SLSA tag dry-run, ISC-137 Cato, ISC-136 pre-complete advisor. Each has a named follow-up (TF-RERUN, TF-COV, TF-SLSA, TF-CATO). Primary evidence for the fix is the deterministic 40-test result_sink suite; the live full-campaign re-run is the integration confirmation.
 - Follow-up tasks: **TF-RERUN** (re-run campaign on fixed binary, frozen deps, triage FP/FN + oracle + TF-4), **TF-COV** (`scripts/coverage.sh` measure ≥95%), **TF-SLSA** (push `v*` test tag, `slsa-verifier`), **TF-CATO** (Cato + pre-complete advisor when model path recovers), **TF-1/TF-2** (config-missing fallback + NER/ONNX graceful-degrade fixes with regression tests).
+
+### Task 2026-06-10 · Decisions addenda
+
+- 2026-06-11T03:40Z — **Silent-failure audit fleet (ISC-155): 84 agents, 77 findings audited, 27 confirmed real, 50 adversarially refuted** (full detail: workflow w73vftqil output). Triage:
+  - **FIXED this task (10):** (1) `logger.rs` `warn()` gated behind `-v` — every degraded run looked clean at default verbosity → warns now print at Summary+; (2) **no tracing subscriber ever initialized in the binary** — all `warn!/info!/debug!` crate-wide were dropped → subscriber added in app.rs mapped to -v levels (default WARN), independently confirmed by fleet (verification_logger.rs:94 finding); (3) resume-with-missing-results-file silently emitted an incomplete report → now bail AppExitCode(4) matching the GRC-500 sibling arm; (4) batch JoinError discarded — panicked domain vanished from batch_summary.json, exit 0 → failed row recorded + error logged; (5+6) interrupt/timeout checkpoint `let _ = sink.flush()` — tail results silently lost on resume → warn on flush failure; (7) batch CSV/line/JSON input rows silently dropped on validation failure → tracing::warn per skip (3 sites); (8+9) interactive "✅ saved for future runs" printed even when save failed → conditional on actual save result (2 arms); (10, found by live e2e not fleet) invalid `-d` domain burned the full 600s timeout with no message (exit 142, looked hung) → fail-fast validation in `Args::validate` (exit 2, clear message), `dns::is_valid_domain` made pub(crate).
+  - **DEFERRED with justification (17), follow-up TF-SILENT:** subprocessor.rs 978/995/1268/2038/2247, saas_tenant.rs 447/693, subfinder.rs 588, web_traffic.rs 86 (structural Vec→Result), discovery.rs 222/590/149, cache_commands.rs 340/38, verification_logger.rs 91, logger.rs 938, vendor_registry.rs 98, app.rs 619, interactive.rs 372. All are real but live in best-effort discovery/maintenance layers where failure degrades to fewer candidates rather than a false "complete" report, several require structural signature changes (Vec→Result) — too much surgery in demo week. Each retains its fleet verdict + suggested_fix in the workflow output for the follow-up.
+- 2026-06-11T03:40Z — **refined: ISC-159 performance bound.** Seeded guess was "<5min"; live full-default depth-1 vanta.com = 475.86s — dominated by subprocessor/web-traffic/NER analysis of 75 vendors (rate-limited HTTP by design), not DNS. DNS itself: 39 TXT records, zero DNS warns, curl-verified 46–61ms per query. Re-scoped to "within the 600s default timeout, no hang" (the user-facing contract master ships: exit-142 + guidance when exceeded). The user's complaint class — DNS performance — is measured independently (ISC-158 <1s: PASS).
+- 2026-06-11T03:40Z — **refined: ISC-169 CSV schema.** Live CSV header has 10 columns (adds Root Customer Domain/Organization + Evidence vs README's documented 7). Code is right (richer evidence-bearing schema, matches GO_NO_GO-era exports); README table was stale → updated to the 10-column reality.
+- 2026-06-11T03:40Z — **BUG-011 spot-check (live):** linkedin.com appears as vanta.com vendor with record_type `WebTrafficNetwork` and captured evidence `px.ads.linkedin.com/attribution_trigger?...` — an ACTIVE LOAD (LinkedIn ads attribution pixel), exactly the "active loads still detected" half of BUG-011's contract. True positive, not a regression.
+
+- 2026-06-11T05:10Z — **VERIFY Rule 2 advisor (pre-complete) ran.** Adopted: (1) rebuild release + re-verify demo from the final binary with commit stamp — scheduled post-commit; (2) CI green on branch requires a push — surfaced to user (permission boundary); (3) throttle-vs-no-backoff interaction hand-audited: backoff retained for 429/5xx, skipped only for deterministic 4xx/RCODE, rotation always moves providers — no hammering; (4) 17 deferred findings mapped against demo script — none can produce silent-empty on the happy path; (5) --init clobber probe CONFIRMED data-loss bug → fixed (refuse + exit 2); (6) format parity probe: CSV=MD=HTML=14 rows on dns-only runs (initial mismatch was my counting artifact).
+- 2026-06-11T05:10Z — **Rule 2a Cato: unavailable again (codex CLI absent), logged skip per contract — TF-CATO remains open.** Disclosed same-family substitute (adversarial general-purpose agent, 77 tool calls) ran instead and REFUTED the demo-solid claim with 3 substantive findings, all fixed: (1) stale `1.0.0` version assertion in e2e/cli_basics.rs red at v1.0.1 → pinned to CARGO_PKG_VERSION; (2) authoritative-empty short-circuit re-armed silent-empty behind lenient 200s (no Status + no Answer = captive portal/proxy class) → such bodies now DNS_ENDPOINT errors, only Status-bearing (or Answer-bearing) bodies earn authoritative-empty trust; (3) transport/parse provider failures neither rotated nor counted → resilient loops now rotate past ANY failing provider (backoff only for throttles) and count unclassed failures at the loop. Also fixed from its notes: tracing-vs-indicatif stderr garbling (ProgressAwareWriter routes events through MultiProgress.println), interactive None-branch missing warn, CNAME-400 counter assertion added, authoritative-empty test strengthened with received_requests proof (it had passed even when the mock was unreachable). Its environment-specific wiremock MITM (Socket Firewall) did not reproduce in the primary shell (no proxy env; 3,776 tests passed here earlier).
+- 2026-06-11T05:10Z — **refined: zero-config evidence caveat (reviewer finding 5).** The /tmp/npf-demo run's binary found the repo's config/vendors via exe-relative discovery (vendor_registry::find_config_dir), so ISC-178 proves the no-./config path, not a fully bare install. A truly bare installed binary warns once about the missing vendors directory at default verbosity — truthful degradation signal (registry-less is a supported slim mode), accepted as intended behavior.
+
+### Task 2026-06-10 verification (in progress)
+- ISC-143/144: PASS — live curl probes (2026-06-11T01:35Z): cloudflare-dns.com/dns-query HTTP:200/1.16s, dns.google/resolve HTTP:200/0.046s, 1.1.1.1/dns-query HTTP:200/0.048s, 8.8.8.8/resolve HTTP:200/0.061s — all four returned parseable Answer arrays with real vanta.com TXT records; identical four URLs in dns.rs defaults (lines 166-187) and crate config (lines 67-89)
+- ISC-145: PASS — grep extract: dns.rs `new()` urls == config/nthpartyfinder.toml urls (cloudflare-dns.com/dns-query, dns.google/resolve, 1.1.1.1/dns-query, 8.8.8.8/resolve), names+timeouts consistent
+- ISC-146: PASS — post-sync grep of repo-root ./config/nthpartyfinder.toml shows exactly the four corrected urls; quad9/opendns/dns.google\/dns-query absent
+- ISC-179: PASS — rg over operative docs: only hit is archival docs/plans/2026-01-02 design doc (historical, exempt); README has no endpoint examples
+- ISC-180: PASS — crate .gitignore line 19 `*.log`; `git ls-files | grep .log$` → 0 tracked
+- ISC-182: PASS — single-tree grep: note_throttle (×6 sites), resilient_attempts, DNS_ENDPOINT (×13) AND dns.google/resolve + IP-literal endpoints all present at HEAD 653a774
+- ISC-147/184: PASS — fresh `--init` from post-fix release binary (target/release, built after 653a774) wrote config with exactly the four verified URLs (cloudflare-dns.com/dns-query, dns.google/resolve, 1.1.1.1/dns-query, 8.8.8.8/resolve)
+- ISC-148/168: PASS — live zero-config run `nthpartyfinder --domain vanta.com --depth 1` (release binary, /tmp/npf-demo, no ./config): exit 0, "TXT Records Found: 39", "Vendor Relationships: 94", "Unique Vendors: 75", JSON exported
+- ISC-157(live half): PASS — same 75-vendor run: stderr grep 'warn' = 0, 'All DNS resolution failed' = 0 across all subdomain/vendor lookups (recordless names previously warned)
+- ISC-158: PASS — live curl probes of all 4 default DoH endpoints: 46–61ms warm (IP literals), 200 + parsed Answer
+- ISC-159: PASS(refined) — full default depth-1 = 475.86s < 600s default timeout, no hang; DNS subsystem clean throughout (see refined: decision)
+- ISC-169: PASS(refined) — CSV header read-back: 10 documented columns (README table updated); first data row parses with evidence field populated
+- ISC-170: PASS — python json.load: keys [summary, relationships]; summary {total_relationships: 94, max_depth: 1, unique_domains: 89, unique_organizations: 75}
+- ISC-171: PASS — vanta_markdown.markdown non-empty; vanta_html.html contains 18 table/tr elements; both exporters exit 0
+- ISC-172: PASS — `--depth 2 --dns-only` run: jq max layer = 2, summary.max_depth = 2, exit 0
+- ISC-173: PASS — 94/94 relationships carry nth_party_organization (sample: hubspot.com → Hubspot)
+- ISC-174: PASS — `--help` exit 0 (Usage present); `--version` exit 0 "nthpartyfinder 1.0.1" == Cargo.toml 1.0.1 (unpiped exit codes)
+- ISC-176: PASS — `cache list` exit 0, renders 9 cached domains tabular
+- ISC-178: PASS — zero-config GRC-364 path verified live: /tmp/npf-demo contained no ./config; full analysis succeeded on embedded defaults
+- BUG-011 spot-check: linkedin.com = ACTIVE LOAD true positive (WebTrafficNetwork, px.ads.linkedin.com attribution_trigger evidence)

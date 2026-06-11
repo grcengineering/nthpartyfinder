@@ -359,6 +359,15 @@ impl Args {
                     )
                 }
                 Some(d) if d.is_empty() => return Err("domain cannot be empty".to_string()),
+                // Fail fast on malformed domains. Previously `bad..domain!!`
+                // sailed through parsing, produced nothing, and burned the full
+                // analysis timeout (exit 142) with no message — looking hung.
+                Some(d) if !crate::dns::is_valid_domain(d) => {
+                    return Err(format!(
+                        "'{}' is not a valid domain name (expected a hostname like example.com)",
+                        d
+                    ))
+                }
                 _ => {}
             }
         }

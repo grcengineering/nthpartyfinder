@@ -565,6 +565,12 @@ mod tests {
     // truly-orphaned sinks (dead PIDs) and leave a concurrently-running scan's
     // live sink untouched. Before the fix, macOS deleted both, so the live scan
     // later panicked reading its own (now missing) sink.
+    //
+    // Both files are backdated past ORPHAN_MIN_AGE_SECS: this originally
+    // asserted a FRESH dead-PID file was reaped, which the post-merge age
+    // guard (defense against PID reuse / in-flight siblings) intentionally
+    // prevents. Aging both makes the test STRONGER: the live file's survival
+    // now proves the liveness check protects it, not merely its freshness.
     #[test]
     fn test_orphan_cleanup_preserves_live_removes_dead() {
         let tmp = TempDir::new().unwrap();
@@ -582,11 +588,28 @@ mod tests {
             .join(format!("nthpartyfinder-results-{}.jsonl.zst", u32::MAX));
         std::fs::write(&dead_file, b"dead").unwrap();
 
+        // Backdate both well beyond ORPHAN_MIN_AGE_SECS.
+        for f in [&live_file, &dead_file] {
+            let status = std::process::Command::new("touch")
+                .arg("-t")
+                .arg("200001010000")
+                .arg(f)
+                .status()
+                .expect("touch must run");
+            assert!(status.success(), "backdating {} failed", f.display());
+        }
+
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
 
         assert_eq!(cleaned, 1, "only the dead-PID orphan should be cleaned");
-        assert!(live_file.exists(), "live sibling sink must be preserved");
-        assert!(!dead_file.exists(), "dead orphan sink must be removed");
+        assert!(
+            live_file.exists(),
+            "an OLD live-PID sink must be preserved by the liveness check"
+        );
+        assert!(
+            !dead_file.exists(),
+            "old dead-PID orphan sink must be removed"
+        );
     }
 
     #[test]

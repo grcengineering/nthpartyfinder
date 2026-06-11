@@ -8,6 +8,43 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
+/// The active MultiProgress, registered by the first AnalysisLogger so the
+/// tracing layer can route log lines through it instead of writing raw stderr
+/// underneath in-place bar redraws (12Hz) — interleaved writes garble both.
+pub static GLOBAL_MULTI_PROGRESS: std::sync::OnceLock<MultiProgress> = std::sync::OnceLock::new();
+
+/// Per-event tracing writer: buffers the formatted event, then emits it via
+/// the active MultiProgress (bar-safe println) or plain stderr when no bars
+/// exist yet. One instance per tracing event; Drop performs the emit.
+#[derive(Default)]
+pub struct ProgressAwareWriter(Vec<u8>);
+
+impl Write for ProgressAwareWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for ProgressAwareWriter {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&self.0);
+        let line = text.trim_end();
+        match GLOBAL_MULTI_PROGRESS.get() {
+            Some(mp) => {
+                let _ = mp.println(line);
+            }
+            None => eprintln!("{}", line),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum VerbosityLevel {
     Silent = 0,   // Only show progress bar and final summary
@@ -99,7 +136,11 @@ impl AnalysisLogger {
 
     /// Create the shared MultiProgress draw target
     fn create_multi_progress() -> MultiProgress {
-        MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(12))
+        let mp = MultiProgress::with_draw_target(ProgressDrawTarget::stderr_with_hz(12));
+        // Register for the tracing layer's ProgressAwareWriter (first logger
+        // wins; one logger per run) so log lines don't splice into redraws.
+        let _ = GLOBAL_MULTI_PROGRESS.set(mp.clone());
+        mp
     }
 
     pub fn new(verbosity: VerbosityLevel) -> Self {
@@ -392,7 +433,10 @@ impl AnalysisLogger {
     }
 
     pub fn warn(&self, message: &str) {
-        if self.verbosity >= VerbosityLevel::Detailed {
+        // Warnings are actionable signal (degraded results, skipped inputs,
+        // failed saves). Gating them behind -v made every degraded run look
+        // clean at default verbosity — show at Summary+ like info/error.
+        if self.verbosity >= VerbosityLevel::Summary {
             self.print_message("WARN", message);
         }
     }
