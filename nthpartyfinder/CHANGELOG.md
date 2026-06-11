@@ -10,6 +10,15 @@
   query, degrading DNS performance and risking false-negative vendor results.
   Cloudflare/Google IP-literal endpoints added (no DNS bootstrap dependency
   when UDP/53 is blocked).
+- DoH responses with a non-2xx status other than 429/5xx (e.g. HTTP 400 from an
+  endpoint that does not serve the JSON DoH API) and dns-json RCODEs other than
+  NOERROR/NXDOMAIN now surface as `DNS_ENDPOINT` errors counted toward the
+  exit-3 guard — never parsed as "0 records". Resilient lookups rotate past
+  broken endpoints immediately (no backoff); each failing provider warns once,
+  then logs at debug.
+- Authoritative empty DoH answers (2xx, RCODE NOERROR/NXDOMAIN, no records) are
+  now final: no system-resolver fallthrough and no spurious "All DNS resolution
+  failed" warning for domains that genuinely have no TXT records.
 - GRC-500: `cleanup_orphans` deleted the live result-sink files of
   concurrently-running scans on macOS/Windows. `is_process_running` checked
   `/proc/{pid}` (Linux-only), so every PID read as "not running" off Linux and

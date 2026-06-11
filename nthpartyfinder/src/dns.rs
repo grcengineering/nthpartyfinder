@@ -111,6 +111,11 @@ pub struct DnsServerPool {
     /// that don't opt in. This is the authoritative source of truth for throttle visibility;
     /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
     failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Per-provider failure-log counts backing `log_doh_failure`'s warn-once-then-debug
+    /// behavior. Mutex (not atomics) because failures are rare and the critical section
+    /// is a HashMap bump with no await inside.
+    #[cfg(not(coverage))]
+    doh_failure_log: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl DnsServerPool {
@@ -156,6 +161,8 @@ impl DnsServerPool {
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -228,6 +235,8 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 500,
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -250,6 +259,30 @@ impl DnsServerPool {
     fn note_throttle(&self) {
         if let Some(c) = &self.failure_counter {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Per-provider failure visibility: the FIRST failure from a given provider warns
+    /// (actionable signal — a configured provider is misconfigured, down, or speaking the
+    /// wrong API); repeats from the same provider log at debug so a long scan against a
+    /// dead provider doesn't drown the output in duplicate warnings.
+    // cfg(not(coverage)): only the live resilient lookups call this — gated identically
+    // to them so it is not dead code under the coverage profile.
+    #[cfg(not(coverage))]
+    fn log_doh_failure(&self, server_name: &str, err: &str) {
+        let mut counts = match self.doh_failure_log.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let n = counts.entry(server_name.to_string()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            warn!(
+                "DoH provider '{}' failed: {} (subsequent failures from this provider log at debug)",
+                server_name, err
+            );
+        } else {
+            debug!("DoH provider '{}' failure #{}: {}", server_name, *n, err);
         }
     }
 }
@@ -307,6 +340,8 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -356,7 +391,37 @@ impl DnsServerPool {
                 domain
             ));
         }
+        // Any other non-2xx (400/403/404…) means the endpoint cannot serve this query at
+        // all — wrong API path, wrong protocol, misconfiguration. Never parse it into an
+        // empty answer: that is the exact silent-false-negative class of the
+        // /dns-query-vs-/resolve incident (3 of 4 default providers returned HTTP 400 and
+        // were read as "0 TXT records"). Count it for the exit-3 guard and surface a
+        // distinct DNS_ENDPOINT class so the resilient loop rotates WITHOUT backoff.
+        if !status.is_success() {
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
+                server.name,
+                status,
+                domain
+            ));
+        }
         let response = http_response.json::<Value>().await?;
+        // dns-json `Status` is the DNS RCODE: 0 = NOERROR and 3 = NXDOMAIN are genuine
+        // answers (records present / genuinely absent). Anything else (2 = SERVFAIL,
+        // 5 = REFUSED, …) is a resolver-side failure that must never read as "this domain
+        // has no records". A missing `Status` field is tolerated (lenient providers/fixtures).
+        if let Some(rcode) = response["Status"].as_u64() {
+            if rcode != 0 && rcode != 3 {
+                self.note_throttle();
+                return Err(anyhow::anyhow!(
+                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    server.name,
+                    rcode,
+                    domain
+                ));
+            }
+        }
 
         let mut records = Vec::new();
 
@@ -423,7 +488,31 @@ impl DnsServerPool {
                 domain
             ));
         }
+        // Any other non-2xx is a broken/misconfigured endpoint — surface DNS_ENDPOINT,
+        // never an empty answer (mirrors the TXT path; see comment there).
+        if !status.is_success() {
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
+                server.name,
+                status,
+                domain
+            ));
+        }
         let response = http_response.json::<Value>().await?;
+        // RCODE gate mirroring the TXT path: only NOERROR (0) and NXDOMAIN (3) are genuine
+        // answers; SERVFAIL/REFUSED/… must never read as "no CNAME".
+        if let Some(rcode) = response["Status"].as_u64() {
+            if rcode != 0 && rcode != 3 {
+                self.note_throttle();
+                return Err(anyhow::anyhow!(
+                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    server.name,
+                    rcode,
+                    domain
+                ));
+            }
+        }
 
         let mut records = Vec::new();
 
@@ -506,12 +595,22 @@ impl DnsServerPool {
             match self.doh_txt_lookup(domain, &server).await {
                 Ok(records) => return Ok(records),
                 Err(e) => {
-                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    let msg = e.to_string();
+                    let throttled = msg.contains("DNS_THROTTLE");
+                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
+                    self.log_doh_failure(&server.name, &msg);
                     last_err = Some(e);
-                    if throttled && i + 1 < attempts {
-                        // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
-                        tokio::time::sleep(self.in_race_backoff(i)).await;
-                        continue;
+                    if i + 1 < attempts {
+                        if throttled {
+                            // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
+                            tokio::time::sleep(self.in_race_backoff(i)).await;
+                            continue;
+                        }
+                        if endpoint_broken {
+                            // A broken endpoint (wrong API path, 4xx, bad RCODE) is not busy —
+                            // rotate to the next provider immediately, no backoff.
+                            continue;
+                        }
                     }
                     break;
                 }
@@ -544,12 +643,21 @@ impl DnsServerPool {
             match self.doh_cname_lookup(domain, &server).await {
                 Ok(records) => return Ok(records),
                 Err(e) => {
-                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    let msg = e.to_string();
+                    let throttled = msg.contains("DNS_THROTTLE");
+                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
+                    self.log_doh_failure(&server.name, &msg);
                     last_err = Some(e);
-                    if throttled && i + 1 < attempts {
-                        // fix 5: same short, overflow-safe backoff as the TXT path.
-                        tokio::time::sleep(self.in_race_backoff(i)).await;
-                        continue;
+                    if i + 1 < attempts {
+                        if throttled {
+                            // fix 5: same short, overflow-safe backoff as the TXT path.
+                            tokio::time::sleep(self.in_race_backoff(i)).await;
+                            continue;
+                        }
+                        if endpoint_broken {
+                            // Broken endpoint: rotate immediately, no backoff (see TXT path).
+                            continue;
+                        }
                     }
                     break;
                 }
@@ -648,7 +756,8 @@ impl DnsServerPool {
         let txt = match txt_result {
             Ok(records) => records,
             Err(e) => {
-                if e.to_string().contains("DNS_THROTTLE") {
+                let msg = e.to_string();
+                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -657,7 +766,8 @@ impl DnsServerPool {
         let cname = match cname_result {
             Ok(records) => records,
             Err(e) => {
-                if e.to_string().contains("DNS_THROTTLE") {
+                let msg = e.to_string();
+                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -687,10 +797,16 @@ impl DnsServerPool {
         )
         .await
         {
-            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
-            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
-                // DoH was throttled across all providers — try DNS fallback, but if that also
-                // yields nothing, surface the throttle rather than a silent empty.
+            // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
+            // no records) — is final: skip the traditional-DNS fallback entirely. On the
+            // high-volume subdomain fan-out this saves a UDP lookup per recordless name.
+            Ok(Ok(records)) => return Ok(records),
+            // All providers failed (throttled or broken endpoint) — try DNS fallback, but if
+            // that also yields nothing, surface the failure rather than a silent empty.
+            Ok(Err(e))
+                if e.to_string().contains("DNS_THROTTLE")
+                    || e.to_string().contains("DNS_ENDPOINT") =>
+            {
                 if let Some(records) = self.fast_dns_txt_fallback(domain).await {
                     return Ok(records);
                 }
@@ -749,8 +865,12 @@ impl DnsServerPool {
         )
         .await
         {
-            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
-            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+            // Authoritative answer (including genuine no-CNAME) is final — skip fallback.
+            Ok(Ok(records)) => return Ok(records),
+            Ok(Err(e))
+                if e.to_string().contains("DNS_THROTTLE")
+                    || e.to_string().contains("DNS_ENDPOINT") =>
+            {
                 if let Some(records) = self.fast_dns_cname_fallback(domain).await {
                     return Ok(records);
                 }
@@ -853,9 +973,13 @@ pub async fn get_txt_records_with_rate_limit(
     let doh_fut = async {
         // GRC-367: resilient lookup retries/rotates DoH providers on throttle (429/5xx)
         // instead of collapsing a throttle into an empty (false-negative) answer.
+        // An authoritative empty answer (HTTP 2xx, RCODE NOERROR/NXDOMAIN, no records) is
+        // a REAL answer: return Some(vec![]) so the caller doesn't fall through to the
+        // system resolver and emit a spurious "All DNS resolution failed" warning for
+        // every domain that genuinely has no TXT records.
         match dns_pool.doh_txt_lookup_resilient(domain).await {
-            Ok(records) if !records.is_empty() => Some(records),
-            _ => None,
+            Ok(records) => Some(records),
+            Err(_) => None,
         }
     };
 
@@ -1043,9 +1167,12 @@ pub async fn get_cname_records_with_rate_limit(
         // All providers throttled (429/5xx surviving rotation). This is a FALSE-NEGATIVE risk,
         // NOT a genuine absence — count it so the exit-3 guard can see it, then return empty so
         // analysis continues (consistent with the TXT path's degrade-but-record behavior).
-        Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+        Ok(Err(e))
+            if e.to_string().contains("DNS_THROTTLE")
+                || e.to_string().contains("DNS_ENDPOINT") =>
+        {
             warn!(
-                "CNAME lookup for {} throttled across all DoH providers — recording failure: {}",
+                "CNAME lookup for {} failed across all DoH providers (throttled or broken endpoint) — recording failure: {}",
                 domain, e
             );
             if let Some(counter) = dns_failure_counter {
