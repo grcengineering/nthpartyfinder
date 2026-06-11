@@ -147,20 +147,25 @@ impl DnsServerPool {
                 name: "Cloudflare DoH".to_string(),
                 timeout_secs: 3,
             },
+            // Google's JSON DoH API is at /resolve, NOT /dns-query (the latter is
+            // RFC-8484 wire-format and 400s for application/dns-json).
             DohServerConfig {
-                url: "https://dns.google/dns-query".to_string(),
+                url: "https://dns.google/resolve".to_string(),
                 name: "Google DoH".to_string(),
                 timeout_secs: 3,
             },
+            // IP-literal endpoints avoid a DNS-bootstrap dependency when UDP/53 is
+            // blocked. Quad9 + OpenDNS were dropped: their DoH does not serve the
+            // JSON GET API, so they returned 0 records and caused false negatives.
             DohServerConfig {
-                url: "https://dns.quad9.net/dns-query".to_string(),
-                name: "Quad9 DoH".to_string(),
-                timeout_secs: 4,
+                url: "https://1.1.1.1/dns-query".to_string(),
+                name: "Cloudflare DoH (IP)".to_string(),
+                timeout_secs: 3,
             },
             DohServerConfig {
-                url: "https://doh.opendns.com/dns-query".to_string(),
-                name: "OpenDNS DoH".to_string(),
-                timeout_secs: 4,
+                url: "https://8.8.8.8/resolve".to_string(),
+                name: "Google DoH (IP)".to_string(),
+                timeout_secs: 3,
             },
         ];
 

@@ -67,20 +67,27 @@ name = "Cloudflare DoH"
 url = "https://cloudflare-dns.com/dns-query"
 timeout_secs = 3
 
+# Google's JSON DoH API is served at /resolve. NOT /dns-query — that endpoint is
+# RFC-8484 wire-format and returns HTTP 400 for application/dns-json requests,
+# which silently produced 0 TXT records (the root-cause of false "no DNS records").
 [[dns.doh_servers]]
 name = "Google DoH"
-url = "https://dns.google/dns-query"
+url = "https://dns.google/resolve"
+timeout_secs = 3
+
+# IP-literal endpoints avoid a DNS-bootstrap dependency (resolving the DoH
+# hostname) when the network blocks UDP/53; provider cert SANs cover the IPs.
+# Quad9 + OpenDNS were removed: their DoH does NOT serve the JSON GET API, so they
+# always returned 0 records and, when round-robin-selected, caused false negatives.
+[[dns.doh_servers]]
+name = "Cloudflare DoH (IP)"
+url = "https://1.1.1.1/dns-query"
 timeout_secs = 3
 
 [[dns.doh_servers]]
-name = "Quad9 DoH"
-url = "https://dns.quad9.net/dns-query"
-timeout_secs = 4
-
-[[dns.doh_servers]]
-name = "OpenDNS DoH"
-url = "https://doh.opendns.com/dns-query"
-timeout_secs = 4
+name = "Google DoH (IP)"
+url = "https://8.8.8.8/resolve"
+timeout_secs = 3
 
 # -----------------------------------------------------------------------------
 # Traditional DNS Servers (Fallback)
