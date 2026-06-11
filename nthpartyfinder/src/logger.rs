@@ -36,11 +36,16 @@ impl Drop for ProgressAwareWriter {
         }
         let text = String::from_utf8_lossy(&self.0);
         let line = text.trim_end();
+        // Route through MultiProgress only when stderr is a real terminal: on a
+        // non-TTY (redirect, pipe, CI) indicatif's draw target is hidden and
+        // MultiProgress::println silently DISCARDS the line — which would make
+        // every warning vanish exactly where users capture logs. No bars draw
+        // on a non-TTY, so plain eprintln is both safe and visible there.
         match GLOBAL_MULTI_PROGRESS.get() {
-            Some(mp) => {
+            Some(mp) if io::stderr().is_terminal() => {
                 let _ = mp.println(line);
             }
-            None => eprintln!("{}", line),
+            _ => eprintln!("{}", line),
         }
     }
 }
