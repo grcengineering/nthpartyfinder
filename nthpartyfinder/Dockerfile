@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build (Debian bookworm-based Rust — glibc matches runtime)
 # -----------------------------------------------------------------------------
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-bookworm@sha256:c8a94a78f67ec8c4d474ec7f71e0720f21eb7e584e158daec0874cafa7c30e4d AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev g++ \
@@ -39,7 +39,7 @@ RUN strip target/release/nthpartyfinder
 # -----------------------------------------------------------------------------
 # Stage 2: Download ONNX Runtime (Chainguard hardened base)
 # -----------------------------------------------------------------------------
-FROM cgr.dev/chainguard/wolfi-base:latest AS onnx-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:34977aa13765da89f60fee8fe5230e2bb1c55192df08e383c58221ee0d1277fb AS onnx-dl
 USER root
 RUN apk add curl && \
     curl -fsSL -o /tmp/onnxruntime.tgz \
@@ -49,7 +49,7 @@ RUN apk add curl && \
 # -----------------------------------------------------------------------------
 # Stage 3: Download subfinder (Chainguard hardened base)
 # -----------------------------------------------------------------------------
-FROM cgr.dev/chainguard/wolfi-base:latest AS subfinder-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:34977aa13765da89f60fee8fe5230e2bb1c55192df08e383c58221ee0d1277fb AS subfinder-dl
 USER root
 RUN apk add curl unzip && \
     curl -fsSL -o /tmp/subfinder.zip \
@@ -62,7 +62,7 @@ RUN apk add curl unzip && \
 # No free hardened image supports Chromium: Chainguard/Wolfi has no Chromium
 # package (request closed as "not planned"), Distroless has no package manager.
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 
 # Install runtime dependencies, then harden by removing package manager cache
 RUN apt-get update && apt-get install -y --no-install-recommends \

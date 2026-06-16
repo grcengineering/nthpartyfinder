@@ -115,6 +115,15 @@ jobs:
           errs=$(jq '[.runs[].results[]? | select(.level=="error")] | length' opengrep.sarif)
           echo "Opengrep ERROR-severity findings: $errs"
           test "$errs" -eq 0
+      - name: Drop test-code WARNING findings from SARIF before upload
+        # The no-unwrap/no-eprintln WARNING rules target PRODUCTION code, but
+        # Opengrep's experimental Rust matcher does not exclude `.unwrap()` /
+        # `eprintln!` inside inline `#[cfg(test)] mod tests` blocks, flooding code
+        # scanning with ~1.7k test-code false positives. This drops only those
+        # test-located WARNING findings (production findings + the ERROR gate are
+        # preserved). Runs AFTER the gate so gating sees the full result set.
+        if: always()
+        run: bash scripts/filter-opengrep-sarif.sh opengrep.sarif
       - name: Upload Opengrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18

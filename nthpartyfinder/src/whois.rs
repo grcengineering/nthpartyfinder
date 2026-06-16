@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::debug;
-use whois_rs::{WhoIs, WhoIsLookupOptions};
 
 /// Result of an organization lookup with verification status
 #[derive(Debug, Clone)]
@@ -342,53 +341,124 @@ pub async fn get_organization_with_config(
     Ok(extract_organization_from_domain(domain))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
-async fn try_native_whois(domain: &str) -> Result<String> {
-    debug!("Trying whois-rust library lookup for domain: {}", domain);
+/// The label we ask IANA about to discover a TLD's registry WHOIS server.
+/// For `sub.example.co.uk` this is `uk` (IANA is authoritative for the root zone,
+/// so the last label is the right key; the registry's own response then carries
+/// any further `Registrar WHOIS Server` referral we follow below).
+fn whois_tld_query(domain: &str) -> String {
+    domain
+        .trim_end_matches('.')
+        .rsplit('.')
+        .next()
+        .unwrap_or(domain)
+        .to_ascii_lowercase()
+}
 
-    // Use default whois-rust configuration with built-in servers
-    let whois = WhoIs::from_path("whois-servers.json")
-        .or_else(|_| {
-            // Fallback to using a basic server configuration string
-            WhoIs::from_string(
-                r#"{
-                "com": "whois.verisign-grs.com",
-                "net": "whois.verisign-grs.com",
-                "org": "whois.pir.org",
-                "_": {"ip": "whois.iana.org"}
-            }"#,
-            )
-        })
-        .map_err(|e| anyhow!("Failed to create WHOIS client: {}", e))?;
-
-    // Configure lookup options
-    let lookup_options = WhoIsLookupOptions::from_string(domain)
-        .map_err(|e| anyhow!("Invalid domain for WHOIS lookup: {}", e))?;
-
-    // Perform WHOIS lookup with timeout using spawn_blocking for async compatibility
-    match tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio::task::spawn_blocking(move || whois.lookup(lookup_options)),
-    )
-    .await
-    {
-        Ok(Ok(Ok(whois_result))) => {
-            debug!("whois-rust lookup successful for {}", domain);
-            Ok(whois_result)
-        }
-        Ok(Ok(Err(e))) => {
-            debug!("whois-rust lookup failed for {}: {}", domain, e);
-            Err(anyhow!("whois-rust lookup failed: {}", e))
-        }
-        Ok(Err(_)) => {
-            debug!("whois-rust lookup task panicked for {}", domain);
-            Err(anyhow!("whois-rust lookup task panicked"))
-        }
-        Err(_) => {
-            debug!("whois-rust lookup timed out for {}", domain);
-            Err(anyhow!("whois-rust lookup timed out"))
+/// Extract a referral WHOIS host from a response: the `refer:` line IANA returns,
+/// or the `Registrar WHOIS Server:` / `whois:` line a registry returns. Returns a
+/// bare hostname (scheme/path/trailing-dot stripped) or `None`.
+fn parse_whois_referral(response: &str) -> Option<String> {
+    for line in response.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        for key in [
+            "refer:",
+            "registrar whois server:",
+            "whois:",
+            "whois server:",
+        ] {
+            if lower.starts_with(key) {
+                // Slice the original (case-preserving) line at the matched span.
+                let value = trimmed[key.len()..].trim();
+                let host = value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_start_matches("rwhois://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('.');
+                if host.len() > 3 && host.contains('.') && !host.contains(' ') {
+                    return Some(host.to_ascii_lowercase());
+                }
+            }
         }
     }
+    None
+}
+
+/// One WHOIS exchange over TCP (RFC 3912): connect to `{server}:43`, send
+/// `{query}\r\n`, read the full reply. In-process replacement for the `whois-rs`
+/// crate, which was removed to drop its vulnerable transitive deps
+/// (hickory-client 0.24 → hickory-proto 0.24 = RUSTSEC-2026-0119; validators 0.25
+/// → idna 0.5 = RUSTSEC-2024-0421). `whois-rs` 1.6.1 is the latest release and
+/// pins those old crates, so eliminating the dependency is the only code-level
+/// fix. System `whois` (`try_system_whois`) remains a fallback.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn whois_query(server: &str, query: &str) -> Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let addr = format!("{server}:43");
+    let mut stream = tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| anyhow!("WHOIS connect to {server} timed out"))?
+        .map_err(|e| anyhow!("WHOIS connect to {server} failed: {e}"))?;
+
+    stream
+        .write_all(format!("{query}\r\n").as_bytes())
+        .await
+        .map_err(|e| anyhow!("WHOIS write to {server} failed: {e}"))?;
+    stream.flush().await.ok();
+
+    let mut buf = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut buf))
+        .await
+        .map_err(|_| anyhow!("WHOIS read from {server} timed out"))?
+        .map_err(|e| anyhow!("WHOIS read from {server} failed: {e}"))?;
+
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn try_native_whois(domain: &str) -> Result<String> {
+    debug!("Trying in-process TCP WHOIS for domain: {}", domain);
+
+    let result = tokio::time::timeout(Duration::from_secs(25), async {
+        // 1. Ask IANA (authoritative for the root zone) which registry serves the TLD.
+        let tld = whois_tld_query(domain);
+        let registry_server = match whois_query("whois.iana.org", &tld).await {
+            Ok(resp) => parse_whois_referral(&resp),
+            Err(e) => {
+                debug!("IANA WHOIS for .{tld} failed: {e}");
+                None
+            }
+        }
+        .ok_or_else(|| anyhow!("no WHOIS server found for .{tld} via IANA"))?;
+
+        // 2. Query the registry for the domain.
+        let registry_resp = whois_query(&registry_server, domain).await?;
+
+        // 3. Follow a registrar referral once for richer registrant data.
+        if let Some(registrar) = parse_whois_referral(&registry_resp) {
+            if !registrar.eq_ignore_ascii_case(&registry_server) {
+                if let Ok(registrar_resp) = whois_query(&registrar, domain).await {
+                    if registrar_resp.trim().len() > 40 {
+                        return Ok::<String, anyhow::Error>(registrar_resp);
+                    }
+                }
+            }
+        }
+        Ok(registry_resp)
+    })
+    .await
+    .map_err(|_| anyhow!("WHOIS lookup for {domain} timed out"))??;
+
+    debug!("in-process WHOIS lookup successful for {}", domain);
+    Ok(result)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -864,6 +934,52 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_whois_tld_query() {
+        assert_eq!(whois_tld_query("example.com"), "com");
+        assert_eq!(whois_tld_query("sub.example.co.uk"), "uk");
+        assert_eq!(whois_tld_query("EXAMPLE.IO"), "io");
+        assert_eq!(whois_tld_query("example.com."), "com");
+        assert_eq!(whois_tld_query("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_parse_whois_referral_iana_refer() {
+        let resp = "% IANA WHOIS server\ndomain:       COM\nrefer:        whois.verisign-grs.com\n\norganisation: VeriSign\n";
+        assert_eq!(
+            parse_whois_referral(resp).as_deref(),
+            Some("whois.verisign-grs.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_whois_referral_registrar_server() {
+        let resp = "Domain Name: EXAMPLE.COM\nRegistrar WHOIS Server: whois.markmonitor.com\nRegistrar URL: http://www.markmonitor.com\n";
+        assert_eq!(
+            parse_whois_referral(resp).as_deref(),
+            Some("whois.markmonitor.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_whois_referral_strips_scheme_and_trailing_dot() {
+        let resp = "Registrar WHOIS Server: https://whois.example-registrar.com./extra\n";
+        assert_eq!(
+            parse_whois_referral(resp).as_deref(),
+            Some("whois.example-registrar.com")
+        );
+    }
+
+    #[test]
+    fn test_parse_whois_referral_none_when_absent() {
+        assert_eq!(
+            parse_whois_referral("No referral here.\nDomain: x.com\n"),
+            None
+        );
+        // A bare/garbage value (no dot) must not be accepted as a host.
+        assert_eq!(parse_whois_referral("refer: localhost\n"), None);
+    }
 
     #[test]
     fn test_organization_result_verified() {
@@ -1779,7 +1895,8 @@ mod tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("lookup")
+                    msg.contains("WHOIS")
+                        || msg.contains("lookup")
                         || msg.contains("timed out")
                         || msg.contains("panicked")
                         || msg.contains("Failed"),
@@ -2069,7 +2186,8 @@ mod tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("lookup")
+                    msg.contains("WHOIS")
+                        || msg.contains("lookup")
                         || msg.contains("timed out")
                         || msg.contains("panicked")
                         || msg.contains("Failed")
