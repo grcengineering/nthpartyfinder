@@ -166,6 +166,11 @@ pub struct Cli {
 
     /// Analysis timeout in seconds (default: 600). Use 0 for no timeout.
     /// Overrides NTHPARTY_ANALYSIS_TIMEOUT_SECS environment variable.
+    /// The default suits a depth-1 scan; depth 3+ or cold-cache runs routinely
+    /// exceed 600s (e.g. ~1500-3000s), so raise this (e.g. --timeout 1800) or
+    /// disable it (--timeout 0) for deep scans. The output format does not
+    /// change discovery time. On timeout the scan exits non-zero with a
+    /// checkpoint rather than emitting an empty report.
     #[arg(long, value_name = "SECONDS")]
     pub timeout: Option<u64>,
 
@@ -366,6 +371,15 @@ impl Args {
                     )
                 }
                 Some(d) if d.is_empty() => return Err("domain cannot be empty".to_string()),
+                // Fail fast on malformed domains. Previously `bad..domain!!`
+                // sailed through parsing, produced nothing, and burned the full
+                // analysis timeout (exit 142) with no message — looking hung.
+                Some(d) if !crate::dns::is_valid_domain(d) => {
+                    return Err(format!(
+                        "'{}' is not a valid domain name (expected a hostname like example.com)",
+                        d
+                    ))
+                }
                 _ => {}
             }
         }

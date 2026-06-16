@@ -32,6 +32,14 @@ use crate::whois;
 
 use std::path::PathBuf;
 
+/// Process exit code carried as an error so `run_inner` can bubble it up to
+/// `main` for a clean `std::process::exit`.
+///
+/// Known codes:
+/// - `1` — generic failure (config error, analysis timeout, batch failure)
+/// - `2` — invalid CLI arguments
+/// - `4` — analysis results could not be read back from the disk sink
+/// - `130` — interrupted by the user (SIGINT)
 #[derive(Debug)]
 pub struct AppExitCode(pub i32);
 
@@ -612,6 +620,19 @@ pub async fn run() -> Result<()> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     if args.init {
+        // --init previously overwrote an existing (possibly customized) config
+        // while printing "Created" — silent data loss. Refuse and instruct.
+        let existing = std::path::Path::new(crate::config::CONFIG_PATH);
+        if existing.exists() {
+            eprintln!(
+                "❌ {} already exists — refusing to overwrite it.",
+                existing.display()
+            );
+            eprintln!(
+                "   Move or delete the file first if you want a fresh default configuration."
+            );
+            bail!(AppExitCode(2));
+        }
         match AppConfig::create_default_config() {
             Ok(path) => {
                 println!(
@@ -749,6 +770,26 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     }
 
     eprintln!("  Starting logger...");
+    // The tracing subscriber was never initialized in the binary, so every
+    // warn!/info!/debug! across the crate (DoH provider failures, DNS race
+    // diagnostics) was silently dropped — the instrumentation existed but no
+    // run could surface it. Map the existing -v levels onto it: default WARN
+    // keeps failures loud and normal runs quiet; -v = INFO, -vv = DEBUG.
+    // try_init: tests and embedders may already have a subscriber installed.
+    let trace_level = match args.verbose {
+        0 => tracing::Level::WARN,
+        1 => tracing::Level::INFO,
+        _ => tracing::Level::DEBUG,
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(trace_level)
+        // Bar-safe writer: routes through the active MultiProgress so warn
+        // lines don't splice into in-place progress redraws (raw stderr writes
+        // under a 12Hz redraw garble both the bar and the warning).
+        .with_writer(crate::logger::ProgressAwareWriter::default)
+        .with_target(false)
+        .compact()
+        .try_init();
     let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
     let logger = Arc::new(match &args.log_file {
         Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
@@ -981,6 +1022,12 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             let results = results.clone();
             let logger = logger.clone();
 
+            // A panicked task pushes nothing into `results`; keep its identity
+            // alongside the handle so the join loop records it as a failed row
+            // instead of letting the domain silently vanish from the summary.
+            let domain_for_join = domain.clone();
+            let label_for_join = label.clone();
+
             let handle = tokio::spawn(async move {
                 let _permit = sem
                     .acquire()
@@ -1063,11 +1110,25 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
                 results.lock().await.push(result);
             });
-            handles.push(handle);
+            handles.push((domain_for_join, label_for_join, handle));
         }
 
-        for handle in handles {
-            let _ = handle.await;
+        for (domain, label, handle) in handles {
+            if let Err(e) = handle.await {
+                // The task panicked before pushing its row — without this, the
+                // domain is counted as neither success nor failure, the summary
+                // exit-code gate never trips, and the run exits 0 incomplete.
+                logger.error(&format!("Batch: task for {} panicked: {}", domain, e));
+                results.lock().await.push(batch::DomainAnalysisResult {
+                    domain,
+                    label,
+                    success: false,
+                    error: Some(format!("internal task failure: {}", e)),
+                    relationship_count: 0,
+                    output_file: None,
+                    duration_secs: 0.0,
+                });
+            }
         }
 
         summary.domain_results = Arc::try_unwrap(results)
@@ -1763,7 +1824,16 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 ));
                 {
                     let mut sink = result_sink.lock().await;
-                    let _ = sink.flush();
+                    if let Err(e) = sink.flush() {
+                        // An unflushed buffer means the checkpoint will claim more
+                        // results than the file holds — the tail rows are lost on
+                        // resume. Say so instead of promising safe progress.
+                        logger.warn(&format!(
+                            "Failed to flush results to disk before checkpointing: {} — \
+                             the checkpoint may be missing the most recent results.",
+                            e
+                        ));
+                    }
                 }
                 {
                     let mut cp = checkpoint.lock().await;
@@ -1805,16 +1875,38 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             let _ = sink.flush();
             sink_path = sink.path().to_path_buf();
         }
-        match Arc::try_unwrap(result_sink) {
-            Ok(mutex) => {
-                let sink = mutex.into_inner();
-                sink.drain_all()
-                    .expect("Failed to read results from disk sink")
-            }
+        let drained = match Arc::try_unwrap(result_sink) {
+            Ok(mutex) => mutex.into_inner().drain_all(),
             Err(_arc) => {
                 logger.debug("ResultSink has outstanding references, reading from file path");
                 ResultSink::read_results(&sink_path)
-                    .expect("Failed to read results from disk sink file")
+            }
+        };
+        match drained {
+            Ok(results) => results,
+            // Fail loudly instead of panicking. A genuinely empty scan returns an
+            // intact (zero-row) file here, so reaching this arm means the sink
+            // file was unreadable or missing — historically because a concurrent
+            // run deleted the shared /tmp sink (GRC-500). Never silently emit an
+            // empty report in that case.
+            Err(e) => {
+                logger.error(&format!(
+                    "Failed to read analysis results from disk sink {}: {}",
+                    sink_path.display(),
+                    e
+                ));
+                eprintln!();
+                eprintln!(
+                    "Failed to read analysis results from the disk sink at {}.",
+                    sink_path.display()
+                );
+                eprintln!("The result file was missing or unreadable, so no report was written.");
+                eprintln!(
+                    "This can happen when a concurrent nthpartyfinder run removes the shared \
+                     /tmp sink file. Re-run the scan, and when running scans in parallel give \
+                     each its own --output-dir."
+                );
+                bail!(AppExitCode(4));
             }
         }
     };
@@ -1844,7 +1936,21 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 }
             }
         } else {
-            Vec::new()
+            // The checkpoint says prior results exist on disk, the file is gone,
+            // and the completed domains will be SKIPPED on this resume — silently
+            // returning empty here writes a "complete" report that is missing
+            // every previously discovered relationship. Same failure class as the
+            // GRC-500 fresh-sink arm above: never silently emit an empty report.
+            eprintln!(
+                "The checkpoint references prior results at {} but that file no longer exists.",
+                results_file
+            );
+            eprintln!(
+                "Resuming would skip the already-completed domains while losing all of their \
+                 results, producing a silently incomplete report."
+            );
+            eprintln!("Re-run without --resume to regenerate the full scan.");
+            bail!(AppExitCode(4));
         }
     } else {
         Vec::new()

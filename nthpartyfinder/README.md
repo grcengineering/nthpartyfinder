@@ -202,13 +202,16 @@ The CSV output includes the following columns:
 
 | Column | Description |
 |--------|-------------|
+| Root Customer Domain | The domain the analysis started from |
+| Root Customer Organization | Root customer organization name |
 | Nth Party Domain | The vendor domain identified |
 | Nth Party Organization | Organization name from WHOIS lookup |
 | Nth Party Layer | Relationship depth (1st, 2nd, 3rd party, etc.) |
 | Nth Party Customer Domain | The domain that references this vendor |
 | Nth Party Customer Organization | Customer organization name |
 | Nth Party Record | The actual DNS record containing the reference |
-| Nth Party Record Type | Type of DNS record (TXT, SPF, etc.) |
+| Nth Party Record Type | Source type (DNS::TXT::*, WebTrafficNetwork, Subprocessor, etc.) |
+| Evidence | The captured evidence for the relationship (raw record / observed request) |
 
 ### JSON Output
 

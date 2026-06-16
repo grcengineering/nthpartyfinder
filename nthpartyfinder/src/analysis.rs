@@ -1073,7 +1073,15 @@ pub async fn discover_nth_parties(
                 if is_interrupted() {
                     {
                         let mut sink = result_sink.lock().await;
-                        let _ = sink.flush();
+                        if let Err(e) = sink.flush() {
+                            // Unflushed rows exist only in memory — the checkpoint
+                            // about to be saved will silently lose them on resume.
+                            logger.warn(&format!(
+                                "Failed to flush results to disk on interrupt: {} — \
+                                 the checkpoint may be missing the most recent results.",
+                                e
+                            ));
+                        }
                     }
                     let mut cp = checkpoint.lock().await;
                     let vendors = discovered_vendors.lock().await;

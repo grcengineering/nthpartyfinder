@@ -145,6 +145,11 @@ pub struct DnsServerPool {
     /// that don't opt in. This is the authoritative source of truth for throttle visibility;
     /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
     failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Per-provider failure-log counts backing `log_doh_failure`'s warn-once-then-debug
+    /// behavior. Mutex (not atomics) because failures are rare and the critical section
+    /// is a HashMap bump with no await inside.
+    #[cfg(not(coverage))]
+    doh_failure_log: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl DnsServerPool {
@@ -190,6 +195,8 @@ impl DnsServerPool {
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -201,20 +208,25 @@ impl DnsServerPool {
                 name: "Cloudflare DoH".to_string(),
                 timeout_secs: 3,
             },
+            // Google's JSON DoH API is at /resolve, NOT /dns-query (the latter is
+            // RFC-8484 wire-format and 400s for application/dns-json).
             DohServerConfig {
-                url: "https://dns.google/dns-query".to_string(),
+                url: "https://dns.google/resolve".to_string(),
                 name: "Google DoH".to_string(),
                 timeout_secs: 3,
             },
+            // IP-literal endpoints avoid a DNS-bootstrap dependency when UDP/53 is
+            // blocked. Quad9 + OpenDNS were dropped: their DoH does not serve the
+            // JSON GET API, so they returned 0 records and caused false negatives.
             DohServerConfig {
-                url: "https://dns.quad9.net/dns-query".to_string(),
-                name: "Quad9 DoH".to_string(),
-                timeout_secs: 4,
+                url: "https://1.1.1.1/dns-query".to_string(),
+                name: "Cloudflare DoH (IP)".to_string(),
+                timeout_secs: 3,
             },
             DohServerConfig {
-                url: "https://doh.opendns.com/dns-query".to_string(),
-                name: "OpenDNS DoH".to_string(),
-                timeout_secs: 4,
+                url: "https://8.8.8.8/resolve".to_string(),
+                name: "Google DoH (IP)".to_string(),
+                timeout_secs: 3,
             },
         ];
 
@@ -257,6 +269,8 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 500,
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -279,6 +293,30 @@ impl DnsServerPool {
     fn note_throttle(&self) {
         if let Some(c) = &self.failure_counter {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Per-provider failure visibility: the FIRST failure from a given provider warns
+    /// (actionable signal — a configured provider is misconfigured, down, or speaking the
+    /// wrong API); repeats from the same provider log at debug so a long scan against a
+    /// dead provider doesn't drown the output in duplicate warnings.
+    // cfg(not(coverage)): only the live resilient lookups call this — gated identically
+    // to them so it is not dead code under the coverage profile.
+    #[cfg(not(coverage))]
+    fn log_doh_failure(&self, server_name: &str, err: &str) {
+        let mut counts = match self.doh_failure_log.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let n = counts.entry(server_name.to_string()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            warn!(
+                "DoH provider '{}' failed: {} (subsequent failures from this provider log at debug)",
+                server_name, err
+            );
+        } else {
+            debug!("DoH provider '{}' failure #{}: {}", server_name, *n, err);
         }
     }
 }
@@ -336,6 +374,8 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
+            #[cfg(not(coverage))]
+            doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -351,6 +391,28 @@ impl DnsServerPool {
     fn next_dns_server(&self) -> &DnsServerConfig {
         let index = self.current_dns_index.fetch_add(1, Ordering::Relaxed) % self.dns_servers.len();
         &self.dns_servers[index]
+    }
+
+    /// Empty-pool-safe rotation. `next_doh_server`/`next_dns_server` index with
+    /// `% len`, which panics on an empty list — and a config with only one of
+    /// the two server kinds is legal (validation requires "at least one DoH OR
+    /// DNS server"). Production lookup paths must rotate through these instead.
+    #[cfg(not(coverage))]
+    fn next_doh_server_opt(&self) -> Option<&DohServerConfig> {
+        if self.doh_servers.is_empty() {
+            None
+        } else {
+            Some(self.next_doh_server())
+        }
+    }
+
+    #[cfg(not(coverage))]
+    fn next_dns_server_opt(&self) -> Option<&DnsServerConfig> {
+        if self.dns_servers.is_empty() {
+            None
+        } else {
+            Some(self.next_dns_server())
+        }
     }
 
     // cfg(not(coverage)): performs live HTTPS request to DoH provider — requires network
@@ -385,7 +447,49 @@ impl DnsServerPool {
                 domain
             ));
         }
+        // Any other non-2xx (400/403/404…) means the endpoint cannot serve this query at
+        // all — wrong API path, wrong protocol, misconfiguration. Never parse it into an
+        // empty answer: that is the exact silent-false-negative class of the
+        // /dns-query-vs-/resolve incident (3 of 4 default providers returned HTTP 400 and
+        // were read as "0 TXT records"). Count it for the exit-3 guard and surface a
+        // distinct DNS_ENDPOINT class so the resilient loop rotates WITHOUT backoff.
+        if !status.is_success() {
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
+                server.name,
+                status,
+                domain
+            ));
+        }
         let response = http_response.json::<Value>().await?;
+        // dns-json `Status` is the DNS RCODE: 0 = NOERROR and 3 = NXDOMAIN are genuine
+        // answers (records present / genuinely absent). Anything else (2 = SERVFAIL,
+        // 5 = REFUSED, …) is a resolver-side failure that must never read as "this domain
+        // has no records". A missing `Status` field is tolerated (lenient providers/fixtures).
+        if let Some(rcode) = response["Status"].as_u64() {
+            if rcode != 0 && rcode != 3 {
+                self.note_throttle();
+                return Err(anyhow::anyhow!(
+                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    server.name,
+                    rcode,
+                    domain
+                ));
+            }
+        } else if response["Answer"].as_array().is_none() {
+            // A 2xx JSON body with NO Status and NO Answer is not a dns-json
+            // answer at all (captive portal, proxy error page, middlebox `{}`)
+            // — treating it as authoritative-empty would re-arm the silent
+            // 0-record incident behind an HTTP 200. Only a body carrying the
+            // RCODE (or actual records) earns authoritative-empty trust.
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned a 2xx body without Status or Answer for {} — not a DNS JSON answer",
+                server.name,
+                domain
+            ));
+        }
 
         let mut records = Vec::new();
 
@@ -452,7 +556,39 @@ impl DnsServerPool {
                 domain
             ));
         }
+        // Any other non-2xx is a broken/misconfigured endpoint — surface DNS_ENDPOINT,
+        // never an empty answer (mirrors the TXT path; see comment there).
+        if !status.is_success() {
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
+                server.name,
+                status,
+                domain
+            ));
+        }
         let response = http_response.json::<Value>().await?;
+        // RCODE gate mirroring the TXT path: only NOERROR (0) and NXDOMAIN (3) are genuine
+        // answers; SERVFAIL/REFUSED/… must never read as "no CNAME".
+        if let Some(rcode) = response["Status"].as_u64() {
+            if rcode != 0 && rcode != 3 {
+                self.note_throttle();
+                return Err(anyhow::anyhow!(
+                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    server.name,
+                    rcode,
+                    domain
+                ));
+            }
+        } else if response["Answer"].as_array().is_none() {
+            // No Status and no Answer: not a dns-json answer (see TXT path).
+            self.note_throttle();
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned a 2xx body without Status or Answer for {} — not a DNS JSON answer",
+                server.name,
+                domain
+            ));
+        }
 
         let mut records = Vec::new();
 
@@ -531,15 +667,38 @@ impl DnsServerPool {
         let attempts = self.resilient_attempts();
         let mut last_err: Option<anyhow::Error> = None;
         for i in 0..attempts {
-            let server = self.next_doh_server().clone();
+            // DoH-only configs are legal; so are DNS-only ones — never index an
+            // empty pool (panic), surface a plain error the callers treat as a
+            // non-class failure and fall back from.
+            let Some(server) = self.next_doh_server_opt().cloned() else {
+                return Err(anyhow::anyhow!(
+                    "no DoH servers configured for TXT lookup of {}",
+                    domain
+                ));
+            };
             match self.doh_txt_lookup(domain, &server).await {
                 Ok(records) => return Ok(records),
                 Err(e) => {
-                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    let msg = e.to_string();
+                    let throttled = msg.contains("DNS_THROTTLE");
+                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
+                    self.log_doh_failure(&server.name, &msg);
+                    if !throttled && !endpoint_broken {
+                        // Transport/parse failures (connect refused, TLS error,
+                        // 200-with-HTML body) are provider failures too — count
+                        // them for the exit-3 guard. Classed errors were already
+                        // counted at the doh_*_lookup choke point.
+                        self.note_throttle();
+                    }
                     last_err = Some(e);
-                    if throttled && i + 1 < attempts {
-                        // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
-                        tokio::time::sleep(self.in_race_backoff(i)).await;
+                    if i + 1 < attempts {
+                        if throttled {
+                            // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
+                            tokio::time::sleep(self.in_race_backoff(i)).await;
+                        }
+                        // Rotate past ANY failing provider — broken (4xx/RCODE),
+                        // unreachable (transport), or misbehaving (parse) endpoints
+                        // are not busy; only a throttle earns a backoff first.
                         continue;
                     }
                     break;
@@ -569,15 +728,31 @@ impl DnsServerPool {
         let attempts = self.resilient_attempts();
         let mut last_err: Option<anyhow::Error> = None;
         for i in 0..attempts {
-            let server = self.next_doh_server().clone();
+            // Mirror the TXT path: never index an empty DoH pool.
+            let Some(server) = self.next_doh_server_opt().cloned() else {
+                return Err(anyhow::anyhow!(
+                    "no DoH servers configured for CNAME lookup of {}",
+                    domain
+                ));
+            };
             match self.doh_cname_lookup(domain, &server).await {
                 Ok(records) => return Ok(records),
                 Err(e) => {
-                    let throttled = e.to_string().contains("DNS_THROTTLE");
+                    let msg = e.to_string();
+                    let throttled = msg.contains("DNS_THROTTLE");
+                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
+                    self.log_doh_failure(&server.name, &msg);
+                    if !throttled && !endpoint_broken {
+                        // Count transport/parse provider failures (see TXT path).
+                        self.note_throttle();
+                    }
                     last_err = Some(e);
-                    if throttled && i + 1 < attempts {
-                        // fix 5: same short, overflow-safe backoff as the TXT path.
-                        tokio::time::sleep(self.in_race_backoff(i)).await;
+                    if i + 1 < attempts {
+                        if throttled {
+                            // fix 5: same short, overflow-safe backoff as the TXT path.
+                            tokio::time::sleep(self.in_race_backoff(i)).await;
+                        }
+                        // Rotate past ANY failing provider (see TXT path).
                         continue;
                     }
                     break;
@@ -677,7 +852,8 @@ impl DnsServerPool {
         let txt = match txt_result {
             Ok(records) => records,
             Err(e) => {
-                if e.to_string().contains("DNS_THROTTLE") {
+                let msg = e.to_string();
+                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -686,7 +862,8 @@ impl DnsServerPool {
         let cname = match cname_result {
             Ok(records) => records,
             Err(e) => {
-                if e.to_string().contains("DNS_THROTTLE") {
+                let msg = e.to_string();
+                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -716,10 +893,16 @@ impl DnsServerPool {
         )
         .await
         {
-            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
-            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
-                // DoH was throttled across all providers — try DNS fallback, but if that also
-                // yields nothing, surface the throttle rather than a silent empty.
+            // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
+            // no records) — is final: skip the traditional-DNS fallback entirely. On the
+            // high-volume subdomain fan-out this saves a UDP lookup per recordless name.
+            Ok(Ok(records)) => return Ok(records),
+            // All providers failed (throttled or broken endpoint) — try DNS fallback, but if
+            // that also yields nothing, surface the failure rather than a silent empty.
+            Ok(Err(e))
+                if e.to_string().contains("DNS_THROTTLE")
+                    || e.to_string().contains("DNS_ENDPOINT") =>
+            {
                 if let Some(records) = self.fast_dns_txt_fallback(domain).await {
                     return Ok(records);
                 }
@@ -739,7 +922,7 @@ impl DnsServerPool {
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
     async fn fast_dns_txt_fallback(&self, domain: &str) -> Option<Vec<String>> {
-        let dns_server = self.next_dns_server();
+        let dns_server = self.next_dns_server_opt()?;
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(txt_lookup)) = tokio::time::timeout(
                 std::time::Duration::from_millis(2000),
@@ -778,8 +961,12 @@ impl DnsServerPool {
         )
         .await
         {
-            Ok(Ok(records)) if !records.is_empty() => return Ok(records),
-            Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+            // Authoritative answer (including genuine no-CNAME) is final — skip fallback.
+            Ok(Ok(records)) => return Ok(records),
+            Ok(Err(e))
+                if e.to_string().contains("DNS_THROTTLE")
+                    || e.to_string().contains("DNS_ENDPOINT") =>
+            {
                 if let Some(records) = self.fast_dns_cname_fallback(domain).await {
                     return Ok(records);
                 }
@@ -799,7 +986,7 @@ impl DnsServerPool {
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
     async fn fast_dns_cname_fallback(&self, domain: &str) -> Option<Vec<String>> {
-        let dns_server = self.next_dns_server();
+        let dns_server = self.next_dns_server_opt()?;
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(lookup)) = tokio::time::timeout(
                 std::time::Duration::from_millis(2000),
@@ -875,21 +1062,21 @@ pub async fn get_txt_records_with_rate_limit(
     // Race DoH and traditional DNS concurrently — first successful result wins.
     // This replaces the old sequential fallback (DoH×2 → DNS×2 → system) which
     // could take 20+ seconds on failure. Now worst-case is ~3s (single timeout).
-    let doh_server = dns_pool.next_doh_server();
-    let dns_server = dns_pool.next_dns_server();
-
     // Spawn DoH lookup
     let doh_fut = async {
         // GRC-367: resilient lookup retries/rotates DoH providers on throttle (429/5xx)
         // instead of collapsing a throttle into an empty (false-negative) answer.
-        match dns_pool.doh_txt_lookup_resilient(domain).await {
-            Ok(records) if !records.is_empty() => Some(records),
-            _ => None,
-        }
+        // An authoritative empty answer (HTTP 2xx, RCODE NOERROR/NXDOMAIN, no records) is
+        // a REAL answer: return Some(vec![]) so the caller doesn't fall through to the
+        // system resolver and emit a spurious "All DNS resolution failed" warning for
+        // every domain that genuinely has no TXT records.
+        dns_pool.doh_txt_lookup_resilient(domain).await.ok()
     };
 
-    // Spawn traditional DNS lookup (UDP)
+    // Spawn traditional DNS lookup (UDP). DNS-only/DoH-only configs are legal —
+    // an empty traditional pool just means this race arm yields nothing.
     let dns_fut = async {
+        let dns_server = dns_pool.next_dns_server_opt()?;
         let resolver = match dns_pool.create_dns_resolver(dns_server, false) {
             Ok(r) => r,
             Err(_) => return None,
@@ -924,24 +1111,24 @@ pub async fn get_txt_records_with_rate_limit(
                 biased;
                 result = &mut doh_fut => {
                     if let Some(records) = result {
-                        info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                        info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
                         return Some(records);
                     }
                     // DoH failed — wait for DNS
                     if let Some(records) = (&mut dns_fut).await {
-                        debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                        debug!("DNS successful: Found {} TXT records for {} (UDP)", records.len(), domain);
                         return Some(records);
                     }
                     None
                 }
                 result = &mut dns_fut => {
                     if let Some(records) = result {
-                        debug!("DNS successful: Found {} TXT records for {} via {} (UDP)", records.len(), domain, dns_server.name);
+                        debug!("DNS successful: Found {} TXT records for {} (UDP)", records.len(), domain);
                         return Some(records);
                     }
                     // DNS failed — wait for DoH
                     if let Some(records) = (&mut doh_fut).await {
-                        info!("DoH successful: Found {} TXT records for {} via {}", records.len(), domain, doh_server.name);
+                        info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
                         return Some(records);
                     }
                     None
@@ -1072,9 +1259,11 @@ pub async fn get_cname_records_with_rate_limit(
         // All providers throttled (429/5xx surviving rotation). This is a FALSE-NEGATIVE risk,
         // NOT a genuine absence — count it so the exit-3 guard can see it, then return empty so
         // analysis continues (consistent with the TXT path's degrade-but-record behavior).
-        Ok(Err(e)) if e.to_string().contains("DNS_THROTTLE") => {
+        Ok(Err(e))
+            if e.to_string().contains("DNS_THROTTLE") || e.to_string().contains("DNS_ENDPOINT") =>
+        {
             warn!(
-                "CNAME lookup for {} throttled across all DoH providers — recording failure: {}",
+                "CNAME lookup for {} failed across all DoH providers (throttled or broken endpoint) — recording failure: {}",
                 domain, e
             );
             if let Some(counter) = dns_failure_counter {
@@ -1851,7 +2040,7 @@ fn infer_provider_domain(provider_name: &str) -> Option<String> {
     }
 }
 
-fn is_valid_domain(domain: &str) -> bool {
+pub(crate) fn is_valid_domain(domain: &str) -> bool {
     // Allow domains with underscores for SPF delegation patterns (e.g., _spf.google.com, _spf1.canva.com)
     // This matches RFC requirements for service records and SPF patterns
     // Each label can be 1-63 characters, starting with alphanumeric or underscore
@@ -4906,6 +5095,340 @@ mod tests {
             test_counter.load(Ordering::Relaxed) >= 1,
             "a throttle defeating every DoH provider must increment the pool's choke-point \
              counter so the exit-3 guard sees it — without any live system-resolver query"
+        );
+    }
+
+    // ── GRC-500: non-throttle endpoint failures (4xx / bad RCODE) must surface as ──
+    // ── DNS_ENDPOINT, never a silent Ok(empty). These pin THE incident: 3 of 4    ──
+    // ── default providers returned HTTP 400 (wrong /dns-query-vs-/resolve path)   ──
+    // ── and were read as "0 TXT records", producing false-negative 0-vendor scans.──
+
+    // THE incident regression: a 400 with a *valid JSON error body* (so it is NOT a
+    // JSON-parse failure that could mask the bug) must (a) surface as a DNS_ENDPOINT
+    // error — never Ok(empty) — and (b) increment the pool's choke-point counter.
+    // Previously this exact case returned Ok(vec![]) and silently dropped every vendor.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_400_valid_json_body_returns_dns_endpoint_and_counts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A 400 with a well-formed JSON body — if the guard relied on a parse failure it
+        // would slip through; the status check must reject it BEFORE parsing.
+        let error_body = serde_json::json!({
+            "error": "Invalid request: this endpoint does not serve application/dns-json"
+        });
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(error_body)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let test_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&test_counter));
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_txt_lookup("incident.example", &doh_server).await;
+
+        assert!(
+            result.is_err(),
+            "a 400 (wrong endpoint) must surface as an error, never the false-negative Ok(empty) \
+             that dropped every vendor in the incident"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
+            "a non-throttle 4xx must be tagged DNS_ENDPOINT so the resilient loop rotates without backoff"
+        );
+        assert_eq!(
+            test_counter.load(Ordering::Relaxed),
+            1,
+            "a DNS_ENDPOINT failure must increment the choke-point counter exactly once so the \
+             exit-3 guard can see the broken endpoint"
+        );
+    }
+
+    // The CNAME path mirrors the TXT path: a 400 must surface as DNS_ENDPOINT, not Ok(empty).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_cname_lookup_400_returns_dns_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(counter.clone());
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_cname_lookup("incident.example", &doh_server).await;
+
+        assert!(
+            result.is_err(),
+            "a 400 on the CNAME path must surface as an error, never a silent Ok(empty)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
+            "a non-throttle 4xx on the CNAME path must be tagged DNS_ENDPOINT (mirrors the TXT path)"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the CNAME 4xx must be counted at the choke point for the exit-3 guard, like the TXT path"
+        );
+    }
+
+    // dns-json `Status` (RCODE) 2 = SERVFAIL with no Answer is a resolver-side failure, NOT a
+    // genuine "no records". It must surface as DNS_ENDPOINT and increment the counter — never
+    // be parsed into an empty answer that reads as "this domain has no TXT records".
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_rcode_servfail_returns_dns_endpoint_and_counts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // HTTP 200 but DNS RCODE 2 (SERVFAIL), no Answer — the subtle case the status check
+        // alone would miss; the RCODE gate must catch it.
+        let body = serde_json::json!({
+            "Status": 2,
+            "Question": [{"name": "servfail.example", "type": 16}],
+            "Answer": []
+        });
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let test_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&test_counter));
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_txt_lookup("servfail.example", &doh_server).await;
+
+        assert!(
+            result.is_err(),
+            "RCODE 2 (SERVFAIL) is a resolver failure, not a genuine empty — must surface as an error"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
+            "a non-0/3 RCODE must be tagged DNS_ENDPOINT"
+        );
+        assert_eq!(
+            test_counter.load(Ordering::Relaxed),
+            1,
+            "a SERVFAIL RCODE must increment the choke-point counter exactly once"
+        );
+    }
+
+    // RCODE 3 = NXDOMAIN with no Answer is a GENUINE absence (the domain truly has no records).
+    // It must map to Ok(vec![]) WITHOUT touching the counter — the boundary case that proves the
+    // RCODE gate distinguishes "resolver failed" (count) from "genuinely absent" (don't count).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_rcode_nxdomain_returns_ok_empty_no_count() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // HTTP 200, RCODE 3 (NXDOMAIN), no Answer — a real "this domain has no TXT records".
+        let body = serde_json::json!({
+            "Status": 3,
+            "Question": [{"name": "nxdomain.example", "type": 16}],
+            "Answer": []
+        });
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let test_counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&test_counter));
+        let doh_server = pool.next_doh_server().clone();
+        let records = pool
+            .doh_txt_lookup("nxdomain.example", &doh_server)
+            .await
+            .expect("NXDOMAIN (RCODE 3) is a genuine absence and must be Ok, not an error");
+
+        assert!(
+            records.is_empty(),
+            "NXDOMAIN must return an empty record set"
+        );
+        assert_eq!(
+            test_counter.load(Ordering::Relaxed),
+            0,
+            "a genuine NXDOMAIN absence must NOT increment the failure counter"
+        );
+    }
+
+    // The resilient loop must rotate to the next provider on a DNS_ENDPOINT failure (the
+    // incident scenario: one provider 400s, the next serves real records). This pins the
+    // "rotate immediately, no backoff" behavior for the DNS_ENDPOINT class specifically.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_txt_lookup_resilient_rotates_past_400_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Provider 1 always 400s (DNS_ENDPOINT); provider 2 serves a valid TXT answer.
+        let broken = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&broken)
+            .await;
+
+        let healthy = MockServer::start().await;
+        let body = build_doh_txt_response(
+            "rotated.example",
+            &["v=spf1 include:mail.rotated.example ~all"],
+        );
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&healthy)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", broken.uri()),
+            format!("{}/dns-query", healthy.uri()),
+        ]);
+        let result = pool.doh_txt_lookup_resilient("rotated.example").await;
+        assert!(
+            result.is_ok(),
+            "resilient lookup must rotate past the 400 (DNS_ENDPOINT) provider to a healthy one"
+        );
+        let records = result.unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "rotation must return the healthy provider's TXT records, not a false-negative empty"
+        );
+        assert!(
+            records[0].contains("spf1"),
+            "the rotated-to record must be the healthy provider's real answer"
+        );
+    }
+
+    // get_txt_records_with_pool on a single DoH server answering 200 / RCODE 0 / no Answer
+    // must treat the authoritative empty as FINAL: Ok(vec![]) with no system-resolver
+    // fallthrough (the recordless subdomain skips the extra UDP/system lookup entirely).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_txt_records_with_pool_authoritative_empty_is_final() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // 200, Status 0 (NOERROR), empty Answer — an authoritative "no TXT records".
+        let body = build_doh_empty_response("authoritative-empty.example");
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "authoritative-empty.example"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let records = get_txt_records_with_pool("authoritative-empty.example", &pool)
+            .await
+            .expect("an authoritative empty (2xx / RCODE 0 / no Answer) must be Ok, not an error");
+
+        assert!(
+            records.is_empty(),
+            "an authoritative empty answer is final and must return Ok(vec![]) — no records, \
+             and (the DoH future resolving first) no system-resolver fallthrough"
+        );
+        // Prove the mock actually served this lookup: the total-failure fallback
+        // path also yields Ok(vec![]), so without this assertion the test passes
+        // even when the mock is never reached (demonstrated under a MITM proxy).
+        let hits = server
+            .received_requests()
+            .await
+            .expect("wiremock request recording enabled");
+        assert!(
+            !hits.is_empty(),
+            "the DoH mock must have served the lookup — otherwise this exercised the \
+             total-failure fallback, not the authoritative-empty short-circuit"
+        );
+    }
+
+    // Config validation accepts "at least one DoH OR DNS server", so single-kind
+    // pools are legal — the rotation helpers index with `% len` and previously
+    // panicked (div-by-zero) on the empty side. These pin the no-panic guarantee.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_doh_only_pool_no_dns_servers_does_not_panic() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body = build_doh_txt_response("doh-only.example", &["v=spf1 include:vendor.test ~all"]);
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "doh-only.example"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(body)
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let mut pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        pool.dns_servers.clear(); // legal DoH-only configuration
+
+        let records = get_txt_records_with_pool("doh-only.example", &pool)
+            .await
+            .expect("a DoH-only pool must resolve without touching the (empty) DNS pool");
+        assert_eq!(records.len(), 1, "the DoH answer must come through intact");
+        assert!(records[0].contains("spf1"));
+    }
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_dns_only_pool_no_doh_servers_does_not_panic() {
+        // DNS-only configuration: empty DoH pool, only the (unreachable) test
+        // DNS fallback. The lookup must complete without panicking — result
+        // content is environment-dependent (system resolver final fallback),
+        // so the assertion is the absence of a panic plus a well-formed Ok.
+        let mut pool = DnsServerPool::with_test_urls(vec!["http://127.0.0.1:1/dns-query".into()]);
+        pool.doh_servers.clear(); // legal DNS-only configuration
+
+        let result = get_txt_records_with_pool("dns-only-nonexistent.invalid", &pool).await;
+        assert!(
+            result.is_ok(),
+            "an empty DoH pool must degrade gracefully, never index-panic: {result:?}"
         );
     }
 }

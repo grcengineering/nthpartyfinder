@@ -17,6 +17,8 @@ fn version_flag_shows_version() {
     cmd.arg("--version")
         .assert()
         .success()
+        // Pinned to the crate manifest so a version bump can't silently leave
+        // this asserting a stale literal (it shipped asserting "1.0.0" at 1.0.1).
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
