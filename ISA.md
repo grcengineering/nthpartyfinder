@@ -3,7 +3,7 @@ project: nthpartyfinder
 task: "Resolve ALL open GitHub PRs (17) + Security Issues/Findings (7 Dependabot, ~1777 code-scanning) properly (2026-06-16)"
 effort: E4
 phase: observe
-progress: 0/32 (task ISC-185..216) · prior tasks 42/42 + 78/142 (see dated sections)
+progress: 4/32 (task ISC-185..216) · prior tasks 42/42 + 78/142 (see dated sections)
 mode: algorithm
 started: 2026-06-16T00:00:00Z
 updated: 2026-06-16T00:00:00Z
@@ -285,10 +285,10 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 
 ### Task 2026-06-16 · Resolve ALL open PRs + Security findings — PR disposition
 
-- [ ] ISC-185: PR #9 (fix/GRC-500) integrated into master — post-merge `git show master:src/dns.rs` contains `dns.google/resolve` + `1.1.1.1/dns-query` + `8.8.8.8/resolve` (broken quad9/opendns/dns.google/dns-query gone)
-- [ ] ISC-186: Post-integration full `cargo test` (lib + integration) green, 0 failures — captured summary
-- [ ] ISC-187: Post-integration `cargo clippy --all-targets -- -D warnings` exit 0 AND `cargo fmt --check` exit 0 — captured
-- [ ] ISC-188: Live DNS smoke on merged binary: vanta.com TXT >0 records; all 4 DoH endpoints HTTP 200 JSON — captured
+- [x] ISC-185: PR #9 (fix/GRC-500) integrated into master — post-merge `git show master:src/dns.rs` contains `dns.google/resolve` + `1.1.1.1/dns-query` + `8.8.8.8/resolve` (broken quad9/opendns/dns.google/dns-query gone). VERIFIED: merged 2026-06-16T19:44:40Z (4b4bbf1); grep confirms 4 corrected endpoints
+- [x] ISC-186: Post-integration full `cargo test` (lib + integration) green, 0 failures — VERIFIED: 4008 lib pass + integration green (fixed latent NER test-cfg bug)
+- [x] ISC-187: Post-integration `cargo clippy --all-targets -- -D warnings` exit 0 AND `cargo fmt --check` exit 0 — VERIFIED + 27/27 CI checks green on PR #9
+- [x] ISC-188: Live DNS smoke on merged binary: vanta.com TXT >0 records; all 4 DoH endpoints HTTP 200 JSON — VERIFIED: "DoH successful: Found 39 TXT records for vanta.com", 14 vendors, exit 0
 - [ ] ISC-189: All 11 cargo Dependabot PRs (#10–#19) resolved (merged or closed with documented rationale) — `gh pr list` shows none open
 - [ ] ISC-190: Frontend npm Dependabot PRs (#1, #21) resolved — none open
 - [ ] ISC-191: github_actions Dependabot PR #20 resolved (merged, all checks green) — closed

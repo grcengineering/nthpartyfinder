@@ -1232,9 +1232,36 @@ mod tests {
     #[test]
     fn test_html_template_trait_constants() {
         use askama::Template;
-        assert_eq!(HtmlReportTemplate::EXTENSION, Some("html"));
-        assert_eq!(HtmlReportTemplate::MIME_TYPE, "text/html; charset=utf-8");
+        // askama 0.13+ removed the generated `EXTENSION` / `MIME_TYPE` associated
+        // constants from the `Template` impl; `SIZE_HINT` remains. We preserve this
+        // test's intent ("this template emits an HTML document") by rendering it and
+        // asserting the output is a `<!DOCTYPE html>` document rather than reading
+        // metadata constants the library no longer provides.
         let _ = HtmlReportTemplate::SIZE_HINT;
+        let template = HtmlReportTemplate {
+            summary: HtmlSummary {
+                root_domain: "test.com".to_string(),
+                root_organization: "Test Org".to_string(),
+                total_relationships: 0,
+                max_depth: 0,
+                unique_domains: 0,
+                unique_organizations: 0,
+                generated_at: "2024-01-01".to_string(),
+            },
+            relationships: Vec::new(),
+            relationships_json: "[]".to_string(),
+            summary_json: "{}".to_string(),
+            vendor_graph_js: VENDOR_GRAPH_JS,
+            vendor_graph_css: VENDOR_GRAPH_CSS,
+        };
+        let html = template
+            .render()
+            .expect("HTML report template should render");
+        assert!(
+            html.contains("<!DOCTYPE html>"),
+            "rendered report should be an HTML document"
+        );
+        assert!(html.contains("text/html") || html.contains("<html"));
     }
 
     #[test]
