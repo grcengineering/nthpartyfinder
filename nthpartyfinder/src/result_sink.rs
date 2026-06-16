@@ -262,37 +262,38 @@ impl ResultSink {
     }
 }
 
-// Portable best-effort liveness. Linux: fast `/proc/<pid>` path. Other Unix
-// (macOS/BSD): `kill -0 <pid>` which succeeds iff the process exists. On ANY
-// uncertainty we return `true` (assume alive) so cleanup never deletes a file
-// that might belong to a live run — the age guard in cleanup_orphans is the
-// primary safety net; this is defense-in-depth against PID reuse.
+/// Returns `true` if a process with the given PID is currently running.
+///
+/// Uses `sysinfo` for portable liveness detection across Linux, macOS, and
+/// Windows. The previous implementation only checked `/proc/{pid}`, which does
+/// not exist on macOS/Windows: there it reported *every* PID as "not running",
+/// so `cleanup_orphans` deleted the live result-sink files of concurrently
+/// running scans. The victim run then panicked in `drain_all()` with ENOENT
+/// (exit 101) before any output was written (GRC-500).
+//
+// cfg(not(coverage)): queries the host process table via platform-specific
+// syscalls, so the result is environment-dependent and excluded from coverage.
 #[cfg(not(coverage))]
 fn is_process_running(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        if Path::new(&format!("/proc/{}", pid)).exists() {
-            return true;
-        }
-    }
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(true)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let target = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[target]),
+        false,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(target).is_some()
 }
+
+// cfg(coverage): the sysinfo path above is excluded from coverage, so this
+// deterministic stub stands in. The current process is always alive; every
+// other PID is treated as dead so both branches of `cleanup_orphans` are
+// exercised without depending on the host process table.
 #[cfg(coverage)]
-fn is_process_running(_pid: u32) -> bool {
-    false
+fn is_process_running(pid: u32) -> bool {
+    pid == std::process::id()
 }
 
 // cfg(not(coverage)): df --output=avail is Linux-only; macOS df writes nothing to stdout, so the parse closure is unreachable
@@ -560,6 +561,57 @@ mod tests {
         assert_eq!(result.unwrap(), 0);
     }
 
+    // GRC-500: when a sibling scan runs cleanup_orphans, it must remove only
+    // truly-orphaned sinks (dead PIDs) and leave a concurrently-running scan's
+    // live sink untouched. Before the fix, macOS deleted both, so the live scan
+    // later panicked reading its own (now missing) sink.
+    //
+    // Both files are backdated past ORPHAN_MIN_AGE_SECS: this originally
+    // asserted a FRESH dead-PID file was reaped, which the post-merge age
+    // guard (defense against PID reuse / in-flight siblings) intentionally
+    // prevents. Aging both makes the test STRONGER: the live file's survival
+    // now proves the liveness check protects it, not merely its freshness.
+    #[test]
+    fn test_orphan_cleanup_preserves_live_removes_dead() {
+        let tmp = TempDir::new().unwrap();
+
+        // Live sibling: our own PID stands in for a concurrently-running scan.
+        let live_file = tmp.path().join(format!(
+            "nthpartyfinder-results-{}.jsonl.zst",
+            std::process::id()
+        ));
+        std::fs::write(&live_file, b"live").unwrap();
+
+        // Orphan: an impossible PID can never be running.
+        let dead_file = tmp
+            .path()
+            .join(format!("nthpartyfinder-results-{}.jsonl.zst", u32::MAX));
+        std::fs::write(&dead_file, b"dead").unwrap();
+
+        // Backdate both well beyond ORPHAN_MIN_AGE_SECS.
+        for f in [&live_file, &dead_file] {
+            let status = std::process::Command::new("touch")
+                .arg("-t")
+                .arg("200001010000")
+                .arg(f)
+                .status()
+                .expect("touch must run");
+            assert!(status.success(), "backdating {} failed", f.display());
+        }
+
+        let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
+
+        assert_eq!(cleaned, 1, "only the dead-PID orphan should be cleaned");
+        assert!(
+            live_file.exists(),
+            "an OLD live-PID sink must be preserved by the liveness check"
+        );
+        assert!(
+            !dead_file.exists(),
+            "old dead-PID orphan sink must be removed"
+        );
+    }
+
     #[test]
     fn test_orphan_cleanup_skips_current_process() {
         let tmp = TempDir::new().unwrap();
@@ -572,10 +624,18 @@ mod tests {
         std::fs::write(&own_file, b"data").unwrap();
 
         let cleaned = ResultSink::cleanup_orphans(tmp.path()).unwrap();
-        // On macOS /proc doesn't exist, so is_process_running returns false
-        // On Linux, our own PID would be detected as running
-        // Either way, the function should not panic
-        let _ = cleaned;
+        // The current process is alive on every platform, so its sink file must
+        // be preserved. GRC-500 regression: macOS previously reported the live
+        // PID as "not running" and deleted the file out from under a running
+        // scan, which then panicked in drain_all().
+        assert_eq!(
+            cleaned, 0,
+            "a live current-process sink must not be cleaned"
+        );
+        assert!(
+            own_file.exists(),
+            "current-process sink file must survive cleanup_orphans"
+        );
     }
 
     #[test]
@@ -592,11 +652,12 @@ mod tests {
 
     #[test]
     fn test_is_process_running_nonexistent() {
-        // PID 999999 is very unlikely to be running
-        // On macOS /proc doesn't exist, so this always returns false
-        let result = is_process_running(999999);
-        // Just verify it doesn't panic
-        let _ = result;
+        // u32::MAX exceeds the maximum PID on every supported platform, so it
+        // can never correspond to a live process and must read as not running.
+        assert!(
+            !is_process_running(u32::MAX),
+            "an impossible PID must read as not running"
+        );
     }
 
     #[test]
@@ -887,43 +948,43 @@ mod tests {
 
     // ── is_process_running additional coverage ───────────────────────
 
-    // cfg(not(coverage)): /proc platform branch — only one arm executes per OS
+    // cfg(not(coverage)): exercises the real sysinfo-backed liveness check.
     #[cfg(not(coverage))]
     #[test]
     fn test_is_process_running_current_process() {
-        // The current process is, by definition, running. This MUST hold on
-        // every supported platform — the prior version asserted the macOS
-        // "no /proc → false" defect (root cause of TF-3) as expected behavior.
-        let pid = std::process::id();
+        // The current process is always running, on every platform. GRC-500
+        // regression: this previously asserted `false` on hosts without /proc.
         assert!(
-            is_process_running(pid),
+            is_process_running(std::process::id()),
             "the current process must be detected as running on every platform"
         );
     }
 
-    // cfg(not(coverage)): /proc platform branch — macOS vs Linux behavior
+    // cfg(not(coverage)): exercises the real liveness check + a removal failure.
     #[cfg(not(coverage))]
     #[cfg(unix)]
     #[test]
     fn test_cleanup_orphans_remove_fails_readonly_dir() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        // Create an orphaned result file with a PID that's definitely not running
-        let orphan_name = "nthpartyfinder-results-999999.jsonl.zst";
-        let orphan_path = dir.path().join(orphan_name);
+        // An impossible PID is guaranteed dead, so cleanup is attempted.
+        let orphan_name = format!("nthpartyfinder-results-{}.jsonl.zst", u32::MAX);
+        let orphan_path = dir.path().join(&orphan_name);
         std::fs::write(&orphan_path, b"dummy").unwrap();
 
         // Make directory read-only to prevent file removal
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let result = ResultSink::cleanup_orphans(dir.path());
-        // On macOS (no /proc), PID 999999 is always "not running" so cleanup is attempted
-        // but remove_file fails because dir is read-only
-        if !Path::new("/proc").exists() {
-            // macOS: cleanup attempted, remove fails, cleaned count = 0
+        // Skip the removal-failure assertions when running as root (common in
+        // Linux CI containers), where read-only directory permissions are
+        // ignored and the file would actually be removed.
+        let running_as_root = std::fs::write(dir.path().join(".root-probe"), b"x").is_ok();
+        if !running_as_root {
+            // Cleanup is attempted, but remove_file fails because the directory
+            // is read-only: cleaned count stays 0 and the file survives.
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), 0);
-            // File should still exist since removal failed
             assert!(orphan_path.exists());
         }
 

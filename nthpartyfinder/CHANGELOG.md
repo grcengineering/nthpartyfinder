@@ -1,5 +1,48 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Default DoH server list replaced with verified JSON-API endpoints. Google's
+  JSON DoH API lives at `/resolve` — `/dns-query` is RFC-8484 wire format and
+  returns HTTP 400 for `application/dns-json`; Quad9 and OpenDNS do not serve
+  the JSON GET API at all. 3 of 4 default DoH servers therefore failed every
+  query, degrading DNS performance and risking false-negative vendor results.
+  Cloudflare/Google IP-literal endpoints added (no DNS bootstrap dependency
+  when UDP/53 is blocked).
+- DoH responses with a non-2xx status other than 429/5xx (e.g. HTTP 400 from an
+  endpoint that does not serve the JSON DoH API) and dns-json RCODEs other than
+  NOERROR/NXDOMAIN now surface as `DNS_ENDPOINT` errors counted toward the
+  exit-3 guard — never parsed as "0 records". Resilient lookups rotate past
+  broken endpoints immediately (no backoff); each failing provider warns once,
+  then logs at debug.
+- Authoritative empty DoH answers (2xx, RCODE NOERROR/NXDOMAIN, no records) are
+  now final: no system-resolver fallthrough and no spurious "All DNS resolution
+  failed" warning for domains that genuinely have no TXT records.
+- GRC-500: `cleanup_orphans` deleted the live result-sink files of
+  concurrently-running scans on macOS/Windows. `is_process_running` checked
+  `/proc/{pid}` (Linux-only), so every PID read as "not running" off Linux and
+  a sibling run's startup cleanup removed an active scan's `/tmp` sink. The
+  victim then panicked in `drain_all()` with ENOENT (exit 101) before writing
+  output — surfacing as HTML/JSON/markdown "crashes" and silently-empty
+  reports in the format matrix while CSV got lucky on timing. Liveness now uses
+  `sysinfo` for correct cross-platform detection.
+- The disk-sink read path no longer panics when results can't be read back; it
+  fails loudly with a clear message and a dedicated exit code (4) instead of
+  emitting a silently-empty report.
+
+### Changed
+- `--timeout` help now explains that depth-3+/cold-cache scans routinely exceed
+  the 600s default (raise it or use `--timeout 0`) and that the output format
+  does not affect discovery time.
+- Dependency updates (clears the open Dependabot maintenance PRs): tokio
+  1.52.1→1.52.3, serde_json 1.0.149→1.0.150, http 1.4.0→1.4.2, thiserror
+  1.0→2.0, colored 2.1→3.1, which 6→8, zip 0.6→8.6, toml 0.8→1.1, sysinfo
+  0.32→0.39, askama 0.12→0.16. Code touched by API changes: `sysinfo`
+  `ProcessRefreshKind::new()`→`nothing()` (process-liveness check); the askama
+  0.13+ removal of the generated `EXTENSION`/`MIME_TYPE` template constants
+  (the affected unit test now verifies HTML output by rendering instead).
+
 ## [1.1.1] - 2026-06-02
 
 ### Security

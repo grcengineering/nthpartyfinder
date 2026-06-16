@@ -326,29 +326,45 @@ pub(crate) async fn confirm_unverified_organizations_with_input(
                         if !custom_org.is_empty() {
                             vendors.insert(domain.to_string(), custom_org.to_string());
 
-                            saved_count +=
-                                try_save_vendor_override(domain, custom_org, logger) as usize;
+                            let saved = try_save_vendor_override(domain, custom_org, logger);
+                            saved_count += saved as usize;
 
                             logger.info(&format!(
                                 "Updated organization for {}: {} -> {}",
                                 domain, inferred_org, custom_org
                             ));
-                            println!(
-                                "    ✅ Updated: {} → \"{}\" (saved for future runs)",
-                                domain, custom_org
-                            );
+                            // Only claim persistence when the save actually succeeded —
+                            // a false "saved for future runs" hides the failed write.
+                            if saved {
+                                println!(
+                                    "    ✅ Updated: {} → \"{}\" (saved for future runs)",
+                                    domain, custom_org
+                                );
+                            } else {
+                                println!(
+                                    "    ⚠️  Updated for this run: {} → \"{}\" (saving for future runs FAILED — see warnings)",
+                                    domain, custom_org
+                                );
+                            }
                             updated_count += 1;
                         } else {
                             println!("    ⏭️  Kept inferred name (empty input)");
                         }
                     }
                     "Y" | "" => {
-                        saved_count +=
-                            try_save_vendor_override(domain, inferred_org, logger) as usize;
-                        println!(
-                            "    ✅ Accepted: \"{}\" (saved for future runs)",
-                            inferred_org
-                        );
+                        let saved = try_save_vendor_override(domain, inferred_org, logger);
+                        saved_count += saved as usize;
+                        if saved {
+                            println!(
+                                "    ✅ Accepted: \"{}\" (saved for future runs)",
+                                inferred_org
+                            );
+                        } else {
+                            println!(
+                                "    ⚠️  Accepted for this run: \"{}\" (saving for future runs FAILED — see warnings)",
+                                inferred_org
+                            );
+                        }
                     }
                     _ => {
                         println!("    ⏭️  Skipped (not saved)");
@@ -398,6 +414,12 @@ fn try_save_vendor_override(domain: &str, org: &str, logger: &AnalysisLogger) ->
             true
         }
     } else {
+        // The caller's failure message points the user at warnings — make sure
+        // one actually exists for this branch too.
+        logger.warn(&format!(
+            "Vendor database not initialized — override for {} applies to this run only and was not saved.",
+            domain
+        ));
         false
     }
 }

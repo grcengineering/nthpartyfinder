@@ -145,7 +145,13 @@ mod ner_robustness_tests {
     }
 }
 
-#[cfg(not(feature = "embedded-ner"))]
+// These tests exercise the fully-disabled no-op stubs (init→Ok, is_available→false,
+// extract→None) which exist ONLY under `not(any(embedded-ner, runtime-ner))`
+// (see ner_org.rs:612-639). The old gate `not(embedded-ner)` wrongly let this mod
+// compile under the default `runtime-ner` build, where init() performs a real
+// (consent-gated) fetch and returns Err — failing `cargo test` with default
+// features. Gating on NER fully-absent matches the code under test.
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
 mod ner_disabled_tests {
     use nthpartyfinder::ner_org;
 

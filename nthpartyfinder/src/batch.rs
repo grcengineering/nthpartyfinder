@@ -168,8 +168,13 @@ pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
                 .filter(|s| !s.is_empty());
 
             if let Some(domain) = domain {
-                // Validate domain format
+                // Validate domain format — loudly. A silently dropped input row
+                // means the batch summary under-reports scope with no signal.
                 if !is_valid_domain(&domain) {
+                    tracing::warn!(
+                        "Skipping invalid domain '{}' from batch input (not a valid hostname)",
+                        domain
+                    );
                     continue;
                 }
 
@@ -191,8 +196,12 @@ pub fn parse_csv_domains(content: &str) -> Result<Vec<DomainEntry>> {
                 continue;
             }
 
-            // Validate domain format
+            // Validate domain format — loudly (see CSV path above).
             if !is_valid_domain(domain) {
+                tracing::warn!(
+                    "Skipping invalid domain '{}' from batch input (not a valid hostname)",
+                    domain
+                );
                 continue;
             }
 
@@ -249,6 +258,11 @@ fn parse_json_array(arr: &[serde_json::Value]) -> Result<Vec<DomainEntry>> {
                 let domain = domain.trim();
                 if !domain.is_empty() && is_valid_domain(domain) {
                     entries.push(DomainEntry::new(domain));
+                } else {
+                    tracing::warn!(
+                        "Skipping invalid domain '{}' from JSON batch input (not a valid hostname)",
+                        domain
+                    );
                 }
             }
 
@@ -267,12 +281,22 @@ fn parse_json_array(arr: &[serde_json::Value]) -> Result<Vec<DomainEntry>> {
                             domain: domain.to_string(),
                             label,
                         });
+                    } else {
+                        tracing::warn!(
+                            "Skipping invalid domain '{}' from JSON batch input (not a valid hostname)",
+                            domain
+                        );
                     }
+                } else {
+                    tracing::warn!(
+                        "Skipping JSON batch entry without a string 'domain' field: {}",
+                        item
+                    );
                 }
             }
 
             _ => {
-                // Skip invalid entries
+                tracing::warn!("Skipping non-string, non-object JSON batch entry: {}", item);
             }
         }
     }
