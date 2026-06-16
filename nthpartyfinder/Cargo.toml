@@ -55,6 +55,10 @@ which = "8"
 # zlib-rs backend, so no `Zlib`-licensed crate enters the tree (matches the
 # miniz_oxide backend ort-sys/ureq already use).
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# Pin flate2's pure-Rust miniz_oxide backend (MIT) so zip's deflate works under
+# `--no-default-features` too (where ort-sys, which otherwise enables it, is
+# absent) — and so flate2's zlib-rs backend (Zlib license) is never selected.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Disk-backed result storage with compression (memory efficiency)
 zstd = "0.13"
 # System memory monitoring for pressure-based throttling

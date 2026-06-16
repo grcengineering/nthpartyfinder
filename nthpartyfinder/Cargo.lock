@@ -2085,6 +2085,7 @@ dependencies = [
  "ctrlc",
  "dirs 5.0.1",
  "fancy-regex",
+ "flate2",
  "futures",
  "gline-rs",
  "headless_chrome",
