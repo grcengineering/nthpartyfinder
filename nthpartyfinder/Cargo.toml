@@ -64,7 +64,7 @@ zstd = "0.13"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.39"
 # Integrity verification for the runtime-fetched NER model
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 # NER for organization extraction (replaces Ollama SLM)
 # Using load-dynamic to avoid Windows linking issues with ONNX Runtime
