@@ -20,6 +20,8 @@ pub mod interactive;
 pub mod known_vendors;
 pub mod logger;
 pub mod memory_monitor;
+#[cfg(feature = "runtime-ner")]
+pub mod model_fetch;
 pub mod ner_org;
 pub mod org_normalizer;
 pub mod rate_limit;

@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main, master]
 
+# Least-privilege default; the build job widens to packages: write for pushes.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}

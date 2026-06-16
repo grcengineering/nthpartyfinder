@@ -35,17 +35,31 @@ impl BrowserSemaphore {
     }
 
     /// Acquire a permit, blocking until one is available.
+    ///
+    /// Mutex/Condvar poison is recovered (not unwrapped): the guarded value is a
+    /// simple permit counter, so a peer thread panicking while holding the lock
+    /// must not take down the whole browser pool. `into_inner()` returns the
+    /// still-valid counter so acquisition continues.
     fn acquire(&self) -> BrowserPermit<'_> {
-        let mut count = self.state.lock().unwrap();
+        let mut count = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         while *count >= self.max {
-            count = self.condvar.wait(count).unwrap();
+            count = self
+                .condvar
+                .wait(count)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         *count += 1;
         BrowserPermit { semaphore: self }
     }
 
     fn release(&self) {
-        let mut count = self.state.lock().unwrap();
+        let mut count = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *count -= 1;
         self.condvar.notify_one();
     }

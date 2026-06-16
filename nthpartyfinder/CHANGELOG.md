@@ -36,6 +36,39 @@
   the 600s default (raise it or use `--timeout 0`) and that the output format
   does not affect discovery time.
 
+## [1.1.1] - 2026-06-02
+
+### Security
+- Patched transitive dependency CVEs: openssl 0.10.78 → 0.10.80 (CVE-2026-42327 [high] OCSP UB,
+  CVE-2026-44662 + CVE-2026-45784 AES-KW heap/OOB) and tar 0.4.45 → 0.4.46 (GHSA-3pv8-6f4r-ffg2).
+- Eliminated all 62 production `.unwrap()` calls (panic-safety): poison-recovery for locks,
+  graceful fallbacks on malformed DNS/WHOIS/web input, documented `.expect()` for provable
+  invariants. Test-code unwraps are unchanged (idiomatic).
+
+### Changed
+- CI/supply-chain hardening: least-privilege `permissions:` on all workflows; Opengrep SAST now
+  gates on ERROR-severity findings; the `no-unwrap-in-prod` lint is scoped to production code
+  (excludes `#[cfg(test)]` modules); added SECURITY.md and a pre-push git hook
+  (`scripts/install-git-hooks.sh`) that runs fmt/clippy/cargo-deny/gitleaks before every push.
+
+## [1.1.0] - 2026-06-01
+
+### Added
+- **Runtime-fetched NER model (crates.io publishability).** A new `runtime-ner` feature (now the
+  default) fetches the ~183 MB GLiNER model at runtime from our own GitHub release
+  (`model-gliner-small-v1`) instead of embedding it via `include_bytes!`. This keeps the published
+  crate small enough for crates.io so `cargo install nthpartyfinder` works. The download is
+  **consent-gated** (explicit `[y/N]` prompt on an interactive terminal; never auto-downloads) and
+  **integrity-controlled**: each file is verified against a compiled-in SHA-256 anchor over an
+  HTTPS-only, `github.com`-only request, written atomically, and re-verified from cache on load —
+  unverified bytes are never loaded.
+- `--download-ner-model` flag to consent to the model download non-interactively (CI/headless).
+
+### Changed
+- Default feature is now `runtime-ner` (was `embedded-ner`). Downloadable release binaries remain
+  **self-contained** — CI builds them with `--no-default-features --features embedded-ner` so the
+  model stays baked in and they work offline. `--disable-slm` still skips NER entirely.
+
 ## [1.0.1] - 2026-05-30
 
 ### Fixed

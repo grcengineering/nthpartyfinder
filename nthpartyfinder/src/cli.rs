@@ -116,9 +116,19 @@ pub struct Cli {
     #[arg(long)]
     pub enable_slm: bool,
 
-    /// Disable NER organization extraction (overrides config)
+    /// Disable NER organization extraction (overrides config).
+    /// Opts out of NER entirely — no model is fetched and no prompt is shown.
     #[arg(long)]
     pub disable_slm: bool,
+
+    /// Consent to download the runtime NER model (~183 MB) without prompting.
+    /// For non-interactive/CI/headless use with the default `runtime-ner` build:
+    /// the model is fetched from grcengineering/nthpartyfinder and SHA-256
+    /// verified before use. Without this flag, an interactive terminal is
+    /// prompted; a non-interactive session skips NER (use --disable-slm to opt
+    /// out entirely). No effect on `embedded-ner` builds (model is bundled).
+    #[arg(long)]
+    pub download_ner_model: bool,
 
     /// Enable web page analysis for organization name extraction
     /// Uses Schema.org, OpenGraph, and meta tags with headless browser fallback for SPAs
@@ -273,6 +283,7 @@ pub struct Args {
     pub log_file: Option<String>,
     pub enable_slm: bool,
     pub disable_slm: bool,
+    pub download_ner_model: bool,
     pub enable_web_org: bool,
     pub disable_web_org: bool,
     pub no_color: bool,
@@ -320,6 +331,7 @@ impl From<&Cli> for Args {
             log_file: cli.log_file.clone(),
             enable_slm: cli.enable_slm,
             disable_slm: cli.disable_slm,
+            download_ner_model: cli.download_ner_model,
             enable_web_org: cli.enable_web_org,
             disable_web_org: cli.disable_web_org,
             no_color: cli.no_color,
@@ -491,6 +503,7 @@ mod tests {
             log_file: None,
             enable_slm: false,
             disable_slm: false,
+            download_ner_model: false,
             enable_web_org: false,
             disable_web_org: false,
             no_color: false,
@@ -948,6 +961,22 @@ mod tests {
         assert!(args.disable_web_traffic_discovery);
         assert!(args.disable_slm);
         assert!(args.disable_web_org);
+    }
+
+    #[test]
+    fn cli_parse_download_ner_model_flag() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com", "--download-ner-model"]);
+        assert!(cli.download_ner_model);
+        let args = Args::from(&cli);
+        assert!(args.download_ner_model);
+    }
+
+    #[test]
+    fn cli_download_ner_model_defaults_false() {
+        let cli = Cli::parse_from(["nthpartyfinder", "-d", "x.com"]);
+        assert!(!cli.download_ner_model);
+        let args = Args::from(&cli);
+        assert!(!args.download_ner_model);
     }
 
     #[test]

@@ -759,7 +759,7 @@ impl AnalysisLogger {
 
         // Ensure clean output after progress bar
         print!("\x1b[2K\r"); // Clear any remaining progress bar artifacts
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
 
         // Always print summary regardless of verbosity level
         if self.color_enabled {
