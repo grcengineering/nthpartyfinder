@@ -282,7 +282,7 @@ fn is_process_running(pid: u32) -> bool {
     system.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[target]),
         false,
-        ProcessRefreshKind::new(),
+        ProcessRefreshKind::nothing(),
     );
     system.process(target).is_some()
 }

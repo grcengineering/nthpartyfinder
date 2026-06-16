@@ -20,12 +20,12 @@ clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1.35", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1"
 csv = "1.3"
 regex = "1.10"
 once_cell = "1.19"
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["registry", "fmt"] }
 url = "2.5"
@@ -33,14 +33,14 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 whois-rs = "1.6"
 dirs = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
-askama = "0.12"
+askama = "0.16"
 base64 = "0.21"
 futures = "0.3"
 scraper = "0.26"
 indicatif = { version = "0.18", features = ["tokio"] }
 urlencoding = "2.1"
 ctrlc = "3.4"
-colored = "2.1"
+colored = "3"
 # DNS over HTTPS support
 hickory-resolver = { version = "0.26", features = ["https-ring"] }
 # Headless browser for JavaScript content
@@ -48,12 +48,12 @@ headless_chrome = "1.0"
 # AI-powered content analysis
 fancy-regex = "0.13"
 rayon = "1.8"
-which = "6"
-zip = "0.6"
+which = "8"
+zip = "8"
 # Disk-backed result storage with compression (memory efficiency)
 zstd = "0.13"
 # System memory monitoring for pressure-based throttling
-sysinfo = "0.32"
+sysinfo = "0.39"
 # Integrity verification for the runtime-fetched NER model
 sha2 = "0.10"
 hex = "0.4"

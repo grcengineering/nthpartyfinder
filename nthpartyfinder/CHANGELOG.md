@@ -35,6 +35,13 @@
 - `--timeout` help now explains that depth-3+/cold-cache scans routinely exceed
   the 600s default (raise it or use `--timeout 0`) and that the output format
   does not affect discovery time.
+- Dependency updates (clears the open Dependabot maintenance PRs): tokio
+  1.52.1→1.52.3, serde_json 1.0.149→1.0.150, http 1.4.0→1.4.2, thiserror
+  1.0→2.0, colored 2.1→3.1, which 6→8, zip 0.6→8.6, toml 0.8→1.1, sysinfo
+  0.32→0.39, askama 0.12→0.16. Code touched by API changes: `sysinfo`
+  `ProcessRefreshKind::new()`→`nothing()` (process-liveness check); the askama
+  0.13+ removal of the generated `EXTENSION`/`MIME_TYPE` template constants
+  (the affected unit test now verifies HTML output by rendering instead).
 
 ## [1.1.1] - 2026-06-02
 
