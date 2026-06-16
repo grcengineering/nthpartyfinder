@@ -45,7 +45,7 @@ hickory-resolver = { version = "0.26", features = ["https-ring"] }
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis
-fancy-regex = "0.13"
+fancy-regex = "0.18"
 rayon = "1.8"
 which = "8"
 # zip is used only to read subfinder's deflate-compressed release archive.
