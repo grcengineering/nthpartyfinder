@@ -7,7 +7,7 @@
 # Runtime uses Debian slim (required for Chromium) with debug tools
 # =============================================================================
 
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-bookworm@sha256:c8a94a78f67ec8c4d474ec7f71e0720f21eb7e584e158daec0874cafa7c30e4d AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev \
@@ -25,7 +25,7 @@ RUN cargo build --release
 RUN strip target/release/nthpartyfinder
 
 # Download ONNX Runtime
-FROM cgr.dev/chainguard/wolfi-base:latest AS onnx-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:34977aa13765da89f60fee8fe5230e2bb1c55192df08e383c58221ee0d1277fb AS onnx-dl
 USER root
 RUN apk add curl && \
     curl -fsSL -o /tmp/onnxruntime.tgz \
@@ -33,7 +33,7 @@ RUN apk add curl && \
     tar -xzf /tmp/onnxruntime.tgz -C /tmp/
 
 # Download subfinder
-FROM cgr.dev/chainguard/wolfi-base:latest AS subfinder-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:34977aa13765da89f60fee8fe5230e2bb1c55192df08e383c58221ee0d1277fb AS subfinder-dl
 USER root
 RUN apk add curl unzip && \
     curl -fsSL -o /tmp/subfinder.zip \
@@ -42,7 +42,7 @@ RUN apk add curl unzip && \
     chmod +x /tmp/subfinder/subfinder
 
 # Runtime with debug tools
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

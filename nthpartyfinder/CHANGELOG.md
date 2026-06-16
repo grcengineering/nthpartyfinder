@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Security
+- Removed the `whois-rs` dependency (replaced with a small in-process TCP WHOIS
+  client using IANA referral, `src/whois.rs`). `whois-rs` 1.6.1 (latest) pinned
+  `hickory-client 0.24` → `hickory-proto 0.24` (RUSTSEC-2026-0119) and
+  `validators 0.25` → `idna 0.5` (RUSTSEC-2024-0421); both vulnerable crates are
+  now out of the tree entirely — a code-level remediation rather than a risk
+  acceptance. The two corresponding `deny.toml` ignore entries were deleted.
+  System `whois` remains a fallback.
+- Opengrep SARIF is now filtered (`scripts/filter-opengrep-sarif.sh`) to drop the
+  report-only `no-unwrap`/`no-eprintln` WARNING findings located in inline
+  `#[cfg(test)]` test code before upload to code scanning — Opengrep's Rust
+  matcher cannot exclude inline test modules, so ~1.7k test-code false positives
+  were flooding the dashboard. Production findings and the ERROR gate are kept.
+- Docker base images in all Dockerfiles pinned by digest (OpenSSF Scorecard
+  Pinned-Dependencies); a Dependabot `docker` ecosystem keeps the pins current.
+
 ### Fixed
 - Default DoH server list replaced with verified JSON-API endpoints. Google's
   JSON DoH API lives at `/resolve` — `/dns-query` is RFC-8484 wire format and

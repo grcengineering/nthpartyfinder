@@ -21,3 +21,13 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "deps"
+
+  # Docker — keep the SHA-pinned base images in the Dockerfiles current so the
+  # digest pins (added for OpenSSF Scorecard Pinned-Dependencies) keep receiving
+  # upstream security patches instead of freezing on a stale rolling tag.
+  - package-ecosystem: "docker"
+    directory: "/nthpartyfinder"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci(deps)"

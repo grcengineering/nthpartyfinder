@@ -17,18 +17,12 @@ unused-ignored-advisory = "warn"
 # REMAINING (3 items, all transitive — no upstream fix available):
 # ──────────────────────────────────────────────────────────────────────────────
 ignore = [
-    # RISK ACCEPTANCE: RUSTSEC-2024-0421 (idna 0.5.0 — Punycode validation)
-    # Type: vulnerability (privilege escalation via malformed Punycode labels)
-    # Impact: idna 0.5.0 is transitive via whois-rs 1.6.1 → validators 0.25.3.
-    #   Used only for WHOIS lookups on domains we already validated via DNS
-    #   resolution. Domains reaching the WHOIS path have already passed our
-    #   URL parser and DNS resolver, limiting exposure to crafted Punycode.
-    # Root cause: whois-rs 1.6.1 (latest) pins validators 0.25.3 which uses
-    #   idna 0.5.0. No newer whois-rs release available.
-    # Mitigation: input domains are pre-validated before WHOIS lookup.
-    # Review: re-evaluate when whois-rs releases > 1.6.1.
-    # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
-    { id = "RUSTSEC-2024-0421", reason = "transitive via whois-rs 1.6.1 (latest); domains pre-validated before WHOIS lookup limits exposure" },
+    # REMEDIATED 2026-06-16: RUSTSEC-2024-0421 (idna 0.5.0 — Punycode validation)
+    #   was a code-level fix, not a suppression: whois-rs (its sole source, via
+    #   validators 0.25.3) was REMOVED and replaced with an in-process TCP WHOIS
+    #   client (src/whois.rs). idna 0.5.0 is no longer in the tree (only idna 1.x
+    #   via url remains). Ignore entry deleted; `cargo deny check advisories` finds
+    #   no crate matching the advisory.
 
     # RISK ACCEPTANCE: RUSTSEC-2025-0119 (number_prefix 0.4.0 — unmaintained)
     # Type: unmaintained (informational warning, not a vulnerability)
@@ -55,19 +49,14 @@ ignore = [
     #   `cargo deny check advisories` confirms "no crate matched advisory criteria" for it.
     #   Ignore entry removed (a code-level fix, not a suppression) — no longer applicable.
 
-    # RUSTSEC-2026-0119 (hickory-proto — O(n²) name compression CPU exhaustion)
-    # Type: vulnerability (CPU DoS amplification during DNS message encoding)
-    # Path (a) hickory-resolver → hickory-proto: REMEDIATED 2026-05-30 (GRC-368) by the
-    #   hickory-resolver 0.25.2 → 0.26.1 bump (now on hickory-proto 0.26.1, not vulnerable).
-    # Path (b) whois-rs 1.6.1 → hickory-client 0.24.4 → hickory-proto 0.24.4: REMAINS, and is
-    #   genuinely unfixable at the code level — whois-rs 1.6.1 is the latest release and pins the
-    #   old hickory-client; no upstream fix exists short of dropping/replacing whois-rs.
-    # Mitigation (b): the vulnerable code is the message ENCODER; we encode only outbound WHOIS
-    #   queries for domains already validated by our pipeline, never re-encoding attacker-supplied
-    #   messages, so the O(n²) compression path is unreachable in our usage.
-    # Review: drop this ignore when whois-rs ships a release on hickory-proto ≥ 0.26.
-    # Updated: 2026-05-30 by GRC Engineering (GRC-368 — resolver path fixed; only whois path remains)
-    { id = "RUSTSEC-2026-0119", reason = "resolver path fixed via hickory 0.26.1 (GRC-368); sole remaining path is whois-rs 1.6.1 (latest, no upstream fix); outbound-only encoding on pre-validated domains keeps the vulnerable encoder unreachable" },
+    # REMEDIATED: RUSTSEC-2026-0119 (hickory-proto — O(n²) name compression DoS)
+    #   Path (a) hickory-resolver → hickory-proto: fixed 2026-05-30 (GRC-368) by the
+    #     hickory-resolver 0.25.2 → 0.26.1 bump (now on hickory-proto 0.26.1).
+    #   Path (b) whois-rs 1.6.1 → hickory-client 0.24.4 → hickory-proto 0.24.4: fixed
+    #     2026-06-16 by REMOVING whois-rs (replaced with an in-process TCP WHOIS client,
+    #     src/whois.rs) — a code-level remediation, not a risk acceptance. hickory-proto
+    #     0.24 / hickory-client are no longer in the tree; only hickory-proto 0.26.1 remains.
+    #   Ignore entry deleted; `cargo deny check advisories` finds no crate matching it.
 ]
 
 [licenses]
