@@ -1,17 +1,19 @@
 ---
 project: nthpartyfinder
-task: "DNS demo-solid: fix DoH endpoints + kill silent failures for Vanta TPRM team share (2026-06-10)"
+task: "Resolve ALL open GitHub PRs (17) + Security Issues/Findings (7 Dependabot, ~1777 code-scanning) properly (2026-06-16)"
 effort: E4
-phase: complete
-progress: 42/42 (task ISC-143..184) · prior task 78/142 + 18 DEFERRED-VERIFY (see 2026-05-16 sections)
+phase: observe
+progress: 0/32 (task ISC-185..216) · prior tasks 42/42 + 78/142 (see dated sections)
 mode: algorithm
-started: 2026-06-11T01:33:00Z
-updated: 2026-06-11T02:25:00Z
+started: 2026-06-16T00:00:00Z
+updated: 2026-06-16T00:00:00Z
 algorithm_config:
   effort_source: context-override
   classifier: { mode: ALGORITHM, tier: E3, source: fail-safe-timeout }
+  note: "classifier fail-safed E3 (Inference timeout); escalated to E4 Deep per goal scope (ALL PRs + ALL findings, cross-cutting, ultracode session)"
 prior_tasks:
   - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
+  - { task: "DNS demo-solid (Vanta TPRM)", started: 2026-06-11, phase: complete, progress: "42/42" }
 ---
 
 # ISA — nthpartyfinder
@@ -281,6 +283,47 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - [x] ISC-183: Anti: no secrets or local absolute paths introduced into committed files — diff scan
 - [ ] ISC-184: Fresh rebuilt binary's embedded `DEFAULT_CONFIG` (via `--init`) contains only verified-working DoH servers — rebuild + read-back
 
+### Task 2026-06-16 · Resolve ALL open PRs + Security findings — PR disposition
+
+- [ ] ISC-185: PR #9 (fix/GRC-500) integrated into master — post-merge `git show master:src/dns.rs` contains `dns.google/resolve` + `1.1.1.1/dns-query` + `8.8.8.8/resolve` (broken quad9/opendns/dns.google/dns-query gone)
+- [ ] ISC-186: Post-integration full `cargo test` (lib + integration) green, 0 failures — captured summary
+- [ ] ISC-187: Post-integration `cargo clippy --all-targets -- -D warnings` exit 0 AND `cargo fmt --check` exit 0 — captured
+- [ ] ISC-188: Live DNS smoke on merged binary: vanta.com TXT >0 records; all 4 DoH endpoints HTTP 200 JSON — captured
+- [ ] ISC-189: All 11 cargo Dependabot PRs (#10–#19) resolved (merged or closed with documented rationale) — `gh pr list` shows none open
+- [ ] ISC-190: Frontend npm Dependabot PRs (#1, #21) resolved — none open
+- [ ] ISC-191: github_actions Dependabot PR #20 resolved (merged, all checks green) — closed
+- [ ] ISC-192: PR #24 (GRC-501 web-traffic FP suppression) resolved (merged/folded) — closed
+- [ ] ISC-193: PR #2 ([StepSecurity]) resolved (merged or closed with rationale vs current CI hardening) — closed
+- [ ] ISC-194: `gh pr list --state open` returns 0 open PRs — captured
+
+### Task 2026-06-16 · Security findings disposition
+
+- [ ] ISC-195: Dependabot esbuild HIGH (#32, frontend) resolved — alert state fixed/dismissed
+- [ ] ISC-196: Dependabot svelte ×2 (#28, #29, frontend) resolved — alert state
+- [ ] ISC-197: Dependabot postcss (#21) + vite (#12, frontend) resolved — alert state
+- [ ] ISC-198: Dependabot hickory-proto medium (#24, RUSTSEC-2026-0119) resolved — `Cargo.lock` has no hickory-proto < 0.26.1
+- [ ] ISC-199: Dependabot idna medium (#13, CVE-2024-12224) resolved — `Cargo.lock` has no idna < 1.0.0
+- [ ] ISC-200: osv-scanner code-scanning alerts RUSTSEC-2026-0119 + CVE-2024-12224 cleared — re-scan shows closed
+- [ ] ISC-201: RUSTSEC-2025-0119 + RUSTSEC-2024-0436 triaged — fixed via bump OR documented in `deny.toml` `{id,reason}` with reachability justification
+- [ ] ISC-202: opengrep `no-unwrap-in-prod` rule corrected so inline `#[cfg(test)]` test code is genuinely excluded — rule diff + verification the exclusion fires
+- [ ] ISC-203: 1753 opengrep no-unwrap code-scanning alerts (100% test-code false positives, proven below `#[cfg(test)]`) dismissed with documented reason — open count drops to ~0
+- [ ] ISC-204: Scorecard PinnedDependenciesID ×12 (Dockerfiles + release.yml) resolved — dependencies pinned by digest/version
+- [ ] ISC-205: Scorecard VulnerabilitiesID (high) resolves — 0 open Dependabot vulns after dep fixes — re-scan
+- [ ] ISC-206: Scorecard BranchProtectionID addressed — master branch protection configured (solo-safe: required status checks, no required human review that locks the owner) OR documented accepted-risk Decision
+- [ ] ISC-207: Residual Scorecard policy findings (CodeReviewID, FuzzingID, CIIBestPracticesID, LicenseID) each resolved or dismissed with a documented accepted-policy rationale
+- [ ] ISC-208: Secret scanning remains 0 open alerts — confirmed
+
+### Task 2026-06-16 · Integrity, anti-criteria, governance
+
+- [ ] ISC-209: Anti: NO security-scanner suppression-shortcut used to bypass a REAL finding — the only dismissals are evidence-documented test-code false positives (opengrep) per the global zero-suppression carve-out — full diff/dismissal-reason audit
+- [ ] ISC-210: Anti: no master-shipping feature regressed by integration/bumps — pre/post oracle (vanta DNS resolves, full suite green pre & post)
+- [ ] ISC-211: Anti: master never force-pushed; every master change lands via a CI-green PR merge — reflog/CI evidence
+- [ ] ISC-212: Anti: no plaintext secret/credential introduced into any committed file — diff secret-pattern scan
+- [ ] ISC-213: Antecedent: working tree clean + on a feature branch before any master-mutating action — `git status`
+- [ ] ISC-214: Cato cross-vendor audit attempted (E4 mandatory); on unavailability (codex absent) a disclosed cross-family substitute (Anvil/Kimi) runs + verdict actioned — agent output in Decisions
+- [ ] ISC-215: Commitment-boundary advisor consulted before `phase: complete` — output in Decisions
+- [ ] ISC-216: FINAL: 0 open PRs + every security alert resolved-or-documented + master CI green across CI/CodeQL/Security/Scorecard — comprehensive captured state
+
 ## Test Strategy
 
 | isc range | type | check | threshold | tool |
@@ -322,6 +365,16 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 
 ## Decisions
 
+- 2026-06-16 — **TERRAIN MAP (OBSERVE, evidence-based).** GitHub state at task start: **17 open PRs**, **7 open Dependabot alerts**, **~1777 open code-scanning alerts** (1753 opengrep no-unwrap + ~24 osv/Scorecard), **0 secret-scanning**. Key findings:
+  - **master has advanced to v1.1.1** (NER runtime, "eliminate all 62 prod unwraps", openssl/tar CVE patches, Opengrep gating) and **independently got** the GRC-500 sink age-guard fix, DNS_ENDPOINT class, ProgressAwareWriter. Branch `fix/GRC-500` (#9) forked from v1.0.1 and diverged.
+  - **master ships BROKEN DNS:** its 4 DoH defaults are `cloudflare-dns.com/dns-query`(ok) + `dns.google/dns-query`(400) + `dns.quad9.net/dns-query`(400) + `doh.opendns.com/dns-query`(400) — 3/4 fail the JSON GET API. Only branch #9 has the verified set (`cloudflare /dns-query`, `dns.google/resolve`, `1.1.1.1/dns-query`, `8.8.8.8/resolve`). Branch #9 has **947 lines of unique src hardening** master lacks (corrected endpoints + authoritative-empty + warn-once DoH + batch/interactive silent-failure fixes). → #9 has REAL value, must be **integrated** (merge master→branch, verify, merge PR), not closed.
+  - **All 1753 opengrep `no-unwrap-in-prod` alerts are TEST-CODE false positives** — script proved 1753/1753 fall below the `#[cfg(test)]` marker in their file; 0 production unwraps. The rule's `pattern-not-inside: #[cfg(test)] mod $M { ... }` exclusion (added in master 5e0e39e) demonstrably does NOT fire in opengrep v1.21.0 (large inline test modules defeat the `...` ellipsis). security.yml uploads the full SARIF (`category: opengrep`, all severities) so they recur each scan. → fix rule + bulk-dismiss as documented test-code FP (NOT a real-finding suppression: rule's own intent is "in-PROD", scanner fundamentally cannot model inline Rust test-module boundary — the global zero-suppression carve-out).
+  - **Transitive Rust vuln root cause = `whois-rs 1.6`** (newest 1.6.1). It alone pulls `hickory-client 0.24.4` (→ vulnerable hickory-proto 0.24.4 = RUSTSEC-2026-0119, AND old idna 0.5.0) and `validators 0.25.3` (→ old idna 0.5.0 = CVE-2024-12224/GHSA-h97m). Direct deps are current (hickory-resolver 0.26, url 2.5.8→idna 1.1.0). → fix by making whois-rs's transitive chain use ≥0.26 hickory / ≥1.0 idna (bump/patch/replace), verify reachability.
+  - **PR #20 (github_actions, 13 actions): all PR checks GREEN**, mergeStateStatus BLOCKED is the no-branch-protection artifact, not a CI failure (the "Dependabot failure" run was the bot's own rebase job). Mergeable.
+  - **Frontend** (`nthpartyfinder/frontend/`, Svelte+vite) is committed but in NO CI workflow; its npm vulns (esbuild HIGH RCE, svelte ×2 XSS, postcss XSS, vite) are build-tool/framework deps → resolve via Dependabot npm PRs.
+  - **Scorecard alerts are repo-maturity/policy**, not code CVEs: PinnedDependenciesID×12 (Docker/release — real fix: pin digests), VulnerabilitiesID (resolves with dep fixes), BranchProtectionID/CodeReviewID/FuzzingID/CIIBestPracticesID/LicenseID (solo-repo policy — configure branch protection solo-safe + document residual).
+  - **Forge/Cato unavailable** (codex CLI absent — TF-CATO precedent persists). Cross-family substitute (Anvil/Kimi) for adversarial VERIFY; primary executes git/dep surgery serially (repo-mutating, no parallel write-conflict).
+- 2026-06-16 — **Execution strategy.** Single integration branch (extend `fix/GRC-500`): merge master(v1.1.1)→branch, then on it land DNS hardening + whois-rs transitive vuln fix + safe dep bumps + opengrep rule fix + Docker pinning; verify fully (build+4000 tests+clippy+fmt+live DNS); push; merge PR #9 → master via CI-green merge. Post-merge: bulk-dismiss 1753 opengrep FPs, dispose remaining PRs (redundant cargo bumps closed-with-rationale or merged, frontend npm merged, #20 merged, #24 rebased+merged, #2 closed-superseded), configure branch protection, re-scan to confirm alert drop. **No force-push to master; every master change via green PR.**
 - 2026-05-16 — **Tier override**: classifier hook fail-safed to E3 (Inference timeout 25000ms). Two-workstream cross-cutting comprehensive scope (full SSCS hardening + 10-domain depth-5 campaign + bug fixing + agent parallelization) ≫ E3. Escalated to **E4 Deep** per conversation-context override; `effort_source: context-override`.
 - 2026-05-16 — **deviation: SSCS Baseline 4 (100% → 95% coverage).** Granted explicitly by the user this session ("lower the code coverage floor requirement to 95%") and codified in global CLAUDE.md ("95% floor, 100% explicitly NOT a goal"). Mitigation: 95% line+function gate + assertion-quality review + documented `--ignore-filename-regex` for structurally-untestable infra. Expiry: re-evaluate if a security-critical module drops below 95% or at next SSCS quarterly research pass.
 - 2026-05-16 — **ISA authoring path**: ISA-skill Tools are v6.2.x-deferred (Algorithm v6.3.0 line 170 authorizes direct Read/Edit/Write + workflow invocation). Project ISA authored directly in canonical twelve-section format; completeness self-checked against the E4 gate. ISA thinking-capability credit is for the analytical 142-ISC test-harness construction, not boilerplate.
