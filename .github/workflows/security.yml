@@ -30,8 +30,8 @@ jobs:
     name: Cargo Deny (SCA gate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
         with:
           command: check all
           manifest-path: nthpartyfinder/Cargo.toml
@@ -48,7 +48,7 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Run osv-scanner
         continue-on-error: true
         # The repo-root action.yml is a stub with NO `runs:` section ("Top level
@@ -66,7 +66,7 @@ jobs:
             --output=nthpartyfinder/osv.sarif
       - name: Upload OSV SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: nthpartyfinder/osv.sarif
           category: osv-scanner
@@ -88,12 +88,12 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # cosign must be on PATH BEFORE the Opengrep installer runs — its
       # `--verify-signatures` flag shells out to cosign and otherwise fails with
       # "cosign is required for --verify-signatures but is not installed."
       - name: Install cosign (for Opengrep signature verification)
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Install Opengrep (pinned + signature-verified)
         run: |
           curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.21.0/install.sh \
@@ -126,7 +126,7 @@ jobs:
         run: bash scripts/filter-opengrep-sarif.sh opengrep.sarif
       - name: Upload Opengrep SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@ff0a06e83cb2de871e5a09832bc6a81e7276941f # v3.28.18
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: nthpartyfinder/opengrep.sarif
           category: opengrep
@@ -138,7 +138,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0  # full history so a leaked-then-deleted secret is caught
       # gitleaks-ACTION requires a paid GITLEAKS_LICENSE for orgs and silently
