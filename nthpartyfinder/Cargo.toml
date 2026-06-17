@@ -29,13 +29,13 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.20", features = ["registry", "fmt"] }
 url = "2.5"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-dirs = "5.0"
+reqwest = { version = "0.13", features = ["json", "stream", "query"] }
+dirs = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
 askama = "0.16"
 base64 = "0.21"
 futures = "0.3"
-scraper = "0.26"
+scraper = "0.27"
 indicatif = { version = "0.18", features = ["tokio"] }
 urlencoding = "2.1"
 ctrlc = "3.4"
@@ -45,7 +45,7 @@ hickory-resolver = { version = "0.26", features = ["https-ring"] }
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis
-fancy-regex = "0.13"
+fancy-regex = "0.18"
 rayon = "1.8"
 which = "8"
 # zip is used only to read subfinder's deflate-compressed release archive.
@@ -64,7 +64,7 @@ zstd = "0.13"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.39"
 # Integrity verification for the runtime-fetched NER model
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 # NER for organization extraction (replaces Ollama SLM)
 # Using load-dynamic to avoid Windows linking issues with ONNX Runtime
