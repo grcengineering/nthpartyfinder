@@ -1,34 +1,43 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import { formatRecordType, type DiscoverySource } from '../lib/transform';
 
-  export let domain: string;
-  export let organization: string = '';
-  export let sources: DiscoverySource[] = [];
-  export let position: { x: number; y: number } = { x: 0, y: 0 };
-  export let visible: boolean = false;
-
-  const dispatch = createEventDispatcher();
+  let {
+    domain,
+    organization = '',
+    sources = [],
+    position = { x: 0, y: 0 },
+    visible = false,
+    onclose
+  }: {
+    domain: string;
+    organization?: string;
+    sources?: DiscoverySource[];
+    position?: { x: number; y: number };
+    visible?: boolean;
+    onclose?: () => void;
+  } = $props();
 
   function close() {
-    dispatch('close');
+    onclose?.();
   }
 
   // Group sources by record type
-  $: groupedSources = sources.reduce((acc, source) => {
-    const type = formatRecordType(source.recordType);
-    if (!acc[type]) {
-      acc[type] = [];
-    }
-    acc[type].push(source);
-    return acc;
-  }, {} as Record<string, DiscoverySource[]>);
+  const groupedSources = $derived(
+    sources.reduce((acc, source) => {
+      const type = formatRecordType(source.recordType);
+      if (!acc[type]) {
+        acc[type] = [];
+      }
+      acc[type].push(source);
+      return acc;
+    }, {} as Record<string, DiscoverySource[]>)
+  );
 </script>
 
 {#if visible}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="tooltip-backdrop" on:click={close}></div>
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="tooltip-backdrop" onclick={close}></div>
   <div
     class="tooltip"
     style="left: {position.x}px; top: {position.y}px;"
@@ -38,7 +47,7 @@
       {#if organization && organization !== domain}
         <div class="tooltip-org">{organization}</div>
       {/if}
-      <button class="close-btn" on:click={close}>×</button>
+      <button class="close-btn" onclick={close}>×</button>
     </div>
 
     <div class="tooltip-content">

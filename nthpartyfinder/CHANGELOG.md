@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Security
+- Frontend vendor-graph build toolchain upgraded to clear its 7 Dependabot
+  alerts (esbuild RCE GHSA-gv7w-rqvm-qjhr, svelte XSS ×2, postcss XSS, vite ×3):
+  svelte 4→5.56, vite 5→6.4.3, esbuild→0.28.1, @sveltejs/vite-plugin-svelte 3→5,
+  @xyflow/svelte 0.1→1.6. The Svelte 4 components were migrated to Svelte 5
+  runes + the @xyflow/svelte 1.x API (`bind:nodes`/`bind:edges`, callback-prop
+  events, `mount()`); the rebuilt `static/vendor-graph.{js,css}` was visually
+  verified rendering in a report. `npm audit` is clean (0 vulnerabilities).
 - Removed the `whois-rs` dependency (replaced with a small in-process TCP WHOIS
   client using IANA referral, `src/whois.rs`). `whois-rs` 1.6.1 (latest) pinned
   `hickory-client 0.24` → `hickory-proto 0.24` (RUSTSEC-2026-0119) and

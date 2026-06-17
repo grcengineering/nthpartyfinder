@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { Handle, Position } from '@xyflow/svelte';
+  import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 
-  export let data: {
+  type RootData = {
     label: string;
     organization: string;
     domain: string;
@@ -9,6 +9,8 @@
     hasChildren: boolean;
     expanded: boolean;
   };
+
+  let { data }: NodeProps & { data: RootData } = $props();
 </script>
 
 <div class="root-node" class:expanded={data.expanded}>

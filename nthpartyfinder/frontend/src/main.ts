@@ -1,3 +1,4 @@
+import { mount } from 'svelte';
 import VendorGraph from './VendorGraph.svelte';
 
 // Type declarations for window.graphData
@@ -18,7 +19,7 @@ declare global {
         max_depth: number;
       };
     };
-    vendorGraph: VendorGraph | null;
+    vendorGraph: Record<string, unknown> | null;
   }
 }
 
@@ -35,7 +36,8 @@ function init() {
     return;
   }
 
-  window.vendorGraph = new VendorGraph({
+  // Svelte 5 removed the `new Component()` class API; mount() is the runtime entry.
+  window.vendorGraph = mount(VendorGraph, {
     target: container,
     props: {
       rootDomain: window.graphData.summary.root_domain,
