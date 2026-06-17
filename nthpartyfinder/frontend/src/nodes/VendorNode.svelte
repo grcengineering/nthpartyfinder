@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { Handle, Position } from '@xyflow/svelte';
+  import { Handle, Position, type NodeProps } from '@xyflow/svelte';
   import type { DiscoverySource } from '../lib/transform';
 
-  export let data: {
+  type VendorData = {
     label: string;
     organization: string;
     domain: string;
@@ -16,6 +16,8 @@
     sources: DiscoverySource[];
   };
 
+  let { data }: NodeProps & { data: VendorData } = $props();
+
   const layerColors: Record<number, { bg: string; shadow: string; ring: string; solid: string }> = {
     1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', shadow: 'rgba(59, 130, 246, 0.35)', ring: 'rgba(59, 130, 246, 0.25)', solid: '#3b82f6' },
     2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', shadow: 'rgba(16, 185, 129, 0.35)', ring: 'rgba(16, 185, 129, 0.25)', solid: '#10b981' },
@@ -23,12 +25,12 @@
     4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', shadow: 'rgba(239, 68, 68, 0.35)', ring: 'rgba(239, 68, 68, 0.25)', solid: '#ef4444' }
   };
 
-  $: colors = layerColors[data.layer] || layerColors[4];
+  const colors = $derived(layerColors[data.layer] || layerColors[4]);
 
   // Build concentric ring shadows from ACTIVE layers only (not all possible layers).
   // activeLayers is set by VendorGraph when edges become visible/hidden.
   // Only show rings for layers BEYOND the primary layer (additional relationships).
-  $: multiLayerShadow = buildMultiLayerShadow(data.activeLayers || [data.layer]);
+  const multiLayerShadow = $derived(buildMultiLayerShadow(data.activeLayers || [data.layer]));
 
   function buildMultiLayerShadow(activeLayers: number[]): string {
     // Only the primary layer = no extra rings
@@ -49,7 +51,7 @@
     return shadows.join(', ');
   }
 
-  let hovered = false;
+  let hovered = $state(false);
 
   function handleExpandClick(event: MouseEvent) {
     event.stopPropagation();
@@ -66,13 +68,13 @@
   }
 </script>
 
-<!-- svelte-ignore a11y-no-static-element-interactions -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="vendor-node"
   class:expanded={data.expanded}
   class:hovered
-  on:mouseenter={() => hovered = true}
-  on:mouseleave={() => hovered = false}
+  onmouseenter={() => hovered = true}
+  onmouseleave={() => hovered = false}
 >
   <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 24px; transform: translate(-50%, -50%);" />
 
@@ -81,11 +83,11 @@
   </div>
 
   {#if data.hasChildren}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
       class="action-badge expand-badge nodrag nopan"
       class:visible={hovered}
-      on:click={handleExpandClick}
+      onclick={handleExpandClick}
       title={data.expanded ? 'Collapse vendors' : `Expand ${data.childCount} vendors`}
     >
       <span class="badge-count">{data.childCount}</span>
@@ -93,11 +95,11 @@
     </div>
   {/if}
   {#if data.discoveryCount > 0}
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div
       class="action-badge info-badge nodrag nopan"
       class:visible={hovered}
-      on:click={handleInfoClick}
+      onclick={handleInfoClick}
       title="View {data.discoveryCount} discovery sources"
     >
       <span class="badge-count">×{data.discoveryCount}</span>

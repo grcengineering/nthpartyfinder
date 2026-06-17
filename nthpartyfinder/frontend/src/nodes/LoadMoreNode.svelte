@@ -1,11 +1,13 @@
 <script lang="ts">
-  import { Handle, Position } from '@xyflow/svelte';
+  import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 
-  export let data: {
+  type LoadMoreData = {
     label: string;
     childCount: number;
     parentId: string;
   };
+
+  let { data }: NodeProps & { data: LoadMoreData } = $props();
 </script>
 
 <div class="load-more-node">

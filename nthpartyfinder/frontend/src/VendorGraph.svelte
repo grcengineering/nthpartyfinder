@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { writable, get } from 'svelte/store';
-  import { SvelteFlow, Controls, Background, MiniMap, BackgroundVariant } from '@xyflow/svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
+  import { SvelteFlow, Controls, Background, MiniMap, BackgroundVariant, type Node } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
 
   import RootNode from './nodes/RootNode.svelte';
@@ -12,8 +11,15 @@
 
   import type { XYFlowNode, XYFlowEdge, Relationship, DiscoverySource, AggregatedVendor, LayerBand } from './lib/transform';
   import { aggregateVendors, buildChildrenMap } from './lib/transform';
-  export let relationships: Relationship[] = [];
-  export let rootDomain: string = '';
+
+  let { relationships: relationshipsProp = [], rootDomain: rootDomainProp = '' }:
+    { relationships?: Relationship[]; rootDomain?: string } = $props();
+
+  // The graph data is constructed once at mount from the initial props (main.ts
+  // mounts with fixed props and never updates them). Snapshot the initial values
+  // with untrack() so the one-time read does not register a reactive dependency.
+  const relationships = untrack(() => relationshipsProp);
+  const rootDomain = untrack(() => rootDomainProp);
 
   const VENDORS_PER_PAGE = 8;
   const ROOT_RADIUS = 300;
@@ -72,20 +78,20 @@
     });
   }
 
-  const nodes = writable<XYFlowNode[]>(allNodes);
-  const edges = writable<XYFlowEdge[]>(allEdges);
+  let nodes = $state.raw<XYFlowNode[]>(allNodes);
+  let edges = $state.raw<XYFlowEdge[]>(allEdges);
 
   const expandedNodes = new Set<string>();
   const paginationState = new Map<string, { shown: number; total: number }>();
   const placedBy = new Map<string, string>();
 
-  let fitViewHelper: FitViewHelper;
+  let fitViewHelper = $state<FitViewHelper | undefined>(undefined);
 
-  let tooltipVisible = false;
-  let tooltipDomain = '';
-  let tooltipOrganization = '';
-  let tooltipSources: DiscoverySource[] = [];
-  let tooltipPosition = { x: 0, y: 0 };
+  let tooltipVisible = $state(false);
+  let tooltipDomain = $state('');
+  let tooltipOrganization = $state('');
+  let tooltipSources = $state<DiscoverySource[]>([]);
+  let tooltipPosition = $state({ x: 0, y: 0 });
 
   const layerBands: LayerBand[] = [
     { layer: 0, label: 'Target Organization', y: 0, height: 0, width: 0 },
@@ -125,13 +131,13 @@
 
   const nodeTypes: any = { root: RootNode, vendor: VendorNode, loadMore: LoadMoreNode };
 
-  function handleNodeClick(event: CustomEvent) {
-    const nodeId = event.detail.node?.id;
+  function handleNodeClick({ node }: { node: Node; event: MouseEvent | TouchEvent }) {
+    const nodeId = node?.id;
     if (!nodeId) return;
-    const node = get(nodes).find(n => n.id === nodeId);
-    if (!node) return;
-    if (node.type === 'loadMore' && node.data.parentId) { loadMoreVendors(node.data.parentId); return; }
-    if (node.type === 'root' && node.data.hasChildren) {
+    const current = nodes.find(n => n.id === nodeId);
+    if (!current) return;
+    if (current.type === 'loadMore' && current.data.parentId) { loadMoreVendors(current.data.parentId); return; }
+    if (current.type === 'root' && current.data.hasChildren) {
       if (expandedNodes.has(nodeId)) collapseNode(nodeId); else expandNode(nodeId);
     }
   }
@@ -141,8 +147,8 @@
   // currently visible edges. Updates node.data.activeLayers so VendorNode
   // can show/hide concentric ring borders with smooth transitions.
   function updateActiveLayers() {
-    const currentEdges = get(edges);
-    const currentNodes = get(nodes);
+    const currentEdges = edges;
+    const currentNodes = nodes;
 
     // Build map: nodeId -> set of layers it's actively connected at
     const activeLayerMap = new Map<string, Set<number>>();
@@ -163,7 +169,7 @@
     }
 
     // Update nodes with their active layers
-    nodes.update(ns => ns.map(n => {
+    nodes = nodes.map(n => {
       if (n.type !== 'vendor') return n;
       const activeLayers = activeLayerMap.get(n.id);
       const newActiveLayers = activeLayers ? Array.from(activeLayers).sort((a, b) => a - b) : [n.data.layer];
@@ -173,7 +179,7 @@
       if (JSON.stringify(current) === JSON.stringify(newActiveLayers)) return n;
 
       return { ...n, data: { ...n.data, activeLayers: newActiveLayers } };
-    }));
+    });
   }
 
   // ─── Radial ring computation ───
@@ -194,7 +200,7 @@
   // ─── Collision detection ───
   function getVisibleRects(excludeIds: Set<string>): { x: number; y: number; w: number; h: number }[] {
     const rects: { x: number; y: number; w: number; h: number }[] = [];
-    for (const n of get(nodes)) {
+    for (const n of nodes) {
       if (n.hidden || excludeIds.has(n.id)) continue;
       rects.push({ x: n.position.x - NODE_W / 2, y: n.position.y - NODE_H / 2, w: NODE_W, h: NODE_H });
     }
@@ -278,7 +284,7 @@
     const endIndex = Math.min(pagination.shown + VENDORS_PER_PAGE, childArray.length);
     const allVisible = childArray.slice(0, endIndex);
 
-    const parentNode = get(nodes).find(n => n.id === nodeId);
+    const parentNode = nodes.find(n => n.id === nodeId);
     const parentPos = parentNode?.position || { x: 0, y: 0 };
     const parentLayer = parentNode?.data.layer || 0;
     const isRoot = nodeId === rootDomain;
@@ -290,7 +296,7 @@
     const toPlace: string[] = [];
     const alreadyVisible: string[] = [];
     for (const childId of allVisible) {
-      const childNode = get(nodes).find(n => n.id === childId);
+      const childNode = nodes.find(n => n.id === childId);
       if (childNode && !childNode.hidden && placedBy.has(childId) && placedBy.get(childId) !== nodeId) {
         alreadyVisible.push(childId);
       } else {
@@ -320,7 +326,7 @@
     }
 
     // Update node positions
-    nodes.update(ns => ns.map(n => {
+    nodes = nodes.map(n => {
       const pos = positionMap.get(n.id);
       if (pos) {
         placedBy.set(n.id, nodeId);
@@ -329,7 +335,7 @@
       if (alreadyVisible.includes(n.id)) return { ...n, hidden: false };
       if (n.id === nodeId) return { ...n, data: { ...n.data, expanded: true } };
       return n;
-    }));
+    });
 
     // Layer colors for edges
     const layerEdgeColors: Record<number, string> = {
@@ -337,7 +343,7 @@
     };
 
     // Show edges
-    edges.update(es => es.map(e => {
+    edges = edges.map(e => {
       if (e.source === nodeId && allVisible.includes(e.target)) {
         const isShared = alreadyVisible.includes(e.target);
         if (isShared) {
@@ -355,7 +361,7 @@
         };
       }
       return e;
-    }));
+    });
 
     pagination.shown = endIndex;
     expandedNodes.add(nodeId);
@@ -374,7 +380,7 @@
   // also anchored — only deeper nodes get pushed.
   function separateOverlappingNodes() {
     const pad = 30; // Minimum gap between node edges
-    const rootPos = get(nodes).find(n => n.id === rootDomain)?.position || { x: 0, y: 0 };
+    const rootPos = nodes.find(n => n.id === rootDomain)?.position || { x: 0, y: 0 };
 
     // Identify anchored nodes: root + root's direct ring children
     const anchored = new Set<string>([rootDomain]);
@@ -389,7 +395,7 @@
     const iterations = 5;
 
     for (let iter = 0; iter < iterations; iter++) {
-      const currentNodes = get(nodes).filter(n => !n.hidden && n.type !== 'group');
+      const currentNodes = nodes.filter(n => !n.hidden && n.type !== 'group');
       let anyMoved = false;
 
       for (let i = 0; i < currentNodes.length; i++) {
@@ -441,16 +447,16 @@
       const posMap = new Map<string, { x: number; y: number }>();
       for (const n of currentNodes) posMap.set(n.id, n.position);
 
-      nodes.update(ns => ns.map(n => {
+      nodes = nodes.map(n => {
         const newPos = posMap.get(n.id);
         if (newPos && !anchored.has(n.id)) {
           return { ...n, position: newPos };
         }
         return n;
-      }));
+      });
 
       // Also move loadMore nodes that belong to pushed parents
-      nodes.update(ns => ns.map(n => {
+      nodes = nodes.map(n => {
         if (n.type === 'loadMore' && n.data.parentId) {
           const parentPos = posMap.get(n.data.parentId);
           if (parentPos && !anchored.has(n.data.parentId)) {
@@ -458,7 +464,7 @@
           }
         }
         return n;
-      }));
+      });
     }
   }
 
@@ -478,18 +484,16 @@
       if (placedBy.get(childId) === nodeId) placedBy.delete(childId);
     }
 
-    nodes.update(ns => {
-      return ns.filter(n => n.id !== loadMoreId).map(n => {
-        if (childArray.includes(n.id)) {
-          if (placedBy.has(n.id)) return n; // Shared node stays visible
-          return { ...n, hidden: true };
-        }
-        if (n.id === nodeId) return { ...n, data: { ...n.data, expanded: false } };
-        return n;
-      });
+    nodes = nodes.filter(n => n.id !== loadMoreId).map(n => {
+      if (childArray.includes(n.id)) {
+        if (placedBy.has(n.id)) return n; // Shared node stays visible
+        return { ...n, hidden: true };
+      }
+      if (n.id === nodeId) return { ...n, data: { ...n.data, expanded: false } };
+      return n;
     });
 
-    edges.update(es => es.map(e => e.source === nodeId ? { ...e, hidden: true } : e));
+    edges = edges.map(e => e.source === nodeId ? { ...e, hidden: true } : e);
     expandedNodes.delete(nodeId);
     paginationState.delete(nodeId);
     doFitView();
@@ -499,22 +503,22 @@
 
   function updateLoadMoreNode(parentId: string, remaining: number, layer: number, pos?: { x: number; y: number }) {
     const loadMoreId = `loadMore-${parentId}`;
-    nodes.update(ns => ns.filter(n => n.id !== loadMoreId));
-    edges.update(es => es.filter(e => e.target !== loadMoreId));
+    nodes = nodes.filter(n => n.id !== loadMoreId);
+    edges = edges.filter(e => e.target !== loadMoreId);
     if (remaining <= 0) return;
 
-    nodes.update(ns => [...ns, {
+    nodes = [...nodes, {
       id: loadMoreId, type: 'loadMore',
       data: { label: `+ ${remaining} more`, organization: '', domain: '', layer,
         childCount: remaining, hasChildren: false, expanded: false,
         discoveryCount: 0, sources: [], parentId },
       position: pos || { x: 0, y: 0 }, hidden: false
-    }]);
+    }];
 
-    edges.update(es => [...es, {
+    edges = [...edges, {
       id: `e-loadMore-${parentId}`, source: parentId, target: loadMoreId,
       type: 'straight', hidden: false
-    }]);
+    }];
   }
 
   function closeTooltip() { tooltipVisible = false; }
@@ -525,16 +529,16 @@
     paginationState.clear();
     placedBy.clear();
     tooltipVisible = false;
-    nodes.update(ns => ns.filter(n => n.type !== 'loadMore'));
-    nodes.update(ns => ns.map(n => ({ ...n, hidden: n.id !== rootDomain, data: { ...n.data, expanded: false } })));
-    edges.update(es => es.map(e => ({ ...e, hidden: true })));
+    nodes = nodes.filter(n => n.type !== 'loadMore');
+    nodes = nodes.map(n => ({ ...n, hidden: n.id !== rootDomain, data: { ...n.data, expanded: false } }));
+    edges = edges.map(e => ({ ...e, hidden: true }));
     expandNode(rootDomain);
   }
 </script>
 
 <div class="vendor-graph-container">
   <div class="graph-controls">
-    <button class="btn btn-primary" on:click={resetView}>Reset View</button>
+    <button class="btn btn-primary" onclick={resetView}>Reset View</button>
   </div>
 
   <div class="layer-bands-overlay">
@@ -544,10 +548,10 @@
   </div>
 
   <SvelteFlow
-    {nodes} {edges} {nodeTypes} fitView
+    bind:nodes bind:edges {nodeTypes} fitView
     minZoom={0.05}
     maxZoom={2}
-    on:nodeclick={handleNodeClick}
+    onnodeclick={handleNodeClick}
     defaultEdgeOptions={{ type: 'straight', style: 'stroke: #b0bec5; stroke-width: 1.5;' }}
   >
     <Controls />
@@ -559,7 +563,7 @@
   <VendorTooltip
     domain={tooltipDomain} organization={tooltipOrganization}
     sources={tooltipSources} position={tooltipPosition}
-    visible={tooltipVisible} on:close={closeTooltip}
+    visible={tooltipVisible} onclose={closeTooltip}
   />
 </div>
 
