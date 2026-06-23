@@ -65,6 +65,11 @@
   `ProcessRefreshKind::new()`→`nothing()` (process-liveness check); the askama
   0.13+ removal of the generated `EXTENSION`/`MIME_TYPE` template constants
   (the affected unit test now verifies HTML output by rendering instead).
+- Second dependency-update batch (clears the routine Dependabot PRs opened during
+  the cleanup): reqwest 0.12→0.13 (added the `query` cargo feature, which 0.13
+  gates behind it), sha2 0.10→0.11, dirs 5→6, scraper 0.26→0.27, fancy-regex
+  0.13→0.18, chrono→0.4.45, which→8.0.4, headless_chrome→1.0.22, insta→1.48,
+  assert_cmd→2.2.2. No source changes required beyond the reqwest feature.
 
 ## [1.1.1] - 2026-06-02
 
