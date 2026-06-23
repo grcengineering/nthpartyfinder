@@ -118,12 +118,15 @@ jobs:
       - name: Drop test-code WARNING findings from SARIF before upload
         # The no-unwrap/no-eprintln WARNING rules target PRODUCTION code, but
         # Opengrep's experimental Rust matcher does not exclude `.unwrap()` /
-        # `eprintln!` inside inline `#[cfg(test)] mod tests` blocks, flooding code
-        # scanning with ~1.7k test-code false positives. This drops only those
-        # test-located WARNING findings (production findings + the ERROR gate are
-        # preserved). Runs AFTER the gate so gating sees the full result set.
+        # `eprintln!` inside inline `#[cfg(test)]` code, flooding code scanning
+        # with ~1.7k test-code false positives. The filter drops a WARNING finding
+        # ONLY when its line is inside the brace span of a `#[cfg(test)]`/`#[test]`
+        # item (a `use`/`const` spans only its own line; a `mod`/`impl`/`fn` to its
+        # matching `}`) — so PRODUCTION findings outside every test span are always
+        # kept, even below an early `#[cfg(test)] use`. ERROR findings are untouched
+        # and the gate ran first. See scripts/filter-opengrep-sarif.py.
         if: always()
-        run: bash scripts/filter-opengrep-sarif.sh opengrep.sarif
+        run: python3 scripts/filter-opengrep-sarif.py opengrep.sarif
       - name: Upload Opengrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2

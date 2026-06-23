@@ -96,17 +96,17 @@ pub async fn get_organization_with_rate_limit(
         ctx.whois_limiter.acquire().await;
     }
 
-    // Priority 3: Native Rust WHOIS lookup using whois-rust library
+    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
             debug!(
-                "Found organization via whois-rust for {}: {}",
+                "Found organization via native WHOIS for {}: {}",
                 domain, organization
             );
             return Ok(OrganizationResult::verified(organization, "whois"));
         }
         debug!(
-            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            "native WHOIS returned placeholder organization for {}, trying fallbacks",
             domain
         );
     }
@@ -201,17 +201,17 @@ pub async fn get_organization_with_status_and_config(
         }
     }
 
-    // Priority 3: Native Rust WHOIS lookup using whois-rust library
+    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
             debug!(
-                "Found organization via whois-rust for {}: {}",
+                "Found organization via native WHOIS for {}: {}",
                 domain, organization
             );
             return Ok(OrganizationResult::verified(organization, "whois"));
         }
         debug!(
-            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            "native WHOIS returned placeholder organization for {}, trying fallbacks",
             domain
         );
     }
@@ -303,17 +303,17 @@ pub async fn get_organization_with_config(
         }
     }
 
-    // Priority 3: Native Rust WHOIS lookup using whois-rust library
+    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
     if let Ok(result) = try_native_whois(domain).await {
         if let Some(organization) = extract_organization_from_whois(&result) {
             debug!(
-                "Found organization via whois-rust for {}: {}",
+                "Found organization via native WHOIS for {}: {}",
                 domain, organization
             );
             return Ok(organization);
         }
         debug!(
-            "whois-rust returned placeholder organization for {}, trying fallbacks",
+            "native WHOIS returned placeholder organization for {}, trying fallbacks",
             domain
         );
     }
@@ -401,6 +401,18 @@ fn parse_whois_referral(response: &str) -> Option<String> {
 async fn whois_query(server: &str, query: &str) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    // Defense-in-depth: the query is a domain/TLD and must be a single WHOIS line.
+    // Reject any CR/LF/whitespace so a (discovered, not pre-validated) domain can
+    // never inject a second protocol line via `\r\n`.
+    if query
+        .bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == b' ' || b == b'\t')
+    {
+        return Err(anyhow!(
+            "invalid WHOIS query (contains whitespace/control chars)"
+        ));
+    }
 
     let addr = format!("{server}:43");
     let mut stream = tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(&addr))
@@ -979,6 +991,21 @@ mod tests {
         );
         // A bare/garbage value (no dot) must not be accepted as a host.
         assert_eq!(parse_whois_referral("refer: localhost\n"), None);
+    }
+
+    #[tokio::test]
+    async fn test_whois_query_rejects_injection() {
+        // CR/LF/whitespace in the query must be rejected at the guard, before any
+        // network I/O — so a discovered (not pre-validated) domain can't inject a
+        // second WHOIS protocol line. The guard returns Err before TcpStream::connect.
+        for bad in ["evil.com\r\ninject", "evil.com\nx", "a b.com", "a\tb.com"] {
+            let r = whois_query("whois.iana.org", bad).await;
+            assert!(r.is_err(), "should reject {bad:?}");
+            assert!(
+                r.unwrap_err().to_string().contains("invalid WHOIS query"),
+                "expected guard error for {bad:?}"
+            );
+        }
     }
 
     #[test]
