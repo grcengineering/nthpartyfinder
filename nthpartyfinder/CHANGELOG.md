@@ -17,11 +17,20 @@
   now out of the tree entirely — a code-level remediation rather than a risk
   acceptance. The two corresponding `deny.toml` ignore entries were deleted.
   System `whois` remains a fallback.
-- Opengrep SARIF is now filtered (`scripts/filter-opengrep-sarif.sh`) to drop the
+- Opengrep SARIF is now filtered (`scripts/filter-opengrep-sarif.py`) to drop the
   report-only `no-unwrap`/`no-eprintln` WARNING findings located in inline
   `#[cfg(test)]` test code before upload to code scanning — Opengrep's Rust
   matcher cannot exclude inline test modules, so ~1.7k test-code false positives
-  were flooding the dashboard. Production findings and the ERROR gate are kept.
+  were flooding the dashboard. The filter scopes by the *enclosing `#[cfg(test)]`/
+  `#[test]` item's brace span* (a `use`/`const` spans only its line; a `mod`/`impl`/
+  `fn` to its matching `}`), so a production finding is never dropped even when it
+  sits below an early `#[cfg(test)] use`. ERROR findings and the gate are untouched.
+- Bumped `quinn-proto` 0.11.14 → 0.11.15 to clear RUSTSEC-2026-0185 (high; remote
+  memory exhaustion via unbounded out-of-order QUIC stream reassembly), a freshly
+  published advisory on a transitive of reqwest 0.13.
+- Hardened the in-process WHOIS client: the query is rejected before any network
+  I/O if it contains CR/LF/whitespace, so a discovered (not pre-validated) domain
+  cannot inject a second WHOIS protocol line.
 - Docker base images in all Dockerfiles pinned by digest (OpenSSF Scorecard
   Pinned-Dependencies); a Dependabot `docker` ecosystem keeps the pins current.
 
