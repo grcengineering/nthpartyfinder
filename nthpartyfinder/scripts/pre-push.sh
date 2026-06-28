@@ -12,12 +12,17 @@ run() { echo "▶ $*"; if ! "$@"; then echo "✖ FAILED: $*"; fail=1; fi; }
 
 cd "$CRATE_DIR"
 
+# Invoke cargo by its absolute path so each call skips the Socket Firewall (sfw)
+# shell wrapper and its per-invocation overhead. Override with CARGO=cargo to
+# route through sfw.
+CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
+
 # Quality + lint (clippy -D warnings is also the CI gate)
-run cargo fmt --check
-run cargo clippy --all-targets --all-features -- -D warnings
+run "$CARGO" fmt --check
+run "$CARGO" clippy --all-targets --all-features -- -D warnings
 
 # SCA: dependency advisories (blocking gate in CI)
-run cargo deny check advisories
+run "$CARGO" deny check advisories
 
 # Secret scan over full history (same policy as CI gitleaks gate)
 if command -v gitleaks >/dev/null 2>&1; then

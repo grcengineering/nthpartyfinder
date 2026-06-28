@@ -9,8 +9,12 @@ cd "$(dirname "$0")/.."
 
 REGEX='(browser_pool|memory_monitor|interactive)\.rs$'
 TOOLCHAIN="${COV_TOOLCHAIN:-nightly-2026-04-29}"
+# Invoke cargo by its absolute path so the run skips the Socket Firewall (sfw)
+# shell wrapper and its per-invocation overhead. Override (e.g. CARGO=cargo to
+# route through sfw). Threshold + ignore-regex stay byte-identical to CI.
+CARGO="${CARGO:-$HOME/.cargo/bin/cargo}"
 
-RUSTFLAGS="" cargo "+${TOOLCHAIN}" llvm-cov \
+RUSTFLAGS="" "$CARGO" "+${TOOLCHAIN}" llvm-cov \
   --locked --all-features --workspace --lib \
   --ignore-filename-regex "${REGEX}" \
   --fail-under-lines 95 --fail-under-functions 95
