@@ -38,3 +38,42 @@ This project gates security at multiple layers (see `.github/workflows/`):
   our own release with a compiled-in SHA-256 integrity anchor.
 - **Pre-PR** — a local `pre-push` git hook (`scripts/install-git-hooks.sh`) runs
   fmt/clippy/cargo-deny/gitleaks so issues are caught before a pull request is opened.
+
+## Accepted findings (documented posture)
+
+A small number of scanner findings are intentionally accepted; each has a concrete,
+evidence-based rationale. No *fixable* true-positive is suppressed — fixes are the
+default (e.g. `whois-rs` was removed outright to clear RUSTSEC-2026-0119 + RUSTSEC-2024-0421
+rather than risk-accept them).
+
+**Dependency advisories (tracked in `deny.toml` with `unused-ignored-advisory = "warn"`):**
+
+- **RUSTSEC-2025-0119** (`number_prefix`, *unmaintained*) — transitive via `indicatif`
+  for human-readable byte counts; no security surface; no maintained alternative in
+  `indicatif`'s tree. Informational, not a vulnerability.
+- **RUSTSEC-2024-0436** (`paste`, *unmaintained*) — compile-time proc-macro only; emits
+  no runtime code; no known CVE; 14k+ reverse-dependents. No runtime attack surface.
+
+These are the *no-fix / unmaintained-dependency* carve-out: there is no upstream patch and
+no reachable security impact. Revisit if a maintained replacement appears.
+
+**OpenSSF Scorecard (repo-maturity signals, not code vulnerabilities):**
+
+- **Pinned-Dependencies** — all GitHub Actions are 40-char-SHA pinned and all Docker base
+  images are digest-pinned. The sole non-SHA `uses:` is
+  `slsa-framework/slsa-github-generator`, which **must** be referenced by a version tag —
+  its TUF trust model rejects commit-SHA pins. Sanctioned exception.
+- **Branch-Protection** — the default branch is governed by a repository ruleset that
+  blocks force-pushes (`non_fast_forward`), blocks deletion, and restricts direct updates
+  to bypass actors (org admins) — so all changes flow through pull requests. Adding
+  *required status checks* to the ruleset is a recommended further hardening, deferred to
+  the repository owner as a deliberate settings change (it is enforced today by the
+  maintainer's discipline of merging only CI-green PRs).
+- **Code-Review** — every change lands through a pull request with the full CI gate suite,
+  but this is a single-maintainer project, so a second human approver is not always
+  available. Accepted for the current maintainer model.
+- **Fuzzing** — not yet integrated. Mitigated today by 4,000+ unit/integration tests
+  (including wiremock-backed network-failure and malformed-input cases). A `cargo-fuzz`
+  harness for the DNS/WHOIS/HTML parsers is a tracked future enhancement.
+- **CII-Best-Practices** — the OpenSSF Best Practices badge has not been applied for; this
+  is an external self-certification process tracked as a follow-up, not a code change.
