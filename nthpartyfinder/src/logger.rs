@@ -286,16 +286,14 @@ impl AnalysisLogger {
             return;
         }
 
+        // Emit as a single timestamped INFO line so init reporting shares one
+        // consistent format with the rest of the logger and is never duplicated by
+        // a parallel reporting path (#2). print_message is bar-safe (routes through
+        // the active MultiProgress) and records to the log-file buffer.
+        self.print_message("INFO", step_name);
+
         let bar_guard = self.main_bar.read().await;
         if let Some(pb) = bar_guard.as_ref() {
-            // Print checklist line above the progress bar
-            let check_line = if self.color_enabled {
-                format!("  {} {}", "✓".green(), step_name)
-            } else {
-                format!("  ✓ {}", step_name)
-            };
-            pb.println(check_line);
-
             // Advance within 0→10 range (cap at 10)
             let new_pos = (pb.position() + 2).min(10);
             pb.set_position(new_pos);
@@ -317,18 +315,9 @@ impl AnalysisLogger {
             return;
         }
 
+        self.print_message("INFO", "Initialization complete");
         let bar_guard = self.main_bar.read().await;
         if let Some(pb) = bar_guard.as_ref() {
-            let done_line = if self.color_enabled {
-                format!(
-                    "  {} {}",
-                    "✓".green().bold(),
-                    "Initialization complete".bold()
-                )
-            } else {
-                "  ✓ Initialization complete".to_string()
-            };
-            pb.println(done_line);
             pb.set_position(10);
             pb.set_message("Preparing analysis...");
         }

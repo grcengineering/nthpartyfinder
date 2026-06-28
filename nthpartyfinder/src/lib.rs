@@ -24,6 +24,7 @@ pub mod memory_monitor;
 pub mod model_fetch;
 pub mod ner_org;
 pub mod org_normalizer;
+pub mod prefs;
 pub mod rate_limit;
 pub mod result_sink;
 pub mod subprocessor;

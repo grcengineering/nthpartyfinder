@@ -649,8 +649,37 @@ fn download_onnx_runtime_interactive_impl() -> Result<PathBuf, String> {
     eprintln!("  ✅ ONNX Runtime installed successfully!");
     eprintln!("  Location: {}", abs_path.display());
     eprintln!();
-    eprintln!("  To make this permanent, add to your shell profile:");
-    eprintln!("    export ORT_DYLIB_PATH={}", abs_path.display());
+
+    // (#3) Offer to persist the path so future runs never re-download or need a manual
+    // shell export. Default Yes. Persists to the user-level prefs file (not the shell
+    // profile), which app startup reads to export ORT_DYLIB_PATH automatically.
+    eprint!("  Remember this location so future runs use it automatically? [Y/n] ");
+    let mut persist_input = String::new();
+    let persist = std::io::stdin().read_line(&mut persist_input).is_ok()
+        && is_download_consent(&persist_input);
+    if persist {
+        let mut prefs = crate::prefs::Prefs::load();
+        prefs.ort_dylib_path = Some(abs_path.to_string_lossy().to_string());
+        match prefs.save() {
+            Ok(()) => match crate::prefs::Prefs::path() {
+                Some(p) => eprintln!("  ✓ Saved to {} — no manual setup needed.", p.display()),
+                None => eprintln!("  ✓ Saved — no manual setup needed."),
+            },
+            Err(e) => {
+                eprintln!(
+                    "  ⚠️  Couldn't save preference ({}). To do it manually, add to",
+                    e
+                );
+                eprintln!(
+                    "      your shell profile:  export ORT_DYLIB_PATH={}",
+                    abs_path.display()
+                );
+            }
+        }
+    } else {
+        eprintln!("  To set it up yourself, add to your shell profile:");
+        eprintln!("    export ORT_DYLIB_PATH={}", abs_path.display());
+    }
     eprintln!();
 
     Ok(abs_path)

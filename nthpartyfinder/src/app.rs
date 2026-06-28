@@ -218,12 +218,66 @@ pub fn compute_analysis_timeout_with_env(
     cli_timeout: Option<u64>,
     env_value: Option<String>,
 ) -> Option<std::time::Duration> {
-    let timeout_secs: u64 =
-        cli_timeout.unwrap_or_else(|| env_value.and_then(|v| v.parse().ok()).unwrap_or(600));
+    compute_analysis_timeout_with_env_and_default(cli_timeout, env_value, None)
+}
+
+/// Resolve the analysis timeout with full precedence (#4): explicit `--timeout` CLI value
+/// wins, then `NTHPARTY_ANALYSIS_TIMEOUT_SECS`, then the user's persisted default, then the
+/// built-in 600s. `0` at any layer disables the timeout (returns None).
+pub fn compute_analysis_timeout_with_env_and_default(
+    cli_timeout: Option<u64>,
+    env_value: Option<String>,
+    prefs_default: Option<u64>,
+) -> Option<std::time::Duration> {
+    let timeout_secs: u64 = cli_timeout
+        .or_else(|| env_value.and_then(|v| v.parse().ok()))
+        .or(prefs_default)
+        .unwrap_or(600);
     if timeout_secs == 0 {
         None
     } else {
         Some(std::time::Duration::from_secs(timeout_secs))
+    }
+}
+
+/// The user's response to the first-run timeout prompt (#4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutChoice {
+    /// Keep the built-in default for this run; persist nothing.
+    KeepDefault,
+    /// Use this value (seconds; 0 = disabled) for this run only.
+    ThisRun(u64),
+    /// Use this value for this run AND persist it as the new default.
+    SetDefault(u64),
+}
+
+/// Parse the first-run timeout prompt input (pure, testable).
+///
+/// - empty / whitespace            → KeepDefault
+/// - `<n>`                         → ThisRun(n)   (0 = disable for this run)
+/// - `<n> d` / `<n> default` / `<n> save` / `<n>!` → SetDefault(n)
+/// - anything else                 → None (caller re-prompts or keeps default)
+pub fn parse_timeout_choice(input: &str) -> Option<TimeoutChoice> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Some(TimeoutChoice::KeepDefault);
+    }
+    // "<n>!" shorthand for set-default.
+    if let Some(num) = trimmed.strip_suffix('!') {
+        return num
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(TimeoutChoice::SetDefault);
+    }
+    let mut parts = trimmed.split_whitespace();
+    let first = parts.next()?;
+    match (first.parse::<u64>(), parts.next()) {
+        (Ok(n), None) => Some(TimeoutChoice::ThisRun(n)),
+        (Ok(n), Some(kw)) if matches!(kw.to_lowercase().as_str(), "d" | "default" | "save") => {
+            Some(TimeoutChoice::SetDefault(n))
+        }
+        _ => None,
     }
 }
 
@@ -608,7 +662,6 @@ pub fn count_unique_vendors(results: &[VendorRelationship]) -> usize {
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run() -> Result<()> {
     eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("  Parsing arguments...");
 
     let cli = Cli::parse();
     if let Some(Commands::Cache { action }) = &cli.command {
@@ -697,7 +750,45 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         bail!(AppExitCode(2));
     }
 
-    eprintln!("  Loading configuration...");
+    // Initialize the tracing subscriber + AnalysisLogger up-front so the first status
+    // lines ("Parsing arguments…", "Loading configuration…", "Checking dependencies…")
+    // flow through the timestamped logger ([HH:MM:SS.mmm] LEVEL:) instead of raw
+    // eprintln (#1). The subscriber also silences headless_chrome's benign CDP-teardown
+    // logs (#5) and maps -v levels: default WARN, -v INFO, -vv DEBUG.
+    // try_init: tests/embedders may already have a subscriber installed.
+    let trace_level = match args.verbose {
+        0 => tracing::Level::WARN,
+        1 => tracing::Level::INFO,
+        _ => tracing::Level::DEBUG,
+    };
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(trace_level.into())
+        .from_env_lossy()
+        // headless_chrome's CDP transport logs benign teardown races at WARN/ERROR
+        // ("Couldn't send browser an event", "Transport loop got a timeout") when the
+        // throwaway headless instance is killed with events still in flight. Not a
+        // nthpartyfinder error, not the user's Chrome — silence the dependency target.
+        .add_directive(
+            "headless_chrome=off"
+                .parse()
+                .expect("static tracing directive is valid"),
+        );
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        // Bar-safe writer: routes through the active MultiProgress so warn lines don't
+        // splice into in-place progress redraws.
+        .with_writer(crate::logger::ProgressAwareWriter::default)
+        .with_target(false)
+        .compact()
+        .try_init();
+    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
+    let logger = Arc::new(match &args.log_file {
+        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
+        None => AnalysisLogger::new(verbosity),
+    });
+
+    logger.info("Parsing arguments...");
+    logger.info("Loading configuration...");
     let load_result = AppConfig::load();
     let prompt_result = match &load_result {
         Err(ConfigError::FileNotFound(_)) => {
@@ -728,7 +819,17 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         _app_config.rate_limits.dns_queries_per_second = rl;
     }
 
-    eprintln!("  Checking dependencies...");
+    // Load user-level prefs (#3/#4). If a prior run persisted the ONNX Runtime path,
+    // export it before the dependency check so NER works without re-download or manual
+    // shell setup — unless the environment already provides one.
+    let mut prefs = crate::prefs::Prefs::load();
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+        if let Some(ort) = prefs.ort_dylib_path.as_deref() {
+            std::env::set_var("ORT_DYLIB_PATH", ort);
+        }
+    }
+
+    logger.info("Checking dependencies...");
     #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
     {
         let slm_wanted =
@@ -811,33 +912,6 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             eprintln!("   Continuing with reduced functionality.");
         }
     }
-
-    eprintln!("  Starting logger...");
-    // The tracing subscriber was never initialized in the binary, so every
-    // warn!/info!/debug! across the crate (DoH provider failures, DNS race
-    // diagnostics) was silently dropped — the instrumentation existed but no
-    // run could surface it. Map the existing -v levels onto it: default WARN
-    // keeps failures loud and normal runs quiet; -v = INFO, -vv = DEBUG.
-    // try_init: tests and embedders may already have a subscriber installed.
-    let trace_level = match args.verbose {
-        0 => tracing::Level::WARN,
-        1 => tracing::Level::INFO,
-        _ => tracing::Level::DEBUG,
-    };
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(trace_level)
-        // Bar-safe writer: routes through the active MultiProgress so warn
-        // lines don't splice into in-place progress redraws (raw stderr writes
-        // under a 12Hz redraw garble both the bar and the warning).
-        .with_writer(crate::logger::ProgressAwareWriter::default)
-        .with_target(false)
-        .compact()
-        .try_init();
-    let verbosity = VerbosityLevel::from_verbose_count(args.verbose);
-    let logger = Arc::new(match &args.log_file {
-        Some(log_file_path) => AnalysisLogger::with_log_file(verbosity, log_file_path.clone()),
-        None => AnalysisLogger::new(verbosity),
-    });
 
     logger.start_init_progress(5).await;
 
@@ -970,15 +1044,9 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.finish_init().await;
 
-    if vendor_registry_loaded {
-        if let Some(reg) = vendor_registry::get() {
-            logger.info(&format!(
-                "Vendor registry: {} vendors, {} domains",
-                reg.vendor_count(),
-                reg.domain_count()
-            ));
-        }
-    }
+    // (#2) The vendor-registry count is already reported once by complete_init_step
+    // above; the previously-duplicated logger.info line here was removed. Only the
+    // enabled-discovery-method lines (not covered by the init steps) remain.
     if web_org_will_be_enabled {
         logger.info("Web organization extraction enabled");
     }
@@ -1818,7 +1886,47 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.start_scan_progress(100).await;
 
-    let analysis_timeout = compute_analysis_timeout(args.timeout);
+    // (#4) First-run timeout onboarding. Fires at most once, and only when interactive,
+    // with no explicit --timeout, no env override, and not yet onboarded — so it never
+    // breaks non-interactive/CI runs. Lets the user keep 600s, override for this run, or
+    // persist a new default.
+    let env_timeout = std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS").ok();
+    if args.timeout.is_none()
+        && env_timeout.is_none()
+        && !prefs.onboarded
+        && std::io::stdin().is_terminal()
+    {
+        eprintln!();
+        eprintln!("  ⏱  Analysis timeout (first-run setup)");
+        eprintln!("     Default is 600s. Depth-3 / cold-cache scans often need more.");
+        eprintln!("       [Enter]   keep 600s for this run");
+        eprintln!("       <n>       use <n> seconds for this run (0 = no timeout)");
+        eprintln!("       <n> d     use <n> seconds AND save it as your default");
+        eprint!("     > ");
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() {
+            match parse_timeout_choice(&line) {
+                Some(TimeoutChoice::ThisRun(n)) => args.timeout = Some(n),
+                Some(TimeoutChoice::SetDefault(n)) => {
+                    args.timeout = Some(n);
+                    prefs.analysis_timeout_secs = Some(n);
+                }
+                // KeepDefault or unparseable → leave precedence to fall through to default.
+                Some(TimeoutChoice::KeepDefault) | None => {}
+            }
+        }
+        prefs.onboarded = true;
+        if let Err(e) = prefs.save() {
+            logger.debug(&format!("Could not persist timeout preference: {}", e));
+        }
+        eprintln!();
+    }
+
+    let analysis_timeout = compute_analysis_timeout_with_env_and_default(
+        args.timeout,
+        env_timeout,
+        prefs.analysis_timeout_secs,
+    );
     let analysis_timeout_secs = analysis_timeout.map(|d| d.as_secs()).unwrap_or(0);
 
     if let Some(duration) = analysis_timeout {
@@ -3023,6 +3131,88 @@ mod tests {
     fn test_compute_analysis_timeout_env_empty_string_uses_default() {
         let timeout = compute_analysis_timeout_with_env(None, Some("".to_string()));
         assert_eq!(timeout, Some(std::time::Duration::from_secs(600)));
+    }
+
+    // ── compute_analysis_timeout_with_env_and_default (#4 precedence) ──
+    #[test]
+    fn test_timeout_default_precedence_cli_wins() {
+        let t = compute_analysis_timeout_with_env_and_default(
+            Some(120),
+            Some("300".to_string()),
+            Some(900),
+        );
+        assert_eq!(t, Some(std::time::Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn test_timeout_default_precedence_env_over_prefs() {
+        let t =
+            compute_analysis_timeout_with_env_and_default(None, Some("300".to_string()), Some(900));
+        assert_eq!(t, Some(std::time::Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_timeout_default_precedence_prefs_over_builtin() {
+        let t = compute_analysis_timeout_with_env_and_default(None, None, Some(900));
+        assert_eq!(t, Some(std::time::Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn test_timeout_default_precedence_falls_back_to_600() {
+        let t = compute_analysis_timeout_with_env_and_default(None, None, None);
+        assert_eq!(t, Some(std::time::Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn test_timeout_default_prefs_zero_disables() {
+        let t = compute_analysis_timeout_with_env_and_default(None, None, Some(0));
+        assert_eq!(t, None);
+    }
+
+    // ── parse_timeout_choice (#4 first-run prompt) ────────────────────
+    #[test]
+    fn test_parse_timeout_choice_empty_keeps_default() {
+        assert_eq!(parse_timeout_choice(""), Some(TimeoutChoice::KeepDefault));
+        assert_eq!(
+            parse_timeout_choice("   \n"),
+            Some(TimeoutChoice::KeepDefault)
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_choice_number_is_this_run() {
+        assert_eq!(
+            parse_timeout_choice("1800"),
+            Some(TimeoutChoice::ThisRun(1800))
+        );
+        assert_eq!(parse_timeout_choice(" 0 "), Some(TimeoutChoice::ThisRun(0)));
+    }
+
+    #[test]
+    fn test_parse_timeout_choice_set_default_variants() {
+        assert_eq!(
+            parse_timeout_choice("1800 d"),
+            Some(TimeoutChoice::SetDefault(1800))
+        );
+        assert_eq!(
+            parse_timeout_choice("1800 default"),
+            Some(TimeoutChoice::SetDefault(1800))
+        );
+        assert_eq!(
+            parse_timeout_choice("1800 save"),
+            Some(TimeoutChoice::SetDefault(1800))
+        );
+        assert_eq!(
+            parse_timeout_choice("1800!"),
+            Some(TimeoutChoice::SetDefault(1800))
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_choice_invalid_is_none() {
+        assert_eq!(parse_timeout_choice("abc"), None);
+        assert_eq!(parse_timeout_choice("1800 bogus"), None);
+        assert_eq!(parse_timeout_choice("twelve!"), None);
     }
 
     // ── build_full_output_path ────────────────────────────────────────

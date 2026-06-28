@@ -1178,7 +1178,16 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
     // 0.26: builder_tokio() returns Result and build() now also returns Result.
     let resolver = TokioResolver::builder_tokio()?.build()?;
 
-    let txt_lookup = resolver.txt_lookup(domain).await?;
+    // Query as an absolute (FQDN) name — trailing dot — so the system resolver's
+    // search list from /etc/resolv.conf (e.g. OrbStack/Docker's `search localdomain`)
+    // is never appended. Without this, a failed lookup of `_x._spf.vali.email` was
+    // retried as `_x._spf.vali.email.localdomain` and surfaced as a confusing error.
+    let fqdn = if domain.ends_with('.') {
+        domain.to_string()
+    } else {
+        format!("{}.", domain)
+    };
+    let txt_lookup = resolver.txt_lookup(fqdn).await?;
     // 0.26: iterate answer Records and render each record's RData.
     let records: Vec<String> = txt_lookup
         .answers()
@@ -1586,6 +1595,20 @@ fn collect_spf_targets(
     for re in target_regexes {
         for m in re.captures_iter(record_lower).filter_map(|c| c.get(1)) {
             let raw_target = m.as_str();
+            // RFC 7208 §7 (macros): an include:/redirect= target bearing a macro
+            // (e.g. Valimail's `%{ir}._ip.%{v}._ehlo.%{d}._spf.vali.email`) is a
+            // sender-dependent, evaluation-time construct — it is NOT a static SPF
+            // delegation. Stripping the `%{...}` leaves a non-resolvable residual
+            // like `_ip._ehlo._spf.vali.email`; recursing into it yields RCODE 2 and
+            // noisy DoH-failure warnings. Skip it here. The provider's registrable
+            // base domain (vali.email) is still surfaced as a vendor by
+            // extract_from_spf_record, so we lose no vendor signal.
+            // Key off the raw token containing any `%` (macro variables `%{...}` and the
+            // macro-literal escapes `%%`/`%_`/`%-`); `%` is never valid in a real
+            // hostname, so this is RFC 7208 §7-complete and never false-positives.
+            if raw_target.contains('%') {
+                continue;
+            }
             // Strip SPF macros (e.g., %{i}._spf.mta.salesforce.com -> _spf.mta.salesforce.com)
             let cleaned = strip_spf_macros(raw_target);
             if is_valid_domain(&cleaned) && visited.insert(cleaned.clone()) {
@@ -3072,13 +3095,38 @@ mod tests {
 
     #[test]
     fn test_collect_spf_targets_with_macros() {
+        // RFC 7208 §7: a macro-bearing include:/redirect= target is a runtime
+        // construct, not a static delegation. It must NOT be recursed into (the
+        // stripped residual is non-resolvable). A static target alongside it is
+        // still collected.
         let record = "v=spf1 include:%{ir}._spf.google.com redirect=_spf.salesforce.com ~all";
         let mut to_resolve = Vec::new();
         let mut visited = HashSet::new();
         collect_spf_targets(record, &mut to_resolve, &mut visited);
-        // Should strip macros and collect valid targets
-        assert!(to_resolve.iter().any(|t| t.contains("google.com")));
+        // The macro-bearing include is skipped...
+        assert!(
+            !to_resolve.iter().any(|t| t.contains("google.com")),
+            "macro-bearing include must not be enqueued, got {:?}",
+            to_resolve
+        );
+        // ...but the static redirect is still collected.
         assert!(to_resolve.iter().any(|t| t.contains("salesforce.com")));
+    }
+
+    #[test]
+    fn test_collect_spf_targets_skips_valimail_agari_macro_artifacts() {
+        // Regression for the vanta.com run: Valimail/Agari publish macro-based
+        // exists/include mechanisms. Their stripped residuals (_ip._ehlo._spf.vali.email,
+        // 55.spf-protect.agari.com) previously got DNS-queried -> RCODE 2 noise.
+        let record = "v=spf1 include:%{ir}._ip.%{v}._ehlo._spf.vali.email redirect=%{ir}.55.spf-protect.agari.com ~all";
+        let mut to_resolve = Vec::new();
+        let mut visited = HashSet::new();
+        collect_spf_targets(record, &mut to_resolve, &mut visited);
+        assert!(
+            to_resolve.is_empty(),
+            "no macro-bearing targets should be enqueued, got {:?}",
+            to_resolve
+        );
     }
 
     #[test]
