@@ -15,12 +15,8 @@ credentials.json
 service-account*.json
 
 # --- AI Agent Artifacts ---
-# Claude Code (settings contain absolute paths and hook configs)
-.claude/settings.json
-.claude/settings.local.json
-.claude/projects/
-.claude/todos/
-.claude/metadata-updater.sh
+# Claude Code (local agent state: settings, worktrees, hooks — never repo content)
+.claude/
 
 # Paperclip
 .paperclip/
