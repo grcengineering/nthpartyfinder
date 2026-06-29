@@ -150,10 +150,11 @@ pub async fn discover_strategy(
     Ok(None)
 }
 
-/// Maximum number of scroll+paginate rounds during render-capture. Bounds the
-/// worst case for very large or infinite-scroll trust centers.
+/// Maximum number of ~1s wait/scroll rounds during render-capture. Bounds the
+/// worst case while giving the (often late-arriving) subprocessor report payload
+/// time to load.
 #[cfg(not(coverage))]
-const MAX_PAGINATION_ROUNDS: usize = 25;
+const MAX_WAIT_ROUNDS: usize = 18;
 
 /// Hard caps on what a single (potentially hostile) page may make us accumulate
 /// while capturing its network JSON: a response-count ceiling and an aggregate
@@ -218,10 +219,24 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
                     || resp_url.contains("/api/");
 
                 if is_json && (200..300).contains(&status) {
-                    // Small delay for body to become available
-                    std::thread::sleep(Duration::from_millis(100));
-                    if let Ok(body_obj) = fetch_body() {
-                        let body_str = &body_obj.body;
+                    // Fetch the body, retrying briefly until it parses as complete
+                    // JSON. `getResponseBody` can return early/partial right after
+                    // ResponseReceived for large payloads (e.g. Vanta's ~74 KB
+                    // report carrying the subprocessor list), which previously made
+                    // the subprocessor array intermittently missed.
+                    let mut body: Option<String> = None;
+                    for attempt in 0..4u64 {
+                        std::thread::sleep(Duration::from_millis(120 + 140 * attempt));
+                        if let Ok(b) = fetch_body() {
+                            let complete =
+                                serde_json::from_str::<serde_json::Value>(&b.body).is_ok();
+                            body = Some(b.body);
+                            if complete {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(body_str) = body {
                         if body_str.len() > 50 && body_str.len() < 5_000_000 {
                             // Recover from a poisoned lock rather than panicking:
                             // the guarded Vec is a plain response accumulator and
@@ -237,7 +252,7 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
                             {
                                 collected.push(InterceptedResponse {
                                     url: resp_url.clone(),
-                                    body: body_str.clone(),
+                                    body: body_str,
                                 });
                             }
                         }
@@ -252,36 +267,44 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
             .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
-        std::thread::sleep(Duration::from_millis(3000));
+        std::thread::sleep(Duration::from_millis(2000));
 
-        // Pagination: scroll + click "next / show more / load more / show all"
-        // controls to trigger additional API calls, which the handler captures.
-        // Bounded and best-effort; failures are ignored. Stops once two
-        // consecutive rounds capture no new responses.
-        let mut last_len = responses
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len();
+        // Content-aware wait: the subprocessor report payload can arrive a few
+        // seconds after first paint, and scrolling fires pagination calls. Keep
+        // scrolling/clicking and waiting until a captured response actually yields
+        // a subprocessor array, then a couple of extra rounds for any remaining
+        // pages — or give up after a hard timeout / sustained silence. Bounded.
+        let mut got_subs_round: Option<usize> = None;
+        let mut last_len = 0usize;
         let mut stagnant_rounds = 0usize;
-        for _ in 0..MAX_PAGINATION_ROUNDS {
+        for round in 0..MAX_WAIT_ROUNDS {
             let _ = tab.evaluate(PAGINATION_JS, false);
-            std::thread::sleep(Duration::from_millis(1200));
-            let current_len = responses
+            std::thread::sleep(Duration::from_millis(1000));
+            let snapshot = responses
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len();
-            if current_len >= MAX_CAPTURED_RESPONSES {
+                .clone();
+            if snapshot.len() >= MAX_CAPTURED_RESPONSES {
                 break;
             }
-            if current_len == last_len {
-                stagnant_rounds += 1;
-                if stagnant_rounds >= 2 {
-                    break;
-                }
-            } else {
-                stagnant_rounds = 0;
+            if got_subs_round.is_none() && responses_contain_subprocessor_array(&snapshot) {
+                got_subs_round = Some(round);
+                debug!("Subprocessor array captured at wait round {}", round);
             }
-            last_len = current_len;
+            match got_subs_round {
+                // Have the data: a couple more rounds for pagination, then stop.
+                Some(r) if round >= r + 2 => break,
+                // Still waiting and nothing new for a while → likely no
+                // subprocessors on this page; give up rather than wait the cap.
+                None if snapshot.len() == last_len => {
+                    stagnant_rounds += 1;
+                    if stagnant_rounds >= 6 {
+                        break;
+                    }
+                }
+                _ => stagnant_rounds = 0,
+            }
+            last_len = snapshot.len();
         }
 
         // Deregister and collect results. Recover from a poisoned lock rather
@@ -357,6 +380,15 @@ pub(crate) fn extract_subprocessors_from_responses(
             let mapping = detect_field_mapping(&items);
             if mapping.name_field.is_none() {
                 continue; // must have a name field
+            }
+            // Guard: a subprocessor array must look like vendors, not just any
+            // named list. Require a website/URL field OR a subprocessor/vendor-ish
+            // path. Without this, when the real subprocessor response is missing
+            // from a capture (e.g. a throttled or partial render), a sibling array
+            // (control categories, frameworks, …) becomes the top scorer and gets
+            // returned as bogus "subprocessors" instead of an honest empty result.
+            if mapping.url_field.is_none() && !path_indicates_subprocessors(&path) {
+                continue;
             }
             candidates.push(Candidate {
                 json_idx,
@@ -441,6 +473,74 @@ fn leaf_segment(path: &str) -> &str {
     path.rsplit('.').next().unwrap_or(path)
 }
 
+/// Whether a JSON path looks like it holds subprocessor / vendor data. Used only
+/// as a *guard* (alongside "has a URL field") so an arbitrary named list — control
+/// categories, frameworks, navigation keys — is never returned as subprocessors
+/// when the real subprocessor array is missing from a capture.
+fn path_indicates_subprocessors(path: &str) -> bool {
+    let p = path.to_lowercase();
+    [
+        "subprocessor",
+        "vendor",
+        "processor",
+        "provider",
+        "supplier",
+        "thirdpart",
+    ]
+    .iter()
+    .any(|kw| p.contains(kw))
+}
+
+/// Whether any captured response already yields a confident subprocessor array
+/// (good score + a name field + a URL field or subprocessor-ish path). Used to
+/// keep the render-capture window open until the (often late-arriving)
+/// subprocessor payload is actually present, instead of stopping on a fixed timer.
+pub(crate) fn responses_contain_subprocessor_array(responses: &[InterceptedResponse]) -> bool {
+    responses.iter().any(|r| {
+        serde_json::from_str::<serde_json::Value>(&r.body)
+            .ok()
+            .is_some_and(|json| {
+                find_entity_arrays(&json, "").iter().any(|(path, items)| {
+                    if score_subprocessor_array(items, path) < 0.5 {
+                        return false;
+                    }
+                    let m = detect_field_mapping(items);
+                    m.name_field.is_some()
+                        && (m.url_field.is_some() || path_indicates_subprocessors(path))
+                })
+            })
+    })
+}
+
+/// Capture network JSON, retrying once if the subprocessor payload didn't land.
+/// The headless render is mildly racy (the large report response can arrive late
+/// or be fetched mid-stream), so a single content-checked retry sharply improves
+/// reliability without hammering the site.
+#[cfg(not(coverage))]
+async fn capture_with_retry(url: &str) -> Result<Vec<InterceptedResponse>> {
+    let responses = capture_network_json_responses(url).await?;
+    if responses_contain_subprocessor_array(&responses) {
+        return Ok(responses);
+    }
+    debug!(
+        "First capture for {} had no subprocessor array; retrying once",
+        url
+    );
+    let retry = capture_network_json_responses(url).await?;
+    if responses_contain_subprocessor_array(&retry) {
+        Ok(retry)
+    } else {
+        // Neither capture found subprocessors — return the larger set so the
+        // caller still sees whatever was there (extraction will honestly yield
+        // empty if it isn't a subprocessor array).
+        Ok(if retry.len() > responses.len() {
+            retry
+        } else {
+            responses
+        })
+    }
+}
+
 /// Extract using the cache hint first, falling back to *all* responses when the
 /// hint matches nothing — so a stale or over-specific hint can never make the
 /// cache-hit path under-capture relative to first discovery.
@@ -492,7 +592,7 @@ pub(crate) async fn render_capture_and_extract(
     source_domain: &str,
     url_substring: Option<&str>,
 ) -> Result<Vec<SubprocessorDomain>> {
-    let responses = capture_network_json_responses(url).await?;
+    let responses = capture_with_retry(url).await?;
     Ok(extract_with_hint_fallback(
         &responses,
         source_domain,
@@ -519,7 +619,7 @@ pub(crate) async fn discover_and_extract_via_render(
     url: &str,
     source_domain: &str,
 ) -> Result<Option<(Vec<SubprocessorDomain>, TrustCenterStrategy)>> {
-    let responses = capture_network_json_responses(url).await?;
+    let responses = capture_with_retry(url).await?;
     if responses.is_empty() {
         debug!("No JSON responses captured from {}", url);
         return Ok(None);
@@ -2782,6 +2882,82 @@ mod tests {
             extract_with_hint_fallback(&responses, "t.example.com", None).len(),
             5
         );
+    }
+
+    #[test]
+    fn test_extract_subprocessors_rejects_non_subprocessor_arrays() {
+        // Real failure mode: the subprocessor response was missing from the
+        // capture (Vanta throttled / partial render), leaving only sibling arrays
+        // — control categories and frameworks. They carry a `name` field and score
+        // >= 0.4, but have NO url field and NO subprocessor-ish path, so they must
+        // be rejected: an honest empty result, never returned as bogus "vendors".
+        let body = serde_json::json!({
+            "data": {"trust": {"trustReportBySlugId": {
+                "controlCategoriesExternal": [
+                    {"id": 1, "name": "Access Control"},
+                    {"id": 2, "name": "Cryptography"},
+                    {"id": 3, "name": "Operations Security"},
+                    {"id": 4, "name": "Asset Management"},
+                    {"id": 5, "name": "Incident Response"},
+                    {"id": 6, "name": "Risk Management"}
+                ],
+                "frameworks": [
+                    {"id": 1, "name": "SOC 2"},
+                    {"id": 2, "name": "ISO 27001"},
+                    {"id": 3, "name": "HIPAA"},
+                    {"id": 4, "name": "GDPR"},
+                    {"id": 5, "name": "PCI DSS"}
+                ]
+            }}}
+        })
+        .to_string();
+        let responses = vec![InterceptedResponse {
+            url: "https://trust.vanta.com/graphql?operation=fetchCustomizableControlsDataForExternalTrustCenter".to_string(),
+            body,
+        }];
+
+        let result = extract_subprocessors_from_responses(&responses, "vanta.com", None);
+        assert!(
+            result.is_empty(),
+            "control categories / frameworks must never be returned as subprocessors, got {:?}",
+            result
+                .iter()
+                .map(|v| v.raw_record.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_responses_contain_subprocessor_array_signal() {
+        // Real subprocessor array (name + url + keyword path) -> true; a response
+        // with only sibling arrays (control categories, name-only) -> false. This
+        // is the signal the render-capture wait polls on, so it must distinguish.
+        let real = vec![InterceptedResponse {
+            url: "https://t/graphql?operation=fetchDataForTrustReport".to_string(),
+            body: serde_json::json!({"data":{"trust":{"trustReportBySlugId":{"subprocessors":[
+                {"name":"AWS","url":"https://aws.amazon.com"},
+                {"name":"GCP","url":"https://cloud.google.com"},
+                {"name":"Azure","url":"https://azure.microsoft.com"},
+                {"name":"Stripe","url":"https://stripe.com"},
+                {"name":"Datadog","url":"https://datadoghq.com"}
+            ]}}}})
+            .to_string(),
+        }];
+        assert!(responses_contain_subprocessor_array(&real));
+
+        let siblings = vec![InterceptedResponse {
+            url: "https://t/graphql?operation=fetchCustomizableControls".to_string(),
+            body: serde_json::json!({"data":{"trust":{"trustReportBySlugId":{"controlCategoriesExternal":[
+                {"id":1,"name":"Access Control"},
+                {"id":2,"name":"Cryptography"},
+                {"id":3,"name":"Operations"},
+                {"id":4,"name":"Assets"},
+                {"id":5,"name":"Incidents"},
+                {"id":6,"name":"Risk"}
+            ]}}}}).to_string(),
+        }];
+        assert!(!responses_contain_subprocessor_array(&siblings));
+        assert!(!responses_contain_subprocessor_array(&[]));
     }
 
     #[test]
