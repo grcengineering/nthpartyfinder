@@ -186,6 +186,32 @@ pub async fn extract_organization_with_fallback(
     Ok(None)
 }
 
+/// HTTP-only organization extraction — no headless-browser fallback, bounded by a
+/// short timeout.
+///
+/// Used for BULK per-vendor org naming (depth-1 processes ~165 vendors): launching a
+/// headless Chrome per unknown vendor was the dominant cost of a scan, and the org name
+/// is display/enrichment only — the unique-relationship key is the domain pair, not the
+/// org name (see app::deduplicate_results). So skipping the browser fallback and
+/// time-boxing the fetch costs nothing in recall or uniqueness, only in cosmetic
+/// name-fill for SPA-only sites (which then fall back to WHOIS/NER/domain anyway).
+// coverage(off): requires live HTTP — not unit-testable
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub async fn extract_organization_http_only(domain: &str) -> Result<Option<WebOrgResult>> {
+    let fetch = fetch_page_content(domain);
+    match tokio::time::timeout(Duration::from_secs(4), fetch).await {
+        Ok(Ok(html_content)) => extract_organization_from_html(&html_content, domain),
+        Ok(Err(e)) => {
+            debug!("HTTP org fetch failed for {}: {}", domain, e);
+            Ok(None)
+        }
+        Err(_) => {
+            debug!("HTTP org fetch timed out for {}", domain);
+            Ok(None)
+        }
+    }
+}
+
 // coverage(off): requires headless Chrome browser process — not unit-testable
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn fetch_page_with_headless(domain: &str) -> Result<String> {

@@ -1,6 +1,7 @@
 use crate::known_vendors;
 use crate::ner_org;
 use crate::rate_limit::RateLimitContext;
+use crate::vendor_registry;
 use crate::web_org;
 use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
@@ -70,11 +71,15 @@ pub async fn get_organization_with_rate_limit(
         ));
     }
 
-    // Priority 2: Web page analysis (uses HTTP rate limiter separately, not WHOIS)
+    // Priority 1.5: Vendor registry (authoritative, instant — no network).
+    if let Some(org) = vendor_registry::lookup_organization(domain) {
+        debug!("Found {} in vendor registry: {}", domain, org);
+        return Ok(OrganizationResult::verified(org, "vendor_registry"));
+    }
+
+    // Priority 2: Web page analysis (HTTP-only — no per-vendor headless browser).
     if web_org_enabled {
-        if let Ok(Some(web_result)) =
-            web_org::extract_organization_with_fallback(domain, false).await
-        {
+        if let Ok(Some(web_result)) = web_org::extract_organization_http_only(domain).await {
             if web_result.confidence >= min_confidence {
                 debug!(
                     "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
@@ -179,12 +184,20 @@ pub async fn get_organization_with_status_and_config(
         ));
     }
 
-    // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
-    // Uses HTTP first, falls back to headless browser for SPA sites
+    // Priority 1.5: Vendor registry (config-backed, verification-token-derived org
+    // names). Authoritative and instant — avoids any network call for the many
+    // registry-known domains, the single biggest per-vendor speedup at scale.
+    if let Some(org) = vendor_registry::lookup_organization(domain) {
+        debug!("Found {} in vendor registry: {}", domain, org);
+        return Ok(OrganizationResult::verified(org, "vendor_registry"));
+    }
+
+    // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags), HTTP-only.
+    // The headless-browser fallback is intentionally NOT used here: this runs once per
+    // discovered vendor (hundreds per scan) and a Chrome launch each was the dominant
+    // cost. Org name is cosmetic (uniqueness keys on domain), so HTTP-only is recall-safe.
     if web_org_enabled {
-        if let Ok(Some(web_result)) =
-            web_org::extract_organization_with_fallback(domain, false).await
-        {
+        if let Ok(Some(web_result)) = web_org::extract_organization_http_only(domain).await {
             if web_result.confidence >= min_confidence {
                 debug!(
                     "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
@@ -287,12 +300,15 @@ pub async fn get_organization_with_config(
         return Ok(kv_result.organization);
     }
 
-    // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags)
-    // Uses HTTP first, falls back to headless browser for SPA sites
+    // Priority 1.5: Vendor registry (authoritative, instant — no network).
+    if let Some(org) = vendor_registry::lookup_organization(domain) {
+        debug!("Found {} in vendor registry: {}", domain, org);
+        return Ok(org);
+    }
+
+    // Priority 2: Web page analysis (HTTP-only — no per-vendor headless browser).
     if web_org_enabled {
-        if let Ok(Some(web_result)) =
-            web_org::extract_organization_with_fallback(domain, false).await
-        {
+        if let Ok(Some(web_result)) = web_org::extract_organization_http_only(domain).await {
             if web_result.confidence >= min_confidence {
                 debug!(
                     "Found {} via web page analysis: {} (confidence: {:.2})",
@@ -415,7 +431,7 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     }
 
     let addr = format!("{server}:43");
-    let mut stream = tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(&addr))
+    let mut stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
         .await
         .map_err(|_| anyhow!("WHOIS connect to {server} timed out"))?
         .map_err(|e| anyhow!("WHOIS connect to {server} failed: {e}"))?;
@@ -427,7 +443,7 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     stream.flush().await.ok();
 
     let mut buf = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut buf))
+    tokio::time::timeout(Duration::from_secs(4), stream.read_to_end(&mut buf))
         .await
         .map_err(|_| anyhow!("WHOIS read from {server} timed out"))?
         .map_err(|e| anyhow!("WHOIS read from {server} failed: {e}"))?;
@@ -439,7 +455,7 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
 async fn try_native_whois(domain: &str) -> Result<String> {
     debug!("Trying in-process TCP WHOIS for domain: {}", domain);
 
-    let result = tokio::time::timeout(Duration::from_secs(25), async {
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
         // 1. Ask IANA (authoritative for the root zone) which registry serves the TLD.
         let tld = whois_tld_query(domain);
         let registry_server = match whois_query("whois.iana.org", &tld).await {
@@ -478,7 +494,7 @@ async fn try_system_whois(domain: &str) -> Result<String> {
     let domain_owned = domain.to_string();
 
     match tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(4),
         tokio::task::spawn_blocking(move || execute_whois_command(&domain_owned)),
     )
     .await

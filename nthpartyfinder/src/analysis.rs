@@ -504,6 +504,194 @@ pub async fn subprocessor_analysis_with_logging(
     }
 }
 
+// ── Independent discovery phases (run concurrently at depth 1) ──
+// Each returns the vendor domains it found. They hit different sources (subprocessor
+// pages, subfinder, SaaS tenants, CT logs, live page traffic) and share no mutable
+// state, so they are safe to run together with tokio::join! — collapsing the previously
+// serial ~70s root-discovery chain to roughly its slowest single phase. Discovery logic
+// is byte-for-byte the same as the old sequential code (same inputs, same outputs), so
+// recall is unchanged; only the orchestration is parallel.
+
+// coverage(off): live subprocessor-page I/O — orchestration only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_subprocessor_phase(
+    domain: &str,
+    analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    enabled: bool,
+    verification_logger: &verification_logger::VerificationFailureLogger,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain> {
+    let Some(analyzer) = analyzer.filter(|_| enabled) else {
+        return Vec::new();
+    };
+    logger.debug(&format!(
+        "Starting subprocessor web page analysis for {}",
+        domain
+    ));
+    match subprocessor_analysis_with_logging(domain, verification_logger, logger.clone(), analyzer)
+        .await
+    {
+        Ok(subprocessor_domains) if !subprocessor_domains.is_empty() => {
+            logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
+            convert_subprocessor_domains(subprocessor_domains)
+        }
+        Ok(_) => {
+            logger.log_subprocessor_analysis(domain, 0);
+            Vec::new()
+        }
+        Err(e) => {
+            logger.warn(&format!(
+                "Subprocessor analysis failed for {}: {}",
+                domain, e
+            ));
+            Vec::new()
+        }
+    }
+}
+
+// coverage(off): subfinder subprocess + DNS I/O — orchestration only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_subfinder_phase(
+    domain: &str,
+    subdomain_discovery: Option<&SubfinderDiscovery>,
+    dns_pool: &Arc<dns::DnsServerPool>,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain> {
+    let Some(subfinder) = subdomain_discovery else {
+        return Vec::new();
+    };
+    logger.info("Running subdomain discovery via subfinder...");
+    let subdomains = match subfinder.discover(domain).await {
+        Ok(s) => s,
+        Err(e) => {
+            logger.warn(&format!("Subdomain discovery failed: {}", e));
+            return Vec::new();
+        }
+    };
+    if subdomains.is_empty() {
+        logger.debug("Subfinder found no subdomains");
+        return Vec::new();
+    }
+    logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
+
+    use futures::{stream, StreamExt};
+    let subdomain_concurrency = 50;
+    let domain_base = domain_utils::extract_base_domain(domain);
+    let subdomain_results: Vec<_> = stream::iter(subdomains.iter().map(|sub| {
+        let subdomain = sub.subdomain.clone();
+        let source = sub.source.clone();
+        let dns_pool = dns_pool.clone();
+        let domain_base = domain_base.clone();
+        let logger_sub = logger.clone();
+        async move {
+            let (txt_records, cname_records) = dns_pool
+                .get_txt_and_cname_fast(&subdomain, logger_sub.dns_failure_counter())
+                .await;
+            let mut txt_vendors = Vec::new();
+            let mut cname_vendors = Vec::new();
+            if !txt_records.is_empty() {
+                txt_vendors = dns::extract_vendor_domains_with_source(&txt_records);
+            }
+            for cname in &cname_records {
+                let cname_base = domain_utils::extract_base_domain(cname);
+                if cname_base != domain_base {
+                    cname_vendors.push((cname.clone(), cname_base));
+                }
+            }
+            (subdomain, source, txt_vendors, cname_vendors)
+        }
+    }))
+    .buffer_unordered(subdomain_concurrency)
+    .collect()
+    .await;
+
+    let (new_vendor_domains, txt_found, cname_found) =
+        filter_subfinder_results(subdomain_results, &domain_base);
+    if txt_found > 0 || cname_found > 0 {
+        logger.info(&format!(
+            "Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
+            txt_found, cname_found
+        ));
+    }
+    new_vendor_domains
+}
+
+// coverage(off): SaaS-tenant probe I/O — orchestration only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_saas_phase(
+    domain: &str,
+    saas_tenant_discovery: Option<&SaasTenantDiscovery>,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain> {
+    let Some(tenant_disc) = saas_tenant_discovery else {
+        return Vec::new();
+    };
+    logger.info("Running SaaS tenant discovery...");
+    match tenant_disc.probe_with_logger(domain, Some(logger)).await {
+        Ok(tenants) => {
+            let tenant_vendors = filter_confirmed_tenants(&tenants);
+            if !tenant_vendors.is_empty() {
+                logger.info(&format!(
+                    "Found {} likely/confirmed SaaS tenants",
+                    tenant_vendors.len()
+                ));
+            }
+            tenant_vendors
+        }
+        Err(e) => {
+            logger.warn(&format!("SaaS tenant discovery failed: {}", e));
+            Vec::new()
+        }
+    }
+}
+
+// coverage(off): CT-log HTTP I/O — orchestration only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_ct_phase(
+    domain: &str,
+    ct_discovery: Option<&CtLogDiscovery>,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain> {
+    let Some(ct_disc) = ct_discovery else {
+        return Vec::new();
+    };
+    logger.info("Running Certificate Transparency log discovery...");
+    match ct_disc.discover(domain).await {
+        Ok(ct_results) if !ct_results.is_empty() => {
+            logger.info(&format!("Found {} vendors from CT logs", ct_results.len()));
+            convert_ct_results(ct_results)
+        }
+        Ok(_) => Vec::new(),
+        Err(e) => {
+            logger.warn(&format!("CT log discovery failed: {}", e));
+            Vec::new()
+        }
+    }
+}
+
+// coverage(off): headless-browser web-traffic I/O — orchestration only.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_webtraffic_phase(
+    domain: &str,
+    web_traffic_discovery: Option<&WebTrafficDiscovery>,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain> {
+    let Some(web_traffic_disc) = web_traffic_discovery else {
+        return Vec::new();
+    };
+    logger.info("Running webpage source & network request discovery...");
+    let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
+    if web_traffic_results.is_empty() {
+        logger.debug("No vendors discovered from webpage analysis");
+        return Vec::new();
+    }
+    logger.info(&format!(
+        "Found {} vendors from webpage analysis",
+        web_traffic_results.len()
+    ));
+    convert_web_traffic_results(web_traffic_results)
+}
+
 // coverage(off): I/O-only orchestration shell after DI extraction. All pure logic extracted to:
 // add_base_domain_if_subdomain, convert_subprocessor_domains, filter_subfinder_results,
 // filter_confirmed_tenants, convert_ct_results, convert_web_traffic_results,
@@ -686,263 +874,47 @@ pub async fn discover_nth_parties(
             all_vendor_domains.push(base_vd);
         }
 
-        if let Some(analyzer) = subprocessor_analyzer.filter(|_| subprocessor_enabled) {
-            if current_depth == 1 {
-                let dns_vendor_count = all_vendor_domains.len();
-                logger.update_progress("Subprocessor page analysis").await;
-                logger
-                    .show_sub_progress(&format!(
-                        "Scraping subprocessor pages for {} ({} DNS vendors found so far)",
-                        domain, dns_vendor_count
-                    ))
-                    .await;
-                logger.set_progress_position(16).await;
-            }
-            logger.debug(&format!(
-                "Starting subprocessor web page analysis for {}",
-                domain
-            ));
-
-            match subprocessor_analysis_with_logging(
-                domain,
-                verification_logger,
-                logger.clone(),
-                analyzer,
-            )
-            .await
-            {
-                Ok(subprocessor_domains) => {
-                    if !subprocessor_domains.is_empty() {
-                        logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
-                        if current_depth == 1 {
-                            logger
-                                .show_sub_progress(&format!(
-                                    "Found {} subprocessors for {}",
-                                    subprocessor_domains.len(),
-                                    domain
-                                ))
-                                .await;
-                        }
-                        logger.debug(&format!(
-                            "Subprocessor domains discovered: {:?}",
-                            subprocessor_domains
-                                .iter()
-                                .map(|d| &d.domain)
-                                .collect::<Vec<_>>()
-                        ));
-
-                        let converted_domains = convert_subprocessor_domains(subprocessor_domains);
-                        all_vendor_domains.extend(converted_domains);
-                    } else {
-                        logger.log_subprocessor_analysis(domain, 0);
-                        if current_depth == 1 {
-                            logger
-                                .show_sub_progress(&format!(
-                                    "No subprocessors found on {} pages",
-                                    domain
-                                ))
-                                .await;
-                        }
-                        logger.debug("Subprocessor analysis completed: No vendor domains found in any subprocessor pages");
-                    }
-                }
-                Err(e) => {
-                    logger.warn(&format!(
-                        "Subprocessor analysis failed for {}: {}",
-                        domain, e
-                    ));
-                    logger.debug(&format!("Subprocessor analysis error details: {:?}", e));
-                }
-            }
-        }
-
+        // Discovery phases. At depth 1 the five independent scanners run concurrently
+        // (each hits a different source and shares no mutable state) via tokio::join!,
+        // collapsing the previously serial ~70s root chain to ~its slowest single phase.
+        // Deeper levels run subprocessor only, as before. Discovery logic per phase is
+        // unchanged, so vendor recall is identical — only the orchestration is parallel.
         if current_depth == 1 {
-            if let Some(subfinder) = subdomain_discovery {
-                logger.update_progress("Subdomain discovery").await;
-                logger
-                    .show_sub_progress(&format!("Running subfinder for {}", domain))
-                    .await;
-                logger.info("Running subdomain discovery via subfinder...");
-                match subfinder.discover(domain).await {
-                    Ok(subdomains) => {
-                        if !subdomains.is_empty() {
-                            logger
-                                .info(&format!("Subfinder found {} subdomains", subdomains.len()));
-
-                            use futures::{stream, StreamExt};
-
-                            let subdomain_concurrency = 50;
-                            let domain_base = domain_utils::extract_base_domain(domain);
-
-                            let total_subdomains = subdomains.len();
-                            logger
-                                .show_sub_progress(&format!(
-                                    "Running subfinder for {} (0/{} subdomains)",
-                                    domain, total_subdomains
-                                ))
-                                .await;
-                            let domain_for_closure = domain.to_string();
-
-                            let subdomain_results: Vec<_> = stream::iter(subdomains.iter().enumerate().map(|(i, sub)| {
-                                    let subdomain = sub.subdomain.clone();
-                                    let source = sub.source.clone();
-                                    let dns_pool = dns_pool.clone();
-                                    let domain_base = domain_base.clone();
-                                    let logger_sub = logger.clone();
-                                    let total = total_subdomains;
-                                    let root_domain = domain_for_closure.clone();
-                                    async move {
-                                        logger_sub.show_sub_progress(&format!(
-                                            "Running subfinder for {} ({}/{} subdomains: {})",
-                                            root_domain, i + 1, total, subdomain
-                                        )).await;
-                                        // GRC-367 (fix 1): thread the shared DNS failure counter
-                                        // (same source as the root path) so a throttle on this
-                                        // high-concurrency subdomain path is visible to the
-                                        // exit-3 guard instead of silently producing empty results.
-                                        let (txt_records, cname_records) = dns_pool
-                                            .get_txt_and_cname_fast(
-                                                &subdomain,
-                                                logger_sub.dns_failure_counter(),
-                                            )
-                                            .await;
-
-                                        let mut txt_vendors = Vec::new();
-                                        let mut cname_vendors = Vec::new();
-
-                                        if !txt_records.is_empty() {
-                                            txt_vendors = dns::extract_vendor_domains_with_source(&txt_records);
-                                        }
-
-                                        for cname in &cname_records {
-                                            let cname_base = domain_utils::extract_base_domain(cname);
-                                            if cname_base != domain_base {
-                                                cname_vendors.push((cname.clone(), cname_base));
-                                            }
-                                        }
-
-                                        if let Some(first_vendor) = txt_vendors.first() {
-                                            logger_sub.show_sub_progress(&format!(
-                                                "Running subfinder for {} ({}/{} subdomains: {} --> {})",
-                                                root_domain, i + 1, total, subdomain, first_vendor.domain
-                                            )).await;
-                                        } else if let Some((cname_target, _)) = cname_vendors.first() {
-                                            logger_sub.show_sub_progress(&format!(
-                                                "Running subfinder for {} ({}/{} subdomains: {} --> {})",
-                                                root_domain, i + 1, total, subdomain, cname_target
-                                            )).await;
-                                        }
-
-                                        (subdomain, source, txt_vendors, cname_vendors)
-                                    }
-                                }))
-                                .buffer_unordered(subdomain_concurrency)
-                                .collect()
-                                .await;
-
-                            let (
-                                new_vendor_domains,
-                                subdomain_txt_vendors_found,
-                                subdomain_cname_vendors_found,
-                            ) = filter_subfinder_results(subdomain_results, &domain_base);
-                            all_vendor_domains.extend(new_vendor_domains);
-
-                            if subdomain_txt_vendors_found > 0 || subdomain_cname_vendors_found > 0
-                            {
-                                logger.info(&format!("Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
-                                        subdomain_txt_vendors_found, subdomain_cname_vendors_found));
-                            }
-                        } else {
-                            logger.debug("Subfinder found no subdomains");
-                        }
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("Subdomain discovery failed: {}", e));
-                    }
-                }
-                logger.clear_sub_progress().await;
-                logger.set_progress_position(22).await;
-            }
-
-            if let Some(tenant_disc) = saas_tenant_discovery {
-                logger.update_progress("SaaS tenant discovery").await;
-                logger
-                    .show_sub_progress(&format!("Probing SaaS platforms for {}", domain))
-                    .await;
-                logger.info("Running SaaS tenant discovery...");
-                match tenant_disc.probe_with_logger(domain, Some(&logger)).await {
-                    Ok(tenants) => {
-                        let tenant_vendors = filter_confirmed_tenants(&tenants);
-                        if !tenant_vendors.is_empty() {
-                            logger.info(&format!(
-                                "Found {} likely/confirmed SaaS tenants",
-                                tenant_vendors.len()
-                            ));
-                            all_vendor_domains.extend(tenant_vendors);
-                        } else {
-                            logger.debug("No SaaS tenants discovered");
-                        }
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("SaaS tenant discovery failed: {}", e));
-                    }
-                }
-                logger.clear_sub_progress().await;
-                logger.set_progress_position(26).await;
-            }
-
-            if let Some(ct_disc) = ct_discovery {
-                logger
-                    .update_progress("Certificate Transparency discovery")
-                    .await;
-                logger
-                    .show_sub_progress(&format!("Querying crt.sh for {} certificates", domain))
-                    .await;
-                logger.info("Running Certificate Transparency log discovery...");
-                match ct_disc.discover(domain).await {
-                    Ok(ct_results) => {
-                        if !ct_results.is_empty() {
-                            logger
-                                .info(&format!("Found {} vendors from CT logs", ct_results.len()));
-                            let ct_vendors = convert_ct_results(ct_results);
-                            all_vendor_domains.extend(ct_vendors);
-                        } else {
-                            logger.debug("No vendors discovered from CT logs");
-                        }
-                    }
-                    Err(e) => {
-                        logger.warn(&format!("CT log discovery failed: {}", e));
-                    }
-                }
-                logger.clear_sub_progress().await;
-                logger.set_progress_position(28).await;
-            }
-
-            if let Some(web_traffic_disc) = web_traffic_discovery {
-                logger
-                    .update_progress("Webpage source & network request discovery")
-                    .await;
-                logger
-                    .show_sub_progress(&format!(
-                        "Analyzing webpage source and network requests for {}",
-                        domain
-                    ))
-                    .await;
-                logger.info("Running webpage source & network request discovery...");
-                let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
-                if !web_traffic_results.is_empty() {
-                    logger.info(&format!(
-                        "Found {} vendors from webpage analysis",
-                        web_traffic_results.len()
-                    ));
-                    let web_vendors = convert_web_traffic_results(web_traffic_results);
-                    all_vendor_domains.extend(web_vendors);
-                } else {
-                    logger.debug("No vendors discovered from webpage analysis");
-                }
-                logger.clear_sub_progress().await;
-                logger.set_progress_position(30).await;
-            }
+            logger
+                .update_progress("Discovery: subprocessor + subfinder + SaaS + CT + web traffic")
+                .await;
+            logger.set_progress_position(16).await;
+            let (sp, sf, st, ct_v, wt) = tokio::join!(
+                run_subprocessor_phase(
+                    domain,
+                    subprocessor_analyzer,
+                    subprocessor_enabled,
+                    verification_logger,
+                    &logger,
+                ),
+                run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
+                run_saas_phase(domain, saas_tenant_discovery, &logger),
+                run_ct_phase(domain, ct_discovery, &logger),
+                run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+            );
+            all_vendor_domains.extend(sp);
+            all_vendor_domains.extend(sf);
+            all_vendor_domains.extend(st);
+            all_vendor_domains.extend(ct_v);
+            all_vendor_domains.extend(wt);
+            logger.clear_sub_progress().await;
+            logger.set_progress_position(30).await;
+        } else {
+            all_vendor_domains.extend(
+                run_subprocessor_phase(
+                    domain,
+                    subprocessor_analyzer,
+                    subprocessor_enabled,
+                    verification_logger,
+                    &logger,
+                )
+                .await,
+            );
         }
 
         {
