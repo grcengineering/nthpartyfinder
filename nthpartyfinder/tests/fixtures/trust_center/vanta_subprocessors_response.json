@@ -1,0 +1,409 @@
+{
+  "data": {
+    "trust": {
+      "trustReportBySlugId": {
+        "subprocessors": [
+          {
+            "name": "Amazon Web Services",
+            "url": "aws.amazon.com",
+            "purpose": "Infrastructure Hosting",
+            "service": "aws",
+            "location": "US, EU or AUS"
+          },
+          {
+            "name": "Mongo DB Inc.",
+            "url": "https://cloud.mongodb.com/",
+            "purpose": "Database Hosting",
+            "location": "US, EU or AUS"
+          },
+          {
+            "name": "Chameleon Intelligent Tech, Inc.",
+            "url": "https://www.chameleon.io/",
+            "purpose": "Application notifications",
+            "location": "US"
+          },
+          {
+            "name": "Cloudflare",
+            "url": "www.cloudflare.com/",
+            "purpose": "Hosting and Content Delivery",
+            "service": "cloudflare",
+            "location": "US, EU"
+          },
+          {
+            "name": "Confluent",
+            "url": "https://www.confluent.io/",
+            "purpose": "Platform Data Streaming",
+            "location": "US"
+          },
+          {
+            "name": "Datadog",
+            "url": "datadoghq.com",
+            "purpose": " Logging & Monitoring",
+            "service": "datadog",
+            "location": "US"
+          },
+          {
+            "name": "Courier ",
+            "url": "https://www.courier.com/",
+            "purpose": "Customer Notification Delivery",
+            "location": "US"
+          },
+          {
+            "name": "svix",
+            "url": "https://www.svix.com/",
+            "purpose": "Webhook Delivery",
+            "location": "US"
+          },
+          {
+            "name": "Snowflake Inc.",
+            "url": "https://snowflake.com",
+            "purpose": "Data Warehouse",
+            "service": "snowflake",
+            "location": "US"
+          },
+          {
+            "name": "Sigma",
+            "url": "https://www.sigmacomputing.com/",
+            "purpose": "BI Analytics",
+            "service": "sigma",
+            "location": "US"
+          },
+          {
+            "name": "Coefficient.io",
+            "url": "https://coefficient.io/",
+            "purpose": "Analytics & Reporting",
+            "location": "US"
+          },
+          {
+            "name": "Dagster Labs",
+            "url": "https://dagster.io/",
+            "purpose": "Data pipeline orchestration",
+            "location": "US"
+          },
+          {
+            "name": "Fivetran",
+            "url": "",
+            "purpose": "Logging & Monitoring",
+            "location": "US"
+          },
+          {
+            "name": "Qlik - Stitch",
+            "url": "https://www.qlik.com/us",
+            "purpose": "Analytics support",
+            "location": "US"
+          },
+          {
+            "name": "Polytomic",
+            "url": "https://www.polytomic.com/",
+            "purpose": "Data Integration and Streaming",
+            "location": "US"
+          },
+          {
+            "name": "Secoda.co",
+            "url": "https://secoda.co",
+            "purpose": "Data Cataloging and Analysis",
+            "location": "US"
+          },
+          {
+            "name": "Tableau",
+            "url": "www.tableau.com",
+            "purpose": "Data Visualization Platform",
+            "location": "US"
+          },
+          {
+            "name": "Heap Inc.",
+            "url": "https://heap.io/",
+            "purpose": "Application Analytics",
+            "location": "US"
+          },
+          {
+            "name": "Statsig",
+            "url": "https://statsig.com",
+            "purpose": "Product Analytics",
+            "service": "statsig",
+            "location": "US"
+          },
+          {
+            "name": "OpenAI, LLC",
+            "url": "Openai.com",
+            "purpose": "Application AI Functionality",
+            "location": "US"
+          },
+          {
+            "name": "Anthropic",
+            "url": "https://www.anthropic.com/",
+            "purpose": "Application AI Functionality",
+            "location": "US"
+          },
+          {
+            "name": "Google",
+            "url": "admin.google.com",
+            "purpose": "Application AI Functionality",
+            "service": "gsuiteadmin",
+            "location": "US"
+          },
+          {
+            "name": "Cohere",
+            "url": "https://cohere.com/",
+            "purpose": "Monitoring and Evaluation of AI Product Features",
+            "location": "US"
+          },
+          {
+            "name": "Langchain (using Langsmith product)",
+            "url": "https://www.langchain.com/",
+            "purpose": "Monitoring and Evaluation of AI product Features",
+            "location": "US"
+          },
+          {
+            "name": "Browserbase",
+            "url": "https://www.browserbase.com/",
+            "purpose": "Application AI Functionality",
+            "location": "US"
+          },
+          {
+            "name": "Microsoft ",
+            "url": "www.microsoft.com",
+            "purpose": "Application AI Functionality",
+            "location": "US"
+          },
+          {
+            "name": "e2b",
+            "url": "e2b.dev",
+            "purpose": "Application AI Functionality",
+            "location": "US"
+          },
+          {
+            "name": "Hatchet.run",
+            "url": "https://hatchet.run",
+            "purpose": "Workflow Orchestration",
+            "location": "US"
+          },
+          {
+            "name": "reducto.ai",
+            "url": "https://reducto.ai/",
+            "purpose": "Document Parsing Tool",
+            "location": "US"
+          },
+          {
+            "name": "Lakera",
+            "url": "https://www.lakera.ai/",
+            "purpose": "AI Security",
+            "location": "US"
+          },
+          {
+            "name": "Intercom",
+            "url": "intercom.com",
+            "purpose": "Customer Support Tool",
+            "location": "US"
+          },
+          {
+            "name": "Salesforce",
+            "url": "https://www.salesforce.com/",
+            "purpose": "Subscription Management",
+            "service": "salesforce",
+            "location": "US"
+          },
+          {
+            "name": "Zapier",
+            "purpose": "Workflow Automation",
+            "location": "US"
+          },
+          {
+            "name": "Finch",
+            "url": "https://www.tryfinch.com/",
+            "purpose": "HR Platform Integration Tool (customer optional)",
+            "location": "US"
+          },
+          {
+            "name": "Merge.dev",
+            "url": "http://merge.dev",
+            "purpose": "Platform Integration Tool (customer optional)",
+            "location": "US"
+          },
+          {
+            "name": "OneSchema",
+            "url": "https://oneschema.co",
+            "purpose": "CSV Importer (customer optional)",
+            "location": "US"
+          },
+          {
+            "name": "WorkOS",
+            "url": "https://workos.com/",
+            "purpose": "SCIM integration (customer optional)",
+            "location": "US "
+          },
+          {
+            "name": "Vanta Technology Australia Pty Limited",
+            "url": "https://www.vanta.com/",
+            "purpose": "Region local Vanta entity",
+            "location": ""
+          },
+          {
+            "name": "Vanta Technology Canada Limited",
+            "url": "https://www.vanta.com/",
+            "purpose": "Region local Vanta entity",
+            "location": ""
+          },
+          {
+            "name": "Vanta Technology Ireland I Limited",
+            "url": "www.vanta.com",
+            "purpose": "Region local Vanta entity",
+            "location": ""
+          },
+          {
+            "name": "Vanta Technology UK Limited",
+            "url": "www.vanta.com",
+            "purpose": "Region local Vanta entity",
+            "location": ""
+          },
+          {
+            "name": "Riskey Technologies Ltd.",
+            "url": "riskey.io",
+            "purpose": "Region local Vanta entity"
+          }
+        ],
+        "frameworks": [
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba3748f",
+            "name": "SOC 2 Type II"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37490",
+            "name": "FedRAMP 20x"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37491",
+            "name": "ISO 27001:2022"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37492",
+            "name": "ISO/IEC 42001:2023"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37493",
+            "name": "ISO 27701"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37494",
+            "name": "ISO 27017"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37495",
+            "name": "ISO 27018"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37496",
+            "name": "GDPR"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37497",
+            "name": "CCPA"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37498",
+            "name": "Trusted Cloud Provider (CSA)"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba37499",
+            "name": "AWS Security Competency"
+          },
+          {
+            "__typename": "TrustReportFrameworks",
+            "id": "68a49ec508e0897e9ba3749a",
+            "name": "PCI DSS 4.0.1"
+          }
+        ],
+        "resourceCategories": [
+          {
+            "id": "6a32cc1bfa9f072965788c9a",
+            "name": "Compliance"
+          },
+          {
+            "id": "6a32cc1bfa9f072965788ca4",
+            "name": "Penetration Testing"
+          },
+          {
+            "id": "6a32cc1bfa9f072965788ca7",
+            "name": "Questionnaires"
+          },
+          {
+            "id": "6a32cc1bfa9f072965788cac",
+            "name": "Privacy"
+          },
+          {
+            "id": "6a32cc1bfa9f072965788cb0",
+            "name": "Miscellaneous (Security)"
+          },
+          {
+            "id": "6a32cc1bfa9f072965788cb6",
+            "name": "Miscellaneous (Financial) "
+          },
+          {
+            "id": "6a32cc1bfa9f072965788cbc",
+            "name": "FedRAMP 20x Pilot"
+          }
+        ],
+        "navigationKeys": [
+          {
+            "name": "OVERVIEW"
+          },
+          {
+            "name": "RESOURCES"
+          },
+          {
+            "name": "CONTROLS"
+          },
+          {
+            "name": "SUBPROCESSORS"
+          },
+          {
+            "name": "FAQ"
+          },
+          {
+            "name": "UPDATES"
+          },
+          {
+            "name": "MEDIA"
+          }
+        ],
+        "mainOverviewSections": [
+          {
+            "id": "CONTROLS",
+            "name": "CONTROLS"
+          },
+          {
+            "id": "DATA_COLLECTED",
+            "name": "DATA_COLLECTED"
+          },
+          {
+            "id": "SUBPROCESSORS",
+            "name": "SUBPROCESSORS"
+          },
+          {
+            "id": "FAQ",
+            "name": "FAQ"
+          },
+          {
+            "id": "UPDATES",
+            "name": "UPDATES"
+          },
+          {
+            "id": "MEDIA",
+            "name": "MEDIA"
+          }
+        ]
+      }
+    }
+  }
+}

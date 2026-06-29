@@ -16,6 +16,7 @@ Thumbs.db
 *.json
 !config/vendors/*.json
 !frontend/*.json
+!tests/fixtures/**/*.json
 *.log
 
 # Build artifacts

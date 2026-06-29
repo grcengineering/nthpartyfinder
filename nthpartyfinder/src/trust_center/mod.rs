@@ -84,6 +84,28 @@ pub enum StrategyType {
         /// Dot-notation path to the subprocessors array within the blob.
         data_path: String,
     },
+
+    /// Render the page in a headless browser, capture the JSON the page's own
+    /// scripts fetch (GraphQL/REST/XHR), and extract subprocessors directly from
+    /// those captured responses.
+    ///
+    /// This is the universal SPA fallback. It is provider-agnostic and robust to
+    /// per-provider API shapes: the page makes its own (runtime-built) API calls
+    /// and we only read the results, so there is nothing to statically
+    /// reconstruct. Used by Vanta and other Apollo/REST-driven trust-center SPAs
+    /// where subprocessor data never appears in static HTML and the request query
+    /// is assembled at runtime (so it cannot be replayed from static analysis).
+    ///
+    /// `requires_browser` is always true for this variant.
+    RenderedNetworkCapture {
+        /// Optional substring used to *prefer* a captured response when several
+        /// JSON responses are seen (e.g. `"graphql"` or an operation name). When
+        /// `None`, every captured JSON response is considered and the subprocessor
+        /// arrays found across them are unioned (this is what makes pagination
+        /// across multiple API calls work transparently).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_url_substring: Option<String>,
+    },
 }
 
 /// Configuration for how to reach the trust center's data source.
@@ -753,6 +775,40 @@ mod tests {
             }
             _ => panic!("Expected HydrationData"),
         }
+    }
+
+    #[test]
+    fn test_strategy_type_rendered_network_capture_serde_roundtrip() {
+        let st = StrategyType::RenderedNetworkCapture {
+            response_url_substring: Some("graphql".to_string()),
+        };
+        let json_str = serde_json::to_string(&st).unwrap();
+        // The serde tag must be stable for cache-file forward/backward compat.
+        assert!(json_str.contains("\"type\":\"RenderedNetworkCapture\""));
+        let deserialized: StrategyType = serde_json::from_str(&json_str).unwrap();
+        match deserialized {
+            StrategyType::RenderedNetworkCapture {
+                response_url_substring,
+            } => assert_eq!(response_url_substring.as_deref(), Some("graphql")),
+            _ => panic!("Expected RenderedNetworkCapture"),
+        }
+    }
+
+    #[test]
+    fn test_strategy_type_rendered_network_capture_no_substring_roundtrip() {
+        // `None` hint must be omitted from the serialized form and deserialize back.
+        let st = StrategyType::RenderedNetworkCapture {
+            response_url_substring: None,
+        };
+        let json_str = serde_json::to_string(&st).unwrap();
+        assert!(!json_str.contains("response_url_substring"));
+        let deserialized: StrategyType = serde_json::from_str(&json_str).unwrap();
+        assert!(matches!(
+            deserialized,
+            StrategyType::RenderedNetworkCapture {
+                response_url_substring: None
+            }
+        ));
     }
 
     #[test]

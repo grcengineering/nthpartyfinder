@@ -324,6 +324,20 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - [x] ISC-215: Commitment-boundary advisor — `Inference.ts --mode advisor` timed out (same degraded path as Cato); the Anvil cross-family audit served as the disclosed substitute (per the 2026-06-11 TF-CATO precedent)
 - [ ] ISC-216: FINAL — PENDING closing verification after #41/#42/#43 merge: 0 open PRs + every alert resolved-or-documented + master CI green (CI/CodeQL/Security/Scorecard); confirmed in closing report
 
+### Task 2026-06-29 · Subprocessor SPA extraction (trust centers)
+
+Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their subprocessors (vanta.com **3 of 42**). Root cause: discovery captured the page's GraphQL response (all 42) but discarded it to build an un-replayable empty-query strategy, then fell back to an HTML-regex over the 4 KB SPA shell. Solution: a provider-agnostic **render → capture network JSON → extract** path (new `StrategyType::RenderedNetworkCapture`). Full design/decisions: `~/.claude/PAI/MEMORY/WORK/20260629-055158_subprocessor-extraction-trust-centers/ISA.md`.
+
+- [x] ISC-217: Vanta SPA subprocessors extracted in full (42, not 3) — live-verified through the real CLI (depth-1 vanta.com, `-vv`): `Render-capture extracted 42 vendors for vanta.com`.
+- [x] ISC-218: Provider-agnostic — renders real Chrome and reads the JSON the page's own scripts fetch (GraphQL/REST/XHR); no per-provider query reconstruction.
+- [x] ISC-219: Disambiguation — highest-scoring captured array wins, unioned only with same-leaf-path arrays; sibling report arrays (frameworks/controls/resourceCategories) excluded (fixture test: exactly 42, not 72).
+- [x] ISC-220: Pagination — union across captured responses, de-dup on (domain, name); bounded scroll + next/show-more click loop (caps: ≤25 rounds, ≤400 responses, ≤64 MiB; PAGINATION_JS skips anchors).
+- [x] ISC-221: Cached as a `RenderedNetworkCapture` strategy (persisted to `cache/vanta.com.json`); cache-hit run re-executes it → 42; serde round-trip tested.
+- [x] ISC-222: No regression — embedded probes (SafeBase/Conveyor/`__NEXT_DATA__`) still tried first (browser-free); static `/legal/subprocessors` path untouched (render gated behind `is_likely_spa`).
+- [x] ISC-223: Anti (zero-suppression / no silent failure) — no `#[allow]`/scanner suppressions added; render-capture failures logged, never silently emptied.
+- [x] ISC-224: Gates — fmt + `clippy -D warnings` clean; coverage **99.70% line / 99.26% function** (≥95/95); full suite green (one pre-existing flaky live-network timeout test, `test_analysis_timeout_handling`, isolation-confirmed at 31s — TF-TIMEOUT-FLAKE).
+- [x] ISC-225: Adversarial review — 3-lens (correctness/security/tests), 14 findings; 1 confirmed-high + selected medium/low actioned (selection redesign, capture caps, anchor-skip, testable-helper factoring). Forge/Cato still absent (TF-CATO); the workflow served as the disclosed cross-check.
+
 ## Test Strategy
 
 | isc range | type | check | threshold | tool |
@@ -544,3 +558,13 @@ Bring nthpartyfinder to a verifiable v1.0.0-ready state by (1) closing every *re
 - Build/test gates (per branch, captured): cargo build (default + `--no-default-features`), 4008→4023 lib tests, full integration, `clippy -D warnings`, `fmt --check`, `cargo deny check advisories bans sources licenses` — all green.
 - Live evidence: vanta.com DNS smoke (39 TXT, 14 vendors) on merged binary; frontend viz Interceptor-verified in real Chrome (1 SvelteFlow, 10 nodes, 9 edges, 0 console errors).
 - Adversarial: Anvil (Kimi, cross-family) audit — CONCERNS verdict, 3 findings all actioned in #42; anti-suppression sweep clean (0 added allow/codeql/lgtm, 0 dismissed alerts).
+
+### Task 2026-06-29 · Verification (subprocessor SPA extraction)
+
+- **THE FIX, live through the real CLI**: depth-1 `vanta.com --enable-subprocessor-analysis -vv` → `SPA detected … only scripts` → embedded probes none → `Captured 13 JSON responses` → `Found 42 items at path 'data.trust.trustReportBySlugId.subprocessors'` → `Render-capture extracted 42 vendors for vanta.com`. **3 → 42.**
+- **Cache-hit path**: 2nd run → `Found cached trust center strategy for vanta.com, executing` → `Trust center strategy returned 42 vendors`. Strategy persisted as `RenderedNetworkCapture` (hint `fetchDataForTrustReport`) in `cache/vanta.com.json`.
+- **Accuracy (not just count)**: real captured payload carries sibling arrays (frameworks 12, resourceCategories 7, navigationKeys, mainOverviewSections, controlCategories 6) that also have `name` fields; the fixture unit test asserts exactly **42** extracted, zero sibling leakage (naive union gave 72). The 42 include 4 distinct Vanta regional legal entities on `vanta.com` (preserved by (domain,name) dedup) + 2 url-less rows (`_org:` placeholders for downstream resolution).
+- **Files**: `nthpartyfinder/src/trust_center/{mod,discovery,executor}.rs`, `src/subprocessor.rs`, `tests/fixtures/trust_center/vanta_subprocessors_response.json`. New `RenderedNetworkCapture` variant is additive + serde-tag-stable (existing caches deserialize unchanged).
+- **Gates**: `cargo fmt --check` clean; `clippy --all-targets -D warnings` clean; `scripts/coverage.sh` = **coverage gate OK** (TOTAL 99.70% line / 99.26% function; trust_center executor 100%, mod 99.85%, discovery 99.21%); full `cargo test` green via `~/.cargo/bin/cargo` (sfw wrapper wedges on the bogus-`.test` negative DNS tests — documented fallback). The lone red was `test_analysis_timeout_handling` (live httpbin.org, asserts <60s) flaking under concurrent suite load; passes in isolation at 31s and exercises no render-capture path → pre-existing flake, **TF-TIMEOUT-FLAKE** (candidate for `#[ignore]` per the repo's no-live-network-in-suite rule).
+- **Adversarial review** (3-lens workflow, read-only): 14 findings (0 critical, 2 high, 6 med, 6 low); 1 high confirmed by a skeptic pass. Actioned: selection redesign (highest-score + same-leaf union — resolved the confirmed-high untested-fallback + over-union + drop-real-array + keyword-list-inconsistency), capture memory caps, PAGINATION_JS anchor-skip, and factoring cache-hint logic into unit-tested pure helpers. Deferred (non-bugs, recorded): TF-EMBEDDED-RACE (embedded-wins-over-render for SPAs — deliberate perf choice), TF-SPA-VISIBILITY (debug-vs-warn on render-empty).
+- **PENDING USER**: this work is **LOCAL & uncommitted** on `master` (standing owner no-push rule); review + merge for the Vanta TPRM share. Owner reads each change before merge.

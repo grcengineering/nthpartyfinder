@@ -16,17 +16,15 @@ use super::{
     DiscoveryMetadata, DiscoveryMethod, EndpointConfig, ResponseMapping, StrategyType,
     TrustCenterStrategy,
 };
+use crate::subprocessor::SubprocessorDomain;
 
-/// Collected network response during page load.
+/// A JSON network response captured during a headless page load.
 #[derive(Debug, Clone)]
-struct InterceptedResponse {
+pub(crate) struct InterceptedResponse {
+    /// The response URL (used to optionally prefer a specific API/operation).
     url: String,
-    status: u16,
-    content_type: String,
+    /// The raw response body (expected to be JSON).
     body: String,
-    request_url: String,
-    request_method: String,
-    request_body: Option<String>,
 }
 
 /// Check if HTML content looks like a JavaScript SPA that needs special handling.
@@ -106,90 +104,92 @@ pub fn is_likely_spa(html: &str) -> bool {
     false
 }
 
-// cfg(not(coverage)): orchestrates browser-based network interception — requires headless Chrome
-#[cfg(not(coverage))]
+/// Discover an extraction strategy from *static* HTML embedded-data patterns
+/// (SafeBase, Conveyor, Next.js `__NEXT_DATA__`, JSON `<script>` tags, base64
+/// blobs, JS object assignments). This is the cheap, no-browser probe and is
+/// tried first.
+///
+/// SPAs whose subprocessor data only exists behind a runtime API call (e.g.
+/// Vanta's Apollo GraphQL) yield nothing here — they are handled by
+/// [`discover_and_extract_via_render`], which renders the page and reads the
+/// JSON the page itself fetches. Keeping this probe browser-free means the same
+/// function runs identically under coverage instrumentation.
 pub async fn discover_strategy(
     url: &str,
     static_html: &str,
 ) -> Result<Option<TrustCenterStrategy>> {
-    let mut all_candidates: Vec<CandidateStrategy> = Vec::new();
-
-    // Probe 1: Scan static HTML for embedded data patterns first (cheapest)
     debug!("Running HTML pattern scan probe on static HTML for {}", url);
-    match discover_via_html_patterns(static_html) {
-        Ok(candidates) => {
-            debug!("HTML pattern scan found {} candidates", candidates.len());
-            all_candidates.extend(candidates);
+    let mut candidates = match discover_via_html_patterns(static_html) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("HTML pattern scan failed: {}", e);
+            Vec::new()
         }
-        Err(e) => debug!("HTML pattern scan failed: {}", e),
-    }
+    };
 
-    // If HTML patterns found strong candidates, use them (no need for browser)
-    if let Some(best) = all_candidates.iter().max_by(|a, b| {
-        a.score
-            .partial_cmp(&b.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) {
-        if best.score >= 0.7 {
-            debug!(
-                "Strong candidate found via HTML patterns (score: {:.2}), skipping browser probes",
-                best.score
-            );
-            return Ok(Some(best.strategy.clone()));
-        }
-    }
-
-    // Probe 2: Network interception (requires headless browser)
-    debug!("Running network interception probe for {}", url);
-    match discover_via_network_interception(url).await {
-        Ok(candidates) => {
-            debug!("Network interception found {} candidates", candidates.len());
-            all_candidates.extend(candidates);
-        }
-        Err(e) => debug!("Network interception failed: {}", e),
-    }
-
-    // Select the best candidate
-    all_candidates.sort_by(|a, b| {
+    candidates.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    if let Some(best) = all_candidates.into_iter().next() {
+    if let Some(best) = candidates.into_iter().next() {
         if best.score >= 0.4 {
             debug!(
-                "Selected strategy with score {:.2}, {} items",
+                "Selected embedded-data strategy with score {:.2}, {} items",
                 best.score, best.item_count
             );
             return Ok(Some(best.strategy));
         }
-        debug!("Best candidate score {:.2} below threshold 0.4", best.score);
+        debug!(
+            "Best embedded-data candidate {:.2} below threshold 0.4",
+            best.score
+        );
     }
 
     Ok(None)
 }
 
-#[cfg(coverage)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-pub async fn discover_strategy(
-    _url: &str,
-    static_html: &str,
-) -> Result<Option<TrustCenterStrategy>> {
-    Ok(discover_via_html_patterns(static_html)?
-        .into_iter()
-        .max_by(|a, b| {
-            a.score
-                .partial_cmp(&b.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .filter(|c| c.score >= 0.4)
-        .map(|c| c.strategy))
-}
-
-// cfg(not(coverage)): launches headless Chrome browser for network interception — requires browser
+/// Maximum number of scroll+paginate rounds during render-capture. Bounds the
+/// worst case for very large or infinite-scroll trust centers.
 #[cfg(not(coverage))]
-async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStrategy>> {
+const MAX_PAGINATION_ROUNDS: usize = 25;
+
+/// Hard caps on what a single (potentially hostile) page may make us accumulate
+/// while capturing its network JSON: a response-count ceiling and an aggregate
+/// body-byte budget. Real trust centers use tens of small responses; these only
+/// bite a page deliberately trying to exhaust memory.
+#[cfg(not(coverage))]
+const MAX_CAPTURED_RESPONSES: usize = 400;
+#[cfg(not(coverage))]
+const MAX_CAPTURED_BYTES: usize = 64 * 1024 * 1024;
+
+/// JavaScript that scrolls to the bottom (to trigger lazy-load / infinite scroll)
+/// and clicks pagination-style controls so paginated APIs fire all their calls.
+/// Restricted to buttons (not links) and strict pagination wording to avoid
+/// triggering full-page navigation. Returns the number of controls clicked
+/// (ignored by the caller).
+#[cfg(not(coverage))]
+const PAGINATION_JS: &str = r#"(function(){
+  try { window.scrollTo(0, document.body.scrollHeight); } catch (e) {}
+  var rx = /(next|show more|load more|view more|show all|see all|view all)/i;
+  var clicked = 0;
+  try {
+    document.querySelectorAll('button, [role="button"]').forEach(function(el){
+      try {
+        if (el.tagName === 'A' || el.hasAttribute('href')) { return; }
+        var label = (el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '');
+        if (rx.test(label) && !el.disabled && el.offsetParent !== null) { el.click(); clicked++; }
+      } catch (e) {}
+    });
+  } catch (e) {}
+  return clicked;
+})()"#;
+
+// cfg(not(coverage)): launches headless Chrome to render an SPA and capture the
+// JSON its own scripts fetch — requires a browser, so coverage-off.
+#[cfg(not(coverage))]
+async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResponse>> {
     let responses = Arc::new(Mutex::new(Vec::<InterceptedResponse>::new()));
     let responses_clone = responses.clone();
     let url_owned = url.to_string();
@@ -203,10 +203,10 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
             .new_tab()
             .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
-        // Register response handler to capture JSON API responses.
+        // Capture JSON API responses (GraphQL/REST/XHR) as the page loads.
         // Handler signature: (ResponseReceivedEventParams, &dyn Fn() -> Result<GetResponseBodyReturnObject>)
         tab.register_response_handling(
-            "trust_center_discovery",
+            "trust_center_capture",
             Box::new(move |event_params, fetch_body| {
                 let resp = &event_params.response;
                 let mime = &resp.mime_type;
@@ -229,15 +229,17 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
                             let mut collected = responses_clone
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            collected.push(InterceptedResponse {
-                                url: resp_url.clone(),
-                                status: status as u16,
-                                content_type: mime.clone(),
-                                body: body_str.clone(),
-                                request_url: resp_url.clone(),
-                                request_method: "GET".to_string(),
-                                request_body: None,
-                            });
+                            // Bound total memory against a hostile page: cap both
+                            // the response count and the aggregate body bytes.
+                            let current_bytes: usize = collected.iter().map(|r| r.body.len()).sum();
+                            if collected.len() < MAX_CAPTURED_RESPONSES
+                                && current_bytes + body_str.len() <= MAX_CAPTURED_BYTES
+                            {
+                                collected.push(InterceptedResponse {
+                                    url: resp_url.clone(),
+                                    body: body_str.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -245,19 +247,46 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
         )
         .map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
 
-        // Navigate and wait for page + API calls to complete
+        // Navigate and wait for the page + first round of API calls.
         tab.navigate_to(&url_owned)
             .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
-
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
-
-        // Wait for async API calls to complete
         std::thread::sleep(Duration::from_millis(3000));
+
+        // Pagination: scroll + click "next / show more / load more / show all"
+        // controls to trigger additional API calls, which the handler captures.
+        // Bounded and best-effort; failures are ignored. Stops once two
+        // consecutive rounds capture no new responses.
+        let mut last_len = responses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let mut stagnant_rounds = 0usize;
+        for _ in 0..MAX_PAGINATION_ROUNDS {
+            let _ = tab.evaluate(PAGINATION_JS, false);
+            std::thread::sleep(Duration::from_millis(1200));
+            let current_len = responses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len();
+            if current_len >= MAX_CAPTURED_RESPONSES {
+                break;
+            }
+            if current_len == last_len {
+                stagnant_rounds += 1;
+                if stagnant_rounds >= 2 {
+                    break;
+                }
+            } else {
+                stagnant_rounds = 0;
+            }
+            last_len = current_len;
+        }
 
         // Deregister and collect results. Recover from a poisoned lock rather
         // than panicking; the accumulated responses remain valid.
-        let _ = tab.deregister_response_handling("trust_center_discovery");
+        let _ = tab.deregister_response_handling("trust_center_capture");
         let collected = responses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -265,95 +294,292 @@ async fn discover_via_network_interception(url: &str) -> Result<Vec<CandidateStr
         Ok(collected)
     });
 
-    let collected_responses = handle
+    let collected = handle
         .await
         .map_err(|e| anyhow::anyhow!("Blocking task panicked: {}", e))??;
 
-    debug!("Intercepted {} JSON responses", collected_responses.len());
-    analyze_intercepted_responses(&collected_responses, url)
+    debug!("Captured {} JSON responses from {}", collected.len(), url);
+    Ok(collected)
 }
 
 #[cfg(coverage)]
-async fn discover_via_network_interception(_url: &str) -> Result<Vec<CandidateStrategy>> {
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn capture_network_json_responses(_url: &str) -> Result<Vec<InterceptedResponse>> {
     Ok(Vec::new())
 }
 
-/// Analyze intercepted API responses to find subprocessor data arrays.
-fn analyze_intercepted_responses(
+/// Extract subprocessor records directly from captured JSON API responses.
+///
+/// Every captured response (optionally restricted to URLs containing
+/// `url_substring`) is searched for subprocessor-like JSON arrays; each array is
+/// field-mapped and extracted with the shared executor logic, then results are
+/// unioned and de-duplicated by domain. Unioning across responses is what makes
+/// paginated APIs work transparently: each page contributes its slice and
+/// duplicates collapse.
+///
+/// This is the pure, browser-free core of the render-capture path and is fully
+/// unit-tested against captured-response fixtures.
+pub(crate) fn extract_subprocessors_from_responses(
     responses: &[InterceptedResponse],
-    page_url: &str,
-) -> Result<Vec<CandidateStrategy>> {
-    let mut candidates = Vec::new();
+    source_domain: &str,
+    url_substring: Option<&str>,
+) -> Vec<SubprocessorDomain> {
+    use std::collections::HashSet;
+
+    /// A subprocessor-like array discovered inside one captured response.
+    struct Candidate {
+        json_idx: usize,
+        path: String,
+        mapping: super::DetectedFieldMapping,
+        score: f32,
+    }
+
+    // Parse every in-scope response once and collect candidate arrays.
+    let mut parsed: Vec<serde_json::Value> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
 
     for response in responses {
+        if let Some(sub) = url_substring {
+            if !response.url.contains(sub) {
+                continue;
+            }
+        }
         let json: serde_json::Value = match serde_json::from_str(&response.body) {
             Ok(j) => j,
             Err(_) => continue,
         };
+        let json_idx = parsed.len();
+        for (path, items) in find_entity_arrays(&json, "") {
+            let score = score_subprocessor_array(&items, &path);
+            if score < 0.4 {
+                continue;
+            }
+            let mapping = detect_field_mapping(&items);
+            if mapping.name_field.is_none() {
+                continue; // must have a name field
+            }
+            candidates.push(Candidate {
+                json_idx,
+                path,
+                mapping,
+                score,
+            });
+        }
+        parsed.push(json);
+    }
 
-        // Search the JSON tree for arrays that look like subprocessor lists
-        let arrays = find_entity_arrays(&json, "");
+    if candidates.is_empty() {
+        return Vec::new();
+    }
 
-        for (path, items) in &arrays {
-            let score = score_subprocessor_array(items, path);
+    // A large report payload (e.g. Vanta's `fetchDataForTrustReport`) carries
+    // several entity arrays — subprocessors *and* frameworks, resource categories,
+    // control categories, etc. — all of which have a `name` field and score above
+    // threshold. We must pick the ONE that is the subprocessor list.
+    // `score_subprocessor_array` already rewards it (item count + name + url +
+    // purpose + a subprocessor/vendor path-keyword bonus), so the highest-scoring
+    // array is the subprocessor list. Pick it, then union every captured array
+    // that shares its leaf path segment — that, and only that, is genuine
+    // pagination of the same logical array across multiple API calls. Sibling
+    // arrays (a different leaf) and lower-scoring decoys are excluded.
+    let Some(best) = candidates.iter().max_by(|a, b| {
+        a.score
+            .partial_cmp(&b.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) else {
+        return Vec::new();
+    };
+    let best_leaf = leaf_segment(&best.path).to_string();
+    let selected: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| leaf_segment(&c.path) == best_leaf)
+        .collect();
 
-            if score >= 0.4 {
-                let field_mapping = detect_field_mapping(items);
-
-                let name_field = match field_mapping.name_field {
-                    Some(f) => f,
-                    None => continue, // Must have a name field
-                };
-
-                // Determine strategy type from the response URL
-                let strategy_type = if response.url.contains("graphql") {
-                    // For GraphQL, we'd need the query from the request body
-                    // For now, create a placeholder that can be refined
-                    StrategyType::GraphqlApi {
-                        query_template: String::new(), // Will need to be captured from request
-                        variables: std::collections::HashMap::new(),
-                        operation_name: extract_graphql_operation(&response.url),
-                    }
-                } else {
-                    StrategyType::RestApi {
-                        method: response.request_method.clone(),
-                        body_template: response.request_body.clone(),
-                        headers: std::collections::HashMap::new(),
-                    }
-                };
-
-                let strategy = TrustCenterStrategy {
-                    strategy_type,
-                    endpoint: EndpointConfig {
-                        url: response.url.clone(),
-                        slug: extract_slug_from_url(page_url),
-                        requires_browser: false,
-                    },
-                    response_mapping: ResponseMapping {
-                        subprocessors_path: path.clone(),
-                        name_field,
-                        url_field: field_mapping.url_field,
-                        purpose_field: field_mapping.purpose_field,
-                        location_field: field_mapping.location_field,
-                        evidence_fields: Vec::new(),
-                    },
-                    discovery_metadata: DiscoveryMetadata::new(
-                        DiscoveryMethod::NetworkInterception,
-                        items.len() as u32,
-                        score,
-                    ),
-                };
-
-                candidates.push(CandidateStrategy {
-                    strategy,
-                    score,
-                    item_count: items.len(),
-                });
+    let mut out: Vec<SubprocessorDomain> = Vec::new();
+    // De-duplicate on (domain, name) so genuine pagination overlap — the same row
+    // captured twice across page calls — collapses, while distinct rows that
+    // happen to share a domain (e.g. a vendor's regional legal entities, all on
+    // one corporate domain) are each preserved, matching the page's row count.
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    for cand in selected {
+        let Some(name_field) = cand.mapping.name_field.clone() else {
+            continue;
+        };
+        let response_mapping = ResponseMapping {
+            subprocessors_path: cand.path.clone(),
+            name_field,
+            url_field: cand.mapping.url_field.clone(),
+            purpose_field: cand.mapping.purpose_field.clone(),
+            location_field: cand.mapping.location_field.clone(),
+            evidence_fields: Vec::new(),
+        };
+        if let Ok(vendors) = crate::trust_center::executor::extract_subprocessors_from_json(
+            &parsed[cand.json_idx],
+            &response_mapping,
+            source_domain,
+        ) {
+            for vendor in vendors {
+                let key = (
+                    vendor.domain.to_lowercase(),
+                    vendor.raw_record.to_lowercase(),
+                );
+                if seen.insert(key) {
+                    out.push(vendor);
+                }
             }
         }
     }
 
-    Ok(candidates)
+    out
+}
+
+/// The final dot-separated segment of a JSON path (`data.trust.subprocessors` ->
+/// `subprocessors`). Two paginated API responses for the same logical array share
+/// this leaf even when their wrapper objects differ, so it is the key used to
+/// union pages while keeping sibling arrays (a different leaf) out.
+fn leaf_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+/// Extract using the cache hint first, falling back to *all* responses when the
+/// hint matches nothing — so a stale or over-specific hint can never make the
+/// cache-hit path under-capture relative to first discovery.
+pub(crate) fn extract_with_hint_fallback(
+    responses: &[InterceptedResponse],
+    source_domain: &str,
+    url_substring: Option<&str>,
+) -> Vec<SubprocessorDomain> {
+    let vendors = extract_subprocessors_from_responses(responses, source_domain, url_substring);
+    if vendors.is_empty() && url_substring.is_some() {
+        extract_subprocessors_from_responses(responses, source_domain, None)
+    } else {
+        vendors
+    }
+}
+
+/// Derive the soft cache hint stored in a `RenderedNetworkCapture` strategy: the
+/// GraphQL operation name (or the generic `"graphql"`) of the first captured
+/// response that actually yields subprocessors. `None` when no response does.
+pub(crate) fn derive_capture_hint(
+    responses: &[InterceptedResponse],
+    source_domain: &str,
+) -> Option<String> {
+    responses
+        .iter()
+        .find(|r| {
+            !extract_subprocessors_from_responses(std::slice::from_ref(*r), source_domain, None)
+                .is_empty()
+        })
+        .and_then(|r| {
+            extract_graphql_operation(&r.url).or_else(|| {
+                if r.url.contains("graphql") {
+                    Some("graphql".to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Render an SPA in a headless browser, capture the JSON it fetches, and extract
+/// subprocessors directly. Used by the executor for cached
+/// [`StrategyType::RenderedNetworkCapture`] strategies. The `url_substring` hint
+/// is applied first; if it yields nothing we fall back to considering every
+/// captured response, so a stale hint can never cause under-capture.
+#[cfg(not(coverage))]
+pub(crate) async fn render_capture_and_extract(
+    url: &str,
+    source_domain: &str,
+    url_substring: Option<&str>,
+) -> Result<Vec<SubprocessorDomain>> {
+    let responses = capture_network_json_responses(url).await?;
+    Ok(extract_with_hint_fallback(
+        &responses,
+        source_domain,
+        url_substring,
+    ))
+}
+
+#[cfg(coverage)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) async fn render_capture_and_extract(
+    _url: &str,
+    _source_domain: &str,
+    _url_substring: Option<&str>,
+) -> Result<Vec<SubprocessorDomain>> {
+    Ok(Vec::new())
+}
+
+/// Discover-and-extract for SPA subprocessor pages: render the page, capture the
+/// JSON its scripts fetch, and extract subprocessors directly. Returns both the
+/// extracted vendors (used immediately — no second browser launch) and a
+/// cacheable [`StrategyType::RenderedNetworkCapture`] strategy for future runs.
+#[cfg(not(coverage))]
+pub(crate) async fn discover_and_extract_via_render(
+    url: &str,
+    source_domain: &str,
+) -> Result<Option<(Vec<SubprocessorDomain>, TrustCenterStrategy)>> {
+    let responses = capture_network_json_responses(url).await?;
+    if responses.is_empty() {
+        debug!("No JSON responses captured from {}", url);
+        return Ok(None);
+    }
+
+    let vendors = extract_subprocessors_from_responses(&responses, source_domain, None);
+    if vendors.is_empty() {
+        debug!(
+            "No subprocessors extracted from {} captured responses for {}",
+            responses.len(),
+            source_domain
+        );
+        return Ok(None);
+    }
+
+    // Record which response/operation actually contributed data, as a soft cache
+    // hint for future runs (execution falls back to all responses if it misses).
+    let hint = derive_capture_hint(&responses, source_domain);
+
+    let strategy = TrustCenterStrategy {
+        strategy_type: StrategyType::RenderedNetworkCapture {
+            response_url_substring: hint,
+        },
+        endpoint: EndpointConfig {
+            url: url.to_string(),
+            slug: extract_slug_from_url(url),
+            requires_browser: true,
+        },
+        // Mapping is re-detected per captured response at execution time; this is
+        // a permissive placeholder kept only for cache-file readability.
+        response_mapping: ResponseMapping {
+            subprocessors_path: String::new(),
+            name_field: "name".to_string(),
+            url_field: None,
+            purpose_field: None,
+            location_field: None,
+            evidence_fields: Vec::new(),
+        },
+        discovery_metadata: DiscoveryMetadata::new(
+            DiscoveryMethod::NetworkInterception,
+            vendors.len() as u32,
+            0.9,
+        ),
+    };
+
+    debug!(
+        "Render-capture extracted {} subprocessors for {}",
+        vendors.len(),
+        source_domain
+    );
+    Ok(Some((vendors, strategy)))
+}
+
+#[cfg(coverage)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub(crate) async fn discover_and_extract_via_render(
+    _url: &str,
+    _source_domain: &str,
+) -> Result<Option<(Vec<SubprocessorDomain>, TrustCenterStrategy)>> {
+    Ok(None)
 }
 
 /// Probe 2: Discover strategies by scanning HTML for embedded data patterns.
@@ -1777,31 +2003,26 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
-    // --- analyze_intercepted_responses ---
+    // --- extract_subprocessors_from_responses ---
 
     #[test]
-    fn test_analyze_intercepted_responses_empty() {
-        let result = analyze_intercepted_responses(&[], "https://example.com").unwrap();
+    fn test_extract_subprocessors_from_responses_empty() {
+        let result = extract_subprocessors_from_responses(&[], "example.com", None);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_analyze_intercepted_responses_invalid_json() {
+    fn test_extract_subprocessors_from_responses_invalid_json() {
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/data".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
             body: "not valid json".to_string(),
-            request_url: "https://api.example.com/data".to_string(),
-            request_method: "GET".to_string(),
-            request_body: None,
         }];
-        let result = analyze_intercepted_responses(&responses, "https://example.com").unwrap();
+        let result = extract_subprocessors_from_responses(&responses, "example.com", None);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_analyze_intercepted_responses_with_subprocessors() {
+    fn test_extract_subprocessors_from_responses_with_subprocessors() {
         let body = serde_json::json!({
             "subprocessors": [
                 {"name": "AWS", "url": "https://aws.amazon.com", "purpose": "Cloud hosting and infrastructure"},
@@ -1814,29 +2035,22 @@ mod tests {
 
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/trust/data".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
             body,
-            request_url: "https://api.example.com/trust/data".to_string(),
-            request_method: "GET".to_string(),
-            request_body: None,
         }];
 
-        let result = analyze_intercepted_responses(
-            &responses,
-            "https://trust.example.com/acme/subprocessors",
-        )
-        .unwrap();
-        assert!(!result.is_empty());
-        let candidate = &result[0];
-        assert!(candidate.score >= 0.4);
-        assert_eq!(candidate.item_count, 5);
-        // Should extract slug from page URL
-        assert_eq!(candidate.strategy.endpoint.slug, Some("acme".to_string()));
+        let result = extract_subprocessors_from_responses(&responses, "trust.example.com", None);
+        assert_eq!(result.len(), 5);
+        // Each vendor resolved a real domain from its url field (no `_org:` placeholders).
+        assert!(result
+            .iter()
+            .all(|v| !v.domain.is_empty() && !v.domain.starts_with("_org:")));
+        let names: Vec<&str> = result.iter().map(|v| v.raw_record.as_str()).collect();
+        assert!(names.contains(&"AWS"));
+        assert!(names.contains(&"Stripe"));
     }
 
     #[test]
-    fn test_analyze_intercepted_responses_graphql_url() {
+    fn test_extract_subprocessors_from_responses_graphql_shape_and_substring_filter() {
         let body = serde_json::json!({
             "data": {
                 "vendors": [
@@ -1851,29 +2065,27 @@ mod tests {
         .to_string();
 
         let responses = vec![InterceptedResponse {
-            url: "https://api.example.com/graphql?operationName=GetVendors".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
+            url: "https://api.example.com/graphql?operation=GetVendors".to_string(),
             body,
-            request_url: "https://api.example.com/graphql?operationName=GetVendors".to_string(),
-            request_method: "POST".to_string(),
-            request_body: Some(r#"{"query":"query GetVendors { vendors { name } }"}"#.to_string()),
         }];
 
-        let result =
-            analyze_intercepted_responses(&responses, "https://trust.example.com/subprocessors")
-                .unwrap();
-        assert!(!result.is_empty());
-        let candidate = &result[0];
-        assert!(matches!(
-            &candidate.strategy.strategy_type,
-            StrategyType::GraphqlApi { operation_name, .. }
-                if operation_name.as_deref() == Some("GetVendors")
-        ));
+        // Nested `data.vendors` array is found and extracted.
+        let all = extract_subprocessors_from_responses(&responses, "trust.example.com", None);
+        assert_eq!(all.len(), 5);
+
+        // A matching url substring keeps the response in scope.
+        let matched =
+            extract_subprocessors_from_responses(&responses, "trust.example.com", Some("graphql"));
+        assert_eq!(matched.len(), 5);
+
+        // A non-matching url substring filters the response out entirely.
+        let filtered =
+            extract_subprocessors_from_responses(&responses, "trust.example.com", Some("rest/v2"));
+        assert!(filtered.is_empty());
     }
 
     #[test]
-    fn test_analyze_intercepted_responses_low_score_skipped() {
+    fn test_extract_subprocessors_from_responses_low_score_skipped() {
         // JSON with arrays but no name/url fields - low score
         let body = serde_json::json!({
             "numbers": [
@@ -1888,16 +2100,11 @@ mod tests {
 
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/data".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
             body,
-            request_url: "https://api.example.com/data".to_string(),
-            request_method: "GET".to_string(),
-            request_body: None,
         }];
 
-        let result = analyze_intercepted_responses(&responses, "https://example.com").unwrap();
-        // The items don't have name fields, so they should score below 0.4 and be skipped
+        let result = extract_subprocessors_from_responses(&responses, "example.com", None);
+        // The items don't have name fields, so they score below 0.4 and are skipped.
         assert!(result.is_empty());
     }
 
@@ -2281,11 +2488,11 @@ mod tests {
         // May or may not parse, but shouldn't panic
     }
 
-    // --- analyze_intercepted_responses: no name_field continue path ---
+    // --- extract_subprocessors_from_responses: no name_field continue path ---
 
     #[test]
-    fn test_analyze_intercepted_responses_no_name_field() {
-        // Array with good score but no identifiable name field -> continue
+    fn test_extract_subprocessors_from_responses_no_name_field() {
+        // Array with good score but no identifiable name field -> skipped
         let body = serde_json::json!({
             "subprocessors": [
                 {"id": 1, "category": "infrastructure", "status": "active", "region": "us-east-1", "tier": "premium"},
@@ -2299,17 +2506,12 @@ mod tests {
 
         let responses = vec![InterceptedResponse {
             url: "https://api.example.com/data".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
             body,
-            request_url: "https://api.example.com/data".to_string(),
-            request_method: "GET".to_string(),
-            request_body: None,
         }];
 
-        let result = analyze_intercepted_responses(&responses, "https://example.com").unwrap();
-        // "subprocessors" path keyword might boost score but items lack a "name" field,
-        // so detect_field_mapping returns None for name_field -> continue
+        let result = extract_subprocessors_from_responses(&responses, "example.com", None);
+        // The "subprocessors" path keyword boosts score, but items lack a name
+        // field, so detect_field_mapping returns None for name_field -> skipped.
         assert!(
             result.is_empty(),
             "Items without a name field should be skipped"
@@ -2317,8 +2519,11 @@ mod tests {
     }
 
     #[test]
-    fn test_analyze_intercepted_responses_rest_with_request_body() {
-        let body = serde_json::json!({
+    fn test_extract_subprocessors_from_responses_unions_and_dedupes_across_pages() {
+        // Two captured responses standing in for two paginated API calls. The
+        // overlap (DataSync, PayFlow share domains) must collapse so the union is
+        // the distinct set, not the sum — this is how pagination is handled.
+        let page1 = serde_json::json!({
             "vendors": [
                 {"name": "CloudHost Inc", "url": "https://cloudhost.io", "purpose": "Cloud hosting infrastructure services"},
                 {"name": "SecureNet LLC", "url": "https://securenet.io", "purpose": "Network security and monitoring"},
@@ -2328,27 +2533,39 @@ mod tests {
             ]
         })
         .to_string();
+        let page2 = serde_json::json!({
+            "vendors": [
+                {"name": "DataSync Corp", "url": "https://datasync.io", "purpose": "Data synchronization services"},
+                {"name": "PayFlow Ltd", "url": "https://payflow.io", "purpose": "Payment processing and billing"},
+                {"name": "Twilio", "url": "https://twilio.com", "purpose": "Messaging and communications"},
+                {"name": "Okta", "url": "https://okta.com", "purpose": "Identity and access management"},
+                {"name": "Snowflake", "url": "https://snowflake.com", "purpose": "Data warehousing platform"}
+            ]
+        })
+        .to_string();
 
-        let responses = vec![InterceptedResponse {
-            url: "https://api.example.com/api/vendors".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
-            body,
-            request_url: "https://api.example.com/api/vendors".to_string(),
-            request_method: "POST".to_string(),
-            request_body: Some(r#"{"filter": "active"}"#.to_string()),
-        }];
+        let responses = vec![
+            InterceptedResponse {
+                url: "https://api.example.com/graphql?operation=subprocessors&page=1".to_string(),
+                body: page1,
+            },
+            InterceptedResponse {
+                url: "https://api.example.com/graphql?operation=subprocessors&page=2".to_string(),
+                body: page2,
+            },
+        ];
 
-        let result =
-            analyze_intercepted_responses(&responses, "https://example.com/mycompany/trust")
-                .unwrap();
-        assert!(!result.is_empty());
-        let candidate = &result[0];
-        assert!(matches!(
-            &candidate.strategy.strategy_type,
-            StrategyType::RestApi { method, body_template, .. }
-                if method == "POST" && body_template.is_some()
-        ));
+        let result = extract_subprocessors_from_responses(&responses, "example.com", None);
+        // 5 from page 1 + 3 new from page 2 (DataSync & PayFlow de-duplicated) = 8.
+        assert_eq!(result.len(), 8);
+        let domains: Vec<&str> = result.iter().map(|v| v.domain.as_str()).collect();
+        assert_eq!(
+            domains.iter().filter(|d| **d == "datasync.io").count(),
+            1,
+            "duplicate domain across pages must collapse to one record"
+        );
+        assert!(domains.contains(&"twilio.com"));
+        assert!(domains.contains(&"snowflake.com"));
     }
 
     // --- discover_strategy: weak candidates below threshold ---
@@ -2427,18 +2644,212 @@ mod tests {
     fn test_intercepted_response_debug_clone() {
         let resp = InterceptedResponse {
             url: "https://api.example.com/data".to_string(),
-            status: 200,
-            content_type: "application/json".to_string(),
             body: r#"{"data":[]}"#.to_string(),
-            request_url: "https://api.example.com/data".to_string(),
-            request_method: "GET".to_string(),
-            request_body: None,
         };
         let cloned = resp.clone();
         assert_eq!(cloned.url, resp.url);
-        assert_eq!(cloned.status, resp.status);
+        assert_eq!(cloned.body, resp.body);
         let debug_str = format!("{:?}", resp);
         assert!(debug_str.contains("InterceptedResponse"));
+    }
+
+    #[test]
+    fn test_extract_subprocessors_selects_single_highest_scoring_array() {
+        // Two sibling arrays in one response, neither at a subprocessor-keyword
+        // path: `alpha` (name + url + purpose) outscores `beta` (name only).
+        // Only the dominant array's records must return — this pins the selection
+        // contract (highest-scoring array + same-leaf union, NOT union-of-all).
+        let body = serde_json::json!({
+            "alpha": [
+                {"name": "Acme Cloud", "url": "https://acmecloud.io", "purpose": "Cloud hosting services"},
+                {"name": "Bolt Pay", "url": "https://boltpay.io", "purpose": "Payment processing services"},
+                {"name": "Crate DB", "url": "https://cratedb.io", "purpose": "Database hosting services"},
+                {"name": "Delta CDN", "url": "https://deltacdn.io", "purpose": "Content delivery network"},
+                {"name": "Echo Mail", "url": "https://echomail.io", "purpose": "Transactional email delivery"},
+                {"name": "Foxtrot Logs", "url": "https://foxtrotlogs.io", "purpose": "Log aggregation service"}
+            ],
+            "beta": [
+                {"name": "Section One"},
+                {"name": "Section Two"},
+                {"name": "Section Three"},
+                {"name": "Section Four"},
+                {"name": "Section Five"}
+            ]
+        })
+        .to_string();
+        let responses = vec![InterceptedResponse {
+            url: "https://api.example.com/data".to_string(),
+            body,
+        }];
+
+        let vendors = extract_subprocessors_from_responses(&responses, "example.com", None);
+        assert_eq!(
+            vendors.len(),
+            6,
+            "only the dominant `alpha` array should be selected"
+        );
+        let names: Vec<&str> = vendors.iter().map(|v| v.raw_record.as_str()).collect();
+        assert!(names.contains(&"Acme Cloud"));
+        assert!(
+            !names.iter().any(|n| n.starts_with("Section")),
+            "the weaker `beta` sibling array must be excluded"
+        );
+    }
+
+    #[test]
+    fn test_derive_capture_hint_picks_operation_of_first_subprocessor_response() {
+        let body = serde_json::json!({
+            "data": {"subprocessors": [
+                {"name": "AWS", "url": "https://aws.amazon.com"},
+                {"name": "GCP", "url": "https://cloud.google.com"},
+                {"name": "Azure", "url": "https://azure.microsoft.com"},
+                {"name": "Stripe", "url": "https://stripe.com"},
+                {"name": "Datadog", "url": "https://datadoghq.com"}
+            ]}
+        })
+        .to_string();
+        let responses = vec![
+            // A noise response (no subprocessors) precedes the data response.
+            InterceptedResponse {
+                url: "https://t.example.com/graphql?operation=ping".to_string(),
+                body: r#"{"data":{"ok":true}}"#.to_string(),
+            },
+            InterceptedResponse {
+                url: "https://t.example.com/graphql?operation=fetchSubs".to_string(),
+                body,
+            },
+        ];
+        assert_eq!(
+            derive_capture_hint(&responses, "t.example.com").as_deref(),
+            Some("fetchSubs")
+        );
+    }
+
+    #[test]
+    fn test_derive_capture_hint_none_and_bare_graphql() {
+        // No response yields subprocessors -> None.
+        let none_resp = vec![InterceptedResponse {
+            url: "https://t.example.com/api/health".to_string(),
+            body: r#"{"status":"ok"}"#.to_string(),
+        }];
+        assert_eq!(derive_capture_hint(&none_resp, "t.example.com"), None);
+
+        // A graphql URL with no operation param -> the generic "graphql".
+        let body = serde_json::json!({"subprocessors":[
+            {"name":"AWS","url":"https://aws.amazon.com"},
+            {"name":"GCP","url":"https://cloud.google.com"},
+            {"name":"Azure","url":"https://azure.microsoft.com"},
+            {"name":"Stripe","url":"https://stripe.com"},
+            {"name":"Datadog","url":"https://datadoghq.com"}
+        ]})
+        .to_string();
+        let resp = vec![InterceptedResponse {
+            url: "https://t.example.com/graphql".to_string(),
+            body,
+        }];
+        assert_eq!(
+            derive_capture_hint(&resp, "t.example.com").as_deref(),
+            Some("graphql")
+        );
+    }
+
+    #[test]
+    fn test_extract_with_hint_fallback_recovers_from_stale_hint() {
+        let body = serde_json::json!({"subprocessors":[
+            {"name":"AWS","url":"https://aws.amazon.com"},
+            {"name":"GCP","url":"https://cloud.google.com"},
+            {"name":"Azure","url":"https://azure.microsoft.com"},
+            {"name":"Stripe","url":"https://stripe.com"},
+            {"name":"Datadog","url":"https://datadoghq.com"}
+        ]})
+        .to_string();
+        let responses = vec![InterceptedResponse {
+            url: "https://t.example.com/graphql?operation=fetchSubs".to_string(),
+            body,
+        }];
+        // Matching hint extracts via the hinted response.
+        assert_eq!(
+            extract_with_hint_fallback(&responses, "t.example.com", Some("fetchSubs")).len(),
+            5
+        );
+        // A stale/non-matching hint must fall back to all responses, not under-capture.
+        assert_eq!(
+            extract_with_hint_fallback(&responses, "t.example.com", Some("staleOperation")).len(),
+            5
+        );
+        // No hint -> all responses.
+        assert_eq!(
+            extract_with_hint_fallback(&responses, "t.example.com", None).len(),
+            5
+        );
+    }
+
+    #[test]
+    fn test_extract_subprocessors_vanta_fixture_discriminates_sibling_arrays() {
+        // Real captured `fetchDataForTrustReport` payload (trimmed): the
+        // subprocessors array sits alongside frameworks, resourceCategories,
+        // navigationKeys and mainOverviewSections — all of which carry a `name`
+        // field and score above threshold. Only the subprocessors must survive.
+        let body = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/trust_center/vanta_subprocessors_response.json"
+        ))
+        .to_string();
+        let responses = vec![InterceptedResponse {
+            url: "https://trust.vanta.com/graphql?operation=fetchDataForTrustReport".to_string(),
+            body,
+        }];
+
+        let vendors = extract_subprocessors_from_responses(&responses, "vanta.com", None);
+
+        // Exactly the 42 real subprocessors — NOT the 12 frameworks, 7 resource
+        // categories, navigation keys, or overview sections.
+        assert_eq!(
+            vendors.len(),
+            42,
+            "expected exactly 42 subprocessors, got {} (sibling arrays leaking?)",
+            vendors.len()
+        );
+
+        let domains: Vec<String> = vendors.iter().map(|v| v.domain.to_lowercase()).collect();
+        assert!(domains.iter().any(|d| d.contains("amazon")));
+        assert!(domains.iter().any(|d| d.contains("cloudflare")));
+        assert!(domains.iter().any(|d| d.contains("datadog")));
+        assert!(domains.iter().any(|d| d.contains("mongodb")));
+
+        // The two entries with no URL fall back to `_org:` placeholders for
+        // downstream org→domain resolution.
+        assert!(domains.iter().any(|d| d.starts_with("_org:")));
+    }
+
+    /// Live smoke test against Vanta's real trust center (network + headless
+    /// Chrome). Exercises the public render-capture entry point end-to-end.
+    /// Ignored by default. Run with:
+    ///   cargo test --lib -- --ignored --nocapture live_vanta_render_capture
+    #[cfg(not(coverage))]
+    #[tokio::test]
+    #[ignore = "live network + headless Chrome"]
+    async fn live_vanta_render_capture() {
+        let url = "https://trust.vanta.com/subprocessors";
+        let (vendors, strategy) = discover_and_extract_via_render(url, "vanta.com")
+            .await
+            .expect("render-capture should not error")
+            .expect("should discover the subprocessor list");
+        eprintln!("Vanta subprocessors extracted: {}", vendors.len());
+        for v in &vendors {
+            eprintln!("  {} | {}", v.domain, v.raw_record);
+        }
+        // Vanta's trust center lists ~42 subprocessors; allow drift but require
+        // the full list, not the 3 the legacy HTML-regex path returned.
+        assert!(
+            vendors.len() >= 40,
+            "expected the full Vanta subprocessor list (~42), got {}",
+            vendors.len()
+        );
+        assert!(matches!(
+            strategy.strategy_type,
+            StrategyType::RenderedNetworkCapture { .. }
+        ));
     }
 
     // --- probe_json_script_tags: array with name field but no name detected ---
@@ -2762,14 +3173,6 @@ mod tests {
             candidates.is_empty(),
             "No application/json scripts means no candidates"
         );
-    }
-
-    #[tokio::test]
-    #[cfg(coverage)]
-    async fn test_discover_via_network_interception_coverage_stub() {
-        let result = discover_via_network_interception("https://example.com").await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
     }
 
     #[test]

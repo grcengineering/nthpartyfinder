@@ -2304,6 +2304,54 @@ impl SubprocessorAnalyzer {
                         );
                     }
                 }
+
+                // 2) Universal SPA fallback: render the page in a headless
+                //    browser, capture the JSON its own scripts fetch, and extract
+                //    subprocessors directly. Provider-agnostic (GraphQL/REST/XHR)
+                //    and handles pagination by unioning every captured response.
+                //    This is what recovers full subprocessor lists from API-driven
+                //    trust centers (e.g. Vanta) whose data never lands in static
+                //    HTML and whose query is built at runtime (so it can't be
+                //    statically reconstructed for replay).
+                match crate::trust_center::discovery::discover_and_extract_via_render(
+                    url,
+                    source_domain,
+                )
+                .await
+                {
+                    Ok(Some((vendors, strategy))) if !vendors.is_empty() => {
+                        debug!(
+                            "Render-capture extracted {} vendors for {}",
+                            vendors.len(),
+                            source_domain
+                        );
+                        // Cache the RenderedNetworkCapture strategy for future runs.
+                        let cache = self.cache.write().await;
+                        if let Ok(mut entry) = cache
+                            .get_cached_entry(source_domain)
+                            .await
+                            .ok_or_else(|| anyhow::anyhow!("no cache entry"))
+                        {
+                            entry.trust_center_strategy = Some(strategy);
+                            let cache_file = cache.get_cache_file_path(source_domain);
+                            let _ = tokio::fs::write(
+                                &cache_file,
+                                serde_json::to_string_pretty(&entry).unwrap_or_default(),
+                            )
+                            .await;
+                        }
+                        return Ok(vendors);
+                    }
+                    Ok(_) => {
+                        debug!(
+                            "Render-capture found no subprocessors for {}",
+                            source_domain
+                        );
+                    }
+                    Err(e) => {
+                        debug!("Render-capture failed for {}: {}", source_domain, e);
+                    }
+                }
             }
         }
 

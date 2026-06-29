@@ -79,6 +79,20 @@ pub async fn execute_strategy(
             let html = require_html(html_content, &strategy.endpoint)?;
             extract_hydration_data(&html, script_selector, data_path)?
         }
+        StrategyType::RenderedNetworkCapture {
+            response_url_substring,
+        } => {
+            // Universal SPA path: render the page in a headless browser, capture
+            // the JSON the page's own scripts fetch, and extract subprocessors
+            // directly from those responses. Returns records, not a JSON blob, so
+            // we short-circuit the shared `extract_subprocessors_from_json` below.
+            return crate::trust_center::discovery::render_capture_and_extract(
+                &endpoint_url,
+                source_domain,
+                response_url_substring.as_deref(),
+            )
+            .await;
+        }
     };
 
     extract_subprocessors_from_json(&json, &strategy.response_mapping, source_domain)
@@ -291,7 +305,10 @@ fn extract_hydration_data(
 // ============================================================================
 
 /// Extract subprocessor records from a JSON value using the response mapping.
-fn extract_subprocessors_from_json(
+///
+/// Shared with the discovery engine's render-and-capture path, which detects the
+/// mapping from a captured API response and reuses this same extraction logic.
+pub(crate) fn extract_subprocessors_from_json(
     json: &serde_json::Value,
     mapping: &ResponseMapping,
     source_domain: &str,
