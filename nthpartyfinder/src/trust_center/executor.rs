@@ -391,8 +391,15 @@ pub(crate) fn extract_subprocessors_from_json(
         };
 
         vendors.push(SubprocessorDomain {
+            // Trust-center API extraction is one way of reading a company's
+            // subprocessor disclosure, so it is tagged with the same generic
+            // `HttpSubprocessor` ("Subprocessor Page") detection source as the
+            // static/legal-page path rather than a separate "Trust Center" type.
+            // The specific source (trust center vs legal page) is preserved in
+            // the evidence/provenance during multi-source merge, not as a distinct
+            // detection source.
             domain,
-            source_type: RecordType::TrustCenterApi,
+            source_type: RecordType::HttpSubprocessor,
             raw_record: evidence,
         });
     }
@@ -637,7 +644,9 @@ mod tests {
         assert_eq!(result[0].domain, "cloudflare.com");
         assert_eq!(result[1].domain, "datadoghq.com");
         assert_eq!(result[2].domain, "anthropic.com");
-        assert_eq!(result[0].source_type, RecordType::TrustCenterApi);
+        // Trust-center extraction is tagged with the generic "Subprocessor Page"
+        // detection source (HttpSubprocessor), not a separate "Trust Center" type.
+        assert_eq!(result[0].source_type, RecordType::HttpSubprocessor);
     }
 
     #[test]

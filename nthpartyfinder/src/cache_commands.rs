@@ -830,6 +830,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "example.com".to_string(),
             working_subprocessor_url: "https://example.com/subprocessors".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 1,
             extraction_patterns: None,
@@ -857,6 +858,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "test.org".to_string(),
             working_subprocessor_url: "https://test.org/vendors".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1718451000,
             cache_version: 2,
             extraction_patterns: None,
@@ -915,6 +917,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "valid.com".to_string(),
             working_subprocessor_url: "https://valid.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1000,
             cache_version: 1,
             extraction_patterns: None,
@@ -1086,6 +1089,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: domain.to_string(),
             working_subprocessor_url: url.to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: timestamp,
             cache_version: 2,
             extraction_patterns: None,
@@ -1107,6 +1111,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: domain.to_string(),
             working_subprocessor_url: format!("https://{}/subprocessors", domain),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns {
@@ -1492,6 +1497,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "empty.com".to_string(),
             working_subprocessor_url: "".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1000,
             cache_version: 1,
             extraction_patterns: None,
@@ -1812,6 +1818,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "meta.com".to_string(),
             working_subprocessor_url: "https://meta.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 2,
             extraction_patterns: None,
@@ -1852,6 +1859,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "empty-patterns.com".to_string(),
             working_subprocessor_url: "https://empty-patterns.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns {
@@ -1895,6 +1903,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "rules.com".to_string(),
             working_subprocessor_url: "https://rules.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns {
@@ -2032,6 +2041,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "special.com".to_string(),
             working_subprocessor_url: "https://special.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1704067200,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns {

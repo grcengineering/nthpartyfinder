@@ -25,7 +25,9 @@ fn make_entry(domain: &str, source_type: RecordType) -> SubprocessorDomain {
 }
 
 fn make_trust_center_entry(domain: &str) -> SubprocessorDomain {
-    make_entry(domain, RecordType::TrustCenterApi)
+    // Trust-center extraction is now tagged with the generic "Subprocessor Page"
+    // detection source (HttpSubprocessor), matching the legal/static-page path.
+    make_entry(domain, RecordType::HttpSubprocessor)
 }
 
 fn make_spf_entry(domain: &str) -> SubprocessorDomain {
@@ -54,18 +56,35 @@ fn test_filter_rejects_bare_labels_without_tld() {
 
 #[test]
 fn test_filter_rejects_org_prefix_without_domain() {
-    // _org: entries with no dot are org-only, not domains
+    // _org: entries that are org-only (no dot) and NOT a known vendor are filtered.
     let entries = vec![
-        make_trust_center_entry("_org:Cloudflare"),
-        make_trust_center_entry("_org:Datadog Inc"),
+        make_trust_center_entry("_org:Obscurevendorxyz"),
+        make_trust_center_entry("_org:Random Holdings Inc"),
         make_trust_center_entry("_org:valid.example.com"),
     ];
     let filtered = filter_subprocessor_results(entries);
-    // "Cloudflare" has no dot → filtered
-    // "Datadog Inc" has no dot → filtered
+    // "Obscurevendorxyz" has no dot, unknown → filtered
+    // "Random Holdings Inc" has no dot, unknown → filtered
     // "valid.example.com" has a dot and no spaces → kept
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].domain, "valid.example.com");
+}
+
+#[test]
+fn test_filter_resolves_known_vendor_org_names() {
+    // Url-less subprocessor disclosures for KNOWN vendors (a bespoke legal page
+    // listing a company by legal name with no link) now resolve to a domain
+    // instead of being dropped — the klaviyo.com/legal/subprocessors case.
+    let entries = vec![
+        make_trust_center_entry("_org:Cloudflare, Inc."),
+        make_trust_center_entry("_org:Amazon Web Services, Inc."),
+        make_trust_center_entry("_org:Microsoft Corporation"),
+    ];
+    let filtered = filter_subprocessor_results(entries);
+    let domains: Vec<&str> = filtered.iter().map(|e| e.domain.as_str()).collect();
+    assert!(domains.contains(&"cloudflare.com"), "got {domains:?}");
+    assert!(domains.contains(&"aws.amazon.com"), "got {domains:?}");
+    assert!(domains.contains(&"microsoft.com"), "got {domains:?}");
 }
 
 // ============================================================================
@@ -86,17 +105,18 @@ fn test_filter_rejects_domains_with_spaces() {
 
 #[test]
 fn test_filter_rejects_org_prefix_entries_with_spaces() {
-    // _org: entries with spaces are company legal names, not domains
+    // _org: entries with spaces that are UNKNOWN company legal names (not in the
+    // curated vendor table) are not domains and stay filtered.
     let entries = vec![
-        make_trust_center_entry("_org:Cloudflare, Inc."),
-        make_trust_center_entry("_org:Amazon Web Services"),
-        make_trust_center_entry("_org:Google LLC"),
+        make_trust_center_entry("_org:Obscure Holdings, Inc."),
+        make_trust_center_entry("_org:Random Vendor Partners"),
+        make_trust_center_entry("_org:Unknown Widgets LLC"),
     ];
     let filtered = filter_subprocessor_results(entries);
     assert_eq!(
         filtered.len(),
         0,
-        "Company legal names with spaces should be filtered"
+        "Unknown company legal names with spaces should be filtered"
     );
 }
 
@@ -435,8 +455,8 @@ fn test_whois_rejects_amazon_registrar() {
 #[test]
 fn test_filter_comprehensive_all_bug_classes() {
     let entries = vec![
-        // BUG 1: Bare labels
-        make_trust_center_entry("_org:Cloudflare"),
+        // BUG 1: Bare labels (unknown org, no dot → not a domain, not a known vendor)
+        make_trust_center_entry("_org:Obscurelabel"),
         // BUG 2: Spaces in domain
         make_trust_center_entry("il mj.com"),
         // BUG 3: Corporate legal names via _org:
@@ -484,8 +504,8 @@ fn test_filter_comprehensive_all_bug_classes() {
 
     // Invalid entries should be filtered
     assert!(
-        !domains.contains(&"Cloudflare"),
-        "Bare label should be filtered"
+        !domains.contains(&"Obscurelabel"),
+        "Unknown bare label should be filtered"
     );
     assert!(!domains.contains(&"il mj.com"), "Spaces should be filtered");
     assert!(

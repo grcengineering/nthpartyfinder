@@ -158,7 +158,16 @@ pub fn filter_infra_providers(
         let before = results.len();
         let filtered: Vec<VendorRelationship> = results
             .into_iter()
-            .filter(|r| !analysis::is_common_denominator(&r.nth_party_domain))
+            .filter(|r| {
+                // A company that EXPLICITLY discloses a vendor on its own
+                // subprocessor/legal page is naming an intentional relationship —
+                // keep it even when the vendor is a common infrastructure provider
+                // (AWS, Cloudflare, Microsoft). Infra suppression targets incidental
+                // providers surfaced by DNS/web-traffic scanning, not disclosed
+                // subprocessor listings (mirrors the GRC-501 marketing-filter scope).
+                is_explicit_subprocessor_disclosure(&r.nth_party_record_type)
+                    || !analysis::is_common_denominator(&r.nth_party_domain)
+            })
             .collect();
         let removed = before - filtered.len();
         (filtered, removed)
@@ -173,6 +182,18 @@ fn is_web_traffic_source(record_type: &crate::vendor::RecordType) -> bool {
     matches!(
         record_type,
         RecordType::WebTrafficSource | RecordType::WebTrafficNetwork
+    )
+}
+
+/// Whether a discovery source is an explicit subprocessor disclosure — a vendor a
+/// company named on its own subprocessor/legal page (or hosted trust center). Such
+/// relationships are intentional and exempt from common-infra suppression, so a
+/// disclosed subprocessor list stays complete even when it names AWS/Cloudflare/etc.
+fn is_explicit_subprocessor_disclosure(record_type: &crate::vendor::RecordType) -> bool {
+    use crate::vendor::RecordType;
+    matches!(
+        record_type,
+        RecordType::HttpSubprocessor | RecordType::TrustCenterApi
     )
 }
 
@@ -2982,6 +3003,46 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(removed, 2);
         assert_eq!(filtered[0].nth_party_domain, "stripe.com");
+    }
+
+    #[test]
+    fn test_filter_infra_keeps_explicitly_disclosed_subprocessors() {
+        // A company that names AWS/Cloudflare/Microsoft on its OWN subprocessor page
+        // is disclosing an intentional relationship — these must NOT be filtered as
+        // common infra. Incidentally-discovered infra (DNS/web traffic) still is.
+        let results = vec![
+            make_relationship(
+                "cloudflare.com",
+                "Cloudflare",
+                "klaviyo.com",
+                RecordType::HttpSubprocessor,
+                "Listed on klaviyo.com/legal/subprocessors",
+            ),
+            make_relationship(
+                "amazonaws.com",
+                "AWS",
+                "klaviyo.com",
+                RecordType::HttpSubprocessor,
+                "Listed on klaviyo.com/legal/subprocessors",
+            ),
+            // Same infra provider but only seen incidentally via DNS → still filtered.
+            make_relationship(
+                "google.com",
+                "Google",
+                "klaviyo.com",
+                RecordType::DnsTxtSpf,
+                "ev",
+            ),
+        ];
+        let (filtered, removed) = filter_infra_providers(results, false);
+        assert_eq!(removed, 1, "only the DNS-sourced infra entry is removed");
+        let domains: Vec<&str> = filtered
+            .iter()
+            .map(|r| r.nth_party_domain.as_str())
+            .collect();
+        assert!(domains.contains(&"cloudflare.com"));
+        assert!(domains.contains(&"amazonaws.com"));
+        assert!(!domains.contains(&"google.com"));
     }
 
     #[test]

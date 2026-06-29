@@ -136,6 +136,122 @@ pub struct SubprocessorDomain {
     pub raw_record: String, // Full HTML content or specific section where domain was found
 }
 
+/// Where a subprocessor disclosure was found. A company can publish its
+/// subprocessor list in more than one place — a hosted trust center (commonly an
+/// SPA on a `trust.` subdomain, e.g. trust.klaviyo.com) and/or a bespoke
+/// legal/subprocessors page on its main site (e.g. klaviyo.com/legal/subprocessors).
+/// Discovery gathers from one URL per category and merges, so neither is missed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SubprocessorSourceCategory {
+    TrustCenter,
+    BespokePage,
+}
+
+/// Number of distinct source categories; discovery can stop once all have yielded.
+pub(crate) const SUBPROCESSOR_SOURCE_CATEGORY_COUNT: usize = 2;
+
+/// Classify a candidate subprocessor URL into a source category by host. A
+/// `trust.`/`trustcenter.`/`trust-*` subdomain (or an embedded `.trust.` label) is
+/// the hosted trust center; everything else (a `/legal/subprocessors`-style path on
+/// the company's own site) is the bespoke page.
+pub(crate) fn subprocessor_source_category(url: &str) -> SubprocessorSourceCategory {
+    let host = url
+        .split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let is_trust_host = host.starts_with("trust.")
+        || host.starts_with("trustcenter.")
+        || host.starts_with("trust-")
+        || host.contains(".trust.")
+        || host.contains(".trustcenter.");
+    if is_trust_host {
+        SubprocessorSourceCategory::TrustCenter
+    } else {
+        SubprocessorSourceCategory::BespokePage
+    }
+}
+
+/// Merge subprocessor results gathered from multiple sources into a single entry
+/// per vendor domain. Each input group is `(source_label, entries)` where
+/// `source_label` identifies where the entries were found (typically the page URL).
+///
+/// The same vendor can appear on more than one source (e.g. a trust center *and* a
+/// legal page); this collapses those into one deduplicated entry whose `raw_record`
+/// records every distinct source — so the report's Evidence view shows the
+/// provenance ("Listed on: <source A>; <source B>") for a single de-duplicated row,
+/// instead of one row per source. The detection source (`source_type`) of the first
+/// occurrence is preserved (all subprocessor sources use the generic
+/// `HttpSubprocessor` / "Subprocessor Page" type). Insertion order is preserved.
+pub(crate) fn merge_sourced_subprocessors(
+    per_source: Vec<(String, Vec<SubprocessorDomain>)>,
+) -> Vec<SubprocessorDomain> {
+    // Preserve first-seen order while accumulating sources per vendor key.
+    let mut order: Vec<String> = Vec::new();
+    let mut merged: std::collections::HashMap<String, SubprocessorDomain> =
+        std::collections::HashMap::new();
+    // Distinct source labels seen for each vendor key, in first-seen order.
+    let mut sources: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    for (source_label, entries) in per_source {
+        for entry in entries {
+            let key = entry.domain.to_ascii_lowercase();
+            let srcs = sources.entry(key.clone()).or_default();
+            if !srcs.iter().any(|s| s == &source_label) {
+                srcs.push(source_label.clone());
+            }
+            match merged.get_mut(&key) {
+                None => {
+                    order.push(key.clone());
+                    merged.insert(key, entry);
+                }
+                Some(existing) => {
+                    // Keep the richer base evidence (longer raw_record) so we don't
+                    // lose per-source detail like purpose/location when merging.
+                    if entry.raw_record.len() > existing.raw_record.len() {
+                        existing.raw_record = entry.raw_record;
+                    }
+                }
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|key| {
+            let mut entry = merged.remove(&key).expect("key inserted with merged");
+            let srcs = sources.remove(&key).unwrap_or_default();
+            entry.raw_record = format_subprocessor_provenance(&entry.raw_record, &srcs);
+            entry
+        })
+        .collect()
+}
+
+/// Build the merged evidence string: the base evidence followed by the list of
+/// distinct sources the vendor was found on. Keeps the report's Evidence view
+/// honest about provenance after de-duplication.
+fn format_subprocessor_provenance(base_evidence: &str, sources: &[String]) -> String {
+    let base = base_evidence.trim();
+    if sources.is_empty() {
+        return base.to_string();
+    }
+    let label = if sources.len() == 1 {
+        "Source"
+    } else {
+        "Sources"
+    };
+    let joined = sources.join("; ");
+    if base.is_empty() {
+        format!("{label}: {joined}")
+    } else {
+        format!("{base} — {label}: {joined}")
+    }
+}
+
 /// Represents a pending org-to-domain mapping that was inferred via generic fallback
 /// and needs user confirmation before being cached
 #[derive(Debug, Clone)]
@@ -296,6 +412,13 @@ impl Default for ExtractionPatterns {
 pub struct SubprocessorUrlCacheEntry {
     pub domain: String,
     pub working_subprocessor_url: String,
+    /// All working subprocessor source URLs for this domain — one per source
+    /// category (a hosted trust center and/or a bespoke legal page). Lets repeat
+    /// runs re-scrape exactly the sources that yielded data and merge them,
+    /// without re-probing every candidate URL. Additive/serde-default so existing
+    /// single-URL caches keep working (they fall back to `working_subprocessor_url`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub working_subprocessor_urls: Vec<String>,
     pub last_successful_access: u64,
     pub cache_version: u32,
     /// Extraction patterns specific to this domain's subprocessor page structure
@@ -534,6 +657,7 @@ impl SubprocessorCache {
                 .unwrap_or_else(|| SubprocessorUrlCacheEntry {
                     domain: domain.to_string(),
                     working_subprocessor_url: String::new(),
+                    working_subprocessor_urls: Vec::new(),
                     last_successful_access: 0,
                     cache_version: Self::CACHE_VERSION,
                     extraction_patterns: Some(ExtractionPatterns::default()),
@@ -543,6 +667,7 @@ impl SubprocessorCache {
 
         // Update URL and timestamp while preserving patterns and metadata
         entry.working_subprocessor_url = subprocessor_url.to_string();
+        entry.working_subprocessor_urls = vec![subprocessor_url.to_string()];
         entry.last_successful_access = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -554,6 +679,75 @@ impl SubprocessorCache {
 
         debug!("Cached working subprocessor URL for domain {} while preserving extraction patterns: {}", domain, subprocessor_url);
         Ok(())
+    }
+
+    /// Cache the full set of working subprocessor source URLs for a domain — one
+    /// per source category found (trust center and/or bespoke legal page). Repeat
+    /// runs re-scrape exactly these and merge, instead of re-probing every
+    /// candidate URL. The first URL is also stored in the legacy single-URL field
+    /// so older readers keep working.
+    pub async fn cache_working_urls(&self, domain: &str, urls: &[String]) -> Result<()> {
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let cache_file = self.get_cache_file_path(domain);
+        let mut entry =
+            self.get_cached_entry(domain)
+                .await
+                .unwrap_or_else(|| SubprocessorUrlCacheEntry {
+                    domain: domain.to_string(),
+                    working_subprocessor_url: String::new(),
+                    working_subprocessor_urls: Vec::new(),
+                    last_successful_access: 0,
+                    cache_version: Self::CACHE_VERSION,
+                    extraction_patterns: Some(ExtractionPatterns::default()),
+                    extraction_metadata: None,
+                    trust_center_strategy: None,
+                });
+
+        // De-duplicate while preserving order.
+        let mut deduped: Vec<String> = Vec::with_capacity(urls.len());
+        for u in urls {
+            if !deduped.iter().any(|e| e == u) {
+                deduped.push(u.clone());
+            }
+        }
+        entry.working_subprocessor_url = deduped[0].clone();
+        entry.working_subprocessor_urls = deduped;
+        entry.last_successful_access = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        entry.cache_version = Self::CACHE_VERSION;
+
+        let content = serde_json::to_string_pretty(&entry)?;
+        tokio::fs::write(&cache_file, content).await?;
+        debug!(
+            "Cached {} working subprocessor URL(s) for domain {}",
+            entry.working_subprocessor_urls.len(),
+            domain
+        );
+        Ok(())
+    }
+
+    /// All cached working subprocessor source URLs for a domain (one per source
+    /// category). Falls back to the legacy single-URL field for caches written
+    /// before multi-source support, so older entries still prioritize their URL.
+    pub async fn get_cached_subprocessor_urls(&self, domain: &str) -> Vec<String> {
+        let cache_file = self.get_cache_file_path(domain);
+        if let Ok(content) = tokio::fs::read_to_string(&cache_file).await {
+            if let Ok(entry) = serde_json::from_str::<SubprocessorUrlCacheEntry>(&content) {
+                if entry.cache_version == Self::CACHE_VERSION {
+                    if !entry.working_subprocessor_urls.is_empty() {
+                        return entry.working_subprocessor_urls;
+                    }
+                    if !entry.working_subprocessor_url.is_empty() {
+                        return vec![entry.working_subprocessor_url];
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Update extraction patterns and metadata for a cached domain
@@ -574,6 +768,7 @@ impl SubprocessorCache {
                 .unwrap_or_else(|| SubprocessorUrlCacheEntry {
                     domain: domain.to_string(),
                     working_subprocessor_url: String::new(),
+                    working_subprocessor_urls: Vec::new(),
                     last_successful_access: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -679,6 +874,7 @@ impl SubprocessorCache {
                 SubprocessorUrlCacheEntry {
                     domain: domain.to_string(),
                     working_subprocessor_url: String::new(),
+                    working_subprocessor_urls: Vec::new(),
                     last_successful_access: 0,
                     cache_version: Self::CACHE_VERSION,
                     extraction_patterns: None,
@@ -690,6 +886,7 @@ impl SubprocessorCache {
             SubprocessorUrlCacheEntry {
                 domain: domain.to_string(),
                 working_subprocessor_url: String::new(),
+                working_subprocessor_urls: Vec::new(),
                 last_successful_access: 0,
                 cache_version: Self::CACHE_VERSION,
                 extraction_patterns: None,
@@ -1165,96 +1362,83 @@ impl SubprocessorAnalyzer {
             ));
         }
 
-        // Check if we have a cached working URL for this domain
-        let cached_url = {
-            let cache = self.cache.read().await;
-            cache.get_cached_subprocessor_url(domain).await
-        };
+        // Multi-source subprocessor discovery. A company can disclose its
+        // subprocessors in more than one place — a hosted trust center (often an
+        // SPA on a `trust.` subdomain) and/or a bespoke legal/subprocessors page on
+        // its main site — so we gather one working URL per source category and
+        // merge, rather than returning the first source that yields data. A cached
+        // working URL is tried first as a hint but no longer short-circuits: a
+        // cached source that yields only one category must not hide the other.
 
-        if let Some(url) = cached_url {
-            debug!("Cache hit for domain {}: using cached URL {}", domain, url);
+        // Fast path: re-scrape exactly the source URLs that worked before (one per
+        // category), merge, and return. Falls through to full discovery if the
+        // cached URLs yield nothing (stale cache).
+        let cached_urls = {
+            let cache = self.cache.read().await;
+            cache.get_cached_subprocessor_urls(domain).await
+        };
+        if !cached_urls.is_empty() {
             debug!(
-                "📋 CACHE HIT PATH: Using cached URL for {}: {}",
-                domain, url
+                "📋 CACHE HIT PATH: {} cached source URL(s) for {}",
+                cached_urls.len(),
+                domain
             );
             if let Some(debug_logger) = &debug_logger {
-                debug_logger.log_cache_hit_organization(domain, 1); // Just indicating cache hit
-                debug_logger.debug(&format!("🔗 Using cached URL: {}", url));
-                debug_logger.debug(&format!("🚀 Making HTTP request to cached URL: {}", url));
+                debug_logger.log_cache_hit_organization(domain, cached_urls.len());
             }
-
-            // Always scrape fresh content from cached URL
-            // Apply HTTP rate limiting before the request
-            if let Some(ctx) = rate_limit_ctx {
-                ctx.http_limiter.acquire(domain).await;
-            }
-            let request_start = std::time::Instant::now();
-            debug!(
-                "🔥🔥🔥 CACHED PATH: ABOUT TO CALL scrape_subprocessor_page for: {}",
-                url
-            );
-            match self.scrape_subprocessor_page(&url, logger, domain).await {
-                Ok(subprocessors) => {
-                    let elapsed = request_start.elapsed();
-                    debug!(
-                        "Scraped {} subprocessors from cached URL: {}",
-                        subprocessors.len(),
-                        url
-                    );
-                    if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("✅ HTTP request to cached URL {} completed in {:.2}s (found {} subprocessors)",
-                            url, elapsed.as_secs_f64(), subprocessors.len()));
-                    }
-
-                    // Update the cache access time regardless of whether results are empty
-                    let cache = self.cache.read().await;
-                    if let Err(e) = cache.cache_working_url(domain, &url).await {
-                        debug!("Failed to update cache timestamp for {}: {}", domain, e);
-                    }
-
-                    // Return results even if empty - empty results are valid and should be cached
-                    if !subprocessors.is_empty() {
+            let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
+            for url in &cached_urls {
+                if let Some(ctx) = rate_limit_ctx {
+                    ctx.http_limiter.acquire(domain).await;
+                }
+                match self.scrape_subprocessor_page(url, logger, domain).await {
+                    Ok(subs) if !subs.is_empty() => {
                         debug!(
-                            "Cached URL {} returned {} subprocessors for {}",
+                            "Cached source {} returned {} subprocessors for {}",
                             url,
-                            subprocessors.len(),
+                            subs.len(),
                             domain
                         );
-                    } else {
-                        debug!("Cached URL {} returned no subprocessors for {} (this is valid and cached)", url, domain);
+                        per_source.push((url.clone(), subs));
                     }
-                    return Ok(filter_subprocessor_results(subprocessors));
+                    Ok(_) => {
+                        debug!(
+                            "Cached source {} returned no subprocessors for {}",
+                            url, domain
+                        )
+                    }
+                    Err(e) => debug!("Cached source {} failed for {}: {}", url, domain, e),
                 }
-                Err(e) => {
-                    debug!(
-                        "Cached URL {} failed for {}: {}, will try other URLs",
-                        url, domain, e
-                    );
-                    if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!("❌ Cached URL {} failed: {}", url, e));
-                    }
-                    // Clear the cache for this domain and fall through to URL discovery
-                    let cache = self.cache.read().await;
-                    if let Err(e) = cache.clear_domain_cache(domain).await {
-                        debug!("Failed to clear stale cache for {}: {}", domain, e);
-                    }
-                }
+            }
+            if !per_source.is_empty() {
+                let merged = merge_sourced_subprocessors(per_source);
+                return Ok(filter_subprocessor_results(merged));
+            }
+            // Stale cache: nothing came back. Clear it and fall through to discovery.
+            debug!(
+                "Cached source URLs for {} yielded nothing; clearing and rediscovering",
+                domain
+            );
+            let cache = self.cache.read().await;
+            if let Err(e) = cache.clear_domain_cache(domain).await {
+                debug!("Failed to clear stale cache for {}: {}", domain, e);
             }
         } else {
             debug!("🆕 NO CACHE: Starting URL discovery for {}", domain);
-            if let Some(debug_logger) = debug_logger {
+            if let Some(debug_logger) = &debug_logger {
                 debug_logger.log_cache_miss_organization(domain);
             }
         }
 
-        // URL discovery phase - try a limited number of most promising URLs
-        // Note: Vanta trust center detection happens inside scrape_subprocessor_page
-        // when it detects "assets.vanta.com" in the HTML response
+        // Full discovery: probe candidate URLs, collecting one working source per
+        // category (trust center + bespoke page), then merge across sources.
         let subprocessor_urls = self.generate_subprocessor_urls(domain);
 
-        // Limit URL testing to prevent performance degradation
+        // Limit URL testing to prevent performance degradation. The time budget is
+        // a little wider than a single-source scan because we may render a trust
+        // center AND fetch a bespoke page.
         const MAX_URLS_TO_TEST: usize = 25;
-        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(15);
+        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(20);
 
         let urls_to_test = if subprocessor_urls.len() > MAX_URLS_TO_TEST {
             debug!(
@@ -1282,8 +1466,16 @@ impl SubprocessorAnalyzer {
         );
 
         let analysis_start = std::time::Instant::now();
+        let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
+        let mut working_urls: Vec<String> = Vec::new();
+        let mut categories_done: std::collections::HashSet<SubprocessorSourceCategory> =
+            std::collections::HashSet::new();
+
         for (url_index, url) in urls_to_test.iter().enumerate() {
-            // Check if we've exceeded our time budget
+            // Stop once every source category has yielded a result.
+            if categories_done.len() >= SUBPROCESSOR_SOURCE_CATEGORY_COUNT {
+                break;
+            }
             if analysis_start.elapsed() > MAX_ANALYSIS_TIME {
                 debug!(
                     "Subprocessor analysis time limit exceeded for {}, stopping URL discovery",
@@ -1297,6 +1489,12 @@ impl SubprocessorAnalyzer {
                 }
                 break;
             }
+            // Skip a category we've already satisfied — we only need one working
+            // URL per category, so probing redundant variants is wasted work.
+            let category = subprocessor_source_category(url);
+            if categories_done.contains(&category) {
+                continue;
+            }
             if let Some(debug_logger) = &debug_logger {
                 debug_logger.debug(&format!(
                     "🔗 Checking URL {}/{}: {}",
@@ -1304,15 +1502,11 @@ impl SubprocessorAnalyzer {
                     urls_to_test.len(),
                     url
                 ));
-                debug_logger.debug(&format!("🚀 Making HTTP request to: {}", url));
             }
-
-            // Apply HTTP rate limiting before each request
             if let Some(ctx) = rate_limit_ctx {
                 ctx.http_limiter.acquire(domain).await;
             }
             let request_start = std::time::Instant::now();
-            debug!("🔥🔥🔥 ABOUT TO CALL scrape_subprocessor_page for: {}", url);
             match self.scrape_subprocessor_page(url, logger, domain).await {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
@@ -1321,71 +1515,34 @@ impl SubprocessorAnalyzer {
                         subprocessors.len(),
                         url
                     );
-                    if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!(
-                            "✅ HTTP request to {} completed in {:.2}s (found {} subprocessors)",
-                            url,
-                            elapsed.as_secs_f64(),
-                            subprocessors.len()
-                        ));
-                    }
-
-                    if !subprocessors.is_empty() {
-                        // Only cache URLs that actually found subprocessors
-                        {
-                            let cache = self.cache.read().await;
-                            if let Err(e) = cache.cache_working_url(domain, url).await {
-                                debug!("Failed to cache working URL for {}: {}", domain, e);
-                            } else {
-                                debug!(
-                                    "Successfully cached URL for {}: {} (found {} subprocessors)",
-                                    domain,
-                                    url,
-                                    subprocessors.len()
-                                );
-                            }
-                        }
-                    }
-
                     if !subprocessors.is_empty() {
                         debug!(
-                            "Found working subprocessor URL for {}: {} - stopping URL discovery",
-                            domain, url
+                            "Source {} satisfied category {:?} with {} subprocessors",
+                            url,
+                            category,
+                            subprocessors.len()
                         );
                         if let Some(debug_logger) = &debug_logger {
                             debug_logger.debug(&format!(
-                                "🎯 SUCCESS: Found {} subprocessors, stopping URL discovery",
-                                subprocessors.len()
+                                "✅ {} ({:?}): {} subprocessors in {:.2}s",
+                                url,
+                                category,
+                                subprocessors.len(),
+                                elapsed.as_secs_f64()
                             ));
                         }
-                        return Ok(filter_subprocessor_results(subprocessors));
-                    } else {
-                        // HTTP succeeded but no subprocessors found - continue trying other URLs
-                        debug!("HTTP request to {} succeeded but found 0 subprocessors - continuing to test other URLs", url);
-                        if let Some(debug_logger) = &debug_logger {
-                            debug_logger.debug(&format!(
-                                "✅ No subprocessors found on {} (continuing to next URL)",
-                                url
-                            ));
-                        }
-
-                        // Continue to the next URL instead of returning
-                        continue;
+                        categories_done.insert(category);
+                        working_urls.push(url.clone());
+                        per_source.push((url.clone(), subprocessors));
+                    } else if let Some(debug_logger) = &debug_logger {
+                        debug_logger.debug(&format!(
+                            "✅ No subprocessors found on {} (continuing to next source)",
+                            url
+                        ));
                     }
                 }
                 Err(e) => {
-                    let elapsed = request_start.elapsed();
-                    let error_msg = e.to_string();
-                    debug!("Failed to scrape {}: {}", url, error_msg);
-                    if let Some(debug_logger) = &debug_logger {
-                        debug_logger.debug(&format!(
-                            "❌ HTTP request to {} failed in {:.2}s: {}",
-                            url,
-                            elapsed.as_secs_f64(),
-                            error_msg
-                        ));
-                    }
-
+                    debug!("Failed to scrape {}: {}", url, e);
                     if let Some(logger) = logger {
                         logger.log_failure(
                             domain,
@@ -1399,12 +1556,29 @@ impl SubprocessorAnalyzer {
             }
         }
 
-        // No working subprocessor page found
-        debug!("No subprocessor pages found for domain: {}", domain);
-        Ok(Vec::new())
+        if per_source.is_empty() {
+            debug!("No subprocessor pages found for domain: {}", domain);
+            return Ok(Vec::new());
+        }
+
+        // Cache the working source URLs (one per category) so repeat runs re-scrape
+        // exactly these and stay multi-source without re-probing every candidate.
+        {
+            let cache = self.cache.read().await;
+            if let Err(e) = cache.cache_working_urls(domain, &working_urls).await {
+                debug!("Failed to cache working URLs for {}: {}", domain, e);
+            }
+        }
+
+        // Merge + dedupe across sources, recording provenance in the evidence.
+        let merged = merge_sourced_subprocessors(per_source);
+        Ok(filter_subprocessor_results(merged))
     }
 
-    /// Test-only version: tries generated URLs sequentially without cache/timing/rate-limit logic
+    /// Test-only version: tries generated URLs without cache/timing/rate-limit
+    /// logic, but mirrors production's multi-source behaviour — it gathers one
+    /// working URL per source category (trust center + bespoke page) and merges
+    /// them with provenance, so tests exercise the same collapse/dedup path.
     #[cfg(any(test, coverage))]
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn analyze_domain_with_full_options(
@@ -1415,18 +1589,32 @@ impl SubprocessorAnalyzer {
         _rate_limit_ctx: Option<&RateLimitContext>,
     ) -> Result<Vec<SubprocessorDomain>> {
         let subprocessor_urls = self.generate_subprocessor_urls(domain);
+        let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
+        let mut categories_done: std::collections::HashSet<SubprocessorSourceCategory> =
+            std::collections::HashSet::new();
         for url in &subprocessor_urls {
-            match self
+            if categories_done.len() >= SUBPROCESSOR_SOURCE_CATEGORY_COUNT {
+                break;
+            }
+            let category = subprocessor_source_category(url);
+            if categories_done.contains(&category) {
+                continue;
+            }
+            if let Ok(subprocessors) = self
                 .scrape_subprocessor_page_with_retry(url, logger, domain, None)
                 .await
             {
-                Ok(subprocessors) if !subprocessors.is_empty() => {
-                    return Ok(filter_subprocessor_results(subprocessors));
+                if !subprocessors.is_empty() {
+                    categories_done.insert(category);
+                    per_source.push((url.clone(), subprocessors));
                 }
-                _ => continue,
             }
         }
-        Ok(Vec::new())
+        if per_source.is_empty() {
+            return Ok(Vec::new());
+        }
+        let merged = merge_sourced_subprocessors(per_source);
+        Ok(filter_subprocessor_results(merged))
     }
 
     /// Get a reference to the cache for external access
@@ -4369,64 +4557,10 @@ impl SubprocessorAnalyzer {
         };
         let cleaned = cleaned.to_string();
 
-        // Common organization to domain mappings for tech/SaaS companies
-        let mappings = [
-            // From Klaviyo samples
-            ("ada support", "ada.cx"),
-            ("amazon web services", "aws.amazon.com"),
-            ("chronosphere", "chronosphere.io"),
-            ("cloudflare", "cloudflare.com"),
-            // Common subprocessors
-            ("google", "google.com"),
-            ("microsoft", "microsoft.com"),
-            ("stripe", "stripe.com"),
-            ("twilio", "twilio.com"),
-            ("sendgrid", "sendgrid.com"),
-            ("mailgun", "mailgun.com"),
-            ("hubspot", "hubspot.com"),
-            ("salesforce", "salesforce.com"),
-            ("zendesk", "zendesk.com"),
-            ("slack", "slack.com"),
-            ("zoom", "zoom.us"),
-            ("atlassian", "atlassian.com"),
-            ("github", "github.com"),
-            ("gitlab", "gitlab.com"),
-            ("docker", "docker.com"),
-            ("kubernetes", "kubernetes.io"),
-            ("databricks", "databricks.com"),
-            ("snowflake", "snowflake.com"),
-            ("mongodb", "mongodb.com"),
-            ("redis", "redis.io"),
-            ("elastic", "elastic.co"),
-            ("elasticsearch", "elastic.co"),
-            ("datadog", "datadoghq.com"),
-            ("new relic", "newrelic.com"),
-            ("splunk", "splunk.com"),
-            ("pagerduty", "pagerduty.com"),
-            ("okta", "okta.com"),
-            ("auth0", "auth0.com"),
-            ("onelogin", "onelogin.com"),
-            ("duo security", "duo.com"),
-            ("crowdstrike", "crowdstrike.com"),
-            ("notion", "notion.so"),
-            ("airtable", "airtable.com"),
-            ("zapier", "zapier.com"),
-            ("segment", "segment.com"),
-            ("amplitude", "amplitude.com"),
-            ("mixpanel", "mixpanel.com"),
-            ("intercom", "intercom.com"),
-            ("braze", "braze.com"),
-            ("iterable", "iterable.com"),
-            ("mailchimp", "mailchimp.com"),
-            ("constant contact", "constantcontact.com"),
-            ("campaign monitor", "campaignmonitor.com"),
-        ];
-
-        // Check for direct matches
-        for (org, domain) in &mappings {
-            if cleaned.contains(org) {
-                return Some(domain.to_string());
-            }
+        // Check for a curated org→domain mapping first (covers well-known vendors
+        // disclosed by legal name, e.g. "Cloudflare, Inc.", "Microsoft Corporation").
+        if let Some(domain) = resolve_known_org_to_domain(trimmed) {
+            return Some(domain);
         }
 
         // Only try to infer domains for well-known organization names
@@ -6106,6 +6240,88 @@ pub async fn extract_vendor_domains_with_analyzer_and_logging(
         .await
 }
 
+/// Curated organization-name → domain mappings for well-known vendors. Used to
+/// recover url-less subprocessor disclosures — a bespoke legal/subprocessors page
+/// that lists a company's legal name ("Cloudflare, Inc.") with no link — which
+/// would otherwise be dropped for not looking like a domain. Keys are lowercase,
+/// corporate-suffix-stripped substrings; values are the vendor's canonical domain.
+const KNOWN_ORG_DOMAIN_MAPPINGS: &[(&str, &str)] = &[
+    // From Klaviyo samples
+    ("ada support", "ada.cx"),
+    ("amazon web services", "aws.amazon.com"),
+    ("chronosphere", "chronosphere.io"),
+    ("cloudflare", "cloudflare.com"),
+    // Common subprocessors
+    ("google", "google.com"),
+    ("microsoft", "microsoft.com"),
+    ("stripe", "stripe.com"),
+    ("twilio", "twilio.com"),
+    ("sendgrid", "sendgrid.com"),
+    ("mailgun", "mailgun.com"),
+    ("hubspot", "hubspot.com"),
+    ("salesforce", "salesforce.com"),
+    ("zendesk", "zendesk.com"),
+    ("slack", "slack.com"),
+    ("zoom", "zoom.us"),
+    ("atlassian", "atlassian.com"),
+    ("github", "github.com"),
+    ("gitlab", "gitlab.com"),
+    ("docker", "docker.com"),
+    ("kubernetes", "kubernetes.io"),
+    ("databricks", "databricks.com"),
+    ("snowflake", "snowflake.com"),
+    ("mongodb", "mongodb.com"),
+    ("redis", "redis.io"),
+    ("elastic", "elastic.co"),
+    ("elasticsearch", "elastic.co"),
+    ("datadog", "datadoghq.com"),
+    ("new relic", "newrelic.com"),
+    ("splunk", "splunk.com"),
+    ("pagerduty", "pagerduty.com"),
+    ("okta", "okta.com"),
+    ("auth0", "auth0.com"),
+    ("onelogin", "onelogin.com"),
+    ("duo security", "duo.com"),
+    ("crowdstrike", "crowdstrike.com"),
+    ("notion", "notion.so"),
+    ("airtable", "airtable.com"),
+    ("zapier", "zapier.com"),
+    ("segment", "segment.com"),
+    ("amplitude", "amplitude.com"),
+    ("mixpanel", "mixpanel.com"),
+    ("intercom", "intercom.com"),
+    ("braze", "braze.com"),
+    ("iterable", "iterable.com"),
+    ("mailchimp", "mailchimp.com"),
+    ("constant contact", "constantcontact.com"),
+    ("campaign monitor", "campaignmonitor.com"),
+];
+
+/// Resolve a known organization legal name (e.g. "Cloudflare, Inc.", "Microsoft
+/// Corporation", "Amazon Web Services, Inc.") to its vendor domain via
+/// [`KNOWN_ORG_DOMAIN_MAPPINGS`]. Strips corporate suffixes and matches
+/// case-insensitively. Returns `None` for names not in the curated table, so
+/// unrecognized multi-word org strings stay filtered out rather than resolving to
+/// a guessed (and possibly wrong) domain.
+pub(crate) fn resolve_known_org_to_domain(org_name: &str) -> Option<String> {
+    let suffix_regex = regex::Regex::new(
+        r"(?i),?\s*\b(inc\.?|llc\.?|ltd\.?|l\.?p\.?|corp\.?|corporation|company|co\.?)$",
+    )
+    .ok();
+    let cleaned_str = org_name.trim().replace([',', '.'], "");
+    let cleaned = if let Some(ref re) = suffix_regex {
+        re.replace_all(&cleaned_str, "").trim().to_lowercase()
+    } else {
+        cleaned_str.trim().to_lowercase()
+    };
+    for (org, domain) in KNOWN_ORG_DOMAIN_MAPPINGS {
+        if cleaned.contains(org) {
+            return Some(domain.to_string());
+        }
+    }
+    None
+}
+
 /// Post-process subprocessor extraction results to remove false positives.
 /// Applied as a final filter before returning results from analyze_domain_with_full_options.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -6129,11 +6345,21 @@ pub fn filter_subprocessor_results(vendors: Vec<SubprocessorDomain>) -> Vec<Subp
                     debug!("Filtering invalid org name: {}", clean_org);
                     return None;
                 }
-                // Org names that contain spaces are company legal names (e.g. "Cloudflare, Inc."),
-                // NOT domains. These need org-to-domain resolution downstream, but they must NOT
-                // appear as the domain field in output. Only allow through if it looks like a
-                // plausible domain (no spaces, has a dot).
+                // Org names that contain spaces are company legal names (e.g.
+                // "Cloudflare, Inc."), NOT domains. Before dropping such a url-less
+                // entry — common on bespoke legal/subprocessors pages that list a
+                // company name with no link — try to resolve it to a domain via the
+                // curated known-vendor table. Only recognized vendors resolve, so an
+                // unknown multi-word org is still dropped rather than guessed.
                 if clean_org.contains(' ') || !clean_org.contains('.') {
+                    if let Some(resolved) = resolve_known_org_to_domain(&clean_org) {
+                        debug!(
+                            "Resolved url-less subprocessor org '{}' -> {}",
+                            clean_org, resolved
+                        );
+                        v.domain = resolved;
+                        return Some(v);
+                    }
                     debug!("Filtering org-only entry (not a domain): {}", clean_org);
                     return None;
                 }
@@ -6783,6 +7009,125 @@ mod tests {
         }
     }
 
+    fn make_domain_with_record(domain: &str, raw_record: &str) -> SubprocessorDomain {
+        SubprocessorDomain {
+            domain: domain.to_string(),
+            source_type: RecordType::HttpSubprocessor,
+            raw_record: raw_record.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_subprocessor_source_category_classifies_trust_vs_bespoke() {
+        use SubprocessorSourceCategory::*;
+        assert_eq!(
+            subprocessor_source_category("https://trust.klaviyo.com/subprocessors"),
+            TrustCenter
+        );
+        assert_eq!(
+            subprocessor_source_category("https://trustcenter.example.com/x"),
+            TrustCenter
+        );
+        assert_eq!(
+            subprocessor_source_category("https://trust-center.example.com/x"),
+            TrustCenter
+        );
+        // Bespoke legal/subprocessor pages on the company's own site.
+        assert_eq!(
+            subprocessor_source_category("https://www.klaviyo.com/legal/subprocessors"),
+            BespokePage
+        );
+        assert_eq!(
+            subprocessor_source_category("https://stripe.com/legal/service-providers"),
+            BespokePage
+        );
+        // A vendor literally named "trust..." in the path (not host) is bespoke.
+        assert_eq!(
+            subprocessor_source_category("https://example.com/trust/subprocessors"),
+            BespokePage
+        );
+    }
+
+    #[test]
+    fn test_merge_sourced_subprocessors_unions_and_records_provenance() {
+        // Trust center (21-ish) and legal page (60-ish) overlap on some vendors.
+        let trust = vec![
+            make_domain_with_record("anthropic.com", "Anthropic | AI"),
+            make_domain_with_record("sentry.io", "Sentry | Monitoring"),
+        ];
+        let legal = vec![
+            // Overlaps anthropic.com — must dedupe to one row, both sources recorded.
+            make_domain_with_record("anthropic.com", "Anthropic, PBC | AI Features"),
+            make_domain_with_record("amazon.com", "Amazon Web Services | Hosting"),
+        ];
+        let merged = merge_sourced_subprocessors(vec![
+            ("https://trust.acme.com/subprocessors".to_string(), trust),
+            ("https://acme.com/legal/subprocessors".to_string(), legal),
+        ]);
+
+        // Union, de-duplicated: anthropic (both), sentry (trust), amazon (legal).
+        assert_eq!(merged.len(), 3);
+        let by_domain: std::collections::HashMap<_, _> =
+            merged.iter().map(|e| (e.domain.as_str(), e)).collect();
+
+        // The vendor found on BOTH sources lists both, in first-seen order.
+        let anthropic = by_domain["anthropic.com"];
+        assert!(anthropic.raw_record.contains("Sources:"));
+        assert!(anthropic
+            .raw_record
+            .contains("https://trust.acme.com/subprocessors"));
+        assert!(anthropic
+            .raw_record
+            .contains("https://acme.com/legal/subprocessors"));
+        // Richer base evidence is preserved (the longer legal-page record).
+        assert!(anthropic.raw_record.contains("Anthropic, PBC"));
+
+        // A single-source vendor uses the singular "Source:" label.
+        let amazon = by_domain["amazon.com"];
+        assert!(amazon.raw_record.contains("Source:"));
+        assert!(!amazon.raw_record.contains("Sources:"));
+        assert!(amazon
+            .raw_record
+            .contains("https://acme.com/legal/subprocessors"));
+
+        // Detection source stays the generic "Subprocessor Page" type.
+        assert!(merged
+            .iter()
+            .all(|e| e.source_type == RecordType::HttpSubprocessor));
+    }
+
+    #[test]
+    fn test_merge_sourced_subprocessors_case_insensitive_dedup() {
+        let a = vec![make_domain_with_record("Cloudflare.com", "from A")];
+        let b = vec![make_domain_with_record("cloudflare.com", "from B")];
+        let merged = merge_sourced_subprocessors(vec![
+            ("source-A".to_string(), a),
+            ("source-B".to_string(), b),
+        ]);
+        assert_eq!(merged.len(), 1, "case-different domains must dedupe");
+        assert!(merged[0].raw_record.contains("source-A"));
+        assert!(merged[0].raw_record.contains("source-B"));
+    }
+
+    #[test]
+    fn test_format_subprocessor_provenance_shapes() {
+        assert_eq!(
+            format_subprocessor_provenance("evidence", &["urlA".to_string()]),
+            "evidence — Source: urlA"
+        );
+        assert_eq!(
+            format_subprocessor_provenance("evidence", &["a".to_string(), "b".to_string()]),
+            "evidence — Sources: a; b"
+        );
+        // Empty base evidence -> just the source line.
+        assert_eq!(
+            format_subprocessor_provenance("", &["only".to_string()]),
+            "Source: only"
+        );
+        // No sources -> unchanged (trimmed).
+        assert_eq!(format_subprocessor_provenance("  ev  ", &[]), "ev");
+    }
+
     #[test]
     fn test_static_lazy_selectors_initialized() {
         // Ensure static Lazy CSS selectors are initialized (exercises Lazy::new closures)
@@ -6795,16 +7140,57 @@ mod tests {
 
     #[test]
     fn test_filter_org_prefix_spaces_rejected() {
-        let vendors = vec![make_domain("_org:Cloudflare, Inc.")];
+        // An UNKNOWN multi-word org name (not in the curated vendor table) is still
+        // dropped — it isn't a domain and can't be safely resolved.
+        let vendors = vec![make_domain("_org:Obscure Vendor Partners, Inc.")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Org with spaces should be filtered");
+        assert!(
+            result.is_empty(),
+            "Unknown org with spaces should be filtered"
+        );
     }
 
     #[test]
     fn test_filter_org_prefix_no_dot_rejected() {
-        let vendors = vec![make_domain("_org:Cloudflare")];
+        // An UNKNOWN single-word org with no dot is still dropped.
+        let vendors = vec![make_domain("_org:Obscurevendorxyz")];
         let result = filter_subprocessor_results(vendors);
-        assert!(result.is_empty(), "Org without dot should be filtered");
+        assert!(
+            result.is_empty(),
+            "Unknown org without dot should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_filter_org_prefix_resolves_known_vendor_names() {
+        // Url-less subprocessor disclosures (a bespoke legal page listing a company
+        // by legal name with no link) for KNOWN vendors now resolve to a domain
+        // instead of being dropped — the klaviyo.com/legal/subprocessors case.
+        let cases = [
+            ("_org:Cloudflare, Inc.", "cloudflare.com"),
+            ("_org:Microsoft Corporation", "microsoft.com"),
+            ("_org:Amazon Web Services, Inc.", "aws.amazon.com"),
+            ("_org:Cloudflare", "cloudflare.com"),
+        ];
+        for (input, expected) in cases {
+            let result = filter_subprocessor_results(vec![make_domain(input)]);
+            assert_eq!(result.len(), 1, "{input} should resolve, not drop");
+            assert_eq!(result[0].domain, expected, "for {input}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_known_org_to_domain_units() {
+        assert_eq!(
+            resolve_known_org_to_domain("Cloudflare, Inc."),
+            Some("cloudflare.com".to_string())
+        );
+        assert_eq!(
+            resolve_known_org_to_domain("Microsoft Corporation"),
+            Some("microsoft.com".to_string())
+        );
+        // Unknown vendors are not guessed.
+        assert_eq!(resolve_known_org_to_domain("Totally Unknown Co, LLC"), None);
     }
 
     #[test]
@@ -8398,6 +8784,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "old.com".to_string(),
             working_subprocessor_url: "https://old.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 12345,
             cache_version: 999, // Wrong version
             extraction_patterns: None,
@@ -10492,6 +10879,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "test.com".to_string(),
             working_subprocessor_url: "https://test.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 12345,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns::default()),
@@ -13733,6 +14121,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "test.com".to_string(),
             working_subprocessor_url: "https://test.com/subprocessors".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1000,
             cache_version: SubprocessorCache::CACHE_VERSION,
             extraction_patterns: Some(ExtractionPatterns {
@@ -14261,6 +14650,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "cached-test.com".to_string(),
             working_subprocessor_url: server.uri(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -14307,6 +14697,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "logged.com".to_string(),
             working_subprocessor_url: server.uri(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -14353,6 +14744,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "failing.com".to_string(),
             working_subprocessor_url: server.uri(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -14577,6 +14969,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "customrules.com".to_string(),
             working_subprocessor_url: String::new(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 0,
             cache_version: SubprocessorCache::CACHE_VERSION,
             extraction_patterns: Some(ExtractionPatterns {
@@ -14891,6 +15284,7 @@ mod tests {
         let entry = SubprocessorUrlCacheEntry {
             domain: "existing.com".to_string(),
             working_subprocessor_url: "https://existing.com/sp".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1000,
             cache_version: SubprocessorCache::CACHE_VERSION,
             extraction_patterns: None,
@@ -15098,6 +15492,66 @@ mod tests {
         let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
         let url = cache.get_cached_subprocessor_url("uncached.com").await;
         assert!(url.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cache_working_urls_multi_source_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
+        // Empty input is a no-op.
+        cache.cache_working_urls("multi.com", &[]).await.unwrap();
+        assert!(cache
+            .get_cached_subprocessor_urls("multi.com")
+            .await
+            .is_empty());
+
+        // Cache one URL per source category, with a duplicate to verify de-dup.
+        let urls = vec![
+            "https://trust.multi.com/subprocessors".to_string(),
+            "https://multi.com/legal/subprocessors".to_string(),
+            "https://trust.multi.com/subprocessors".to_string(),
+        ];
+        cache.cache_working_urls("multi.com", &urls).await.unwrap();
+        let got = cache.get_cached_subprocessor_urls("multi.com").await;
+        assert_eq!(
+            got,
+            vec![
+                "https://trust.multi.com/subprocessors".to_string(),
+                "https://multi.com/legal/subprocessors".to_string(),
+            ]
+        );
+        // The legacy single-URL field is the first working URL.
+        assert_eq!(
+            cache.get_cached_subprocessor_url("multi.com").await,
+            Some("https://trust.multi.com/subprocessors".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_cached_subprocessor_urls_falls_back_to_single() {
+        // A pre-existing cache that only has the legacy single-URL field (no
+        // working_subprocessor_urls) still yields that URL via the multi-source
+        // getter — back-compat for caches written before multi-source support.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache::new_with_dir(tmp.path().to_path_buf());
+        let legacy = SubprocessorUrlCacheEntry {
+            domain: "legacy.com".to_string(),
+            working_subprocessor_url: "https://legacy.com/subs".to_string(),
+            working_subprocessor_urls: Vec::new(), // legacy: empty
+            last_successful_access: 1,
+            cache_version: SubprocessorCache::CACHE_VERSION,
+            extraction_patterns: None,
+            extraction_metadata: None,
+            trust_center_strategy: None,
+        };
+        let path = cache.get_cache_file_path("legacy.com");
+        tokio::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.get_cached_subprocessor_urls("legacy.com").await,
+            vec!["https://legacy.com/subs".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -16936,15 +17390,17 @@ The following third-party sub-processors are engaged:
 
     #[test]
     fn test_filter_subprocessor_results_org_prefix_with_spaces_no_dot() {
+        // An UNKNOWN org name with spaces and no dot is not a domain and isn't in
+        // the curated vendor table, so it's still filtered out.
         let vendors = vec![SubprocessorDomain {
-            domain: "_org:Cloudflare Inc".to_string(),
+            domain: "_org:Obscure Vendor Partners".to_string(),
             source_type: RecordType::HttpSubprocessor,
             raw_record: "test".to_string(),
         }];
         let result = filter_subprocessor_results(vendors);
         assert!(
             result.is_empty(),
-            "Should filter org names with spaces (not domains) that lack dots"
+            "Should filter unknown org names with spaces (not domains) that lack dots"
         );
     }
 
@@ -21558,6 +22014,7 @@ Suite 200</td></tr>
         let entry = SubprocessorUrlCacheEntry {
             domain: "example.com".to_string(),
             working_subprocessor_url: "https://example.com/subprocessors".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1700000000,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns::default()),
@@ -21727,6 +22184,7 @@ Suite 200</td></tr>
         let entry = SubprocessorUrlCacheEntry {
             domain: "stripe.com".to_string(),
             working_subprocessor_url: "https://stripe.com/legal/service-providers".to_string(),
+            working_subprocessor_urls: Vec::new(),
             last_successful_access: 1700000000,
             cache_version: 2,
             extraction_patterns: Some(ExtractionPatterns::default()),
