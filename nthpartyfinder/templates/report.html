@@ -38,6 +38,18 @@
             position: relative;
         }
 
+        /* Atomic theme switch — while toggling, suppress every transition so the
+           whole page flips light<->dark in a single frame. Without this, elements
+           transition at different rates/properties (body background 0.25s, cards
+           instant, "transition: all 0.2s" elsewhere), which renders a visibly
+           partial transition between modes. */
+        html.theme-switching,
+        html.theme-switching *,
+        html.theme-switching *::before,
+        html.theme-switching *::after {
+            transition: none !important;
+        }
+
         /* Ambient engineering backdrop: node-graph canvas + blueprint dot grid + fusion ink glow */
         #ng-bg {
             position: fixed;
@@ -776,19 +788,37 @@
 
             function resolve(choice) { return choice === 'system' ? (mq && mq.matches ? 'dark' : 'light') : choice; }
             function apply(choice) {
+                // Flip the theme atomically: disable transitions, change the
+                // attribute, commit a reflow, then restore transitions on the next
+                // frame. This stops a partial transition where the background,
+                // cards, and chrome would otherwise switch at different rates.
+                root.classList.add('theme-switching');
                 root.setAttribute('data-theme', resolve(choice));
                 root.setAttribute('data-theme-choice', choice);
                 if (iconEl) iconEl.textContent = icons[choice];
                 if (labelEl) labelEl.textContent = choice.toUpperCase();
                 try { localStorage.setItem('grc-theme', choice); } catch (e) {}
+                void root.offsetWidth; // force reflow so 'transition: none' is committed
+                requestAnimationFrame(function () {
+                    requestAnimationFrame(function () { root.classList.remove('theme-switching'); });
+                });
+            }
+            // Repaint the static (reduced-motion) backdrop after a theme change so
+            // its node colors match the new theme. The animated backdrop re-reads
+            // the theme every frame, so this is a no-op there.
+            function redrawBackdrop() {
+                try { if (reduce && ctx) { resize(); draw(); } } catch (e) {}
             }
             var current = root.getAttribute('data-theme-choice') || 'system';
             apply(current);
             if (btn) btn.addEventListener('click', function () {
                 current = order[(order.indexOf(current) + 1) % order.length];
                 apply(current);
+                redrawBackdrop();
             });
-            if (mq) mq.addEventListener('change', function () { if ((root.getAttribute('data-theme-choice') || 'system') === 'system') apply('system'); });
+            if (mq) mq.addEventListener('change', function () {
+                if ((root.getAttribute('data-theme-choice') || 'system') === 'system') { apply('system'); redrawBackdrop(); }
+            });
 
             // ---- Ambient node-graph backdrop ----
             var canvas = document.getElementById('ng-bg');
