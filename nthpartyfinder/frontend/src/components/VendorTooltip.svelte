@@ -1,5 +1,6 @@
 <script lang="ts">
   import { formatRecordType, type DiscoverySource } from '../lib/transform';
+  import { icons } from '../lib/icons';
 
   let {
     domain,
@@ -47,7 +48,7 @@
       {#if organization && organization !== domain}
         <div class="tooltip-org">{organization}</div>
       {/if}
-      <button class="close-btn" onclick={close}>×</button>
+      <button class="close-btn" onclick={close} aria-label="Close">{@html icons.x}</button>
     </div>
 
     <div class="tooltip-content">

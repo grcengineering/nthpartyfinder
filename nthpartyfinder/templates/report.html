@@ -31,6 +31,33 @@
     <!-- Report-specific styling — maps every report component onto GRC Engineering design tokens -->
     <style>
         /* ============================================================
+           ICONS — GRCE Design System icon set (Lucide, 1.75 stroke).
+           Embedded as an inline <symbol> sprite (see start of <body>);
+           fully offline, no CDN. Icons inherit text color via
+           currentColor and scale with font-size (1em).
+           ============================================================ */
+        :root {
+            --ic-chevrons-up-down: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%222.25%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%3E%3Cpath%20d=%22m7%2015%205%205%205-5%22%20/%3E%3Cpath%20d=%22m7%209%205-5%205%205%22%20/%3E%3C/svg%3E");
+            --ic-chevron-up: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%222.25%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%3E%3Cpath%20d=%22m18%2015-6-6-6%206%22%20/%3E%3C/svg%3E");
+            --ic-chevron-down: url("data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20stroke=%22%23000%22%20stroke-width=%222.25%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22%3E%3Cpath%20d=%22m6%209%206%206%206-6%22%20/%3E%3C/svg%3E");
+        }
+        .lucide-icon {
+            display: inline-block;
+            width: 1em;
+            height: 1em;
+            vertical-align: -0.125em;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.75;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+        }
+        .lucide-icon.lucide-spin { animation: lucide-spin 0.9s linear infinite; transform-origin: center; }
+        @keyframes lucide-spin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) { .lucide-icon.lucide-spin { animation: none; } }
+
+        /* ============================================================
            LAYOUT
            ============================================================ */
         body {
@@ -343,9 +370,22 @@
             transition: background-color 0.2s ease, color 0.2s ease;
         }
         .data-table th:hover { background: var(--surface-inset); color: var(--text-strong); }
-        .data-table th.sortable::after { content: ' ↕'; opacity: 0.4; }
-        .data-table th.sorted-asc::after { content: ' ↑'; opacity: 1; color: var(--brand-accent); }
-        .data-table th.sorted-desc::after { content: ' ↓'; opacity: 1; color: var(--brand-accent); }
+        .data-table th.sortable::after,
+        .data-table th.sorted-asc::after,
+        .data-table th.sorted-desc::after {
+            content: '';
+            display: inline-block;
+            width: 1em;
+            height: 1em;
+            margin-left: 0.25em;
+            vertical-align: -0.125em;
+            background-color: currentColor;
+            -webkit-mask: center / contain no-repeat;
+            mask: center / contain no-repeat;
+        }
+        .data-table th.sortable::after { -webkit-mask-image: var(--ic-chevrons-up-down); mask-image: var(--ic-chevrons-up-down); opacity: 0.4; }
+        .data-table th.sorted-asc::after { -webkit-mask-image: var(--ic-chevron-up); mask-image: var(--ic-chevron-up); background-color: var(--brand-accent); opacity: 1; }
+        .data-table th.sorted-desc::after { -webkit-mask-image: var(--ic-chevron-down); mask-image: var(--ic-chevron-down); background-color: var(--brand-accent); opacity: 1; }
         .data-table tbody tr { transition: background-color 0.15s ease; }
         .data-table tbody tr:hover { background: var(--surface-sunken); }
         .data-table td code { font-family: var(--font-mono); font-size: var(--text-2xs); max-width: 300px; display: inline-block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; color: var(--text-body); }
@@ -588,11 +628,13 @@
     </style>
 </head>
 <body>
+    <!-- GRCE Design System icon set (Lucide v0.544.0) — inline sprite, offline. Referenced via <use href="#ic-NAME">. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><symbol id="ic-search" viewBox="0 0 24 24"><path d="m21 21-4.34-4.34" /><circle cx="11" cy="11" r="8" /></symbol><symbol id="ic-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" /><path d="M2 12h20" /></symbol><symbol id="ic-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></symbol><symbol id="ic-external-link" viewBox="0 0 24 24"><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /></symbol><symbol id="ic-circle-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="m9 12 2 2 4-4" /></symbol><symbol id="ic-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol><symbol id="ic-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></symbol><symbol id="ic-clipboard-list" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="2" rx="1" ry="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="M12 11h4" /><path d="M12 16h4" /><path d="M8 11h.01" /><path d="M8 16h.01" /></symbol><symbol id="ic-circle-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" /><path d="m15 9-6 6" /><path d="m9 9 6 6" /></symbol><symbol id="ic-x" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></symbol><symbol id="ic-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" /></symbol><symbol id="ic-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2v2" /><path d="M12 20v2" /><path d="m4.93 4.93 1.41 1.41" /><path d="m17.66 17.66 1.41 1.41" /><path d="M2 12h2" /><path d="M20 12h2" /><path d="m6.34 17.66-1.41 1.41" /><path d="m19.07 4.93-1.41 1.41" /></symbol><symbol id="ic-moon" viewBox="0 0 24 24"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401" /></symbol><symbol id="ic-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></symbol><symbol id="ic-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></symbol><symbol id="ic-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></symbol><symbol id="ic-download" viewBox="0 0 24 24"><path d="M12 15V3" /><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /></symbol><symbol id="ic-trophy" viewBox="0 0 24 24"><path d="M10 14.66v1.626a2 2 0 0 1-.976 1.696A5 5 0 0 0 7 21.978" /><path d="M14 14.66v1.626a2 2 0 0 0 .976 1.696A5 5 0 0 1 17 21.978" /><path d="M18 9h1.5a1 1 0 0 0 0-5H18" /><path d="M4 22h16" /><path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /><path d="M6 9H4.5a1 1 0 0 1 0-5H6" /></symbol><symbol id="ic-mail" viewBox="0 0 24 24"><path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7" /><rect x="2" y="4" width="20" height="16" rx="2" /></symbol><symbol id="ic-network" viewBox="0 0 24 24"><rect x="16" y="16" width="6" height="6" rx="1" /><rect x="2" y="16" width="6" height="6" rx="1" /><rect x="9" y="2" width="6" height="6" rx="1" /><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" /><path d="M12 12V8" /></symbol><symbol id="ic-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" /><path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M10 9H8" /><path d="M16 13H8" /><path d="M16 17H8" /></symbol><symbol id="ic-command" viewBox="0 0 24 24"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3" /></symbol><symbol id="ic-app-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2" /><path d="M10 4v4" /><path d="M2 8h20" /><path d="M6 4v4" /></symbol><symbol id="ic-terminal" viewBox="0 0 24 24"><path d="M12 19h8" /><path d="m4 17 6-6-6-6" /></symbol><symbol id="ic-lightbulb" viewBox="0 0 24 24"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5" /><path d="M9 18h6" /><path d="M10 22h4" /></symbol><symbol id="ic-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" /><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2" /><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2" /><path d="M10 6h4" /><path d="M10 10h4" /><path d="M10 14h4" /><path d="M10 18h4" /></symbol><symbol id="ic-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></symbol><symbol id="ic-chevrons-up-down" viewBox="0 0 24 24"><path d="m7 15 5 5 5-5" /><path d="m7 9 5-5 5 5" /></symbol><symbol id="ic-chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6" /></symbol><symbol id="ic-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol><symbol id="ic-loader-circle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></symbol></svg>
     <canvas id="ng-bg" aria-hidden="true"></canvas>
     <div class="ng-overlay" aria-hidden="true"></div>
 
     <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme" title="Theme: light / dark / system">
-        <span class="tt-icon" id="tt-icon">◐</span>
+        <span class="tt-icon" id="tt-icon"><svg class="lucide-icon" aria-hidden="true" focusable="false"><use href="#ic-monitor"></use></svg></span>
         <span id="tt-label">SYSTEM</span>
     </button>
 
@@ -775,7 +817,7 @@
         (function () {
             // ---- Theme toggle: cycle light -> dark -> system ----
             var order = ['light', 'dark', 'system'];
-            var icons = { light: '☀', dark: '☾', system: '◐' };
+            var icons = { light: 'sun', dark: 'moon', system: 'monitor' };
             var root = document.documentElement;
             var btn = document.getElementById('theme-toggle');
             var iconEl = document.getElementById('tt-icon');
@@ -791,7 +833,7 @@
                 root.classList.add('theme-switching');
                 root.setAttribute('data-theme', resolve(choice));
                 root.setAttribute('data-theme-choice', choice);
-                if (iconEl) iconEl.textContent = icons[choice];
+                if (iconEl) iconEl.innerHTML = '<svg class="lucide-icon" aria-hidden="true" focusable="false"><use href="#ic-' + icons[choice] + '"></use></svg>';
                 if (labelEl) labelEl.textContent = choice.toUpperCase();
                 try { localStorage.setItem('grc-theme', choice); } catch (e) {}
                 void root.offsetWidth; // force reflow so 'transition: none' is committed
@@ -889,6 +931,37 @@
         // (DNS::TXT::SPF) and serde variant name (DnsTxtSpf).
         // SAFETY(C003): serialized by serde_json (proper escaping) in a <script> JSON context.
         const RECORD_TYPE_LABELS = {{ record_type_labels_json|safe }};
+
+        // --- GRCE Design System icons (Lucide). Render glyphs from the inline
+        // sprite via <use href="#ic-NAME">. lucideIcon() returns markup;
+        // lucideIconEl() returns a DOM node; setIconText()/createIconTextElement()
+        // build "icon + text" safely (text via text nodes, never innerHTML). ---
+        const SVG_NS = 'http://www.w3.org/2000/svg';
+        function lucideIcon(name) {
+            return '<svg class="lucide-icon" aria-hidden="true" focusable="false"><use href="#ic-' + name + '"></use></svg>';
+        }
+        function lucideIconEl(name) {
+            const svg = document.createElementNS(SVG_NS, 'svg');
+            svg.setAttribute('class', 'lucide-icon');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.setAttribute('focusable', 'false');
+            const use = document.createElementNS(SVG_NS, 'use');
+            use.setAttribute('href', '#ic-' + name);
+            svg.appendChild(use);
+            return svg;
+        }
+        function setIconText(el, name, text) {
+            el.textContent = '';
+            el.appendChild(lucideIconEl(name));
+            el.appendChild(document.createTextNode(' ' + text));
+        }
+        function createIconTextElement(tag, name, text, className) {
+            const el = document.createElement(tag);
+            el.appendChild(lucideIconEl(name));
+            el.appendChild(document.createTextNode(' ' + text));
+            if (className) el.className = className;
+            return el;
+        }
 
         let currentSortColumn = {};
 
@@ -992,7 +1065,7 @@
             // Previous button
             const prevBtn = document.createElement('button');
             prevBtn.className = 'pagination-btn';
-            prevBtn.textContent = '← Previous';
+            setIconText(prevBtn, 'arrow-left', 'Previous');
             prevBtn.onclick = () => goToPage(tableId, state.currentPage - 1);
             paginationDiv.appendChild(prevBtn);
 
@@ -1005,7 +1078,8 @@
             // Next button
             const nextBtn = document.createElement('button');
             nextBtn.className = 'pagination-btn';
-            nextBtn.textContent = 'Next →';
+            nextBtn.textContent = 'Next ';
+            nextBtn.appendChild(lucideIconEl('arrow-right'));
             nextBtn.onclick = () => goToPage(tableId, state.currentPage + 1);
             paginationDiv.appendChild(nextBtn);
 
@@ -1106,7 +1180,7 @@
             // Get headers
             const headers = [];
             table.querySelectorAll('thead th').forEach(th => {
-                headers.push(escapeCSVField(th.textContent.trim().replace(/[↕️↑↓]/g, '').trim()));
+                headers.push(escapeCSVField(th.textContent.trim()));
             });
             rows.push(headers.join(','));
 
@@ -1166,7 +1240,7 @@
             // Add export button
             const exportBtn = document.createElement('button');
             exportBtn.className = 'export-btn';
-            exportBtn.innerHTML = '📥 Export CSV';
+            exportBtn.innerHTML = lucideIcon('download') + ' Export CSV';
             exportBtn.onclick = () => exportTableToCSV(tableId, exportFilename);
             toolbar.appendChild(exportBtn);
         }
@@ -1240,25 +1314,25 @@
 
             const insights = [
                 {
-                    icon: '🏆',
+                    icon: 'trophy',
                     title: 'Most Common Vendor',
                     value: mostCommonVendor ? mostCommonVendor[0] : 'N/A',
                     subtitle: mostCommonVendor ? `${mostCommonVendor[1]} relationships` : ''
                 },
                 {
-                    icon: '🔗',
+                    icon: 'link',
                     title: 'Deepest Vendor Chain',
                     value: `${deepestLayer} layers`,
                     subtitle: `${vendorsByLayer[deepestLayer] || 0} vendors at this depth`
                 },
                 {
-                    icon: '📧',
+                    icon: 'mail',
                     title: 'Email Service Providers',
                     value: new Set(spfVendors).size,
                     subtitle: 'Unique SPF domains'
                 },
                 {
-                    icon: '✅',
+                    icon: 'circle-check',
                     title: 'Verified Services',
                     value: new Set(verificationVendors).size,
                     subtitle: 'Domain verifications'
@@ -1267,7 +1341,7 @@
 
             if (subprocessorVendors.length > 0) {
                 insights.push({
-                    icon: '🔄',
+                    icon: 'building-2',
                     title: 'Subprocessors',
                     value: new Set(subprocessorVendors).size,
                     subtitle: 'From subprocessor pages'
@@ -1280,7 +1354,7 @@
 
                 const iconDiv = document.createElement('div');
                 iconDiv.className = 'insight-icon';
-                iconDiv.textContent = insight.icon;
+                iconDiv.appendChild(lucideIconEl(insight.icon));
 
                 const titleDiv = document.createElement('div');
                 titleDiv.className = 'insight-title';
@@ -1328,7 +1402,7 @@
                     let attempts = 0;
                     function tryLoadVis() {
                         if (attempts >= cdnUrls.length) {
-                            loadingIndicator.innerHTML = '<div style="color: orange; text-align: center; padding: 2rem;"><h3>📊 Network Visualization Unavailable</h3><p>The interactive graph requires an internet connection to load the visualization library.</p><p style="margin-top: 1rem;"><strong>Don\'t worry!</strong> All the data is still available in the sortable tables below.</p><button class="btn btn-primary" onclick="location.reload()" style="margin-top: 1rem;">🔄 Try Again</button></div>';
+                            loadingIndicator.innerHTML = '<div style="color: orange; text-align: center; padding: 2rem;"><h3>' + lucideIcon('network') + ' Network Visualization Unavailable</h3><p>The interactive graph requires an internet connection to load the visualization library.</p><p style="margin-top: 1rem;"><strong>Don\'t worry!</strong> All the data is still available in the sortable tables below.</p><button class="btn btn-primary" onclick="location.reload()" style="margin-top: 1rem;">' + lucideIcon('refresh-cw') + ' Try Again</button></div>';
                             return;
                         }
                         
@@ -1390,10 +1464,10 @@
                 const rootChildCount = window.relationshipsByParent[summary.root_domain] ? window.relationshipsByParent[summary.root_domain].length : 0;
                 const rootNode = {
                     id: summary.root_domain,
-                    label: summary.root_domain + '\n(' + summary.root_organization + ')' + (rootChildCount > 0 ? '\n▼ ' + rootChildCount + ' vendors' : ''),
+                    label: summary.root_domain + '\n(' + summary.root_organization + ')' + (rootChildCount > 0 ? '\n' + rootChildCount + ' vendors' : ''),
                     group: 'root',
                     level: 0,
-                    title: 'Root Domain: ' + summary.root_domain + '<br>Organization: ' + summary.root_organization + (rootChildCount > 0 ? '<br><br>Click to expand ' + rootChildCount + ' vendors ▼' : ''),
+                    title: 'Root Domain: ' + summary.root_domain + '<br>Organization: ' + summary.root_organization + (rootChildCount > 0 ? '<br><br>Click to expand ' + rootChildCount + ' vendors' : ''),
                     hasChildren: rootChildCount > 0,
                     expanded: false
                 };
@@ -1416,10 +1490,10 @@
                         const hasChildren = childCount > 0;
                         const nodeData = {
                             id: rel.nth_party_domain,
-                            label: rel.nth_party_domain + '\n(' + rel.nth_party_organization + ')' + (hasChildren ? '\n▼ ' + childCount + ' vendors' : ''),
+                            label: rel.nth_party_domain + '\n(' + rel.nth_party_organization + ')' + (hasChildren ? '\n' + childCount + ' vendors' : ''),
                             group: 'layer' + rel.nth_party_layer,
                             level: rel.nth_party_layer,
-                            title: 'Domain: ' + rel.nth_party_domain + '<br>Organization: ' + rel.nth_party_organization + '<br>Layer: ' + rel.nth_party_layer + (hasChildren ? '<br><br>Click to expand ' + childCount + ' vendors ▼' : ''),
+                            title: 'Domain: ' + rel.nth_party_domain + '<br>Organization: ' + rel.nth_party_organization + '<br>Layer: ' + rel.nth_party_layer + (hasChildren ? '<br><br>Click to expand ' + childCount + ' vendors' : ''),
                             hasChildren: hasChildren,
                             expanded: false
                         };
@@ -1436,7 +1510,7 @@
                             label: rel.nth_party_customer_domain,
                             group: customerLevel === 0 ? 'root' : 'layer' + customerLevel,
                             level: customerLevel,
-                            title: 'Customer Domain: ' + rel.nth_party_customer_domain + (hasChildren ? '<br><br>Click to expand vendors ▼' : ''),
+                            title: 'Customer Domain: ' + rel.nth_party_customer_domain + (hasChildren ? '<br><br>Click to expand vendors' : ''),
                             hasChildren: hasChildren,
                             expanded: false
                         };
@@ -1792,7 +1866,7 @@
                 : `[${totalChildren} vendors]`;
             const updatedNode = {
                 ...node,
-                title: node.title.replace('Click to expand vendors ▼', `Click to collapse ${totalChildren} vendors ▲`),
+                title: node.title.replace('Click to expand vendors', `Click to collapse ${totalChildren} vendors`),
                 expanded: true,
                 label: node.label.includes('[') ? node.label.replace(/\[.*vendors\]/, shownText) : node.label + `\n${shownText}`
             };
@@ -1889,7 +1963,7 @@
             const cleanLabel = node.label.replace(/\n\[[\d\/]+ vendors\]/, '');
             const updatedNode = {
                 ...node,
-                title: node.title.replace(`Click to collapse ${childCount} vendors ▲`, 'Click to expand vendors ▼'),
+                title: node.title.replace(`Click to collapse ${childCount} vendors`, 'Click to expand vendors'),
                 expanded: false,
                 label: cleanLabel
             };
@@ -2323,7 +2397,7 @@
             // Evidence section
             const evidenceSection = document.createElement('div');
             evidenceSection.className = 'evidence-section';
-            const evidenceTitle = createTextElement('div', '📋 Full Evidence', 'evidence-section-title');
+            const evidenceTitle = createIconTextElement('div', 'clipboard-list', 'Full Evidence', 'evidence-section-title');
             const evidenceContent = createTextElement('div', rel.evidence, 'evidence-content');
             evidenceSection.appendChild(evidenceTitle);
             evidenceSection.appendChild(evidenceContent);
@@ -2332,7 +2406,7 @@
             // Record value section
             const recordSection = document.createElement('div');
             recordSection.className = 'evidence-section';
-            const recordTitle = createTextElement('div', '📄 Record Value', 'evidence-section-title');
+            const recordTitle = createIconTextElement('div', 'file-text', 'Record Value', 'evidence-section-title');
             const recordContent = createTextElement('div', rel.nth_party_record, 'evidence-content');
             recordSection.appendChild(recordTitle);
             recordSection.appendChild(recordContent);
@@ -2341,7 +2415,7 @@
             // Validation section
             const validationSection = document.createElement('div');
             validationSection.className = 'validation-section';
-            const validationTitle = createTextElement('div', '🔍 Validate This Evidence', 'evidence-section-title');
+            const validationTitle = createIconTextElement('div', 'search', 'Validate This Evidence', 'evidence-section-title');
             validationSection.appendChild(validationTitle);
 
             const validationDesc = createTextElement('p', 'Verify this finding yourself using the commands below. Select your platform:');
@@ -2353,17 +2427,19 @@
             tabsContainer.className = 'validation-tabs';
 
             const platforms = [
-                { id: 'browser', icon: '🌐', label: 'Browser', active: true },
-                { id: 'macos', icon: '🍎', label: 'macOS', active: false },
-                { id: 'windows', icon: '🪟', label: 'Windows', active: false },
-                { id: 'linux', icon: '🐧', label: 'Linux', active: false }
+                { id: 'browser', icon: 'globe', label: 'Browser', active: true },
+                { id: 'macos', icon: 'command', label: 'macOS', active: false },
+                { id: 'windows', icon: 'app-window', label: 'Windows', active: false },
+                { id: 'linux', icon: 'terminal', label: 'Linux', active: false }
             ];
 
             platforms.forEach(platform => {
                 const tab = document.createElement('button');
                 tab.className = 'validation-tab' + (platform.active ? ' active' : '');
                 tab.onclick = function() { showValidationTab(this, platform.id + '-' + relationshipIndex); };
-                const iconSpan = createTextElement('span', platform.icon, 'validation-tab-icon');
+                const iconSpan = document.createElement('span');
+                iconSpan.className = 'validation-tab-icon';
+                iconSpan.appendChild(lucideIconEl(platform.icon));
                 tab.appendChild(iconSpan);
                 tab.appendChild(document.createTextNode(' ' + platform.label));
                 tabsContainer.appendChild(tab);
@@ -2424,7 +2500,7 @@
 
             const copyBtn = document.createElement('button');
             copyBtn.className = 'validation-copy-btn';
-            copyBtn.textContent = '📋 Copy';
+            setIconText(copyBtn, 'copy', 'Copy');
             copyBtn.onclick = function() { copyCommand(this); };
             header.appendChild(copyBtn);
 
@@ -2452,7 +2528,7 @@
 
             const title = document.createElement('div');
             title.className = 'browser-validation-title';
-            title.textContent = '🌐 Validate in Browser';
+            setIconText(title, 'globe', 'Validate in Browser');
 
             if (!isSubprocessor) {
                 const inspectBtn = document.createElement('button');
@@ -2477,7 +2553,7 @@
                     link.rel = 'noopener noreferrer';
                     link.className = 'browser-validation-btn';
                     link.style.cssText = 'text-decoration: none; display: inline-block;';
-                    link.textContent = '🔗 Open Subprocessor Page';
+                    setIconText(link, 'external-link', 'Open Subprocessor Page');
                     container.appendChild(link);
                 } else {
                     const noUrl = createTextElement('p', 'No URL found in evidence.');
@@ -2487,7 +2563,7 @@
 
                 const tip = document.createElement('p');
                 tip.style.cssText = 'color: #92400e; font-size: 0.8rem; margin-top: 0.75rem;';
-                tip.textContent = '💡 Search for "' + orgName + '" on the page to find this vendor.';
+                setIconText(tip, 'lightbulb', 'Search for "' + orgName + '" on the page to find this vendor.');
                 container.appendChild(tip);
             } else {
                 desc.textContent = 'Click the button below to query DNS TXT records for ' + domain + ' directly from this page.';
@@ -2495,7 +2571,7 @@
 
                 const runBtn = document.createElement('button');
                 runBtn.className = 'browser-validation-btn';
-                runBtn.textContent = '🔍 Run DNS Lookup';
+                setIconText(runBtn, 'search', 'Run DNS Lookup');
                 runBtn.onclick = function() { runBrowserDnsLookup(domain, searchPattern, this); };
                 container.appendChild(runBtn);
 
@@ -2604,7 +2680,7 @@
 
                 const cnameDiv = document.createElement('div');
                 cnameDiv.className = 'browser-validation';
-                const cnameTitle = createTextElement('div', '🔗 CNAME Infrastructure Validation', 'browser-validation-title');
+                const cnameTitle = createIconTextElement('div', 'link', 'CNAME Infrastructure Validation', 'browser-validation-title');
                 cnameDiv.appendChild(cnameTitle);
                 const cnameDesc = createTextElement('p', 'This vendor was discovered via CNAME record analysis. The subdomain "' + subdomain + '" has a CNAME pointing to "' + cnameTarget + '", indicating third-party infrastructure.');
                 cnameDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
@@ -2635,7 +2711,7 @@
 
                 const subfinderDiv = document.createElement('div');
                 subfinderDiv.className = 'browser-validation';
-                const subfinderTitle = createTextElement('div', '🔍 Subdomain Discovery Validation', 'browser-validation-title');
+                const subfinderTitle = createIconTextElement('div', 'search', 'Subdomain Discovery Validation', 'browser-validation-title');
                 subfinderDiv.appendChild(subfinderTitle);
                 const subfinderDesc = createTextElement('p', 'This vendor was discovered via subdomain enumeration. The subdomain "' + subdomain + '" points to or is hosted by this vendor.');
                 subfinderDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
@@ -2666,7 +2742,7 @@
 
                 const tenantDiv = document.createElement('div');
                 tenantDiv.className = 'browser-validation';
-                const tenantTitle = createTextElement('div', '🏢 SaaS Tenant Discovery Validation', 'browser-validation-title');
+                const tenantTitle = createIconTextElement('div', 'building-2', 'SaaS Tenant Discovery Validation', 'browser-validation-title');
                 tenantDiv.appendChild(tenantTitle);
                 const tenantDesc = createTextElement('p', 'This vendor was discovered by probing SaaS tenant URLs. Visit the tenant URL to verify the organization uses this service.');
                 tenantDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
@@ -2703,7 +2779,7 @@
                 const webTrafficDiv = document.createElement('div');
                 webTrafficDiv.className = 'browser-validation';
                 const sourceType = isWebTrafficSource ? 'webpage source analysis' : 'runtime network request capture';
-                const webTrafficTitle = createTextElement('div', '🌐 Webpage Discovery Validation', 'browser-validation-title');
+                const webTrafficTitle = createIconTextElement('div', 'globe', 'Webpage Discovery Validation', 'browser-validation-title');
                 webTrafficDiv.appendChild(webTrafficTitle);
                 const webTrafficDesc = createTextElement('p', 'This vendor was discovered via ' + sourceType + '. ' + (isWebTrafficSource ? 'The webpage loads external resources (scripts, stylesheets, images) from this vendor domain.' : 'Runtime JavaScript on the webpage sends network requests to this vendor domain (e.g., analytics, monitoring, SDKs phoning home).'));
                 webTrafficDesc.style.cssText = 'color: #6b7280; font-size: 0.875rem;';
@@ -2734,7 +2810,7 @@
             } else {
                 const manualDiv = document.createElement('div');
                 manualDiv.className = 'browser-validation';
-                const manualTitle = createTextElement('div', '🌐 Manual Validation Required', 'browser-validation-title');
+                const manualTitle = createIconTextElement('div', 'globe', 'Manual Validation Required', 'browser-validation-title');
                 manualDiv.appendChild(manualTitle);
                 const manualDesc = createTextElement('p', 'This record type (' + getReadableRecordType(recordType) + ') requires manual investigation. Review the evidence and record value above.');
                 manualDesc.style.cssText = 'color: #92400e; font-size: 0.875rem;';
@@ -2763,7 +2839,11 @@
             const resultDiv = container.querySelector('.browser-validation-result');
 
             button.disabled = true;
-            button.textContent = '⏳ Looking up...';
+            button.textContent = '';
+            const lookupSpinner = lucideIconEl('loader-circle');
+            lookupSpinner.classList.add('lucide-spin');
+            button.appendChild(lookupSpinner);
+            button.appendChild(document.createTextNode(' Looking up...'));
             resultDiv.style.display = 'block';
             resultDiv.textContent = 'Querying DNS records...';
 
@@ -2782,7 +2862,7 @@
                     );
 
                     if (matchingRecords.length > 0) {
-                        const successMsg = createTextElement('p', '✅ Record Found!');
+                        const successMsg = createIconTextElement('p', 'circle-check', 'Record Found!');
                         successMsg.style.cssText = 'color: #16a34a; font-weight: 600; margin-bottom: 0.5rem;';
                         resultDiv.appendChild(successMsg);
 
@@ -2799,7 +2879,7 @@
                         countMsg.style.cssText = 'font-size: 0.75rem; color: #666; margin-top: 0.5rem;';
                         resultDiv.appendChild(countMsg);
                     } else {
-                        const warnMsg = createTextElement('p', '⚠️ Pattern Not Found');
+                        const warnMsg = createIconTextElement('p', 'triangle-alert', 'Pattern Not Found');
                         warnMsg.style.cssText = 'color: #d97706; font-weight: 600; margin-bottom: 0.5rem;';
                         resultDiv.appendChild(warnMsg);
 
@@ -2813,7 +2893,7 @@
                         resultDiv.appendChild(pre);
                     }
                 } else {
-                    const errorMsg = createTextElement('p', '❌ No TXT Records Found');
+                    const errorMsg = createIconTextElement('p', 'circle-x', 'No TXT Records Found');
                     errorMsg.style.cssText = 'color: #dc2626; font-weight: 600;';
                     resultDiv.appendChild(errorMsg);
 
@@ -2826,7 +2906,7 @@
                     resultDiv.removeChild(resultDiv.firstChild);
                 }
 
-                const errorMsg = createTextElement('p', '❌ Lookup Failed');
+                const errorMsg = createIconTextElement('p', 'circle-x', 'Lookup Failed');
                 errorMsg.style.cssText = 'color: #dc2626; font-weight: 600;';
                 resultDiv.appendChild(errorMsg);
 
@@ -2840,7 +2920,7 @@
             }
 
             button.disabled = false;
-            button.textContent = '🔍 Run DNS Lookup Again';
+            setIconText(button, 'search', 'Run DNS Lookup Again');
         }
 
         function toggleInspectCode(button) {
@@ -2855,14 +2935,14 @@
 
             navigator.clipboard.writeText(code).then(function() {
                 button.classList.add('copied');
-                button.textContent = '✅ Copied!';
+                setIconText(button, 'check', 'Copied!');
                 setTimeout(function() {
                     button.classList.remove('copied');
-                    button.textContent = '📋 Copy';
+                    setIconText(button, 'copy', 'Copy');
                 }, 2000);
             }).catch(function(err) {
                 console.error('Failed to copy:', err);
-                button.textContent = '❌ Failed';
+                setIconText(button, 'x', 'Failed');
             });
         }
 
@@ -2894,8 +2974,8 @@
     <div id="evidence-modal-overlay" class="evidence-modal-overlay">
         <div class="evidence-modal">
             <div class="evidence-modal-header">
-                <div class="evidence-modal-title">🔍 Evidence Details</div>
-                <button class="evidence-modal-close" onclick="closeEvidenceModal()">✕</button>
+                <div class="evidence-modal-title"><svg class="lucide-icon" aria-hidden="true" focusable="false"><use href="#ic-search"></use></svg> Evidence Details</div>
+                <button class="evidence-modal-close" onclick="closeEvidenceModal()" aria-label="Close"><svg class="lucide-icon" aria-hidden="true" focusable="false"><use href="#ic-x"></use></svg></button>
             </div>
             <div class="evidence-modal-body" id="evidence-modal-body">
                 <!-- Content populated by JavaScript using safe DOM methods -->

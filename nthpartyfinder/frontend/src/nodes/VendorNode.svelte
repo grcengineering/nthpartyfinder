@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
   import type { DiscoverySource } from '../lib/transform';
+  import { icons } from '../lib/icons';
 
   type VendorData = {
     label: string;
@@ -79,7 +80,7 @@
   <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 24px; transform: translate(-50%, -50%);" />
 
   <div class="node-circle" style="background: {colors.bg}; --shadow-color: {colors.shadow}; --ring-color: {colors.ring};{multiLayerShadow ? ` box-shadow: ${multiLayerShadow};` : ''}">
-    <span class="node-icon">🏢</span>
+    <span class="node-icon">{@html icons.building2}</span>
   </div>
 
   {#if data.hasChildren}
@@ -91,7 +92,7 @@
       title={data.expanded ? 'Collapse vendors' : `Expand ${data.childCount} vendors`}
     >
       <span class="badge-count">{data.childCount}</span>
-      <span class="badge-icon">{data.expanded ? '▲' : '▼'}</span>
+      <span class="badge-icon">{@html data.expanded ? icons.chevronUp : icons.chevronDown}</span>
     </div>
   {/if}
   {#if data.discoveryCount > 0}
@@ -103,7 +104,7 @@
       title="View {data.discoveryCount} discovery sources"
     >
       <span class="badge-count">×{data.discoveryCount}</span>
-      <span class="badge-icon">ℹ</span>
+      <span class="badge-icon">{@html icons.info}</span>
     </div>
   {/if}
 
@@ -149,7 +150,7 @@
     box-shadow: 0 0 0 3px var(--ring-color, rgba(59, 130, 246, 0.25)), 0 2px 8px var(--shadow-color);
   }
 
-  .node-icon { font-size: 20px; line-height: 1; }
+  .node-icon { font-size: 20px; line-height: 1; color: #fff; display: inline-flex; }
 
   .action-badge {
     position: absolute;

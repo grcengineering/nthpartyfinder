@@ -609,3 +609,21 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
 - **Files**: `src/subprocessor.rs` (multi-source collector in both analyze_domain_with_full_options paths, source category + merge/provenance helpers, cache_working_urls/get_cached_subprocessor_urls + Vec cache field, resolve_known_org_to_domain + KNOWN_ORG_DOMAIN_MAPPINGS const, _org resolve in filter, tests), `src/trust_center/executor.rs` (HttpSubprocessor tag), `src/app.rs` (infra-filter subprocessor exemption + test), `src/cache_commands.rs` (cache-entry field), `tests/regression_bug_tests.rs` (updated safety tests + new resolution test).
 - **Residual** (not blocking; klaviyo 26/27 legal entities): 2 obscure url-less legal-page names (Agency AI, Linear Orbit) stay unresolved — not in the curated table; resolving arbitrary unknown company names would risk false positives. Candidate follow-up if the team wants broader org→domain coverage.
 - **PENDING USER**: LOCAL & uncommitted on `master`. The prior filter-consistency work (e03226a) + reliability fix (305c887) were pushed earlier this session and are green on CI; this is the next commit.
+
+### Task 2026-06-29 · Replace HTML-report emojis with GRCE Design System (Lucide) icons
+
+**Goal**: Replace all emoji usage in the HTML report with the GRC Design System's official icon library. DS icon set = **Lucide** (lucide.dev, MIT, 1.75px stroke; per `grce-design-system/SKILL.md` + `readme.md`: "Icons: Lucide … No hand-drawn SVG icons"). Report is self-contained/offline → embed real Lucide v0.544.0 SVGs (lucide-static), no CDN.
+
+**Criteria**
+- ISC-237: Every emoji in `templates/report.html` (buttons, evidence modal, validation panels, insights, theme toggle, sort indicators, network-viz fallback, DNS results) replaced with the equivalent Lucide glyph.
+- ISC-238: The interactive vendor graph (Svelte → `static/vendor-graph.js`) emojis (🏢 nodes, ▲▼ toggles, ℹ info, × close, + load-more) replaced with Lucide; bundle rebuilt reproducibly.
+- ISC-239: Offline + accessible — inline `<symbol>` sprite + `<use>`; icons inherit currentColor + scale (1em); icon+text built safely (no innerHTML on user data); every `<use>` resolves.
+- ISC-240: Gates green; 0 emoji/pictograph glyphs in the rendered report.
+
+**Verification**
+- ISC-237/238: PASS — comprehensive non-ASCII scan (category So/Sk + geometric/arrow/emoji ranges) of `templates/report.html` = **0** symbol/emoji glyphs; rebuilt bundle = **0**; full **rendered** report (klaviyo.com) = **0** (only residual is `→` inside synced `design-system.css` comments, not rendered). 31-icon Lucide sprite; theme toggle = sun/moon/monitor; sort indicators = chevron mask-images (currentColor/accent); "Looking up…" = spinning loader-circle; graph nodes = building-2 (white), chevron-up/down, info, x, plus.
+- ISC-239: PASS — sprite parses as **well-formed XML**; **0 orphan `<use>` refs** (every `#ic-NAME` has a `<symbol>`); helpers `lucideIcon`/`lucideIconEl`/`setIconText`/`createIconTextElement`; new `frontend/src/lib/icons.ts` for the graph; `prefers-reduced-motion` disables the spinner.
+- ISC-240: PASS — askama template compiles; `cargo test --lib export html_report` **62 passed / 0 failed**; `fmt --check` + `clippy --lib --all-targets -D warnings` clean; release rebuilt; `bun run build` reproduces the bundle (icon diff only).
+- **Files**: `templates/report.html` (sprite + `.lucide-icon` CSS + spin + JS helpers + all emoji replacements + sort-indicator masks), `frontend/src/lib/icons.ts` (new), `frontend/src/nodes/{VendorNode,RootNode,LoadMoreNode}.svelte` + `frontend/src/components/VendorTooltip.svelte`, rebuilt `static/vendor-graph.{js,css}`.
+- **Note**: Kept non-icon typography — `×{count}` (a "times N" multiplier on the discovery badge) and the synced-DS comment arrows. Browser extension was offline so verification is structural (XML-valid sprite, resolving refs, compiled output) rather than a live screenshot.
+- **PENDING USER**: LOCAL & uncommitted on `master`, stacked on the multi-source subprocessor commit (dd90de2, also unpushed). Decide push.

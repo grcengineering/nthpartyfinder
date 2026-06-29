@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+  import { icons } from '../lib/icons';
 
   type LoadMoreData = {
     label: string;
@@ -15,7 +16,7 @@
   <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 20px; transform: translate(-50%, -50%);" />
 
   <div class="node-circle">
-    <span class="plus-icon">+</span>
+    <span class="plus-icon">{@html icons.plus}</span>
   </div>
   <div class="node-label">{data.label}</div>
   <div class="node-hint">Click to load</div>

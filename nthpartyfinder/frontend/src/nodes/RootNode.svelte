@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
+  import { icons } from '../lib/icons';
 
   type RootData = {
     label: string;
@@ -18,7 +19,7 @@
   <Handle type="source" position={Position.Bottom} id="source" style="position: absolute; left: 50%; top: 28px; transform: translate(-50%, -50%);" />
 
   <div class="node-circle">
-    <span class="node-icon">🏢</span>
+    <span class="node-icon">{@html icons.building2}</span>
     {#if data.hasChildren}
       <div class="badge">{data.childCount}</div>
     {/if}
@@ -61,7 +62,7 @@
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25), 0 2px 8px rgba(99, 102, 241, 0.35);
   }
 
-  .node-icon { font-size: 24px; line-height: 1; }
+  .node-icon { font-size: 24px; line-height: 1; color: #fff; display: inline-flex; }
 
   .badge {
     position: absolute;
