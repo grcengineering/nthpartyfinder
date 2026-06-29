@@ -384,22 +384,58 @@ export function transformToXyflow(
 }
 
 export function formatRecordType(recordType: string): string {
+  // Compact labels for the graph tooltip's source groupings. Covers every Rust
+  // RecordType variant — keyed by both the serde variant name (DnsTxtSpf) and the
+  // hierarchy string (DNS::TXT::SPF) — so no discovery source ever falls back to a
+  // raw/misleading code (e.g. TRUST_CENTER::API previously rendered as "API").
+  // Mirrors RecordType::discovery_source_label() in src/vendor.rs; keep in sync.
   const typeMap: Record<string, string> = {
     'DnsTxtSpf': 'SPF',
     'DnsTxtVerification': 'DNS Verification',
     'DnsTxtDmarc': 'DMARC',
     'DnsTxtDkim': 'DKIM',
     'DnsSubdomain': 'Subdomain',
-    'DnsCname': 'CNAME',
+    'DnsMx': 'MX',
+    'DnsA': 'A Record',
+    'DnsAaaa': 'AAAA Record',
+    'HttpWellKnown': 'Well-Known',
+    'HttpMeta': 'Meta Tag',
+    'HttpFile': 'Hosted File',
+    'CertDomain': 'TLS Cert',
+    'CertSan': 'Cert SAN',
+    'ApiEndpoint': 'API Endpoint',
+    'ApiWebhook': 'API Webhook',
     'HttpSubprocessor': 'Subprocessor',
-    'DiscoverySaas': 'SaaS Tenant',
+    'SubfinderDiscovery': 'Subdomain',
+    'SaasTenantProbe': 'SaaS Tenant',
+    'CtLogDiscovery': 'CT Log',
+    'TrustCenterApi': 'Trust Center',
+    'WebTrafficSource': 'Webpage Source',
+    'WebTrafficNetwork': 'Webpage Network',
+    'Unknown': 'Other',
     'DNS::TXT::SPF': 'SPF',
     'DNS::TXT::VERIFICATION': 'DNS Verification',
     'DNS::TXT::DMARC': 'DMARC',
+    'DNS::TXT::DKIM': 'DKIM',
     'DNS::SUBDOMAIN': 'Subdomain',
-    'DNS::CNAME': 'CNAME',
+    'DNS::MX': 'MX',
+    'DNS::A': 'A Record',
+    'DNS::AAAA': 'AAAA Record',
+    'HTTP::WELL_KNOWN': 'Well-Known',
+    'HTTP::META': 'Meta Tag',
+    'HTTP::FILE': 'Hosted File',
+    'CERT::DOMAIN': 'TLS Cert',
+    'CERT::SAN': 'Cert SAN',
+    'API::ENDPOINT': 'API Endpoint',
+    'API::WEBHOOK': 'API Webhook',
     'HTTP::SUBPROCESSOR': 'Subprocessor',
-    'DISCOVERY::SAAS_TENANT': 'SaaS Tenant'
+    'DISCOVERY::SUBFINDER': 'Subdomain',
+    'DISCOVERY::SAAS_TENANT': 'SaaS Tenant',
+    'DISCOVERY::CT_LOG': 'CT Log',
+    'TRUST_CENTER::API': 'Trust Center',
+    'DISCOVERY::WEBPAGE_SOURCE': 'Webpage Source',
+    'DISCOVERY::WEBPAGE_NETWORK': 'Webpage Network',
+    'UNKNOWN': 'Other'
   };
 
   return typeMap[recordType] || recordType.split('::').pop() || recordType;

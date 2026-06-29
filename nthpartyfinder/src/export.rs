@@ -1,4 +1,4 @@
-use crate::vendor::VendorRelationship;
+use crate::vendor::{RecordType, VendorRelationship};
 use anyhow::Result;
 use askama::Template;
 use chrono::Utc;
@@ -7,6 +7,48 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
 use tracing::{debug, info};
+
+/// One option in the HTML report's "Discovery Source" filter dropdown. `value`
+/// is the hierarchy string (matching each row's `data-type`, so filtering works
+/// 1:1); `label` is the human-friendly name shown in the dropdown.
+struct DiscoverySourceOption {
+    value: String,
+    label: String,
+}
+
+/// Build the filter's option list from the discovery sources that actually
+/// appear in this report, in canonical [`RecordType::all_variants`] order. The
+/// filter therefore can never list a source that isn't present nor omit one that
+/// is — the exact drift that previously hid trust-center subprocessors.
+fn present_discovery_sources(relationships: &[VendorRelationship]) -> Vec<DiscoverySourceOption> {
+    let present: HashSet<String> = relationships
+        .iter()
+        .map(|r| r.nth_party_record_type.as_hierarchy_string())
+        .collect();
+    RecordType::all_variants()
+        .iter()
+        .filter(|rt| present.contains(&rt.as_hierarchy_string()))
+        .map(|rt| DiscoverySourceOption {
+            value: rt.as_hierarchy_string(),
+            label: rt.discovery_source_label().to_string(),
+        })
+        .collect()
+}
+
+/// JSON object mapping every discovery-source identifier — both the hierarchy
+/// string (`TRUST_CENTER::API`) and the serde variant name (`TrustCenterApi`) —
+/// to its friendly label. Injected into the report so the in-page JS that
+/// renders badge text and the evidence modal draws labels from the same source
+/// of truth as the filter, keeping every label complete and consistent.
+fn record_type_label_map_json() -> String {
+    let mut map = serde_json::Map::new();
+    for rt in RecordType::all_variants() {
+        let label = serde_json::Value::String(rt.discovery_source_label().to_string());
+        map.insert(rt.as_hierarchy_string(), label.clone());
+        map.insert(rt.variant_name().to_string(), label);
+    }
+    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
+}
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
@@ -86,7 +128,7 @@ pub fn export_json(relationships: &[VendorRelationship], output_path: &str) -> R
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
         },
-        relationships: relationships.to_vec(),
+        relationships: relationships.iter().map(JsonRelationship::from).collect(),
     };
 
     let json_string = serde_json::to_string_pretty(&json_output)?;
@@ -104,9 +146,47 @@ pub fn export_json(relationships: &[VendorRelationship], output_path: &str) -> R
 }
 
 #[derive(serde::Serialize)]
-struct JsonExport {
+struct JsonExport<'a> {
     summary: ExportSummary,
-    relationships: Vec<VendorRelationship>,
+    relationships: Vec<JsonRelationship<'a>>,
+}
+
+/// JSON-export view of a relationship. Identical to [`VendorRelationship`] in
+/// shape and field order, except `nth_party_record_type` is rendered as the
+/// hierarchy string (`TRUST_CENTER::API`) instead of the serde variant name
+/// (`TrustCenterApi`). This keeps the JSON export's discovery-source values 1:1
+/// with the CSV, Markdown, and HTML reports (which all use the hierarchy string).
+/// Export-only: the internal result sink serializes `VendorRelationship`
+/// directly and round-trips it, so its variant-name form must stay unchanged.
+#[derive(serde::Serialize)]
+struct JsonRelationship<'a> {
+    nth_party_domain: &'a str,
+    nth_party_organization: &'a str,
+    nth_party_layer: u32,
+    nth_party_customer_domain: &'a str,
+    nth_party_customer_organization: &'a str,
+    nth_party_record: &'a str,
+    nth_party_record_type: String,
+    root_customer_domain: &'a str,
+    root_customer_organization: &'a str,
+    evidence: &'a str,
+}
+
+impl<'a> From<&'a VendorRelationship> for JsonRelationship<'a> {
+    fn from(r: &'a VendorRelationship) -> Self {
+        JsonRelationship {
+            nth_party_domain: &r.nth_party_domain,
+            nth_party_organization: &r.nth_party_organization,
+            nth_party_layer: r.nth_party_layer,
+            nth_party_customer_domain: &r.nth_party_customer_domain,
+            nth_party_customer_organization: &r.nth_party_customer_organization,
+            nth_party_record: &r.nth_party_record,
+            nth_party_record_type: r.nth_party_record_type.as_hierarchy_string(),
+            root_customer_domain: &r.root_customer_domain,
+            root_customer_organization: &r.root_customer_organization,
+            evidence: &r.evidence,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -527,6 +607,8 @@ mod html_report_template {
         pub(super) relationships: Vec<VendorRelationship>,
         pub(super) relationships_json: String,
         pub(super) summary_json: String,
+        pub(super) discovery_sources: Vec<DiscoverySourceOption>,
+        pub(super) record_type_labels_json: String,
         pub(super) vendor_graph_js: &'static str,
         pub(super) vendor_graph_css: &'static str,
         pub(super) design_system_css: &'static str,
@@ -567,6 +649,8 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
             relationships: Vec::new(),
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
+            discovery_sources: Vec::new(),
+            record_type_labels_json: record_type_label_map_json(),
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,
@@ -616,6 +700,8 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
         relationships: relationships.to_vec(),
         relationships_json,
         summary_json,
+        discovery_sources: present_discovery_sources(relationships),
+        record_type_labels_json: record_type_label_map_json(),
         vendor_graph_js: VENDOR_GRAPH_JS,
         vendor_graph_css: VENDOR_GRAPH_CSS,
         design_system_css: DESIGN_SYSTEM_CSS,
@@ -1096,6 +1182,8 @@ mod tests {
             relationships: Vec::new(),
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
+            discovery_sources: Vec::new(),
+            record_type_labels_json: record_type_label_map_json(),
             vendor_graph_js: "",
             vendor_graph_css: "",
             design_system_css: "",
@@ -1112,6 +1200,118 @@ mod tests {
             buf.contains("Test Org"),
             "Rendered HTML should contain organization name"
         );
+    }
+
+    #[test]
+    fn test_present_discovery_sources_matches_records_present() {
+        // The filter must list exactly the sources present — no more, no less.
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::HttpSubprocessor),
+            make_vendor("b.com", "B", 3, RecordType::TrustCenterApi),
+            make_vendor("c.com", "C", 3, RecordType::DnsTxtSpf),
+            // Duplicate source must collapse to a single option.
+            make_vendor("d.com", "D", 3, RecordType::TrustCenterApi),
+        ];
+        let opts = present_discovery_sources(&rels);
+        let values: Vec<&str> = opts.iter().map(|o| o.value.as_str()).collect();
+
+        // Exactly the three distinct sources present, in canonical order
+        // (HttpSubprocessor before TrustCenterApi per all_variants(); SPF first).
+        assert_eq!(
+            values,
+            vec!["DNS::TXT::SPF", "HTTP::SUBPROCESSOR", "TRUST_CENTER::API"]
+        );
+        // The trust-center option (previously absent → subprocessors unfilterable)
+        // carries its friendly label.
+        let trust = opts
+            .iter()
+            .find(|o| o.value == "TRUST_CENTER::API")
+            .expect("trust center option present");
+        assert_eq!(trust.label, "Trust Center");
+        // A source NOT present must not appear as an option.
+        assert!(!values.contains(&"DISCOVERY::SAAS_TENANT"));
+    }
+
+    #[test]
+    fn test_html_report_filter_options_cover_every_present_source() {
+        // End-to-end: every record type's hierarchy string that appears in the
+        // rendered table (data-type=...) must have a matching <option value=...> in
+        // the Discovery Source filter, and a label in the injected label map.
+        use askama::Template;
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::HttpSubprocessor),
+            make_vendor("b.com", "B", 3, RecordType::TrustCenterApi),
+            make_vendor("c.com", "C", 3, RecordType::DnsTxtSpf),
+        ];
+        let template = HtmlReportTemplate {
+            summary: HtmlSummary {
+                root_domain: "root.com".to_string(),
+                root_organization: "Root".to_string(),
+                total_relationships: rels.len(),
+                max_depth: 4,
+                unique_domains: rels.len(),
+                unique_organizations: rels.len(),
+                generated_at: "2024-01-01".to_string(),
+            },
+            relationships: rels.clone(),
+            relationships_json: serde_json::to_string(&rels).unwrap(),
+            summary_json: "{}".to_string(),
+            discovery_sources: present_discovery_sources(&rels),
+            record_type_labels_json: record_type_label_map_json(),
+            vendor_graph_js: "",
+            vendor_graph_css: "",
+            design_system_css: "",
+        };
+        let html = template.render().expect("render");
+
+        for rel in &rels {
+            let hierarchy = rel.nth_party_record_type.as_hierarchy_string();
+            // A filter option whose value matches the row's data-type.
+            assert!(
+                html.contains(&format!("<option value=\"{hierarchy}\">")),
+                "filter is missing an option for present source {hierarchy}"
+            );
+            // The row itself carries that data-type, so the filter matches 1:1.
+            assert!(
+                html.contains(&format!("data-type=\"{hierarchy}\"")),
+                "no table row carries data-type {hierarchy}"
+            );
+            // The injected label map covers it (no raw code leaks into the badge).
+            assert!(
+                html.contains(&format!("\"{hierarchy}\":")),
+                "label map is missing {hierarchy}"
+            );
+        }
+        // The previously-missing trust-center label is present and friendly.
+        assert!(html.contains(">Trust Center</option>"));
+    }
+
+    #[test]
+    fn test_json_export_uses_hierarchy_string_for_record_type() {
+        // The JSON export's discovery-source value must match the CSV/Markdown/HTML
+        // reports (hierarchy string), not the internal serde variant name — so all
+        // report types are 1:1. Trust-center subprocessors are the regression case.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rels.json");
+        let path_str = path.to_str().unwrap();
+        let rels = vec![
+            make_vendor("a.com", "A", 3, RecordType::TrustCenterApi),
+            make_vendor("b.com", "B", 3, RecordType::HttpSubprocessor),
+        ];
+        export_json(&rels, path_str).unwrap();
+        let body = std::fs::read_to_string(path_str).unwrap();
+
+        // Hierarchy strings present...
+        assert!(body.contains("\"nth_party_record_type\": \"TRUST_CENTER::API\""));
+        assert!(body.contains("\"nth_party_record_type\": \"HTTP::SUBPROCESSOR\""));
+        // ...and the internal variant names must NOT leak into the export.
+        assert!(!body.contains("\"TrustCenterApi\""));
+        assert!(!body.contains("\"HttpSubprocessor\""));
+
+        // The export still parses as well-formed JSON with the expected shape.
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["relationships"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["relationships"][0]["nth_party_domain"], "a.com");
     }
 
     // ====================================================================
@@ -1259,6 +1459,8 @@ mod tests {
             relationships: Vec::new(),
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
+            discovery_sources: Vec::new(),
+            record_type_labels_json: record_type_label_map_json(),
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,
@@ -1289,6 +1491,8 @@ mod tests {
             relationships: Vec::new(),
             relationships_json: "[]".to_string(),
             summary_json: "{}".to_string(),
+            discovery_sources: Vec::new(),
+            record_type_labels_json: record_type_label_map_json(),
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,

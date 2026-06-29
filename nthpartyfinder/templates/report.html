@@ -703,13 +703,9 @@
                             <label class="filter-label">Discovery Source</label>
                             <select class="filter-select" id="filter-type-all" onchange="applyFilters('all-table')">
                                 <option value="">All Sources</option>
-                                <option value="DNS::TXT::SPF">Email Provider (SPF)</option>
-                                <option value="DNS::TXT::VERIFICATION">Domain Verification</option>
-                                <option value="HTTP::SUBPROCESSOR">Subprocessor Page</option>
-                                <option value="DISCOVERY::SUBFINDER">Subdomains</option>
-                                <option value="DISCOVERY::SAAS_TENANT">SaaS Tenant</option>
-                                <option value="DISCOVERY::WEBPAGE_SOURCE">Webpage Source</option>
-                                <option value="DISCOVERY::WEBPAGE_NETWORK">Webpage Network Requests</option>
+                                {% for src in discovery_sources %}
+                                <option value="{{ src.value }}">{{ src.label }}</option>
+                                {% endfor %}
                             </select>
                         </div>
                     </div>
@@ -886,6 +882,13 @@
         // Legacy aliases for table JavaScript
         const relationshipsData = window.graphData.relationships;
         const summary = window.graphData.summary;
+
+        // Discovery-source labels, injected from Rust (RecordType::discovery_source_label)
+        // so badge text, the evidence modal, and the filter dropdown all draw friendly
+        // names from one complete source of truth — keyed by both hierarchy string
+        // (DNS::TXT::SPF) and serde variant name (DnsTxtSpf).
+        // SAFETY(C003): serialized by serde_json (proper escaping) in a <script> JSON context.
+        const RECORD_TYPE_LABELS = {{ record_type_labels_json|safe }};
 
         let currentSortColumn = {};
 
@@ -1607,6 +1610,9 @@
                 case 'HttpSubprocessor':
                 case 'HTTP::SUBPROCESSOR':
                     return '#22c55e';
+                case 'TrustCenterApi':
+                case 'TRUST_CENTER::API':
+                    return '#10b981';
                 case 'SubfinderDiscovery':
                 case 'DISCOVERY::SUBFINDER':
                     return '#a855f7';
@@ -1999,7 +2005,7 @@
                 Array.from(data.recordTypes).forEach(type => {
                     const typeBadge = document.createElement('span');
                     typeBadge.className = `record-type-badge record-type-${type}`;
-                    typeBadge.textContent = type;
+                    typeBadge.textContent = getReadableRecordType(type);
                     typesCell.appendChild(typeBadge);
                     typesCell.appendChild(document.createTextNode(' '));
                 });
@@ -2399,31 +2405,11 @@
         }
 
         function getReadableRecordType(type) {
-            const types = {
-                'DnsTxtSpf': 'Email Provider (SPF)',
-                'DnsTxtVerification': 'Domain Verification',
-                'DnsTxtDmarc': 'Email Security (DMARC)',
-                'DnsTxtDkim': 'Email Security (DKIM)',
-                'DnsSubdomain': 'Subdomains',
-                'DnsCname': 'Subdomains',
-                'DnsMx': 'Mail Server (MX)',
-                'HttpSubprocessor': 'Subprocessor Page',
-                'SubfinderDiscovery': 'Subdomains',
-                'SaasTenantProbe': 'SaaS Tenant',
-                'DNS::TXT::SPF': 'Email Provider (SPF)',
-                'DNS::TXT::VERIFICATION': 'Domain Verification',
-                'DNS::TXT::DMARC': 'Email Security (DMARC)',
-                'DNS::SUBDOMAIN': 'Subdomains',
-                'DNS::CNAME': 'Subdomains',
-                'HTTP::SUBPROCESSOR': 'Subprocessor Page',
-                'DISCOVERY::SUBFINDER': 'Subdomains',
-                'DISCOVERY::SAAS_TENANT': 'SaaS Tenant',
-                'WebTrafficSource': 'Webpage Source',
-                'WebTrafficNetwork': 'Webpage Network Requests',
-                'DISCOVERY::WEBPAGE_SOURCE': 'Webpage Source',
-                'DISCOVERY::WEBPAGE_NETWORK': 'Webpage Network Requests'
-            };
-            return types[type] || type;
+            // Labels come from the Rust source of truth (RECORD_TYPE_LABELS), so the
+            // map is always complete for every RecordType variant and stays in sync
+            // with the filter dropdown. Falls back to the raw code only if a future
+            // value somehow isn't mapped.
+            return RECORD_TYPE_LABELS[type] || type;
         }
 
         function createCommandContainer(labelText, command, explanation) {

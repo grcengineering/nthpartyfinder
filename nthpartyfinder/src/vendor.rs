@@ -81,6 +81,104 @@ impl RecordType {
         }
     }
 
+    /// Every `RecordType` variant, in a stable, human-meaningful order (DNS →
+    /// HTTP/cert/API → discovery → trust center). Single source of truth for any
+    /// consumer that needs to enumerate the full set of discovery sources — most
+    /// importantly the HTML report's "Discovery Source" filter, which is built
+    /// from the subset of these that actually appear in a report so its options
+    /// can never drift out of sync with the values emitted.
+    pub fn all_variants() -> &'static [RecordType] {
+        const ALL: [RecordType; 23] = [
+            RecordType::DnsTxtSpf,
+            RecordType::DnsTxtVerification,
+            RecordType::DnsTxtDmarc,
+            RecordType::DnsTxtDkim,
+            RecordType::DnsSubdomain,
+            RecordType::DnsMx,
+            RecordType::DnsA,
+            RecordType::DnsAaaa,
+            RecordType::HttpWellKnown,
+            RecordType::HttpMeta,
+            RecordType::HttpFile,
+            RecordType::CertDomain,
+            RecordType::CertSan,
+            RecordType::ApiEndpoint,
+            RecordType::ApiWebhook,
+            RecordType::HttpSubprocessor,
+            RecordType::SubfinderDiscovery,
+            RecordType::SaasTenantProbe,
+            RecordType::CtLogDiscovery,
+            RecordType::TrustCenterApi,
+            RecordType::WebTrafficSource,
+            RecordType::WebTrafficNetwork,
+            RecordType::Unknown,
+        ];
+        &ALL
+    }
+
+    /// The serde-serialized variant name (e.g. `TrustCenterApi`). This is what
+    /// `nth_party_record_type` carries in the JSON the HTML report embeds, so the
+    /// report's label lookups key on both this and [`Self::as_hierarchy_string`].
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            RecordType::DnsTxtSpf => "DnsTxtSpf",
+            RecordType::DnsTxtVerification => "DnsTxtVerification",
+            RecordType::DnsTxtDmarc => "DnsTxtDmarc",
+            RecordType::DnsTxtDkim => "DnsTxtDkim",
+            RecordType::DnsSubdomain => "DnsSubdomain",
+            RecordType::DnsMx => "DnsMx",
+            RecordType::DnsA => "DnsA",
+            RecordType::DnsAaaa => "DnsAaaa",
+            RecordType::HttpWellKnown => "HttpWellKnown",
+            RecordType::HttpMeta => "HttpMeta",
+            RecordType::HttpFile => "HttpFile",
+            RecordType::CertDomain => "CertDomain",
+            RecordType::CertSan => "CertSan",
+            RecordType::ApiEndpoint => "ApiEndpoint",
+            RecordType::ApiWebhook => "ApiWebhook",
+            RecordType::HttpSubprocessor => "HttpSubprocessor",
+            RecordType::SubfinderDiscovery => "SubfinderDiscovery",
+            RecordType::SaasTenantProbe => "SaasTenantProbe",
+            RecordType::CtLogDiscovery => "CtLogDiscovery",
+            RecordType::TrustCenterApi => "TrustCenterApi",
+            RecordType::WebTrafficSource => "WebTrafficSource",
+            RecordType::WebTrafficNetwork => "WebTrafficNetwork",
+            RecordType::Unknown => "Unknown",
+        }
+    }
+
+    /// Human-friendly label for the discovery source, shown in the HTML report's
+    /// "Discovery Source" filter dropdown, the record-type badges, and the
+    /// evidence modal. Single source of truth — the report derives every label
+    /// from here so the filter options, badge text, and graph all agree.
+    pub fn discovery_source_label(&self) -> &'static str {
+        match self {
+            RecordType::DnsTxtSpf => "Email Provider (SPF)",
+            RecordType::DnsTxtVerification => "Domain Verification",
+            RecordType::DnsTxtDmarc => "Email Security (DMARC)",
+            RecordType::DnsTxtDkim => "Email Security (DKIM)",
+            RecordType::DnsSubdomain => "Subdomains",
+            RecordType::DnsMx => "Mail Server (MX)",
+            RecordType::DnsA => "IPv4 Address (A)",
+            RecordType::DnsAaaa => "IPv6 Address (AAAA)",
+            RecordType::HttpWellKnown => "Well-Known URI",
+            RecordType::HttpMeta => "HTML Meta Tag",
+            RecordType::HttpFile => "Hosted File",
+            RecordType::CertDomain => "TLS Certificate",
+            RecordType::CertSan => "Certificate SAN",
+            RecordType::ApiEndpoint => "API Endpoint",
+            RecordType::ApiWebhook => "API Webhook",
+            RecordType::HttpSubprocessor => "Subprocessor Page",
+            RecordType::SubfinderDiscovery => "Subdomains",
+            RecordType::SaasTenantProbe => "SaaS Tenant",
+            RecordType::CtLogDiscovery => "Certificate Transparency Log",
+            RecordType::TrustCenterApi => "Trust Center",
+            RecordType::WebTrafficSource => "Webpage Source",
+            RecordType::WebTrafficNetwork => "Webpage Network Requests",
+            RecordType::Unknown => "Other",
+        }
+    }
+
     pub fn from_legacy_string(legacy_type: &str) -> Self {
         match legacy_type {
             "SPF" => RecordType::DnsTxtSpf,
@@ -330,6 +428,51 @@ mod tests {
     #[case(RecordType::Unknown, "UNKNOWN")]
     fn test_display_matches_hierarchy(#[case] record_type: RecordType, #[case] expected: &str) {
         assert_eq!(format!("{}", record_type), expected);
+    }
+
+    #[test]
+    fn test_all_variants_is_complete_and_unique() {
+        // Every variant's hierarchy string must be distinct, and all_variants()
+        // must enumerate them all — this is what lets the report build its filter
+        // from a complete, duplicate-free set of discovery sources.
+        let variants = RecordType::all_variants();
+        let hierarchies: std::collections::HashSet<String> =
+            variants.iter().map(|v| v.as_hierarchy_string()).collect();
+        assert_eq!(
+            hierarchies.len(),
+            variants.len(),
+            "all_variants() has duplicate hierarchy strings"
+        );
+        // Spot-check that the previously-missing trust-center source is present.
+        assert!(hierarchies.contains("TRUST_CENTER::API"));
+    }
+
+    #[test]
+    fn test_variant_name_matches_serde_serialization() {
+        // The report keys its label map on the serde variant name; if serde's
+        // representation ever diverges from variant_name(), JSON-driven badge
+        // labels would silently fall back to the raw code. Lock them together.
+        for rt in RecordType::all_variants() {
+            let serialized = serde_json::to_string(rt).expect("record type serializes");
+            let expected = format!("\"{}\"", rt.variant_name());
+            assert_eq!(
+                serialized, expected,
+                "variant_name() out of sync with serde for {rt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_variant_has_a_discovery_source_label() {
+        // A missing/empty label would surface a raw code (e.g. TRUST_CENTER::API)
+        // in the UI and break filter↔badge agreement. The match is exhaustive, so
+        // this guards against an empty placeholder slipping in.
+        for rt in RecordType::all_variants() {
+            assert!(
+                !rt.discovery_source_label().trim().is_empty(),
+                "empty discovery_source_label for {rt:?}"
+            );
+        }
     }
 
     #[rstest]
