@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "nthpartyfinder-marketplace",
+  "version": "1",
+  "plugins": [
+    {
+      "name": "nthpartyfinder",
+      "displayName": "Nth Party Finder — Vendor Mapping Review",
+      "version": "0.1.0",
+      "description": "Validate + accept/correct+save the domain↔org vendor mappings nthpartyfinder surfaces for review, with cited web evidence. Sole safe writer of the tool's local override store.",
+      "source": "./plugin"
+    }
+  ]
+}
