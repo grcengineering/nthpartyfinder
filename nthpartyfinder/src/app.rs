@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, IsTerminal};
@@ -10,7 +10,7 @@ use crate::analysis;
 use crate::batch;
 use crate::cache_commands;
 use crate::checkpoint::{generate_settings_hash, Checkpoint, ResumeMode};
-use crate::cli::{Args, CacheCommands, Cli, Commands};
+use crate::cli::{Args, CacheCommands, Cli, Commands, ReviewCommands};
 use crate::config::{AppConfig, ConfigError};
 use crate::dep_check;
 use crate::discovery::{
@@ -24,6 +24,7 @@ use crate::logger::{AnalysisLogger, VerbosityLevel};
 use crate::memory_monitor::{self, MemoryMonitor};
 use crate::org_normalizer;
 use crate::result_sink::ResultSink;
+use crate::review;
 use crate::subprocessor;
 use crate::vendor::VendorRelationship;
 use crate::vendor_registry;
@@ -713,6 +714,10 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    if let Some(Commands::Review { action }) = &cli.command {
+        return run_review(action).await;
+    }
+
     let args = Args::from(&cli);
     let input = StdioInput;
     match run_inner(args, &input).await {
@@ -722,6 +727,136 @@ pub async fn run() -> Result<()> {
                 std::process::exit(code.0);
             }
             Err(e)
+        }
+    }
+}
+
+/// Handle the non-interactive `review` subcommands — the Claude plugin contract.
+/// Thin I/O orchestrator over the individually-tested `review` / `known_vendors`
+/// logic; coverage-off because it only sequences stdin/stdout/filesystem calls.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn run_review(action: &ReviewCommands) -> Result<()> {
+    match action {
+        ReviewCommands::Path => {
+            println!("{}", known_vendors::resolved_overrides_path().display());
+            Ok(())
+        }
+        ReviewCommands::Apply { input, dry_run } => {
+            let json = std::fs::read_to_string(input)
+                .with_context(|| format!("read decisions file {}", input))?;
+            let decisions = review::parse_decisions(&json)?;
+            let kv = known_vendors::KnownVendors::load()?;
+            // Log the resolved store path so the operator can confirm this run
+            // writes exactly where the next scan reads (no silent path mismatch).
+            println!(
+                "Store: {}",
+                known_vendors::resolved_overrides_path().display()
+            );
+            let report = review::apply_decisions(&kv, &decisions, *dry_run)?;
+            if *dry_run {
+                println!("DRY RUN — no changes written");
+            }
+            for (d, o) in &report.written {
+                println!("  wrote     {} -> {}", d, o);
+            }
+            for (d, o) in &report.would_write {
+                println!("  would     {} -> {}", d, o);
+            }
+            for d in &report.unchanged {
+                println!("  unchanged {}", d);
+            }
+            for d in &report.abstained {
+                println!("  abstained {}", d);
+            }
+            for d in &report.skipped_precedence {
+                println!("  skipped   {} (higher-trust entry exists)", d);
+            }
+            for (d, reason) in &report.rejected {
+                eprintln!("  REJECTED  {}: {}", d, reason);
+            }
+            println!("{}", report.summary());
+            // Persist an audit trail of WHY each mapping was accepted (the cited
+            // signals), co-located with the store so it survives the transient
+            // decisions file — the durable answer to "how do I know this is right?".
+            // A written override without a recoverable audit line is a failure.
+            let mut audit_failed = false;
+            if !*dry_run && !report.written.is_empty() {
+                use std::io::Write as _;
+                let audit_path =
+                    known_vendors::resolved_overrides_path().with_extension("audit.jsonl");
+                let ts = chrono::Utc::now().to_rfc3339();
+                let written: std::collections::HashSet<String> =
+                    report.written.iter().map(|(d, _)| d.clone()).collect();
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&audit_path)
+                {
+                    Ok(mut f) => {
+                        for d in &decisions.decisions {
+                            if written.contains(&d.domain.trim().to_lowercase()) {
+                                match review::audit_line(d, &ts) {
+                                    Ok(line) => {
+                                        if writeln!(f, "{}", line).is_err() {
+                                            audit_failed = true;
+                                        }
+                                    }
+                                    Err(_) => audit_failed = true,
+                                }
+                            }
+                        }
+                        if audit_failed {
+                            eprintln!(
+                                "ERROR: failed to write one or more audit-trail lines to {}",
+                                audit_path.display()
+                            );
+                        } else {
+                            println!("Audit trail appended to {}", audit_path.display());
+                        }
+                    }
+                    Err(e) => {
+                        audit_failed = true;
+                        eprintln!(
+                            "ERROR: could not open audit trail {}: {}",
+                            audit_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+            // Non-zero exit if any decision was rejected OR a written decision's
+            // audit line could not be recorded — automation must notice both.
+            if !report.rejected.is_empty() || audit_failed {
+                std::process::exit(3);
+            }
+            Ok(())
+        }
+        ReviewCommands::List { source } => {
+            let kv = known_vendors::KnownVendors::load()?;
+            let mut count = 0usize;
+            for (domain, entry) in kv.list_overrides() {
+                if let Some(s) = source {
+                    if &entry.source != s {
+                        continue;
+                    }
+                }
+                println!(
+                    "{}\t{}\t[{}]\t{}",
+                    domain, entry.organization, entry.source, entry.added
+                );
+                count += 1;
+            }
+            eprintln!("{} override(s)", count);
+            Ok(())
+        }
+        ReviewCommands::Revert { domain } => {
+            let kv = known_vendors::KnownVendors::load()?;
+            if kv.remove_override(domain)? {
+                println!("Removed override for {}", domain);
+            } else {
+                println!("No override found for {}", domain);
+            }
+            Ok(())
         }
     }
 }
@@ -2169,29 +2304,65 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.log_export_success(&final_output_path);
 
-    let is_interactive_post = input.is_terminal();
-    if is_interactive_post {
-        if let Some(analyzer) = &subprocessor_analyzer {
-            let pending = analyzer.get_pending_mappings().await;
-            if !pending.is_empty() {
-                interactive::confirm_pending_mappings(&pending, analyzer, &logger).await?;
+    // Compute the two uncertain sets ONCE — consumed by the non-interactive
+    // `--review-json` machine contract and/or the interactive human prompts.
+    let pending_for_review = match &subprocessor_analyzer {
+        Some(analyzer) => analyzer.get_pending_mappings().await,
+        None => Vec::new(),
+    };
+    let all_unverified = {
+        let vendors = discovered_vendors.lock().await;
+        let mut au = unverified_orgs.lock().await.clone();
+        let newly_found = collect_unverified_orgs(&vendors);
+        for mapping in newly_found {
+            if !au.iter().any(|u| u.domain == mapping.domain) {
+                au.push(mapping);
             }
+        }
+        au
+    };
+
+    // Non-interactive machine contract (additive, opt-in): emit the uncertain
+    // set as JSON so an automated reviewer (the Claude plugin) can validate the
+    // true company↔domain relationship and apply corrections via `review apply`.
+    // Does not alter the normal scan output.
+    if let Some(review_path) = &args.review_json {
+        let ov_path = known_vendors::resolved_overrides_path()
+            .to_string_lossy()
+            .into_owned();
+        let export = review::build_review_export(
+            args.domain.as_deref().unwrap_or(""),
+            &pending_for_review,
+            &all_unverified,
+            &ov_path,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        match review::export_to_json(&export) {
+            Ok(json) => match std::fs::write(review_path, json) {
+                Ok(()) => logger.info(&format!(
+                    "Wrote {} unverified org(s) and {} pending mapping(s) to {}",
+                    export.unverified_orgs.len(),
+                    export.pending_mappings.len(),
+                    review_path
+                )),
+                Err(e) => logger.warn(&format!(
+                    "Failed to write --review-json {}: {}",
+                    review_path, e
+                )),
+            },
+            Err(e) => logger.warn(&format!("Failed to serialize review export: {}", e)),
         }
     }
 
-    {
-        let vendors = discovered_vendors.lock().await;
-        let mut all_unverified = unverified_orgs.lock().await.clone();
-
-        let newly_found = collect_unverified_orgs(&vendors);
-        for mapping in newly_found {
-            if !all_unverified.iter().any(|u| u.domain == mapping.domain) {
-                all_unverified.push(mapping);
+    let is_interactive_post = input.is_terminal();
+    if is_interactive_post {
+        if let Some(analyzer) = &subprocessor_analyzer {
+            if !pending_for_review.is_empty() {
+                interactive::confirm_pending_mappings(&pending_for_review, analyzer, &logger)
+                    .await?;
             }
         }
-        drop(vendors);
-
-        if !all_unverified.is_empty() && is_interactive_post {
+        if !all_unverified.is_empty() {
             interactive::confirm_unverified_organizations(
                 &all_unverified,
                 &discovered_vendors,
@@ -2641,6 +2812,7 @@ mod tests {
             batch_output_dir: None,
             batch_parallel: 1,
             batch_combined: false,
+            review_json: None,
         }
     }
 

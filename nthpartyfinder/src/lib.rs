@@ -27,6 +27,7 @@ pub mod org_normalizer;
 pub mod prefs;
 pub mod rate_limit;
 pub mod result_sink;
+pub mod review;
 pub mod subprocessor;
 pub mod trust_center;
 pub mod vendor;
