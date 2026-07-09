@@ -47,6 +47,9 @@
   cannot inject a second WHOIS protocol line.
 - Docker base images in all Dockerfiles pinned by digest (OpenSSF Scorecard
   Pinned-Dependencies); a Dependabot `docker` ecosystem keeps the pins current.
+- Bumped `crossbeam-epoch` 0.9.18 → 0.9.20 to clear RUSTSEC-2026-0204 (invalid
+  pointer dereference in the `fmt::Pointer`/`Display` impl for `Atomic`/`Shared`),
+  a freshly published advisory on a transitive of rayon / tokenizers / hickory.
 
 ### Fixed
 - Default DoH server list replaced with verified JSON-API endpoints. Google's
