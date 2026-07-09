@@ -1,6 +1,6 @@
 [package]
 name = "nthpartyfinder"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 description = "A cross-platform CLI tool for identifying Nth party vendor relationships through DNS analysis"
 authors = ["Security Community"]

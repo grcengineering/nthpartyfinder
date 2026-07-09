@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-07-08
+## [1.2.1] - 2026-07-08
+
+<!-- 1.2.0 was never released: GitHub's immutable-releases feature permanently
+     reserved the v1.2.0 tag when a broken release run auto-published it, so the
+     tag was unusable. The identical contents ship as 1.2.1. -->
 
 ### Added
 - **Multi-source subprocessor discovery.** Subprocessor lists are now extracted
