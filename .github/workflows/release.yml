@@ -214,6 +214,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job has no checkout, so gh cannot infer the repo from a git
+          # remote — GH_REPO tells it explicitly (otherwise: "not a git repository").
+          GH_REPO: ${{ github.repository }}
           TAG_REF: ${{ github.ref }}
         run: |
           TAG="${TAG_REF#refs/tags/}"
