@@ -2,8 +2,8 @@
 project: nthpartyfinder
 task: "Depth-3 vanta.com ≤600s performance optimization, full NER build, no quality loss (2026-07-08)"
 effort: E4
-phase: build
-progress: 0/75 (task ISC-241..315) · prior tasks 30/32 + 42/42 + 78/142
+phase: complete
+progress: 73/75 (task ISC-241..315; ISC-269 singleflight unmet -> TF-SINGLEFLIGHT)
 mode: algorithm
 started: 2026-07-08T17:15:00-07:00
 updated: 2026-07-08T17:15:00-07:00
@@ -428,11 +428,11 @@ Problem: a cold-cache depth-3 scan of vanta.com takes ~1500–3000s (documented 
 - [x] ISC-308: Comprehension + research parallelized via Workflow (invocation evidence)
 - [x] ISC-309: Advisor consulted at pre-BUILD commitment boundary and before `phase: complete`
 - [x] ISC-310: Cross-vendor audit in VERIFY (Cato if codex present; else Anvil substitute disclosed — TF-CATO)
-- [ ] ISC-311: Deliverable-compliance + re-read gates output with zero ✗
+- [x] ISC-311: Deliverable-compliance + re-read gates output with zero ✗
 - [x] ISC-312: ISA carries Decisions / Changelog / Verification entries for this task
 - [x] ISC-313: Anti: live scans limited to vanta.com (target) + klaviyo.com (regression oracle); all other network shapes via wiremock
 - [x] ISC-314: Anti: no secrets or machine-local absolute paths in committed files (diff scan)
-- [ ] ISC-315: Branch pushed + PR opened (multi-author repo norm) with all CI checks watched to green
+- [x] ISC-315: Branch pushed + PR opened (multi-author repo norm) with all CI checks watched to green
 
 ## Test Strategy
 
