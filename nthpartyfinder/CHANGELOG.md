@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-08
+
+### Added
+- **Multi-source subprocessor discovery.** Subprocessor lists are now extracted
+  from multiple discovery sources and merged; the former Trust Center view is
+  unified into a single Subprocessor Page.
+- **SPA subprocessor extraction (render-and-capture).** Subprocessor tables
+  rendered client-side by single-page apps are captured via a headless render
+  pass instead of being missed.
+
+### Performance
+- Depth-1 scans up to ~10× faster (e.g. `vanta.com` ~8 min → ~48 s) with recall
+  preserved.
+
 ### Security
 - Frontend vendor-graph build toolchain upgraded to clear its 7 Dependabot
   alerts (esbuild RCE GHSA-gv7w-rqvm-qjhr, svelte XSS ×2, postcss XSS, vite ×3):
@@ -62,6 +76,10 @@
 - The disk-sink read path no longer panics when results can't be read back; it
   fails loudly with a clear message and a dedicated exit code (4) instead of
   emitting a silently-empty report.
+- Six CLI/UX/DNS defects surfaced by a live `vanta.com` run.
+- HTML report: data-driven Discovery Source filter with unified source values
+  across all report types; atomic light/dark theme toggle (no partial
+  transitions during switch).
 
 ### Changed
 - `--timeout` help now explains that depth-3+/cold-cache scans routinely exceed
@@ -79,6 +97,8 @@
   gates behind it), sha2 0.10→0.11, dirs 5→6, scraper 0.26→0.27, fancy-regex
   0.13→0.18, chrono→0.4.45, which→8.0.4, headless_chrome→1.0.22, insta→1.48,
   assert_cmd→2.2.2. No source changes required beyond the reqwest feature.
+- HTML report icons migrated from emoji to the GRCE Design System (Lucide) icon
+  set for a consistent, professional look.
 
 ## [1.1.1] - 2026-06-02
 
