@@ -275,10 +275,9 @@ fn resolve_ort_env_path(
 
     let resolved = if candidate.is_absolute() {
         candidate.to_path_buf()
-    } else if let Some(cwd) = cwd {
-        cwd.join(candidate)
     } else {
-        return None;
+        // A relative ORT_DYLIB_PATH is meaningless without a base directory.
+        cwd?.join(candidate)
     };
 
     let has_parent_component = resolved
