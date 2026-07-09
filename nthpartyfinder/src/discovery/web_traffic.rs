@@ -174,11 +174,11 @@ impl WebTrafficDiscovery {
         let wait_ms = self.network_wait_ms;
 
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-            let guard = crate::browser_pool::create_browser()?;
-            let tab = guard
-                .browser
-                .new_tab()
-                .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+            // Declared before the guard so tab close and Chrome recycling are measured.
+            let mut render_timer = crate::perf::RenderTimer::start();
+            let guard = crate::browser_pool::acquire_tab()?;
+            render_timer.exclude(guard.permit_wait());
+            let tab = guard.tab();
 
             // Intercept ALL network responses (not just JSON like trust_center does)
             tab.register_response_handling(

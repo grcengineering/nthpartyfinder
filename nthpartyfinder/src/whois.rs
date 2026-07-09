@@ -9,6 +9,8 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::debug;
@@ -78,20 +80,28 @@ pub async fn get_organization_with_rate_limit(
     }
 
     // Priority 2: Web page analysis (HTTP-only — no per-vendor headless browser).
+    // The fetched body is retained so the Priority-5 NER step can reuse it rather than
+    // re-fetching the same page.
+    let mut prefetched_html: Option<String> = None;
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_http_only(domain).await {
-            if web_result.confidence >= min_confidence {
-                debug!(
-                    "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                    domain, web_result.organization, web_result.source, web_result.confidence
-                );
-                return Ok(OrganizationResult::verified(
-                    web_result.organization,
-                    &format!("web_{}", web_result.source),
-                ));
-            } else {
-                debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
-                       domain, web_result.confidence, min_confidence);
+        if let Ok((web_result, html)) =
+            web_org::extract_organization_http_only_with_body(domain).await
+        {
+            prefetched_html = html;
+            if let Some(web_result) = web_result {
+                if web_result.confidence >= min_confidence {
+                    debug!(
+                        "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
+                        domain, web_result.organization, web_result.source, web_result.confidence
+                    );
+                    return Ok(OrganizationResult::verified(
+                        web_result.organization,
+                        &format!("web_{}", web_result.source),
+                    ));
+                } else {
+                    debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
+                           domain, web_result.confidence, min_confidence);
+                }
             }
         }
     }
@@ -102,31 +112,48 @@ pub async fn get_organization_with_rate_limit(
     }
 
     // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
-    if let Ok(result) = try_native_whois(domain).await {
-        if let Some(organization) = extract_organization_from_whois(&result) {
+    let native_org_is_redacted = match try_native_whois(domain).await {
+        Ok(result) => {
+            if let Some(organization) = extract_organization_from_whois(&result) {
+                debug!(
+                    "Found organization via native WHOIS for {}: {}",
+                    domain, organization
+                );
+                return Ok(OrganizationResult::verified(organization, "whois"));
+            }
             debug!(
-                "Found organization via native WHOIS for {}: {}",
-                domain, organization
+                "native WHOIS returned placeholder organization for {}, trying fallbacks",
+                domain
             );
-            return Ok(OrganizationResult::verified(organization, "whois"));
+            whois_org_field_is_redacted(&result)
         }
-        debug!(
-            "native WHOIS returned placeholder organization for {}, trying fallbacks",
-            domain
-        );
-    }
+        Err(_) => false,
+    };
 
-    // Priority 4: System whois command (if available) - also uses the same rate limit token
-    if let Ok(result) = try_system_whois(domain).await {
-        if let Some(organization) = extract_organization_from_whois(&result) {
+    // Priority 4: System whois command (if available) - also uses the same rate limit token.
+    //
+    // Skipped when the native record already showed the organization to be deliberately
+    // redacted: `whois(1)` queries the same servers over the same protocol and returns the
+    // same redaction, so it can only cost a subprocess and up to 4s. It is still tried
+    // whenever the native client failed outright or returned a record with no org field —
+    // the cases where a different client can genuinely learn something.
+    if !native_org_is_redacted {
+        if let Ok(result) = try_system_whois(domain).await {
+            if let Some(organization) = extract_organization_from_whois(&result) {
+                debug!(
+                    "Found organization via system whois for {}: {}",
+                    domain, organization
+                );
+                return Ok(OrganizationResult::verified(organization, "system_whois"));
+            }
             debug!(
-                "Found organization via system whois for {}: {}",
-                domain, organization
+                "System whois returned placeholder organization for {}, trying NER fallback",
+                domain
             );
-            return Ok(OrganizationResult::verified(organization, "system_whois"));
         }
+    } else {
         debug!(
-            "System whois returned placeholder organization for {}, trying NER fallback",
+            "Skipping system whois for {}: native WHOIS org field is redacted at the source",
             domain
         );
     }
@@ -134,10 +161,11 @@ pub async fn get_organization_with_rate_limit(
     // Priority 5: NER-based extraction (if embedded-ner feature enabled)
     if ner_org::is_available() {
         debug!("NER is available, attempting extraction for {}", domain);
-        let page_content = web_org::fetch_page_content(domain).await.ok();
+        let page_content = fetch_org_page_content(domain, prefetched_html).await;
         let content_ref = page_content.as_deref();
 
-        if let Ok(Some(ner_result)) = ner_org::extract_organization(domain, content_ref) {
+        if let Ok(Some(ner_result)) = ner_org::extract_organization_async(domain, content_ref).await
+        {
             debug!(
                 "Found organization via NER for {}: {} (confidence: {:.2})",
                 domain, ner_result.organization, ner_result.confidence
@@ -161,6 +189,45 @@ pub async fn get_organization_with_rate_limit(
     Ok(OrganizationResult::inferred(
         extract_organization_from_domain(domain),
     ))
+}
+
+/// Whether a WHOIS record carries an organization/registrant field whose value is a
+/// privacy placeholder ("REDACTED FOR PRIVACY", "Domains By Proxy", ...).
+///
+/// This is the precise condition under which running `whois(1)` afterwards cannot help:
+/// both clients speak RFC 3912 to the same registry and registrar servers, so when the
+/// field is present and deliberately redacted, the second query returns the same
+/// redaction. It just costs a subprocess and up to 4s to learn that — and modern .com
+/// registrations are redacted by default, so this is the common case.
+///
+/// Deliberately narrower than "the response looked long enough": a thin or referral-only
+/// record carries no org field at all, and there a second client that chases referrals
+/// differently might genuinely find one. Those still fall through to `whois(1)`.
+fn whois_org_field_is_redacted(response: &str) -> bool {
+    for regex in organization_patterns().iter().chain(registrar_patterns()) {
+        if let Some(cap) = regex.captures(response) {
+            if let Some(field) = cap.get(1) {
+                let value = field.as_str().trim();
+                if !value.is_empty() {
+                    return is_placeholder_organization(value);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Page HTML for the NER step. Reuses the body already fetched by the web-org step
+/// when one is available, so a domain reaching NER is fetched once, not twice. Falls
+/// back to a fetch only when the web-org step did not run or produced no body.
+async fn fetch_org_page_content(domain: &str, prefetched_html: Option<String>) -> Option<String> {
+    match prefetched_html {
+        Some(html) => {
+            debug!("Reusing web-org page body for NER extraction of {}", domain);
+            Some(html)
+        }
+        None => web_org::fetch_page_content(domain).await.ok(),
+    }
 }
 
 /// Get organization with verification status, with configurable web org lookup
@@ -196,50 +263,70 @@ pub async fn get_organization_with_status_and_config(
     // The headless-browser fallback is intentionally NOT used here: this runs once per
     // discovered vendor (hundreds per scan) and a Chrome launch each was the dominant
     // cost. Org name is cosmetic (uniqueness keys on domain), so HTTP-only is recall-safe.
+    // The fetched body is retained for the Priority-5 NER step, which would otherwise
+    // re-fetch the same page.
+    let mut prefetched_html: Option<String> = None;
     if web_org_enabled {
-        if let Ok(Some(web_result)) = web_org::extract_organization_http_only(domain).await {
-            if web_result.confidence >= min_confidence {
-                debug!(
-                    "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                    domain, web_result.organization, web_result.source, web_result.confidence
-                );
-                return Ok(OrganizationResult::verified(
-                    web_result.organization,
-                    &format!("web_{}", web_result.source),
-                ));
-            } else {
-                debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
-                       domain, web_result.confidence, min_confidence);
+        if let Ok((web_result, html)) =
+            web_org::extract_organization_http_only_with_body(domain).await
+        {
+            prefetched_html = html;
+            if let Some(web_result) = web_result {
+                if web_result.confidence >= min_confidence {
+                    debug!(
+                        "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
+                        domain, web_result.organization, web_result.source, web_result.confidence
+                    );
+                    return Ok(OrganizationResult::verified(
+                        web_result.organization,
+                        &format!("web_{}", web_result.source),
+                    ));
+                } else {
+                    debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
+                           domain, web_result.confidence, min_confidence);
+                }
             }
         }
     }
 
     // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
-    if let Ok(result) = try_native_whois(domain).await {
-        if let Some(organization) = extract_organization_from_whois(&result) {
+    let native_org_is_redacted = match try_native_whois(domain).await {
+        Ok(result) => {
+            if let Some(organization) = extract_organization_from_whois(&result) {
+                debug!(
+                    "Found organization via native WHOIS for {}: {}",
+                    domain, organization
+                );
+                return Ok(OrganizationResult::verified(organization, "whois"));
+            }
             debug!(
-                "Found organization via native WHOIS for {}: {}",
-                domain, organization
+                "native WHOIS returned placeholder organization for {}, trying fallbacks",
+                domain
             );
-            return Ok(OrganizationResult::verified(organization, "whois"));
+            whois_org_field_is_redacted(&result)
         }
-        debug!(
-            "native WHOIS returned placeholder organization for {}, trying fallbacks",
-            domain
-        );
-    }
+        Err(_) => false,
+    };
 
-    // Priority 4: System whois command (if available)
-    if let Ok(result) = try_system_whois(domain).await {
-        if let Some(organization) = extract_organization_from_whois(&result) {
+    // Priority 4: System whois command (if available). Skipped when the native record
+    // already showed a deliberately-redacted org — see the sibling chain for the rationale.
+    if !native_org_is_redacted {
+        if let Ok(result) = try_system_whois(domain).await {
+            if let Some(organization) = extract_organization_from_whois(&result) {
+                debug!(
+                    "Found organization via system whois for {}: {}",
+                    domain, organization
+                );
+                return Ok(OrganizationResult::verified(organization, "system_whois"));
+            }
             debug!(
-                "Found organization via system whois for {}: {}",
-                domain, organization
+                "System whois returned placeholder organization for {}, trying NER fallback",
+                domain
             );
-            return Ok(OrganizationResult::verified(organization, "system_whois"));
         }
+    } else {
         debug!(
-            "System whois returned placeholder organization for {}, trying NER fallback",
+            "Skipping system whois for {}: native WHOIS org field is redacted at the source",
             domain
         );
     }
@@ -247,11 +334,11 @@ pub async fn get_organization_with_status_and_config(
     // Priority 5: NER-based extraction (if embedded-ner feature enabled)
     if ner_org::is_available() {
         debug!("NER is available, attempting extraction for {}", domain);
-        // First try to get web content for NER to analyze
-        let page_content = web_org::fetch_page_content(domain).await.ok();
+        let page_content = fetch_org_page_content(domain, prefetched_html).await;
         let content_ref = page_content.as_deref();
 
-        if let Ok(Some(ner_result)) = ner_org::extract_organization(domain, content_ref) {
+        if let Ok(Some(ner_result)) = ner_org::extract_organization_async(domain, content_ref).await
+        {
             debug!(
                 "Found organization via NER for {}: {} (confidence: {:.2})",
                 domain, ner_result.organization, ner_result.confidence
@@ -418,6 +505,8 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
+    let _whois_timer = crate::perf::scoped(&crate::perf::METRICS.whois_lookup);
+
     // Defense-in-depth: the query is a domain/TLD and must be a single WHOIS line.
     // Reject any CR/LF/whitespace so a (discovered, not pre-validated) domain can
     // never inject a second protocol line via `\r\n`.
@@ -451,21 +540,58 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// TLD → registry WHOIS server, learned from IANA once per TLD per process.
+///
+/// A scan resolves hundreds of domains, the overwhelming majority under a handful of
+/// TLDs. Without this, every native WHOIS lookup opens a fresh TCP session to
+/// `whois.iana.org` to ask the same question ("who serves .com?") and pays up to a 3s
+/// connect plus a 4s read for an answer that does not change during a scan. Caching it
+/// removes one full round trip from every lookup after the first per TLD, and stops the
+/// scan from hammering IANA.
+static TLD_REGISTRY_SERVERS: OnceLock<StdRwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn tld_registry_servers() -> &'static StdRwLock<HashMap<String, String>> {
+    TLD_REGISTRY_SERVERS.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+/// The registry WHOIS server for a TLD, from cache when known and from IANA otherwise.
+/// Only successful resolutions are cached: a failed IANA query says nothing durable
+/// about the TLD, and caching it would convert one transient network error into a
+/// scan-long inability to resolve any domain under that TLD.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn resolve_registry_server(tld: &str) -> Option<String> {
+    if let Ok(cache) = tld_registry_servers().read() {
+        if let Some(server) = cache.get(tld) {
+            debug!("Using cached WHOIS registry server for .{tld}: {server}");
+            return Some(server.clone());
+        }
+    }
+
+    let server = match whois_query("whois.iana.org", tld).await {
+        Ok(resp) => parse_whois_referral(&resp),
+        Err(e) => {
+            debug!("IANA WHOIS for .{tld} failed: {e}");
+            None
+        }
+    }?;
+
+    if let Ok(mut cache) = tld_registry_servers().write() {
+        cache.insert(tld.to_string(), server.clone());
+    }
+    Some(server)
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 async fn try_native_whois(domain: &str) -> Result<String> {
     debug!("Trying in-process TCP WHOIS for domain: {}", domain);
 
     let result = tokio::time::timeout(Duration::from_secs(8), async {
         // 1. Ask IANA (authoritative for the root zone) which registry serves the TLD.
+        //    Answered from the per-process cache after the first domain in each TLD.
         let tld = whois_tld_query(domain);
-        let registry_server = match whois_query("whois.iana.org", &tld).await {
-            Ok(resp) => parse_whois_referral(&resp),
-            Err(e) => {
-                debug!("IANA WHOIS for .{tld} failed: {e}");
-                None
-            }
-        }
-        .ok_or_else(|| anyhow!("no WHOIS server found for .{tld} via IANA"))?;
+        let registry_server = resolve_registry_server(&tld)
+            .await
+            .ok_or_else(|| anyhow!("no WHOIS server found for .{tld} via IANA"))?;
 
         // 2. Query the registry for the domain.
         let registry_resp = whois_query(&registry_server, domain).await?;
@@ -545,26 +671,51 @@ fn extract_organization_from_domain(domain: &str) -> String {
     }
 }
 
+/// Organization field patterns, in precedence order. Compiled once: a scan parses one
+/// WHOIS response per unknown domain, and rebuilding these ten regexes each time was
+/// pure repeated work.
+static ORGANIZATION_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+static REGISTRAR_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+/// Compile a fixed pattern list, dropping any that fail. The literals are compile-time
+/// constants, so a failure here is a programming error, not an input-dependent one; the
+/// prior code silently skipped uncompilable patterns and this preserves that behavior.
+fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
+    patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
+}
+
+fn organization_patterns() -> &'static [Regex] {
+    ORGANIZATION_PATTERNS.get_or_init(|| {
+        compile_patterns(&[
+            r"(?i)Organization:\s*(.+)",
+            r"(?i)Registrant Organization:\s*(.+)",
+            r"(?i)Registrant:\s*(.+)",
+            r"(?i)OrgName:\s*(.+)",
+            r"(?i)org-name:\s*(.+)",
+            r"(?i)organisation:\s*(.+)",
+            r"(?i)Company:\s*(.+)",
+        ])
+    })
+}
+
+fn registrar_patterns() -> &'static [Regex] {
+    REGISTRAR_PATTERNS.get_or_init(|| {
+        compile_patterns(&[
+            r"(?i)Registrar:\s*(.+)",
+            r"(?i)Sponsoring Registrar:\s*(.+)",
+            r"(?i)Registrar Name:\s*(.+)",
+        ])
+    })
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
-    let organization_patterns = vec![
-        r"(?i)Organization:\s*(.+)",
-        r"(?i)Registrant Organization:\s*(.+)",
-        r"(?i)Registrant:\s*(.+)",
-        r"(?i)OrgName:\s*(.+)",
-        r"(?i)org-name:\s*(.+)",
-        r"(?i)organisation:\s*(.+)",
-        r"(?i)Company:\s*(.+)",
-    ];
-
-    for pattern in organization_patterns {
-        if let Ok(regex) = Regex::new(pattern) {
-            if let Some(cap) = regex.captures(whois_data) {
-                if let Some(org_match) = cap.get(1) {
-                    let org = org_match.as_str().trim();
-                    if !org.is_empty() && !is_placeholder_organization(org) {
-                        return Some(clean_organization_name(org));
-                    }
+    for regex in organization_patterns() {
+        if let Some(cap) = regex.captures(whois_data) {
+            if let Some(org_match) = cap.get(1) {
+                let org = org_match.as_str().trim();
+                if !org.is_empty() && !is_placeholder_organization(org) {
+                    return Some(clean_organization_name(org));
                 }
             }
         }
@@ -576,20 +727,12 @@ fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
-    let registrar_patterns = vec![
-        r"(?i)Registrar:\s*(.+)",
-        r"(?i)Sponsoring Registrar:\s*(.+)",
-        r"(?i)Registrar Name:\s*(.+)",
-    ];
-
-    for pattern in registrar_patterns {
-        if let Ok(regex) = Regex::new(pattern) {
-            if let Some(cap) = regex.captures(whois_data) {
-                if let Some(registrar_match) = cap.get(1) {
-                    let registrar = registrar_match.as_str().trim();
-                    if !registrar.is_empty() && !is_placeholder_organization(registrar) {
-                        return Some(clean_organization_name(registrar));
-                    }
+    for regex in registrar_patterns() {
+        if let Some(cap) = regex.captures(whois_data) {
+            if let Some(registrar_match) = cap.get(1) {
+                let registrar = registrar_match.as_str().trim();
+                if !registrar.is_empty() && !is_placeholder_organization(registrar) {
+                    return Some(clean_organization_name(registrar));
                 }
             }
         }
@@ -598,125 +741,131 @@ fn extract_registrar_from_whois(whois_data: &str) -> Option<String> {
     None
 }
 
+/// Registrant strings that name a privacy service, a registry operator, or a registrar
+/// rather than the organization that actually owns the domain. A static slice: the list
+/// is fixed, and rebuilding a ~120-element `Vec` on every candidate string was pure
+/// repeated allocation on a path that runs several times per WHOIS response.
+static PLACEHOLDER_ORGANIZATIONS: &[&str] = &[
+    // Privacy protection services
+    "whois privacy protection service",
+    "privacy protection service",
+    "domains by proxy",
+    "whoisguard",
+    "perfect privacy",
+    "redacted for privacy",
+    "contact privacy inc",
+    "n/a",
+    "not disclosed",
+    "private",
+    "redacted",
+    "withheld",
+    // TLD registry operators (not the actual domain owners)
+    "verisign global registry",
+    "verisign",
+    "vrsn",
+    "pir.org",
+    "public interest registry",
+    "afilias",
+    "donuts",
+    "identity digital",
+    "centralnic",
+    "nic.br",
+    "denic",
+    "nominet",
+    "afnic",
+    "sidn",
+    "registry operator",
+    "global registry services",
+    "icann",
+    // ccTLD registry authorities (government/national registries, not domain owners)
+    "nic.ro",
+    "rotld",
+    "registro.br",
+    "cnnic",
+    "jprs",
+    "krnic",
+    "twnic",
+    "mynic",
+    "thnic",
+    "vnnic",
+    "sgnic",
+    "hkirc",
+    "auda",
+    ".au domain administration",
+    "nz domain name commission",
+    "cira",
+    "nic.at",
+    "nic.ch",
+    "switch",
+    "dns belgium",
+    "dns.pt",
+    "nic.cz",
+    "nic.pl",
+    "domaininfo.com",
+    "registro.it",
+    "nic.ir",
+    "registry.in",
+    "nixi",
+    "national internet exchange of india",
+    // Domain registrars/brand protection services (not the actual domain owners)
+    "markmonitor",
+    "csc corporate domains",
+    "corporatedomains.com",
+    "safenames",
+    "com laude",
+    "nameprotect",
+    "brand protection",
+    "domain management",
+    "networksolutions",
+    "network solutions",
+    "godaddy",
+    "namecheap",
+    "enom",
+    "tucows",
+    "key-systems",
+    "gandi",
+    "identity protection service",
+    "identity protect",
+    // Amazon registrar (operates as domain registrar, not the actual domain owner)
+    "amazon registrar",
+    "amazon registrar, inc.",
+    // Additional registrars
+    "porkbun",
+    "cloudflare",
+    "dynadot",
+    "hover",
+    "google domains",
+    "squarespace domains",
+    "bluehost",
+    "hostgator",
+    "dreamhost",
+    "siteground",
+    "ionos",
+    "register.com",
+    "name.com",
+    "domain.com",
+    "epik",
+    // Registrant field values that aren't organization names
+    "registrant street",
+    "registrant city",
+    "registrant state",
+    "registrant postal",
+    "registrant country",
+    "registrant phone",
+    "registrant email",
+    "registrant fax",
+    "admin street",
+    "admin city",
+    "tech street",
+    "tech city",
+    "po box",
+    "p.o. box",
+    "care of",
+    "c/o ",
+];
+
 pub fn is_placeholder_organization(org: &str) -> bool {
-    let placeholders = vec![
-        // Privacy protection services
-        "whois privacy protection service",
-        "privacy protection service",
-        "domains by proxy",
-        "whoisguard",
-        "perfect privacy",
-        "redacted for privacy",
-        "contact privacy inc",
-        "n/a",
-        "not disclosed",
-        "private",
-        "redacted",
-        "withheld",
-        // TLD registry operators (not the actual domain owners)
-        "verisign global registry",
-        "verisign",
-        "vrsn",
-        "pir.org",
-        "public interest registry",
-        "afilias",
-        "donuts",
-        "identity digital",
-        "centralnic",
-        "nic.br",
-        "denic",
-        "nominet",
-        "afnic",
-        "sidn",
-        "registry operator",
-        "global registry services",
-        "icann",
-        // ccTLD registry authorities (government/national registries, not domain owners)
-        "nic.ro",
-        "rotld",
-        "registro.br",
-        "cnnic",
-        "jprs",
-        "krnic",
-        "twnic",
-        "mynic",
-        "thnic",
-        "vnnic",
-        "sgnic",
-        "hkirc",
-        "auda",
-        ".au domain administration",
-        "nz domain name commission",
-        "cira",
-        "nic.at",
-        "nic.ch",
-        "switch",
-        "dns belgium",
-        "dns.pt",
-        "nic.cz",
-        "nic.pl",
-        "domaininfo.com",
-        "registro.it",
-        "nic.ir",
-        "registry.in",
-        "nixi",
-        "national internet exchange of india",
-        // Domain registrars/brand protection services (not the actual domain owners)
-        "markmonitor",
-        "csc corporate domains",
-        "corporatedomains.com",
-        "safenames",
-        "com laude",
-        "nameprotect",
-        "brand protection",
-        "domain management",
-        "networksolutions",
-        "network solutions",
-        "godaddy",
-        "namecheap",
-        "enom",
-        "tucows",
-        "key-systems",
-        "gandi",
-        "identity protection service",
-        "identity protect",
-        // Amazon registrar (operates as domain registrar, not the actual domain owner)
-        "amazon registrar",
-        "amazon registrar, inc.",
-        // Additional registrars
-        "porkbun",
-        "cloudflare",
-        "dynadot",
-        "hover",
-        "google domains",
-        "squarespace domains",
-        "bluehost",
-        "hostgator",
-        "dreamhost",
-        "siteground",
-        "ionos",
-        "register.com",
-        "name.com",
-        "domain.com",
-        "epik",
-        // Registrant field values that aren't organization names
-        "registrant street",
-        "registrant city",
-        "registrant state",
-        "registrant postal",
-        "registrant country",
-        "registrant phone",
-        "registrant email",
-        "registrant fax",
-        "admin street",
-        "admin city",
-        "tech street",
-        "tech city",
-        "po box",
-        "p.o. box",
-        "care of",
-        "c/o ",
-    ];
+    let placeholders = PLACEHOLDER_ORGANIZATIONS;
 
     let org_lower = org.to_lowercase();
 

@@ -101,6 +101,41 @@ static ALL_ELEMENTS_SELECTOR: Lazy<Selector> =
 static PARAGRAPH_SELECTOR: Lazy<Selector> =
     Lazy::new(|| Selector::parse("p").expect("\"p\" is a valid compile-time CSS selector"));
 
+/// High-confidence organization-name patterns used by `detect_organizations_in_content`,
+/// compiled once. That function runs on every subprocessor page a scan parses, and each
+/// pattern is applied across seven DOM selectors — recompiling them per page was pure
+/// repeated work on the scan's hottest CPU path.
+static ORG_DETECTION_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
+    [
+        // Common company suffixes
+        r"(?i)\b([A-Z][a-zA-Z\s&\.]{2,30})\s+(Inc\.?|LLC\.?|Corp\.?|Corporation|Ltd\.?|Limited|Co\.?|Company|Group|Technologies?|Tech|Systems?|Solutions?)\b",
+        // Cloud/tech companies
+        r"(?i)\b(Amazon|Google|Microsoft|Apple|IBM|Oracle|Salesforce|Adobe|Atlassian|Dropbox|GitHub|Slack|Zoom|Stripe|HubSpot|Klaviyo|Canva|Notion|DocuSign|Twilio|SendGrid|Mailgun|Zendesk|Freshworks?|Intercom|Segment|Mixpanel|Amplitude|Datadog|New Relic|PagerDuty|Auth0|Okta|OneLogin)\b",
+        // Generic company patterns
+        r"(?i)\b([A-Z][a-zA-Z]{3,20})\s+(Services?|Analytics?|Platform|Network|Software|SaaS|Cloud|Data|Security|Infrastructure)\b",
+    ]
+    .iter()
+    .filter_map(|p| Regex::new(p).ok())
+    .collect()
+});
+
+/// Content-focused selectors preferred over the generic `*` sweep, compiled once.
+/// Ordered: main content areas first, then tables and lists, then paragraphs.
+static ORG_CONTENT_SELECTORS: Lazy<Vec<Selector>> = Lazy::new(|| {
+    [
+        "main *",          // Main content area
+        "article *",       // Article content
+        ".content *",      // Common content class
+        "[role='main'] *", // ARIA main role
+        "table *",         // Table cells (subprocessor lists are often in tables)
+        "ul li, ol li",    // List items
+        "p",               // Paragraphs
+    ]
+    .iter()
+    .filter_map(|s| Selector::parse(s).ok())
+    .collect()
+});
+
 static HEADER_ROW_SELECTOR: Lazy<Selector> = Lazy::new(|| {
     Selector::parse("thead tr, tr:first-child")
         .expect("\"thead tr, tr:first-child\" is a valid compile-time CSS selector")
@@ -987,6 +1022,14 @@ impl SubprocessorAnalyzer {
     fn create_http_client() -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(30))  // Increased timeout for slower servers
+            // A vendor generates up to MAX_URLS_TO_TEST candidate subprocessor URLs and probes
+            // them against a MAX_ANALYSIS_TIME budget. Without a connect timeout, a single host
+            // that blackholes SYN (dropped packets, dead IPv6 AAAA) burns the FULL 30s request
+            // timeout and consumes the vendor's entire budget on one URL that was never going
+            // to answer. Bounding TCP connect at 5s is recall-positive, not a corner cut: a
+            // host we cannot connect to yields nothing either way, and a responsive-but-slow
+            // server still gets the full 30s to send its body.
+            .connect_timeout(Duration::from_secs(5))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")  // Realistic browser user agent
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false)  // Security: reject invalid certificates
@@ -1466,6 +1509,11 @@ impl SubprocessorAnalyzer {
         );
 
         let analysis_start = std::time::Instant::now();
+        // Time this vendor spends queued for a headless-Chrome permit. It is subtracted from
+        // the analysis budget below: without it, MAX_ANALYSIS_TIME measures how contended the
+        // browser pool is, so a vendor whose trust center needs rendering silently yields zero
+        // subprocessors whenever the scan is busy. Recall must not depend on scan concurrency.
+        let browser_wait_nanos = std::sync::atomic::AtomicU64::new(0);
         let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
         let mut working_urls: Vec<String> = Vec::new();
         let mut categories_done: std::collections::HashSet<SubprocessorSourceCategory> =
@@ -1476,15 +1524,44 @@ impl SubprocessorAnalyzer {
             if categories_done.len() >= SUBPROCESSOR_SOURCE_CATEGORY_COUNT {
                 break;
             }
-            if analysis_start.elapsed() > MAX_ANALYSIS_TIME {
-                debug!(
-                    "Subprocessor analysis time limit exceeded for {}, stopping URL discovery",
-                    domain
+            let working_elapsed = analysis_start
+                .elapsed()
+                .saturating_sub(Duration::from_nanos(
+                    browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                ));
+            if working_elapsed > MAX_ANALYSIS_TIME {
+                // Classify + count, never silently truncate. This mirrors the DNS
+                // failure-visibility contract (`note_throttle`, warn-once-per-provider): a
+                // budget that expires converts "we did not look" into "there is nothing here",
+                // and the aggregate row count hides it — vanta's peer `chargify.com` once lost
+                // all 28 of its rows while the scan-wide total went UP.
+                crate::perf::METRICS.subproc_budget_exhausted.hit();
+                let queued = Duration::from_nanos(
+                    browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
                 );
+                if per_source.is_empty() {
+                    crate::perf::METRICS.subproc_zero_yield.hit();
+                    tracing::warn!(
+                        "SUBPROC_BUDGET_EXHAUSTED: {} yielded no subprocessors after {:.1}s of \
+                         working time ({:.1}s queued for a browser, excluded). Recall for this \
+                         vendor is incomplete — it was starved, not empty.",
+                        domain,
+                        working_elapsed.as_secs_f64(),
+                        queued.as_secs_f64()
+                    );
+                } else {
+                    debug!(
+                        "Subprocessor analysis time limit exceeded for {} after {:.1}s working \
+                         time; {} source(s) already found, stopping URL discovery",
+                        domain,
+                        working_elapsed.as_secs_f64(),
+                        per_source.len()
+                    );
+                }
                 if let Some(debug_logger) = &debug_logger {
                     debug_logger.debug(&format!(
-                        "⏰ Time limit exceeded after {:.2}s, stopping URL discovery",
-                        analysis_start.elapsed().as_secs_f64()
+                        "⏰ Time limit exceeded after {:.2}s of working time, stopping URL discovery",
+                        working_elapsed.as_secs_f64()
                     ));
                 }
                 break;
@@ -1507,7 +1584,16 @@ impl SubprocessorAnalyzer {
                 ctx.http_limiter.acquire(domain).await;
             }
             let request_start = std::time::Instant::now();
-            match self.scrape_subprocessor_page(url, logger, domain).await {
+            match self
+                .scrape_subprocessor_page_with_retry(
+                    url,
+                    logger,
+                    domain,
+                    None,
+                    Some(&browser_wait_nanos),
+                )
+                .await
+            {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
                     debug!(
@@ -1601,7 +1687,7 @@ impl SubprocessorAnalyzer {
                 continue;
             }
             if let Ok(subprocessors) = self
-                .scrape_subprocessor_page_with_retry(url, logger, domain, None)
+                .scrape_subprocessor_page_with_retry(url, logger, domain, None, None)
                 .await
             {
                 if !subprocessors.is_empty() {
@@ -2233,20 +2319,28 @@ impl SubprocessorAnalyzer {
         logger: Option<&dyn LogFailure>,
         source_domain: &str,
     ) -> Result<Vec<SubprocessorDomain>> {
-        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None)
+        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None, None)
             .await
     }
 
     /// Scrape a single subprocessor page with configurable retry and backoff
     // coverage(off) justified: makes live HTTP requests with retry/backoff to external URLs
     #[cfg_attr(coverage_nightly, coverage(off))]
+    /// `browser_wait_nanos`, when supplied, accumulates the time this scrape spent blocked in
+    /// the global headless-Chrome permit queue. A caller enforcing a per-vendor time budget
+    /// subtracts it so the budget bounds this vendor's own work rather than how many other
+    /// vendors happened to want a browser at the same moment.
     pub async fn scrape_subprocessor_page_with_retry(
         &self,
         url: &str,
         _logger: Option<&dyn LogFailure>,
         source_domain: &str,
         rate_limit_ctx: Option<&RateLimitContext>,
+        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<Vec<SubprocessorDomain>> {
+        // Consumed by the headless-render paths, which are compiled out under cfg(test) and
+        // cfg(coverage) — those builds never launch Chrome, so nothing can be credited.
+        let _ = &browser_wait_nanos;
         debug!("🔥🔥🔥 SCRAPE_SUBPROCESSOR_PAGE CALLED: {}", url);
         debug!(
             "🚀🚀🚀 STARTING DETAILED SCRAPE of subprocessor page: {}",
@@ -2260,7 +2354,12 @@ impl SubprocessorAnalyzer {
             (3, None) // Default: 3 retries
         };
 
-        // Fetch the webpage with configurable retry mechanism
+        // Fetch the webpage with configurable retry mechanism.
+        //
+        // This is the work `MAX_ANALYSIS_TIME` actually spends: a vendor generates up to
+        // MAX_URLS_TO_TEST candidate URLs and most of them 404. Timing it is what lets the
+        // attribution table account for the subprocessor path at all.
+        let _probe_timer = crate::perf::scoped(&crate::perf::METRICS.subproc_probe);
         let mut last_error = None;
         let mut response = None;
 
@@ -2553,26 +2652,36 @@ impl SubprocessorAnalyzer {
             if is_spa {
                 debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
                 let url_for_browser = url.to_string();
-                match tokio::task::spawn_blocking(move || -> Result<String> {
-                    let guard = crate::browser_pool::create_browser()?;
-                    let tab = guard
-                        .browser
-                        .new_tab()
-                        .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+                match tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
+                    // Records `render.total` on drop — failures counted too. Before the guard,
+                    // so tab close and Chrome recycling are inside the measurement.
+                    let mut render_timer = crate::perf::RenderTimer::start();
+                    let guard = crate::browser_pool::acquire_tab()?;
+                    let permit_wait = guard.permit_wait();
+                    render_timer.exclude(permit_wait);
+                    let tab = guard.tab();
+                    let nav_started = std::time::Instant::now();
                     tab.navigate_to(&url_for_browser)
                         .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
                     tab.wait_until_navigated()
                         .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
+                    crate::perf::METRICS
+                        .render_navigate
+                        .record(nav_started.elapsed());
                     // Wait for JavaScript to render content
-                    std::thread::sleep(Duration::from_millis(5000));
-                    let rendered = tab
-                        .get_content()
-                        .map_err(|e| anyhow::anyhow!("Failed to get rendered content: {}", e))?;
-                    Ok(rendered)
+                    crate::perf::timed(&crate::perf::METRICS.render_settle, || {
+                        std::thread::sleep(Duration::from_millis(5000))
+                    });
+                    let rendered = crate::perf::timed(&crate::perf::METRICS.render_capture, || {
+                        tab.get_content()
+                    })
+                    .map_err(|e| anyhow::anyhow!("Failed to get rendered content: {}", e))?;
+                    Ok((rendered, permit_wait))
                 })
                 .await
                 {
-                    Ok(Ok(rendered)) if rendered.len() > content.len() => {
+                    Ok(Ok((rendered, permit_wait))) if rendered.len() > content.len() => {
+                        credit_browser_wait(browser_wait_nanos, permit_wait);
                         debug!(
                             "Browser rendered {} chars (was {} static) for {}",
                             rendered.len(),
@@ -2581,7 +2690,8 @@ impl SubprocessorAnalyzer {
                         );
                         rendered
                     }
-                    Ok(Ok(_rendered)) => {
+                    Ok(Ok((_rendered, permit_wait))) => {
+                        credit_browser_wait(browser_wait_nanos, permit_wait);
                         debug!(
                             "Browser rendering didn't produce larger content for {}, using static HTML",
                             source_domain
@@ -2619,27 +2729,31 @@ impl SubprocessorAnalyzer {
             &content[..std::cmp::min(content.len(), 1000)]
         );
 
-        // Debug: Check for div elements that might contain subprocessor info
-        let divs: Vec<_> = document.select(&DIV_SELECTOR).collect();
-        debug!("🔥🔥🔥 Found {} div elements total", divs.len());
+        // Diagnostics only: six full-document sweeps whose sole output is a debug line.
+        // Gated on the level actually being enabled, so a default-verbosity scan does not
+        // walk every page's DOM six extra times to build messages nobody will see.
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let divs: Vec<_> = document.select(&DIV_SELECTOR).collect();
+            debug!("🔥🔥🔥 Found {} div elements total", divs.len());
 
-        // Check for specific div patterns that might contain subprocessors
-        let common_selectors = [
-            "div[class*='subprocessor']",
-            "div[class*='vendor']",
-            "div[class*='partner']",
-            "div[class*='processor']",
-            "div[class*='supplier']",
-        ];
+            // Check for specific div patterns that might contain subprocessors
+            let common_selectors = [
+                "div[class*='subprocessor']",
+                "div[class*='vendor']",
+                "div[class*='partner']",
+                "div[class*='processor']",
+                "div[class*='supplier']",
+            ];
 
-        for selector_str in &common_selectors {
-            if let Ok(selector) = Selector::parse(selector_str) {
-                let elements: Vec<_> = document.select(&selector).collect();
-                debug!(
-                    "🔥🔥🔥 Found {} elements with selector: {}",
-                    elements.len(),
-                    selector_str
-                );
+            for selector_str in &common_selectors {
+                if let Ok(selector) = Selector::parse(selector_str) {
+                    let elements: Vec<_> = document.select(&selector).collect();
+                    debug!(
+                        "🔥🔥🔥 Found {} elements with selector: {}",
+                        elements.len(),
+                        selector_str
+                    );
+                }
             }
         }
 
@@ -2929,7 +3043,7 @@ impl SubprocessorAnalyzer {
 
             // Try headless browser scraping as final fallback
             match self
-                .scrape_with_headless_browser(url, _logger, source_domain)
+                .scrape_with_headless_browser(url, _logger, source_domain, browser_wait_nanos)
                 .await
             {
                 Ok(headless_vendors) => {
@@ -2943,21 +3057,10 @@ impl SubprocessorAnalyzer {
                             headless_vendors.len()
                         );
 
-                        // Try AI analysis on the rendered content for pattern discovery
-                        let rendered_content = self
-                            .get_rendered_content_from_browser(url)
-                            .await
-                            .unwrap_or_default();
-                        if !rendered_content.is_empty() {
-                            let _ = self
-                                .scrape_with_intelligent_analysis(
-                                    url,
-                                    &rendered_content,
-                                    source_domain,
-                                )
-                                .await;
-                        }
-
+                        // The vendors are already extracted; a second render purely to
+                        // re-run pattern discovery used to happen here, launching another
+                        // Chrome process and discarding its result. The extraction that
+                        // just succeeded is what the cache learns from.
                         return Ok(headless_vendors);
                     } else {
                         debug!("🔥🔥🔥 ALL METHODS FAILED - no vendors found with any approach");
@@ -2979,7 +3082,9 @@ impl SubprocessorAnalyzer {
                 // Extract text content from HTML for NER processing
                 let text_content = extract_text_from_html(&content);
                 if text_content.len() >= 100 {
-                    match crate::ner_org::extract_all_organizations(&text_content, Some(0.85)) {
+                    match crate::ner_org::extract_all_organizations_async(&text_content, Some(0.85))
+                        .await
+                    {
                         Ok(ner_results) if !ner_results.is_empty() => {
                             debug!(
                                 "NER fallback found {} organizations for {}",
@@ -3119,35 +3224,13 @@ impl SubprocessorAnalyzer {
 
         let mut detected_orgs = Vec::new();
 
-        // High-confidence patterns for organization names
-        let org_patterns = vec![
-            // Common company suffixes
-            r"(?i)\b([A-Z][a-zA-Z\s&\.]{2,30})\s+(Inc\.?|LLC\.?|Corp\.?|Corporation|Ltd\.?|Limited|Co\.?|Company|Group|Technologies?|Tech|Systems?|Solutions?)\b",
-            // Cloud/tech companies
-            r"(?i)\b(Amazon|Google|Microsoft|Apple|IBM|Oracle|Salesforce|Adobe|Atlassian|Dropbox|GitHub|Slack|Zoom|Stripe|HubSpot|Klaviyo|Canva|Notion|DocuSign|Twilio|SendGrid|Mailgun|Zendesk|Freshworks?|Intercom|Segment|Mixpanel|Amplitude|Datadog|New Relic|PagerDuty|Auth0|Okta|OneLogin)\b",
-            // Generic company patterns
-            r"(?i)\b([A-Z][a-zA-Z]{3,20})\s+(Services?|Analytics?|Platform|Network|Software|SaaS|Cloud|Data|Security|Infrastructure)\b",
-        ];
-
-        // Prefer content-focused elements over generic * selector to avoid navigation noise
-        // Priority: main content areas first, then fall back to all elements
-        let content_selectors = [
-            "main *",          // Main content area
-            "article *",       // Article content
-            ".content *",      // Common content class
-            "[role='main'] *", // ARIA main role
-            "table *",         // Table cells (subprocessor lists are often in tables)
-            "ul li, ol li",    // List items
-            "p",               // Paragraphs
-        ];
-
-        for pattern_str in &org_patterns {
-            if let Ok(pattern) = Regex::new(pattern_str) {
+        for pattern in ORG_DETECTION_PATTERNS.iter() {
+            {
                 // Try content-focused selectors first
                 let mut found_in_content = false;
-                for selector_str in &content_selectors {
-                    if let Ok(selector) = Selector::parse(selector_str) {
-                        for text_element in document.select(&selector) {
+                for selector in ORG_CONTENT_SELECTORS.iter() {
+                    {
+                        for text_element in document.select(selector) {
                             // Skip if element is inside navigation containers
                             if self.is_in_navigation_container(&text_element) {
                                 continue;
@@ -3675,6 +3758,7 @@ impl SubprocessorAnalyzer {
         url: &str,
         _logger: Option<&dyn LogFailure>,
         source_domain: &str,
+        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<Vec<SubprocessorDomain>> {
         debug!(
             "🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}",
@@ -3682,31 +3766,14 @@ impl SubprocessorAnalyzer {
         );
         debug!("Starting headless browser scraping for: {}", url);
 
-        // Launch headless Chrome (auto-detects container for sandbox config)
-        let guard = crate::browser_pool::create_browser()?;
-
-        let tab = guard
-            .browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to create new browser tab: {}", e))?;
-
-        // Navigate to the page and wait for JavaScript to render
+        // Launch headless Chrome, navigate, let scripts render, and read the DOM — all
+        // on the blocking pool (see `render_html_in_browser`). Same navigation and same
+        // 2s settle wait as before; only the thread it occupies has changed.
         debug!("🔥🔥🔥 HEADLESS BROWSER: Navigating to {}", url);
-        tab.navigate_to(url)
-            .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url, e))?;
-
-        // Wait for the page to load completely
-        tab.wait_until_navigated()
-            .map_err(|e| anyhow::anyhow!("Page failed to load: {}", e))?;
-
-        // Wait a bit more for JavaScript content to render
-        std::thread::sleep(Duration::from_millis(2000));
+        let (html_content, permit_wait) =
+            render_html_in_browser(url, Duration::from_millis(2000)).await?;
+        credit_browser_wait(browser_wait_nanos, permit_wait);
         debug!("🔥🔥🔥 HEADLESS BROWSER: Page loaded, extracting content");
-
-        // Get the fully rendered HTML
-        let html_content = tab
-            .get_content()
-            .map_err(|e| anyhow::anyhow!("Failed to get page content: {}", e))?;
 
         debug!(
             "🔥🔥🔥 HEADLESS BROWSER: Got rendered HTML, length: {} chars",
@@ -6169,38 +6236,66 @@ impl SubprocessorAnalyzer {
         );
         Ok(vendors)
     }
+}
 
-    /// Helper method to get rendered content from headless browser
-    // coverage(off): requires headless Chrome process; not available in test
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    #[cfg(all(not(test), not(coverage)))]
-    async fn get_rendered_content_from_browser(&self, url: &str) -> Result<String> {
-        let guard = crate::browser_pool::create_browser()?;
+/// Render a URL in headless Chrome and return the fully-rendered HTML.
+///
+/// Every step here — acquiring a browser permit, launching Chrome, navigating, the
+/// settle wait, and reading the DOM — is synchronous and blocks its thread for seconds.
+/// Run on the blocking pool so it never parks an async runtime worker, which would stall
+/// every other in-flight DNS and HTTP future in the scan.
+// coverage(off): requires headless Chrome process; not available in test
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(all(not(test), not(coverage)))]
+/// Add a browser-pool queue wait to a vendor's credit sink, saturating rather than wrapping.
+///
+/// The sink is `None` for callers that have no time budget (tests, one-off scrapes); those
+/// simply discard the measurement.
+fn credit_browser_wait(sink: Option<&std::sync::atomic::AtomicU64>, waited: Duration) {
+    if let Some(sink) = sink {
+        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+        sink.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
-        let tab = guard
-            .browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to create new browser tab: {}", e))?;
+/// Render `url` in headless Chrome and return the settled DOM plus how long the render
+/// blocked waiting for a pool permit. Callers with a time budget must subtract that wait —
+/// see `analyze_domain_with_full_options`.
+async fn render_html_in_browser(url: &str, settle: Duration) -> Result<(String, Duration)> {
+    let url = url.to_string();
+    tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
+        // Records `render.total` on drop, so a render that fails partway is still counted.
+        // Otherwise the table's denominator would silently exclude the slow failures — the
+        // renders most likely to be the problem. Declared before the guard so that tab close
+        // and Chrome recycling land inside the measurement.
+        let mut render_timer = crate::perf::RenderTimer::start();
+        let guard = crate::browser_pool::acquire_tab()?;
+        let permit_wait = guard.permit_wait();
+        render_timer.exclude(permit_wait);
+        let tab = guard.tab();
 
-        tab.navigate_to(url)
+        let nav_started = std::time::Instant::now();
+        tab.navigate_to(&url)
             .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url, e))?;
 
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Page failed to load: {}", e))?;
+        crate::perf::METRICS
+            .render_navigate
+            .record(nav_started.elapsed());
 
-        // Wait for JavaScript to render content
-        std::thread::sleep(Duration::from_millis(2000));
+        // Give client-side scripts time to populate the DOM after navigation completes.
+        crate::perf::timed(&crate::perf::METRICS.render_settle, || {
+            std::thread::sleep(settle)
+        });
 
-        let html_content = tab
-            .get_content()
+        let html = crate::perf::timed(&crate::perf::METRICS.render_capture, || tab.get_content())
             .map_err(|e| anyhow::anyhow!("Failed to get page content: {}", e))?;
 
-        debug!(
-            "Retrieved {} characters of rendered HTML content",
-            html_content.len()
-        );
-        Ok(html_content)
-    }
+        Ok((html, permit_wait))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Headless render task failed to join: {}", e))?
 }
 
 /// Extract vendor domains from subprocessor pages with logging support
@@ -13121,7 +13216,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
             .await;
         assert!(result.is_ok());
     }
@@ -13141,7 +13236,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
             .await;
         assert!(result.is_err(), "Non-HTML/PDF content type should error");
         let err_msg = result.unwrap_err().to_string();
@@ -13165,7 +13260,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
             .await;
         assert!(result.is_err(), "HTTP 500 should error");
     }
@@ -13211,7 +13306,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
             .await;
         assert!(result.is_ok(), "PDF content type should be processed");
     }
@@ -14395,7 +14490,7 @@ mod tests {
         let url = server.uri();
         // This exercises the Vanta detection branch (line 2060) within scrape_subprocessor_page_with_retry
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
             .await;
         // Vanta GraphQL call will fail (external URL), so it falls through to generic extraction
         assert!(result.is_ok());
@@ -14428,7 +14523,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None)
+            .scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None, None)
             .await;
         assert!(result.is_ok());
         // Exercises the full table extraction + pattern generation code path (lines 2411-2478)
@@ -14450,7 +14545,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None, None)
             .await;
         assert!(result.is_ok());
         assert!(
@@ -15021,7 +15116,7 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "customrules.com", None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "customrules.com", None, None)
             .await;
         assert!(result.is_ok());
     }
@@ -15047,7 +15142,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "listtest.com", None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "listtest.com", None, None)
             .await;
         assert!(result.is_ok(), "List extraction path should work");
     }
@@ -15178,7 +15273,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "pdftest.com", None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "pdftest.com", None, None)
             .await;
         assert!(result.is_ok());
     }
@@ -25950,7 +26045,7 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let ctx = RateLimitContext::from_config(&config);
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx))
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx), None)
             .await;
         // Should succeed or fail gracefully with rate limit context
         let _ = result;
@@ -25988,7 +26083,7 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let ctx = RateLimitContext::from_config(&config);
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx))
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx), None)
             .await;
         let _ = result;
     }
@@ -27106,6 +27201,7 @@ New York, NY 10018</td><td>Monitoring</td></tr>
                 None,
                 "test-429.example",
                 Some(&ctx),
+                None,
             )
             .await;
         let _ = result;

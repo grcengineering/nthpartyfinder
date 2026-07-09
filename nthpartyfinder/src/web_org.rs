@@ -14,6 +14,7 @@ use anyhow::{anyhow, Result};
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Deserialize;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -72,6 +73,32 @@ struct SchemaOrgData {
     graph: Option<Vec<SchemaOrgData>>,
 }
 
+/// Shared HTTP client for page fetches.
+///
+/// A `reqwest::Client` owns its connection pool and TLS session store, so building one
+/// per call — as this module used to — throws away connection reuse and pays a fresh
+/// TCP + TLS handshake for every one of the hundreds of vendor pages a scan fetches.
+/// One long-lived client keeps keep-alive connections and TLS resumption across the
+/// whole run. Timeout, user-agent, and redirect policy are unchanged.
+static PAGE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+// coverage(off): builder failure requires a broken TLS backend; unreachable in practice
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn page_client() -> Result<&'static reqwest::Client> {
+    // `get_or_init` cannot fail, so build fallibly first and cache only on success.
+    if let Some(client) = PAGE_CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .tcp_keepalive(Duration::from_secs(60))
+        .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/grcengineering/nthpartyfinder)")
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    Ok(PAGE_CLIENT.get_or_init(|| client))
+}
+
 // coverage(off): network I/O — fetches live HTTPS/HTTP, non-success and fallback branches require real server
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn fetch_page_content(domain: &str) -> Result<String> {
@@ -79,11 +106,8 @@ pub async fn fetch_page_content(domain: &str) -> Result<String> {
 
     debug!("Fetching web page content: {}", url);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/grcengineering/nthpartyfinder)")
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
+    let _fetch_timer = crate::perf::scoped(&crate::perf::METRICS.http_fetch);
+    let client = page_client()?;
 
     let response =
         match client.get(&url).send().await {
@@ -162,9 +186,16 @@ pub async fn extract_organization_with_fallback(
         }
     }
 
-    // Step 2: Fall back to headless browser for JavaScript rendering
+    // Step 2: Fall back to headless browser for JavaScript rendering. Chrome launch,
+    // navigation, the render wait, and the DOM read are all blocking, so they run on the
+    // blocking pool rather than parking an async runtime worker for several seconds.
     debug!("Trying headless browser for {}", domain);
-    match fetch_page_with_headless(domain) {
+    let domain_owned = domain.to_string();
+    let headless_result =
+        tokio::task::spawn_blocking(move || fetch_page_with_headless(&domain_owned))
+            .await
+            .map_err(|e| anyhow!("Headless fetch task failed to join: {}", e))?;
+    match headless_result {
         Ok(html_content) => {
             if let Ok(Some(result)) = extract_organization_from_html(&html_content, domain) {
                 info!(
@@ -198,18 +229,59 @@ pub async fn extract_organization_with_fallback(
 // coverage(off): requires live HTTP — not unit-testable
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn extract_organization_http_only(domain: &str) -> Result<Option<WebOrgResult>> {
+    extract_organization_http_only_with_body(domain)
+        .await
+        .map(|(result, _body)| result)
+}
+
+/// As [`extract_organization_http_only`], but also hands back the page body it fetched.
+///
+/// The org-resolution chain in `whois` may fall through from this step all the way to
+/// NER, which needs the same page. Returning the body lets the chain fetch each domain
+/// once instead of twice. The body is returned even when no organization could be
+/// extracted from it — that is exactly the case NER exists to handle.
+// coverage(off): requires live HTTP — not unit-testable
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub async fn extract_organization_http_only_with_body(
+    domain: &str,
+) -> Result<(Option<WebOrgResult>, Option<String>)> {
     let fetch = fetch_page_content(domain);
     match tokio::time::timeout(Duration::from_secs(4), fetch).await {
-        Ok(Ok(html_content)) => extract_organization_from_html(&html_content, domain),
+        Ok(Ok(html_content)) => {
+            let result = parse_organization_off_runtime(html_content.clone(), domain).await?;
+            Ok((result, Some(html_content)))
+        }
         Ok(Err(e)) => {
             debug!("HTTP org fetch failed for {}: {}", domain, e);
-            Ok(None)
+            Ok((None, None))
         }
         Err(_) => {
             debug!("HTTP org fetch timed out for {}", domain);
-            Ok(None)
+            Ok((None, None))
         }
     }
+}
+
+/// Parse a page's organization on the blocking pool.
+///
+/// `extract_organization_from_html` builds a full `scraper::Html` DOM and runs several
+/// selector passes and regexes over it — tens of milliseconds of pure CPU on pages that are
+/// routinely hundreds of kilobytes. It runs once per discovered vendor, so on the async
+/// runtime it both stalls other vendors' I/O and serialises against them. Moving it to the
+/// blocking pool lets several vendors' pages parse on several cores.
+///
+/// `scraper::Html` is not `Send`, so the DOM is constructed and dropped entirely inside the
+/// closure; only the owned HTML goes in and an owned result comes out.
+// coverage(off): thin scheduling wrapper; the parsing logic it calls is unit-tested directly
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn parse_organization_off_runtime(
+    html: String,
+    domain: &str,
+) -> Result<Option<WebOrgResult>> {
+    let domain = domain.to_string();
+    tokio::task::spawn_blocking(move || extract_organization_from_html(&html, &domain))
+        .await
+        .map_err(|e| anyhow!("HTML org-parse task failed to join: {}", e))?
 }
 
 // coverage(off): requires headless Chrome browser process — not unit-testable
@@ -217,25 +289,31 @@ pub async fn extract_organization_http_only(domain: &str) -> Result<Option<WebOr
 fn fetch_page_with_headless(domain: &str) -> Result<String> {
     let url = format!("https://{}", domain);
 
-    let guard = crate::browser_pool::create_browser()?;
+    // Records `render.total` on drop — failures counted too. Before the guard, so tab close
+    // and Chrome recycling are inside the measurement.
+    let mut render_timer = crate::perf::RenderTimer::start();
+    let guard = crate::browser_pool::acquire_tab()?;
+    render_timer.exclude(guard.permit_wait());
+    let tab = guard.tab();
 
-    let tab = guard
-        .browser
-        .new_tab()
-        .map_err(|e| anyhow!("Failed to create browser tab: {}", e))?;
-
+    let nav_started = std::time::Instant::now();
     tab.navigate_to(&url)
         .map_err(|e| anyhow!("Failed to navigate to {}: {}", url, e))?;
 
     tab.wait_until_navigated()
         .map_err(|e| anyhow!("Page failed to load for {}: {}", url, e))?;
+    crate::perf::METRICS
+        .render_navigate
+        .record(nav_started.elapsed());
 
     // Wait for JavaScript to render - SPAs often need more time
-    std::thread::sleep(Duration::from_millis(3000));
+    crate::perf::timed(&crate::perf::METRICS.render_settle, || {
+        std::thread::sleep(Duration::from_millis(3000))
+    });
 
-    let html_content = tab
-        .get_content()
-        .map_err(|e| anyhow!("Failed to get page content for {}: {}", url, e))?;
+    let html_content =
+        crate::perf::timed(&crate::perf::METRICS.render_capture, || tab.get_content())
+            .map_err(|e| anyhow!("Failed to get page content for {}: {}", url, e))?;
 
     Ok(html_content)
 }
@@ -529,22 +607,36 @@ fn extract_from_title(document: &Html, _domain: &str) -> Option<WebOrgResult> {
     None
 }
 
-// coverage(off): Selector::parse on hardcoded valid CSS + Regex::new on valid patterns never fail
+/// Copyright-line patterns, compiled once. These run against a page's footer text — or,
+/// when a page has no footer element, against its entire raw HTML — for every vendor
+/// domain a scan resolves, so recompiling them per page was measurable repeated work.
+static COPYRIGHT_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+// coverage(off): Regex::new on valid compile-time patterns never fails
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn copyright_patterns() -> &'static [Regex] {
+    COPYRIGHT_PATTERNS.get_or_init(|| {
+        [
+            // Pattern 1: © 2024 Company Name followed by All rights or period/comma
+            r"(?i)(?:©|&copy;|\(c\))\s*(?:20\d{2}[-–]?\s*)?(?:20\d{2}\s+)?([A-Z][A-Za-z0-9\s,&']+?(?:\s*(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?|GmbH|Pty|Limited))?)(?:\s*\.|\s*,|\s+All\s+[Rr]ights)",
+            // Pattern 2: Copyright © 2024 Company Name
+            r"(?i)Copyright\s+(?:©|&copy;)?\s*(?:20\d{2}[-–]?\s*)?(?:20\d{2}\s+)?([A-Z][A-Za-z0-9\s,&']+?(?:\s*(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?|GmbH|Pty|Limited))?)(?:\s*\.|\s*,|\s+All\s+[Rr]ights)",
+            // Pattern 3: Simpler pattern - just year followed by company name until period
+            r"(?i)(?:©|&copy;|\(c\)|copyright)\s*20\d{2}\s+([A-Z][A-Za-z0-9\s]+?)(?:\.|\s+All)",
+        ]
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+    })
+}
+
+// coverage(off): Selector::parse on hardcoded valid CSS never fails
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn extract_from_copyright(document: &Html, html: &str) -> Option<WebOrgResult> {
     // Look for copyright patterns in the HTML
     // © 2024 Company Name, Inc.
     // Copyright © 2024 Company Name
     // (c) 2024 Company Name
-
-    let copyright_patterns = [
-        // Pattern 1: © 2024 Company Name followed by All rights or period/comma
-        r"(?i)(?:©|&copy;|\(c\))\s*(?:20\d{2}[-–]?\s*)?(?:20\d{2}\s+)?([A-Z][A-Za-z0-9\s,&']+?(?:\s*(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?|GmbH|Pty|Limited))?)(?:\s*\.|\s*,|\s+All\s+[Rr]ights)",
-        // Pattern 2: Copyright © 2024 Company Name
-        r"(?i)Copyright\s+(?:©|&copy;)?\s*(?:20\d{2}[-–]?\s*)?(?:20\d{2}\s+)?([A-Z][A-Za-z0-9\s,&']+?(?:\s*(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Company|Co\.?|GmbH|Pty|Limited))?)(?:\s*\.|\s*,|\s+All\s+[Rr]ights)",
-        // Pattern 3: Simpler pattern - just year followed by company name until period
-        r"(?i)(?:©|&copy;|\(c\)|copyright)\s*20\d{2}\s+([A-Z][A-Za-z0-9\s]+?)(?:\.|\s+All)",
-    ];
 
     // First try to find footer element
     let footer_selectors = ["footer", ".footer", "#footer", "[role=\"contentinfo\"]"];
@@ -564,18 +656,16 @@ fn extract_from_copyright(document: &Html, html: &str) -> Option<WebOrgResult> {
         search_text = html.to_string();
     }
 
-    for pattern in copyright_patterns {
-        if let Ok(regex) = Regex::new(pattern) {
-            if let Some(caps) = regex.captures(&search_text) {
-                if let Some(org_match) = caps.get(1) {
-                    let org = org_match.as_str().trim();
-                    if is_valid_org_name(org) {
-                        return Some(WebOrgResult {
-                            organization: clean_org_name(org),
-                            confidence: 0.60,
-                            source: WebOrgSource::Copyright,
-                        });
-                    }
+    for regex in copyright_patterns() {
+        if let Some(caps) = regex.captures(&search_text) {
+            if let Some(org_match) = caps.get(1) {
+                let org = org_match.as_str().trim();
+                if is_valid_org_name(org) {
+                    return Some(WebOrgResult {
+                        organization: clean_org_name(org),
+                        confidence: 0.60,
+                        source: WebOrgSource::Copyright,
+                    });
                 }
             }
         }
