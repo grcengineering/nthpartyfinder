@@ -16,7 +16,54 @@ defaults:
     working-directory: nthpartyfinder
 
 jobs:
+  # GitHub "immutable releases" forbid asset changes AFTER a release is published.
+  # So create the release as a DRAFT up front (a single job — no parallel-create
+  # race), have every downstream job push its assets to the still-mutable draft,
+  # and publish exactly once at the very end (the `publish` job).
+  create-draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Verify CHANGELOG entry
+        shell: bash
+        env:
+          TAG_REF: ${{ github.ref }}
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          grep -q "## \[${TAG#v}\]" CHANGELOG.md \
+            || (echo "CHANGELOG entry missing for $TAG" && exit 1)
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        env:
+          TAG_REF: ${{ github.ref }}
+        run: |
+          TAG="${TAG_REF#refs/tags/}"; VER="${TAG#v}"
+          awk -v v="$VER" '
+            index($0, "## [" v "]") == 1 { f = 1; print; next }
+            f && /^## \[/ { exit }
+            f { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          echo "----- release notes -----"; cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create (or reset) the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref }}
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --draft --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          else
+            gh release create "$TAG" --draft --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
   build-release:
+    needs: create-draft
     strategy:
       fail-fast: false
       matrix:
@@ -34,15 +81,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Verify CHANGELOG entry
-        shell: bash
-        env:
-          TAG_REF: ${{ github.ref }}
-        run: |
-          TAG="${TAG_REF#refs/tags/}"
-          grep -q "## \[${TAG#v}\]" CHANGELOG.md \
-            || (echo "CHANGELOG entry missing for $TAG" && exit 1)
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -84,11 +122,19 @@ jobs:
             shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
           fi
 
-      - uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
-        with:
-          files: |
-            nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz
-            nthpartyfinder/target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz.sha256
+      # Upload to the DRAFT (mutable) release — never publishes, so it never trips
+      # the immutable-release asset lock even when four matrix jobs run in parallel.
+      - name: Upload binary to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref }}
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          gh release upload "$TAG" \
+            "target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz" \
+            "target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz.sha256" \
+            --clobber
 
       # Per-target digest for SLSA provenance aggregation (B5).
       - name: Export artifact digest
@@ -134,7 +180,7 @@ jobs:
     permissions:
       actions: read       # read workflow metadata
       id-token: write     # keyless cosign / Fulcio OIDC
-      contents: write     # attach provenance to the release
+      contents: write     # emit provenance (attached to the release by `publish`)
     # NOTE: slsa-github-generator MUST be referenced by semantic tag, not SHA —
     # its TUF/slsa-verifier trust model binds builder identity to the tag. This
     # is the one sanctioned non-SHA pin (OpenSSF Scorecard documents this
@@ -142,4 +188,34 @@ jobs:
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.combine-digests.outputs.digests }}
-      upload-assets: true
+      # Do NOT let the generator attach to the release directly: with immutable
+      # releases the asset must land while the release is still a draft. The
+      # `publish` job downloads the provenance artifact (output `provenance-name`)
+      # and attaches it to the draft before flipping it to published.
+      upload-assets: false
+
+  # Attach the provenance to the still-draft release, then publish once — after
+  # this step no more assets are added, so the immutable lock is satisfied.
+  publish:
+    needs: [build-release, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Download provenance artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+          path: provenance
+      - name: Attach provenance and publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref }}
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          gh release upload "$TAG" provenance/* --clobber
+          gh release edit "$TAG" --draft=false --latest
