@@ -12,7 +12,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Build (Debian bookworm-based Rust — glibc matches runtime)
 # -----------------------------------------------------------------------------
-FROM rust:slim-bookworm@sha256:4732ca96fd086cb9be682050c3f0176288eebaac2b80aa2bcefccfaf198e1950 AS builder
+FROM rust:slim-bookworm@sha256:cfbb0e0ef7a73e736386bfa346f1cb0503c6d162969dc9426fb37834f3f64c25 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev g++ \
