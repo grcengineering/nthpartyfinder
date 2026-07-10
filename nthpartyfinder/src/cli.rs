@@ -212,6 +212,13 @@ pub struct Cli {
     /// Generate a single combined report with all domains instead of individual files
     #[arg(long)]
     pub batch_combined: bool,
+
+    /// Emit the scan's uncertain domain↔org mappings (the set normally shown in the
+    /// interactive review prompt) to this JSON file, non-interactively — enabling the
+    /// Claude plugin / automation to validate and apply corrections. Does not change
+    /// the normal scan output.
+    #[arg(long, value_name = "FILE", global = true)]
+    pub review_json: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -220,6 +227,13 @@ pub enum Commands {
     Cache {
         #[command(subcommand)]
         action: CacheCommands,
+    },
+
+    /// Validate and apply domain→org mapping decisions non-interactively
+    /// (the Claude plugin contract: the sole safe writer of local overrides).
+    Review {
+        #[command(subcommand)]
+        action: ReviewCommands,
     },
 }
 
@@ -253,6 +267,36 @@ pub enum CacheCommands {
         /// Only validate specific domain
         #[arg(short, long)]
         domain: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReviewCommands {
+    /// Apply a validated decisions JSON — the SOLE writer of local overrides.
+    Apply {
+        /// Path to the decisions JSON (produced after independent validation)
+        #[arg(long, visible_alias = "in", value_name = "FILE")]
+        input: String,
+
+        /// Show what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Print the resolved local-overrides store path (where the next scan reads)
+    Path,
+
+    /// List local overrides, optionally filtered to a single provenance source
+    List {
+        /// Only show overrides whose source matches (e.g. claude_verified)
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Remove a local override (revert an accepted mapping)
+    Revert {
+        /// Domain whose override should be removed
+        domain: String,
     },
 }
 
@@ -302,6 +346,7 @@ pub struct Args {
     pub batch_output_dir: Option<String>,
     pub batch_parallel: usize,
     pub batch_combined: bool,
+    pub review_json: Option<String>,
 }
 
 impl From<&Cli> for Args {
@@ -349,6 +394,7 @@ impl From<&Cli> for Args {
             batch_output_dir: cli.batch_output_dir.clone(),
             batch_parallel: cli.batch_parallel,
             batch_combined: cli.batch_combined,
+            review_json: cli.review_json.clone(),
         }
     }
 }
@@ -521,6 +567,7 @@ mod tests {
             batch_output_dir: None,
             batch_parallel: 1,
             batch_combined: false,
+            review_json: None,
         }
     }
 

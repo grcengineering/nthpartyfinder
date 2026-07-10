@@ -129,6 +129,31 @@ fn get_local_overrides_path() -> PathBuf {
     }
 }
 
+/// Public accessor for the resolved local-overrides store path, using the SAME
+/// discovery logic the scanner uses to READ it (`find_config_dir`). External
+/// tooling (the Claude plugin `review` contract) writes exactly where the next
+/// scan reads, instead of re-implementing path resolution and silently targeting
+/// the wrong file.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn resolved_overrides_path() -> PathBuf {
+    get_local_overrides_path()
+}
+
+/// Atomically write `content` to `path`: write a sibling temp file in the SAME
+/// directory, then `rename()` over the target. `rename` is atomic on one
+/// filesystem, so a crash or signal mid-write can never leave a truncated or
+/// corrupt overrides file that a later scan would fail to load.
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// GitHub raw URL for remote updates
 pub const GITHUB_RAW_URL: &str = "https://raw.githubusercontent.com/grcengineering/nthpartyfinder/main/config/known_vendors.json";
 
@@ -414,6 +439,95 @@ impl KnownVendors {
         Ok(())
     }
 
+    /// Add/update a local override with an explicit provenance `source`
+    /// (e.g. "claude_verified", "whois_verified"). Unlike `add_override` (which
+    /// always stamps "user_confirmed" for the human TTY flow), this preserves the
+    /// caller's provenance so programmatically-verified mappings are
+    /// distinguishable and auditable.
+    ///
+    /// Returns `Ok(true)` if the store changed, or `Ok(false)` if an entry with
+    /// the identical organization AND source already existed (idempotent no-op —
+    /// no disk write at all).
+    pub fn add_override_with_source(
+        &self,
+        domain: &str,
+        organization: &str,
+        source: &str,
+    ) -> Result<bool> {
+        let domain_lower = domain.to_lowercase();
+        {
+            let mut overrides = self
+                .local_overrides
+                .write()
+                .map_err(|_| anyhow!("Failed to acquire write lock on overrides"))?;
+            if let Some(existing) = overrides.overrides.get(&domain_lower) {
+                if existing.organization == organization && existing.source == source {
+                    return Ok(false);
+                }
+            }
+            overrides.overrides.insert(
+                domain_lower.clone(),
+                LocalOverride {
+                    organization: organization.to_string(),
+                    added: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+                    source: source.to_string(),
+                },
+            );
+            overrides.updated = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            overrides.version = "1.0.0".to_string();
+        }
+        self.save_overrides()?;
+        info!(
+            "Added local override ({}): {} -> {}",
+            source, domain_lower, organization
+        );
+        Ok(true)
+    }
+
+    /// Return the current local override entry for `domain`, if any (case-insensitive).
+    pub fn override_entry(&self, domain: &str) -> Option<LocalOverride> {
+        let domain_lower = domain.to_lowercase();
+        let overrides = self.local_overrides.read().ok()?;
+        overrides.overrides.get(&domain_lower).cloned()
+    }
+
+    /// Remove a local override (revert an accepted mapping). Returns `Ok(true)`
+    /// if an entry was removed, `Ok(false)` if none existed.
+    pub fn remove_override(&self, domain: &str) -> Result<bool> {
+        let domain_lower = domain.to_lowercase();
+        let removed = {
+            let mut overrides = self
+                .local_overrides
+                .write()
+                .map_err(|_| anyhow!("Failed to acquire write lock on overrides"))?;
+            let removed = overrides.overrides.remove(&domain_lower).is_some();
+            if removed {
+                overrides.updated = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            }
+            removed
+        };
+        if removed {
+            self.save_overrides()?;
+            info!("Removed local override: {}", domain_lower);
+        }
+        Ok(removed)
+    }
+
+    /// List all local overrides as `(domain, entry)` pairs, sorted by domain.
+    pub fn list_overrides(&self) -> Vec<(String, LocalOverride)> {
+        let overrides = match self.local_overrides.read() {
+            Ok(o) => o,
+            Err(_) => return Vec::new(),
+        };
+        let mut items: Vec<(String, LocalOverride)> = overrides
+            .overrides
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
+    }
+
     /// Save local overrides to disk
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn save_overrides(&self) -> Result<()> {
@@ -422,12 +536,10 @@ impl KnownVendors {
             .read()
             .map_err(|_| anyhow!("Failed to acquire read lock on overrides"))?;
 
-        // Create parent directory if needed
-        let parent = self.overrides_path.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(parent)?;
-
         let content = serde_json::to_string_pretty(&*overrides)?;
-        fs::write(&self.overrides_path, content)?;
+        // Atomic write: temp-in-same-dir → rename, so a crash mid-write cannot
+        // corrupt the store (which wins over every other lookup source).
+        atomic_write(&self.overrides_path, &content)?;
 
         debug!(
             "Saved {} local overrides to {:?}",
@@ -2196,5 +2308,96 @@ mod tests {
         assert!(result.is_err());
 
         fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod review_contract_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn fresh_kv() -> (tempfile::TempDir, KnownVendors) {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("known_vendors.json");
+        let ov = dir.path().join("known_vendors_local.json");
+        let kv = KnownVendors::load_from_paths(&base, &ov).unwrap();
+        (dir, kv)
+    }
+
+    #[test]
+    fn atomic_write_roundtrips_and_leaves_no_temp() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested").join("ov.json");
+        atomic_write(&path, "{\"k\":1}").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"k\":1}");
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        assert!(
+            !Path::new(&tmp).exists(),
+            "temp sibling must be renamed away"
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ov.json");
+        atomic_write(&path, "first").unwrap();
+        atomic_write(&path, "second").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn add_with_source_stamps_and_is_idempotent() {
+        let (_d, kv) = fresh_kv();
+        assert!(kv
+            .add_override_with_source("Example.COM", "Example, Inc.", "claude_verified")
+            .unwrap());
+        // identical entry → idempotent no-op (no write, returns false)
+        assert!(!kv
+            .add_override_with_source("example.com", "Example, Inc.", "claude_verified")
+            .unwrap());
+        let e = kv.override_entry("example.com").unwrap();
+        assert_eq!(e.organization, "Example, Inc.");
+        assert_eq!(e.source, "claude_verified");
+        assert!(kv.override_entry("missing.com").is_none());
+    }
+
+    #[test]
+    fn add_with_source_persists_and_reloads() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("known_vendors.json");
+        let ov = dir.path().join("known_vendors_local.json");
+        {
+            let kv = KnownVendors::load_from_paths(&base, &ov).unwrap();
+            kv.add_override_with_source("x.com", "X Co", "claude_verified")
+                .unwrap();
+        }
+        let kv2 = KnownVendors::load_from_paths(&base, &ov).unwrap();
+        let e = kv2.override_entry("x.com").unwrap();
+        assert_eq!(e.organization, "X Co");
+        assert_eq!(e.source, "claude_verified");
+    }
+
+    #[test]
+    fn remove_and_list_overrides_sorted_case_insensitive() {
+        let (_d, kv) = fresh_kv();
+        kv.add_override_with_source("b.com", "B", "claude_verified")
+            .unwrap();
+        kv.add_override_with_source("a.com", "A", "user_confirmed")
+            .unwrap();
+        let list = kv.list_overrides();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].0, "a.com"); // sorted
+        assert_eq!(list[1].0, "b.com");
+        assert!(kv.remove_override("B.com").unwrap()); // case-insensitive
+        assert!(!kv.remove_override("b.com").unwrap()); // already gone
+        assert_eq!(kv.list_overrides().len(), 1);
+    }
+
+    #[test]
+    fn resolved_overrides_path_names_the_store() {
+        let p = resolved_overrides_path();
+        assert!(p.to_string_lossy().contains("known_vendors_local.json"));
     }
 }

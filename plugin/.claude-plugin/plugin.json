@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "nthpartyfinder",
+  "displayName": "Nth Party Finder — Vendor Mapping Review",
+  "version": "0.1.0",
+  "description": "Drive the nthpartyfinder CLI from Claude and — the headline capability — validate then accept-or-correct+save the domain↔org vendor mappings the scanner surfaces for human decision, using independent, cited web evidence (RDAP/WHOIS + the domain's own site + TLS cert + search) instead of a domain-name guess.",
+  "author": {
+    "name": "GRC Engineering",
+    "url": "https://github.com/grcengineering"
+  },
+  "homepage": "https://github.com/grcengineering/nthpartyfinder",
+  "repository": "https://github.com/grcengineering/nthpartyfinder",
+  "license": "MIT",
+  "keywords": [
+    "security",
+    "vendor-risk",
+    "grc",
+    "third-party",
+    "nth-party",
+    "dns",
+    "domain-attribution"
+  ]
+}
