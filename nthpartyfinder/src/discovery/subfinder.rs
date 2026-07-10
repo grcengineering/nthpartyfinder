@@ -567,8 +567,10 @@ impl SubfinderDiscovery {
             Err(e) => return Err(anyhow!("Failed to spawn subfinder: {}", e)),
         };
 
-        // stdout is always Some when spawned with Stdio::piped()
-        let stdout = child.stdout.take().unwrap();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("subfinder child process missing stdout pipe"))?;
 
         let reader = BufReader::new(stdout);
         let (results, timed_out) = read_lines_with_timeout(reader, self.timeout, domain).await;
