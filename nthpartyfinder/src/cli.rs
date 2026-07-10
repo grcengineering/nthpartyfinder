@@ -51,8 +51,14 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
-    /// Number of parallel jobs for domain analysis (default: 10)
-    #[arg(short = 'j', long, default_value = "10")]
+    /// Maximum vendor analyses in flight, as a cap on the per-depth concurrency configured
+    /// in `analysis.concurrency_per_depth`. `0` (the default) means "no extra cap" — the
+    /// configured per-depth values apply as written.
+    ///
+    /// Request pacing is NOT controlled by this flag: the DNS, HTTP-per-domain, and WHOIS
+    /// token buckets are global and enforce politeness regardless of how many analyses are
+    /// in flight. Lower this only to bound local CPU/memory use.
+    #[arg(short = 'j', long, default_value = "0")]
     pub parallel_jobs: usize,
 
     /// Log failed verification record inferences to a separate file
@@ -453,10 +459,8 @@ impl Args {
             }
         }
 
-        if self.parallel_jobs == 0 {
-            return Err("--parallelism must be >= 1".to_string());
-        }
-
+        // `0` is the default and means "no operator cap" — the configured
+        // `analysis.concurrency_per_depth` applies as written. Any positive value narrows it.
         let max_parallel = std::cmp::min(64, Self::num_cpus() * 8);
         if self.parallel_jobs > max_parallel {
             return Err(format!(
@@ -578,7 +582,10 @@ mod tests {
         let cli = Cli::parse_from(["nthpartyfinder", "-d", "example.com"]);
         assert_eq!(cli.domain, Some("example.com".to_string()));
         assert_eq!(cli.output_format, "csv");
-        assert_eq!(cli.parallel_jobs, 10);
+        // 0 = "no operator cap": the configured `analysis.concurrency_per_depth` applies as
+        // written. Before this became the default, `-j` silently clamped every depth to 10 and
+        // the shipped per-depth widths were unreachable.
+        assert_eq!(cli.parallel_jobs, 0);
         assert!(!cli.init);
     }
 
@@ -886,12 +893,17 @@ mod tests {
         assert!(args.validate().is_ok());
     }
 
+    /// `0` is the default and means "no operator cap"; it must validate, not error.
+    /// It previously errored because the flag defaulted to 10 and was always min'd into the
+    /// stream width, which made `analysis.concurrency_per_depth` unreachable.
     #[test]
-    fn validate_error_parallel_jobs_zero() {
+    fn validate_parallel_jobs_zero_is_auto_not_an_error() {
         let mut args = default_args();
         args.parallel_jobs = 0;
-        let err = args.validate().unwrap_err();
-        assert!(err.contains("--parallelism must be >= 1"));
+        assert!(
+            args.validate().is_ok(),
+            "-j 0 means 'use the configured per-depth concurrency', not an invalid input"
+        );
     }
 
     #[test]

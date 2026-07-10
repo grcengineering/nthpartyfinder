@@ -396,9 +396,20 @@ pub fn convert_web_traffic_results(results: Vec<WebTrafficResult>) -> Vec<dns::V
         .collect()
 }
 
-/// Compute stream buffer size: min of configured concurrency and parallel_jobs, floored at 2.
+/// Compute stream buffer size from the depth's configured concurrency, optionally capped by
+/// an operator-supplied `--parallel-jobs`, floored at 2.
+///
+/// `parallel_jobs == 0` means "no operator cap". Previously this argument defaulted to 10 and
+/// was always min'd in, so `analysis.concurrency_per_depth` (50/20/10/5) could never take
+/// effect unless the operator also passed a matching `-j` — every depth ran 10 wide. The
+/// configured values are the intended widths; `-j` now only narrows them.
 pub fn compute_buffer_size(configured_concurrency: usize, parallel_jobs: usize) -> usize {
-    configured_concurrency.min(parallel_jobs).max(2)
+    let capped = if parallel_jobs == 0 {
+        configured_concurrency
+    } else {
+        configured_concurrency.min(parallel_jobs)
+    };
+    capped.max(2)
 }
 
 /// Compute progress bar position (30-100 range) given current index and total vendors.
@@ -1248,69 +1259,61 @@ pub async fn process_vendor_domain(
     let base_domain = domain_utils::extract_base_domain(&vendor_domain);
     let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
 
-    {
-        let vendors = discovered_vendors.lock().await;
-        if !vendors.contains_key(&base_domain) {
-            drop(vendors);
-            match whois::get_organization_with_status_and_config(
-                &base_domain,
-                web_org_enabled,
-                web_org_min_confidence,
-            )
+    // The vendor's org and the customer's org are independent lookups against different
+    // map keys, and each can cost seconds (web fetch → WHOIS → NER). Awaiting them in
+    // sequence, as this used to, put both on every vendor's critical path. Resolving them
+    // concurrently makes the pair cost `max` rather than `sum`; when either is already
+    // cached the join costs nothing. Politeness is unaffected — the DNS, HTTP, and WHOIS
+    // token buckets are global and still pace every outbound request.
+    //
+    // The insert-after-lookup shape is preserved exactly, including its check-then-act
+    // window: a domain resolved twice by racing vendors yields the same value from the same
+    // priority chain, so last-write-wins is a no-op rather than a correctness hazard.
+    let vendor_needed = !discovered_vendors.lock().await.contains_key(&base_domain);
+    let customer_needed = base_domain != customer_base_domain
+        && !discovered_vendors
+            .lock()
             .await
-            {
-                Ok(org_result) => {
-                    let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(
-                        base_domain.clone(),
-                        org_normalizer::normalize(&org_result.name),
-                    );
-                    logger.log_whois_lookup(&base_domain, org_result.is_verified);
-                }
-                Err(e) => {
-                    logger.debug(&format!(
-                        "Failed to get organization for {}: {}",
-                        base_domain, e
-                    ));
-                    let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(base_domain.clone(), org_normalizer::normalize(&base_domain));
-                    logger.log_whois_lookup(&base_domain, false);
-                }
-            }
-        }
-    }
+            .contains_key(&customer_base_domain);
 
-    {
-        let vendors = discovered_vendors.lock().await;
-        if !vendors.contains_key(&customer_base_domain) {
-            drop(vendors);
-            match whois::get_organization_with_status_and_config(
-                &customer_base_domain,
+    let resolve = |domain: String, needed: bool| async move {
+        if !needed {
+            return None;
+        }
+        Some((
+            domain.clone(),
+            whois::get_organization_with_status_and_config(
+                &domain,
                 web_org_enabled,
                 web_org_min_confidence,
             )
-            .await
-            {
-                Ok(org_result) => {
-                    let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(
-                        customer_base_domain.clone(),
-                        org_normalizer::normalize(&org_result.name),
-                    );
-                    logger.log_whois_lookup(&customer_base_domain, org_result.is_verified);
-                }
-                Err(e) => {
-                    logger.debug(&format!(
-                        "Failed to get organization for customer {}: {}",
-                        customer_base_domain, e
-                    ));
-                    let mut vendors = discovered_vendors.lock().await;
-                    vendors.insert(
-                        customer_base_domain.clone(),
-                        org_normalizer::normalize(&customer_base_domain),
-                    );
-                    logger.log_whois_lookup(&customer_base_domain, false);
-                }
+            .await,
+        ))
+    };
+
+    let (vendor_lookup, customer_lookup) = tokio::join!(
+        resolve(base_domain.clone(), vendor_needed),
+        resolve(customer_base_domain.clone(), customer_needed),
+    );
+
+    for (label, lookup) in [("", vendor_lookup), ("customer ", customer_lookup)] {
+        let Some((domain, result)) = lookup else {
+            continue;
+        };
+        match result {
+            Ok(org_result) => {
+                let mut vendors = discovered_vendors.lock().await;
+                vendors.insert(domain.clone(), org_normalizer::normalize(&org_result.name));
+                logger.log_whois_lookup(&domain, org_result.is_verified);
+            }
+            Err(e) => {
+                logger.debug(&format!(
+                    "Failed to get organization for {}{}: {}",
+                    label, domain, e
+                ));
+                let mut vendors = discovered_vendors.lock().await;
+                vendors.insert(domain.clone(), org_normalizer::normalize(&domain));
+                logger.log_whois_lookup(&domain, false);
             }
         }
     }
@@ -2694,6 +2697,34 @@ mod tests {
         assert_eq!(compute_buffer_size(10, 5), 5);
         assert_eq!(compute_buffer_size(5, 10), 5);
         assert_eq!(compute_buffer_size(50, 50), 50);
+    }
+
+    /// `--parallel-jobs 0` is the default and means "no operator cap": the configured
+    /// per-depth concurrency must reach the stream unchanged. Before this, the flag's
+    /// default of 10 was always min'd in, so `concurrency_per_depth = [50, 20, 10, 5]`
+    /// silently ran 10/10/10/5.
+    #[test]
+    fn test_compute_buffer_size_zero_jobs_means_no_operator_cap() {
+        assert_eq!(compute_buffer_size(50, 0), 50, "depth-1 configured width");
+        assert_eq!(compute_buffer_size(20, 0), 20, "depth-2 configured width");
+        assert_eq!(compute_buffer_size(5, 0), 5, "depth-4 configured width");
+        // The floor still applies when the configured value is degenerate.
+        assert_eq!(compute_buffer_size(1, 0), 2);
+    }
+
+    /// An explicit `-j N` still narrows the configured width, and never widens it.
+    #[test]
+    fn test_compute_buffer_size_explicit_jobs_only_narrows() {
+        assert_eq!(
+            compute_buffer_size(50, 4),
+            4,
+            "operator cap wins when lower"
+        );
+        assert_eq!(
+            compute_buffer_size(5, 100),
+            5,
+            "operator cap never widens beyond the configured value"
+        );
     }
 
     #[test]

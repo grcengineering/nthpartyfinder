@@ -414,10 +414,14 @@ impl NerOrganizationExtractor {
     ) -> Result<Vec<(String, String, f32)>> {
         let input = TextInput::from_str(&[text], entity_types)
             .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
+        let inference_started = std::time::Instant::now();
         let output = self
             .model
             .inference(input)
             .map_err(|e| anyhow!("NER inference failed: {}", e))?;
+        crate::perf::METRICS
+            .ner_infer
+            .record(inference_started.elapsed());
         let mut candidates = Vec::new();
         for spans in &output.spans {
             for span in spans {
@@ -605,8 +609,101 @@ pub fn extract_all_organizations(
 }
 
 // ============================================================================
+// Async offload: keep ONNX inference off the async runtime's worker threads
+// ============================================================================
+//
+// GLiNER inference is CPU-bound and runs for hundreds of milliseconds to seconds.
+// Called inline from an `async fn` it parks a tokio worker for that whole time,
+// which stalls every other in-flight DNS/HTTP future (the scan's per-vendor futures
+// are driven by one consumer task). Offloading to the blocking pool restores I/O
+// concurrency and lets several inferences use several cores.
+//
+// Extraction results are unchanged: the same `&'static` extractor runs the same
+// model over the same input. Only the thread it runs on differs.
+
+/// Bounds concurrent ONNX inferences. ORT already parallelises a single inference
+/// across its intra-op threads (orp's default: 4), so unbounded concurrent calls
+/// would oversubscribe the CPU and slow every inference down. Sizing the permit
+/// count as `cores / intra_op_threads` keeps total inference threads near the core
+/// count without touching the session's thread configuration (which would perturb
+/// float reduction order, and therefore extraction output).
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+static INFERENCE_PERMITS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+/// Intra-op threads orp/ORT uses per inference (`orp::params::RuntimeParameters`
+/// default). Held as a constant rather than read back from the session because the
+/// value is deliberately left at its default — see `INFERENCE_PERMITS`.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+const ORT_INTRA_OP_THREADS: usize = 4;
+
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+fn inference_permits() -> &'static tokio::sync::Semaphore {
+    INFERENCE_PERMITS.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(ORT_INTRA_OP_THREADS);
+        tokio::sync::Semaphore::new((cores / ORT_INTRA_OP_THREADS).max(1))
+    })
+}
+
+/// Async form of [`extract_organization`]: identical inputs, identical output,
+/// executed on the blocking pool under an inference permit.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+pub async fn extract_organization_async(
+    domain: &str,
+    page_content: Option<&str>,
+) -> anyhow::Result<Option<NerOrgResult>> {
+    let Some(extractor) = NER_EXTRACTOR.get() else {
+        return Ok(None);
+    };
+    let domain = domain.to_string();
+    let page_content = page_content.map(str::to_owned);
+    let _permit = inference_permits().acquire().await;
+    tokio::task::spawn_blocking(move || {
+        extractor.extract_from_domain(&domain, page_content.as_deref())
+    })
+    .await
+    .map_err(|e| anyhow!("NER inference task failed to join: {}", e))?
+}
+
+/// Async form of [`extract_all_organizations`]: identical inputs, identical output,
+/// executed on the blocking pool under an inference permit.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+pub async fn extract_all_organizations_async(
+    text: &str,
+    min_confidence: Option<f32>,
+) -> anyhow::Result<Vec<NerOrgResult>> {
+    let Some(extractor) = NER_EXTRACTOR.get() else {
+        return Ok(Vec::new());
+    };
+    let text = text.to_string();
+    let _permit = inference_permits().acquire().await;
+    tokio::task::spawn_blocking(move || extractor.extract_all_organizations(&text, min_confidence))
+        .await
+        .map_err(|e| anyhow!("NER inference task failed to join: {}", e))?
+}
+
+// ============================================================================
 // Stub implementations when NER is disabled (neither delivery mode selected)
 // ============================================================================
+
+/// Stub: Async extract organization (always returns None when disabled)
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
+pub async fn extract_organization_async(
+    _domain: &str,
+    _page_content: Option<&str>,
+) -> anyhow::Result<Option<NerOrgResult>> {
+    Ok(None)
+}
+
+/// Stub: Async extract all organizations (always returns empty when disabled)
+#[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]
+pub async fn extract_all_organizations_async(
+    _text: &str,
+    _min_confidence: Option<f32>,
+) -> anyhow::Result<Vec<NerOrgResult>> {
+    Ok(Vec::new())
+}
 
 /// Stub: Initialize the global NER extractor (no-op when disabled)
 #[cfg(not(any(feature = "embedded-ner", feature = "runtime-ner")))]

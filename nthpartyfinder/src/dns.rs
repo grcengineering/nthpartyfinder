@@ -150,6 +150,30 @@ pub struct DnsServerPool {
     /// is a HashMap bump with no await inside.
     #[cfg(not(coverage))]
     doh_failure_log: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Scan-lifetime memo of DNS answers, keyed by `(record kind, domain)`.
+    ///
+    /// The same names are looked up many times in one scan: SPF include chains converge on
+    /// a handful of shared targets (`_spf.google.com`, `sendgrid.net`, …), and a vendor seen
+    /// at one depth is commonly re-analyzed as a customer at the next. Each repeat used to
+    /// re-issue the query, spend a rate-limit token, and wait a full round trip.
+    ///
+    /// **Only authoritative answers are stored** — see `remember_answer`. A record set that
+    /// came back from a real resolver (including a genuinely empty one) is a fact about the
+    /// zone and is safe to reuse for the seconds-to-minutes a scan lasts. An empty vector
+    /// produced because every resolver failed is NOT such a fact: caching it would silently
+    /// convert one transient outage into a scan-wide false negative and would bypass the
+    /// `note_throttle` counting that the exit-3 guard depends on (GRC-367).
+    #[cfg(not(coverage))]
+    answer_memo: tokio::sync::Mutex<std::collections::HashMap<(RecordKind, String), Vec<String>>>,
+}
+
+/// Record kinds the answer memo distinguishes. Keying on the name alone would let a TXT
+/// answer satisfy a CNAME query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(coverage, allow(dead_code))]
+pub(crate) enum RecordKind {
+    Txt,
+    Cname,
 }
 
 impl DnsServerPool {
@@ -197,6 +221,8 @@ impl DnsServerPool {
             failure_counter: None,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(not(coverage))]
+            answer_memo: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -271,6 +297,8 @@ impl DnsServerPool {
             failure_counter: None,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(not(coverage))]
+            answer_memo: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -376,6 +404,8 @@ impl DnsServerPool {
             failure_counter: None,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
+            #[cfg(not(coverage))]
+            answer_memo: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -1021,6 +1051,31 @@ impl DnsServerPool {
     }
 }
 
+// cfg(not(coverage)): the memo only serves the live-network lookup paths, which are
+// themselves compiled out under coverage.
+#[cfg(not(coverage))]
+impl DnsServerPool {
+    /// A previously-seen authoritative answer for `(kind, domain)`, if any.
+    async fn recall_answer(&self, kind: RecordKind, domain: &str) -> Option<Vec<String>> {
+        let memo = self.answer_memo.lock().await;
+        let hit = memo.get(&(kind, domain.to_string())).cloned();
+        if hit.is_some() {
+            crate::perf::METRICS.dns_memo_hit.hit();
+        }
+        hit
+    }
+
+    /// Record an answer that a resolver actually returned.
+    ///
+    /// Callers MUST NOT pass a vector manufactured after every resolution path failed:
+    /// that value is a degradation marker, not a fact about the zone, and its caller is
+    /// obliged to count it toward the DNS-failure guard rather than memoize it.
+    async fn remember_answer(&self, kind: RecordKind, domain: &str, records: &[String]) {
+        let mut memo = self.answer_memo.lock().await;
+        memo.insert((kind, domain.to_string()), records.to_vec());
+    }
+}
+
 pub async fn get_txt_records(domain: &str) -> Result<Vec<String>> {
     get_txt_records_with_pool(domain, &DnsServerPool::new()).await
 }
@@ -1048,6 +1103,22 @@ pub async fn get_txt_records_with_rate_limit(
     rate_limit_ctx: Option<&RateLimitContext>,
     dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
+    // A memo hit sends no packet, so it is checked before any permit is taken: rate limits
+    // exist to pace outbound queries, and charging a token for a query we don't make would
+    // throttle the scan against nothing.
+    if let Some(records) = dns_pool.recall_answer(RecordKind::Txt, domain).await {
+        debug!(
+            "TXT memo hit for {}: {} records (no query issued)",
+            domain,
+            records.len()
+        );
+        return Ok(records);
+    }
+
+    // Past the memo: this call will put a packet on the wire. Time the whole resolution,
+    // including the rate-limit permit wait, since that is wall clock the scan actually spends.
+    let _query_timer = crate::perf::scoped(&crate::perf::METRICS.dns_query);
+
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
@@ -1138,6 +1209,10 @@ pub async fn get_txt_records_with_rate_limit(
     ).await;
 
     if let Ok(Some(records)) = race_result {
+        // A resolver answered. Empty counts: "this name has no TXT records" is an answer.
+        dns_pool
+            .remember_answer(RecordKind::Txt, domain, &records)
+            .await;
         return Ok(records);
     }
 
@@ -1150,6 +1225,9 @@ pub async fn get_txt_records_with_rate_limit(
                 records.len(),
                 domain
             );
+            dns_pool
+                .remember_answer(RecordKind::Txt, domain, &records)
+                .await;
             Ok(records)
         }
         Err(e) => {
@@ -1157,6 +1235,9 @@ pub async fn get_txt_records_with_rate_limit(
             if let Some(counter) = dns_failure_counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
+            // Deliberately NOT memoized: no resolver answered, so this empty vector is a
+            // degradation marker. Memoizing it would turn a transient failure into a
+            // scan-wide false negative and would suppress the counting above on retries.
             Ok(vec![])
         }
     }
@@ -1232,6 +1313,17 @@ pub async fn get_cname_records_with_rate_limit(
     rate_limit_ctx: Option<&RateLimitContext>,
     dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
+    // Checked before the permit for the same reason as the TXT path: a memo hit issues no
+    // query, so it must not consume rate-limit budget.
+    if let Some(records) = dns_pool.recall_answer(RecordKind::Cname, domain).await {
+        debug!(
+            "CNAME memo hit for {}: {} records (no query issued)",
+            domain,
+            records.len()
+        );
+        return Ok(records);
+    }
+
     // Apply rate limiting if configured
     if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
@@ -1259,12 +1351,20 @@ pub async fn get_cname_records_with_rate_limit(
                 records.len(),
                 domain
             );
+            dns_pool
+                .remember_answer(RecordKind::Cname, domain, &records)
+                .await;
             Ok(records)
         }
         // Genuine no-CNAME (NoData/NXDOMAIN): the resilient lookup succeeded but returned
         // no records. This is the normal "CNAME absence is normal" case — return empty WITHOUT
-        // touching the failure counter.
-        Ok(Ok(_)) => Ok(vec![]),
+        // touching the failure counter. It is an authoritative answer, so it is memoized.
+        Ok(Ok(_)) => {
+            dns_pool
+                .remember_answer(RecordKind::Cname, domain, &[])
+                .await;
+            Ok(vec![])
+        }
         // All providers throttled (429/5xx surviving rotation). This is a FALSE-NEGATIVE risk,
         // NOT a genuine absence — count it so the exit-3 guard can see it, then return empty so
         // analysis continues (consistent with the TXT path's degrade-but-record behavior).
@@ -1748,6 +1848,187 @@ fn extract_from_verification_record(
     }
 }
 
+/// Literal TXT-record markers that identify a SaaS vendor, mapped to that vendor's domain.
+///
+/// A static slice rather than a `vec!` rebuilt inside the function: this table is
+/// consulted for every TXT record of every domain and subdomain a scan touches, and the
+/// entries are compile-time constants.
+static VERIFICATION_PATTERNS: &[(&str, &str, RecordType)] = &[
+    // Common verification patterns
+    (
+        r"google-site-verification=",
+        "google.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"facebook-domain-verification=",
+        "facebook.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (r"MS=", "microsoft.com", RecordType::DnsTxtVerification),
+    (
+        r"apple-domain-verification=",
+        "apple.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"adobe-idp-site-verification=",
+        "adobe.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"stripe-verification=",
+        "stripe.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (r"docusign=", "docusign.com", RecordType::DnsTxtVerification),
+    (
+        r"globalsign-domain-verification=",
+        "globalsign.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"dropbox-domain-verification=",
+        "dropbox.com",
+        RecordType::DnsTxtVerification,
+    ),
+    // Extended patterns from research and klaviyo analysis
+    (r"ZOOM_verify_", "zoom.us", RecordType::DnsTxtVerification),
+    (
+        r"atlassian-domain-verification=",
+        "atlassian.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"browserstack-domain-verification=",
+        "browserstack.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"canva-site-verification=",
+        "canva.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"cursor-domain-verification",
+        "cursor.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"datadome-domain-verify=",
+        "datadome.co",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"drift-domain-verification=",
+        "drift.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"hubspot-domain-verification=",
+        "hubspot.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"klaviyo-site-verification=",
+        "klaviyo.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"notion-domain-verification=",
+        "notion.so",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"onetrust-domain-verification=",
+        "onetrust.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"openai-domain-verification=",
+        "openai.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"postman-domain-verification=",
+        "postman.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"slack-domain-verification=",
+        "slack.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"teamviewer-sso-verification=",
+        "teamviewer.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"wework-site-verification=",
+        "wework.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"heroku-domain-verification=",
+        "heroku.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"jamf-site-verification=",
+        "jamf.com",
+        RecordType::DnsTxtVerification,
+    ),
+    // Additional patterns found in klaviyo.com analysis
+    (
+        r"anthropic-domain-verification",
+        "anthropic.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"jetbrains-domain-verification=",
+        "jetbrains.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"gc-ai-domain-verification",
+        "gc-ai.com",
+        RecordType::DnsTxtVerification,
+    ), // Unverified vendor - kept for completeness
+    // Special mappings discovered from research
+    (r"intacct-esk=", "sage.com", RecordType::DnsTxtVerification), // Sage Intacct
+    (r"mgverify=", "mailgun.com", RecordType::DnsTxtVerification), // Mailgun verification
+    // L002: neat.co is correct — Neat's actual domain is neat.co (not .com)
+    (
+        r"neat-pulse-domain-verification",
+        "neat.co",
+        RecordType::DnsTxtVerification,
+    ),
+    // Pattern variations
+    (
+        r"webex-domain-verification=",
+        "webex.com",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"zoom-domain-verification=",
+        "zoom.us",
+        RecordType::DnsTxtVerification,
+    ),
+    (
+        r"have-i-been-pwned-verification=",
+        "haveibeenpwned.com",
+        RecordType::DnsTxtVerification,
+    ),
+    // L001: Whimsical uses angle bracket format in TXT records — this is an actual
+    // record format observed in the wild (e.g., klaviyo.com DNS), not a parsing error.
+    (
+        r"<whimsical=",
+        "whimsical.com",
+        RecordType::DnsTxtVerification,
+    ),
+];
+
 fn try_static_verification_patterns(
     record: &str,
     _logger: Option<&dyn LogFailure>,
@@ -1755,186 +2036,11 @@ fn try_static_verification_patterns(
     raw_record: &str,
 ) -> Option<Vec<VendorDomain>> {
     // Comprehensive static provider mappings based on research
-    let verification_patterns = vec![
-        // Common verification patterns
-        (
-            r"google-site-verification=",
-            "google.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"facebook-domain-verification=",
-            "facebook.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (r"MS=", "microsoft.com", RecordType::DnsTxtVerification),
-        (
-            r"apple-domain-verification=",
-            "apple.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"adobe-idp-site-verification=",
-            "adobe.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"stripe-verification=",
-            "stripe.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (r"docusign=", "docusign.com", RecordType::DnsTxtVerification),
-        (
-            r"globalsign-domain-verification=",
-            "globalsign.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"dropbox-domain-verification=",
-            "dropbox.com",
-            RecordType::DnsTxtVerification,
-        ),
-        // Extended patterns from research and klaviyo analysis
-        (r"ZOOM_verify_", "zoom.us", RecordType::DnsTxtVerification),
-        (
-            r"atlassian-domain-verification=",
-            "atlassian.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"browserstack-domain-verification=",
-            "browserstack.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"canva-site-verification=",
-            "canva.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"cursor-domain-verification",
-            "cursor.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"datadome-domain-verify=",
-            "datadome.co",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"drift-domain-verification=",
-            "drift.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"hubspot-domain-verification=",
-            "hubspot.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"klaviyo-site-verification=",
-            "klaviyo.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"notion-domain-verification=",
-            "notion.so",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"onetrust-domain-verification=",
-            "onetrust.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"openai-domain-verification=",
-            "openai.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"postman-domain-verification=",
-            "postman.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"slack-domain-verification=",
-            "slack.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"teamviewer-sso-verification=",
-            "teamviewer.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"wework-site-verification=",
-            "wework.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"heroku-domain-verification=",
-            "heroku.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"jamf-site-verification=",
-            "jamf.com",
-            RecordType::DnsTxtVerification,
-        ),
-        // Additional patterns found in klaviyo.com analysis
-        (
-            r"anthropic-domain-verification",
-            "anthropic.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"jetbrains-domain-verification=",
-            "jetbrains.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"gc-ai-domain-verification",
-            "gc-ai.com",
-            RecordType::DnsTxtVerification,
-        ), // Unverified vendor - kept for completeness
-        // Special mappings discovered from research
-        (r"intacct-esk=", "sage.com", RecordType::DnsTxtVerification), // Sage Intacct
-        (r"mgverify=", "mailgun.com", RecordType::DnsTxtVerification), // Mailgun verification
-        // L002: neat.co is correct — Neat's actual domain is neat.co (not .com)
-        (
-            r"neat-pulse-domain-verification",
-            "neat.co",
-            RecordType::DnsTxtVerification,
-        ),
-        // Pattern variations
-        (
-            r"webex-domain-verification=",
-            "webex.com",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"zoom-domain-verification=",
-            "zoom.us",
-            RecordType::DnsTxtVerification,
-        ),
-        (
-            r"have-i-been-pwned-verification=",
-            "haveibeenpwned.com",
-            RecordType::DnsTxtVerification,
-        ),
-        // L001: Whimsical uses angle bracket format in TXT records — this is an actual
-        // record format observed in the wild (e.g., klaviyo.com DNS), not a parsing error.
-        (
-            r"<whimsical=",
-            "whimsical.com",
-            RecordType::DnsTxtVerification,
-        ),
-    ];
 
     let mut domains = Vec::new();
 
     // These patterns are all literal strings, use contains() instead of regex for speed
-    for (pattern, domain, record_type) in &verification_patterns {
+    for (pattern, domain, record_type) in VERIFICATION_PATTERNS {
         if record.contains(pattern) {
             domains.push(VendorDomain {
                 domain: domain.to_string(),
@@ -5477,6 +5583,144 @@ mod tests {
         assert!(
             result.is_ok(),
             "an empty DoH pool must degrade gracefully, never index-panic: {result:?}"
+        );
+    }
+
+    // ── Answer memo (scan-lifetime DNS deduplication) ────────────────────────────
+    //
+    // The memo's whole safety story is *what it refuses to remember*. A resolver's answer —
+    // including an authoritative "no records" — is a fact about the zone and may be reused.
+    // An empty vector produced because every resolution path failed is not; caching it would
+    // convert one transient outage into a scan-wide false negative and would suppress the
+    // `dns_failure_counter` increments that the exit-3 guard reads (GRC-367).
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn memo_serves_repeat_txt_query_without_a_second_request() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // `expect(1)` is the assertion: a second outbound request fails the test on drop.
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "memo.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(build_doh_txt_response("memo.com", &["v=spf1 -all"]))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+
+        let first = get_txt_records_with_rate_limit("memo.com", &pool, None, None)
+            .await
+            .expect("first lookup succeeds");
+        let second = get_txt_records_with_rate_limit("memo.com", &pool, None, None)
+            .await
+            .expect("second lookup served from memo");
+
+        assert_eq!(
+            first, second,
+            "memo must return the recorded answer verbatim"
+        );
+        assert_eq!(first.len(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn memo_remembers_authoritative_empty_txt_answer() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // RCODE 0 with no Answer section: the name exists and genuinely has no TXT records.
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "norecords.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(build_doh_empty_response("norecords.com"))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+
+        let first = get_txt_records_with_rate_limit("norecords.com", &pool, None, None)
+            .await
+            .expect("authoritative empty is a successful lookup");
+        assert!(first.is_empty());
+
+        let second = get_txt_records_with_rate_limit("norecords.com", &pool, None, None)
+            .await
+            .expect("second lookup served from memo");
+        assert!(second.is_empty(), "authoritative empty is reusable");
+    }
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn memo_never_caches_an_empty_result_produced_by_total_dns_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Every DoH attempt is a hard endpoint error, and the traditional/system resolvers
+        // cannot answer this reserved-for-testing name either. The lookup therefore degrades
+        // to `Ok(vec![])` while incrementing the failure counter.
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let counter = AtomicUsize::new(0);
+
+        let first =
+            get_txt_records_with_rate_limit("invalid.invalid", &pool, None, Some(&counter)).await;
+        let second =
+            get_txt_records_with_rate_limit("invalid.invalid", &pool, None, Some(&counter)).await;
+
+        assert!(
+            first.is_ok() && second.is_ok(),
+            "failures degrade, never panic"
+        );
+        assert!(first.unwrap().is_empty() && second.unwrap().is_empty());
+
+        // The load-bearing assertion: the second call re-attempted resolution and re-counted
+        // the failure. Had the degraded empty been memoized, this counter would read 1 and the
+        // exit-3 guard would under-report DNS failures for every later lookup of this name.
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "a failure-produced empty must not be memoized: each attempt must re-count"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn memo_keys_on_record_kind_so_txt_and_cname_do_not_collide() {
+        let pool = DnsServerPool::with_test_urls(vec![]);
+
+        pool.remember_answer(RecordKind::Txt, "collide.com", &["txt-answer".to_string()])
+            .await;
+
+        assert_eq!(
+            pool.recall_answer(RecordKind::Txt, "collide.com").await,
+            Some(vec!["txt-answer".to_string()])
+        );
+        assert_eq!(
+            pool.recall_answer(RecordKind::Cname, "collide.com").await,
+            None,
+            "a TXT answer must never satisfy a CNAME query"
         );
     }
 }

@@ -145,7 +145,7 @@ pub async fn show_cache_entry(domain: &str) -> Result<()> {
                         for pattern in &rules.custom_regex_patterns {
                             println!(
                                 "      - {} (capture group: {})",
-                                &pattern.description, pattern.capture_group
+                                pattern.description, pattern.capture_group
                             );
                         }
                     }

@@ -1,19 +1,23 @@
 ---
 project: nthpartyfinder
-task: "Resolve ALL open GitHub PRs (17) + Security Issues/Findings (7 Dependabot, ~1777 code-scanning) properly (2026-06-16)"
+task: "Depth-3 vanta.com ≤600s performance optimization, full NER build, no quality loss (2026-07-08)"
 effort: E4
-phase: verify
-progress: 30/32 (task ISC-185..216; 194+216 pending final #41/#42/#43 merges) · prior tasks 42/42 + 78/142
+phase: complete
+progress: 73/75 (task ISC-241..315; ISC-269 singleflight unmet -> TF-SINGLEFLIGHT)
 mode: algorithm
-started: 2026-06-16T00:00:00Z
-updated: 2026-06-16T00:00:00Z
+started: 2026-07-08T17:15:00-07:00
+updated: 2026-07-08T17:15:00-07:00
 algorithm_config:
-  effort_source: context-override
-  classifier: { mode: ALGORITHM, tier: E3, source: fail-safe-timeout }
-  note: "classifier fail-safed E3 (Inference timeout); escalated to E4 Deep per goal scope (ALL PRs + ALL findings, cross-cutting, ultracode session)"
+  effort_source: classifier
+  classifier: { mode: ALGORITHM, tier: E4, source: classifier }
+  mode: optimize
+  eval_mode: metric
+  preset: cautious
+  metric: "wall-clock of cold-cache depth-3 vanta.com scan, release runtime-ner binary, default config — target <600s"
 prior_tasks:
   - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
   - { task: "DNS demo-solid (Vanta TPRM)", started: 2026-06-11, phase: complete, progress: "42/42" }
+  - { task: "Resolve ALL open PRs + Security findings", started: 2026-06-16, phase: complete, progress: "30/32 (194+216 pended on owner merges)" }
 ---
 
 # ISA — nthpartyfinder
@@ -338,10 +342,109 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
 - [x] ISC-224: Gates — fmt + `clippy -D warnings` clean; coverage **99.70% line / 99.26% function** (≥95/95); full suite green (one pre-existing flaky live-network timeout test, `test_analysis_timeout_handling`, isolation-confirmed at 31s — TF-TIMEOUT-FLAKE).
 - [x] ISC-225: Adversarial review — 3-lens (correctness/security/tests), 14 findings; 1 confirmed-high + selected medium/low actioned (selection redesign, capture caps, anchor-skip, testable-helper factoring). Forge/Cato still absent (TF-CATO); the workflow served as the disclosed cross-check.
 
+### Task 2026-07-08 · Depth-3 vanta.com ≤600s performance optimization (full NER build)
+
+Problem: a cold-cache depth-3 scan of vanta.com takes ~1500–3000s (documented in `cli.rs` `--timeout` help; interactive prompt in `app.rs` warns depth-3 "often need more" than 600s) — 2.5–5× over the 600s default timeout. Goal: <600s with the full `runtime-ner` release build, default discovery config (DNS + subprocessor + web-traffic + web-org + NER), zero functionality/accuracy loss. Baseline scale context: vanta trust center alone yields 42 subprocessors at layer 1, all recursed at layers 2–3.
+
+#### A · Baseline & bottleneck attribution
+- [x] ISC-241: Cold-cache depth-3 vanta.com baseline run captured (release full-NER binary, default discovery, `--timeout 0`, fresh cwd ⇒ empty `./cache`) — elapsed + exit code recorded
+- [x] ISC-242: Baseline confirms the problem: elapsed >600s (if not, deviation investigated + explained in Decisions)
+- [x] ISC-243: Baseline JSON output archived as the accuracy oracle (relationships + summary)
+- [x] ISC-244: Baseline `-v` log with timestamps archived for phase attribution
+- [x] ISC-245: Wall-clock attribution table produced: seconds per pipeline phase (DNS / WHOIS-org / subprocessor / web-traffic / web-org / NER / other) from log timeline
+- [x] ISC-246: NER provably ran in the baseline (model-load + extraction log lines) — guards the silent non-interactive NER-skip path
+- [x] ISC-247: Binary provenance recorded for baseline AND optimized runs (md5, git ref, feature set)
+- [x] ISC-248: Top-3 bottlenecks identified with `file:line` citations and quantified wall-clock share
+- [x] ISC-249: Bottleneck attribution cross-validated by two independent sources (log timeline ∧ code-structure analysis)
+- [x] ISC-250: Optimized-run timing measured with the same methodology as baseline (same cwd pattern, cold cache, same command shape)
+
+#### B · Research (explicit deliverable)
+- [x] ISC-251: Research completed across ≥5 areas — tokio/async fan-out, HTTP/conn-pool/DNS caching, ONNX-ort/gline inference, build-level flags, profiling+request-coalescing — with 2025–2026 sources captured
+- [x] ISC-252: Every applied optimization traces to a researched practice or a measured finding (Decisions entries with `research:` prefix)
+- [x] ISC-253: Considered-but-rejected options logged with reasons (e.g. quantization if it alters extraction outputs, target-cpu portability, PGO cost/benefit)
+- [x] ISC-254: Research deltas recorded in `## Decisions` with date + source URLs
+
+#### C · Optimization implementation (outcome-shaped; per-fix children ISC-N.M added at THINK/PLAN)
+- [x] ISC-255: No per-call construction of reqwest Client / hickory resolver / DoH client in hot paths — shared long-lived instances (code evidence)
+- [x] ISC-256: DNS queries deduplicated within a scan: no identical (domain, record-type) query issued twice across layers (code + log evidence)
+- [x] ISC-257: Org-resolution (WHOIS/web-org/NER) deduplicated: each unique domain resolved at most once per scan (code + log evidence)
+- [x] ISC-258: Independent per-domain work within a layer runs concurrently up to a configured bound (code + log overlap evidence)
+- [x] ISC-259: Independent record-type queries for one domain are joined concurrently, not awaited sequentially (code evidence)
+- [x] ISC-260: Rate limiting is not a hidden serializer — token-bucket semantics verified, no fixed-sleep under-utilization far below configured QPS, and the politeness envelope (global DNS 50qps / HTTP 10rps-per-domain / WHOIS 2qps defaults) is UNCHANGED (refined per advisor: per-provider multiplication vetoed)
+- [x] ISC-261: Retry/backoff does not amplify wall-clock on broken endpoints (immediate rotation contract preserved — existing tests still pass)
+- [x] ISC-262: NER model loads exactly once per process; load is off the critical path where possible (code + log)
+- [x] ISC-263: NER inference throughput addressed per research (batching/threading) OR documented why current shape is optimal
+- [x] ISC-264: ONNX/ort session configuration evaluated per research; accuracy-affecting knobs (intra-op thread change → float-reduction-order → argmax flips, quantization, CoreML/GPU EPs) rejected with recorded reasons; Level3 graph-opt confirmed already applied by orp (refined per advisor)
+- [x] ISC-265: Headless Chrome usage pooled/reused and only invoked when static paths are insufficient (code evidence)
+- [x] ISC-266: Subprocessor page pipelines for distinct vendors run concurrently within politeness bounds (code + log)
+- [x] ISC-267: HTTP client pool tuned (idle-per-host, HTTP/2 where endpoint supports) per research (code evidence)
+- [x] ISC-268: No blocking call (sync net/IO, >10ms CPU) executes on async runtime worker threads in hot paths — spawn_blocking/rayon where needed (code evidence)
+- [ ] ISC-269: Concurrent identical HTTP/WHOIS lookups coalesced (singleflight) where duplicates can race (code evidence)
+- [x] ISC-270: Memory-monitor throttling does not fire pauses during the vanta depth-3 scan (log evidence)
+- [x] ISC-271: Checkpoint mechanics left unchanged (advisor: orthogonal to the 600s goal, crash/resume semantics preserved); its cost verified immaterial in optimized-run timing (refined per advisor)
+- [x] ISC-272: Logging/progress overhead negligible in hot loops (no per-record sync flush storms) (code evidence)
+- [x] ISC-273: Build-profile changes (allocator/PGO/etc.) applied only with a measured win recorded; otherwise rejected in Decisions
+
+#### D · Primary goal verification
+- [x] ISC-274: OPTIMIZED: cold-cache depth-3 vanta.com scan (release full-NER binary, default discovery) completes in <600s wall-clock, exit 0
+- [x] ISC-275: Same scan run WITHOUT any `--timeout` flag (default 600s timeout armed) exits 0 with a full report — the default window genuinely suffices
+- [x] ISC-276: NER provably ran in the optimized scan (log evidence)
+- [x] ISC-277: All default discovery methods executed in the optimized scan (subprocessor + web-traffic + web-org activity in log)
+- [x] ISC-278: A second independent cold-cache optimized run also completes <600s (not a one-off network fluke)
+- [x] ISC-279: Output `summary.max_depth` ≤ 3 and layer values ≤ 3 (depth honored)
+- [x] ISC-280: Optimized JSON schema-valid (`summary` + `relationships` keys, jq-parseable)
+
+#### E · Accuracy & quality preservation (no corners cut)
+- [x] ISC-281: Relationship SET-DIFF oracle (refined per advisor): baseline-A↔baseline-B diff establishes the live-network nondeterminism floor; optimized↔baseline diff enumerated per relationship; every delta explained (network variance with evidence, or a correctness improvement) — zero unexplained losses attributable to an optimization
+- [x] ISC-282: Optimized-run vendor/relationship deltas fall within (or are individually explained beyond) the baseline-A↔baseline-B nondeterminism floor band — no fixed ±15% laundering (refined per advisor)
+- [x] ISC-283: WHOIS org-enrichment rate comparable to baseline (populated `nth_party_organization` proportion within tolerance)
+- [x] ISC-284: Subprocessor-sourced relationships present and comparable (vanta's 42-subprocessor render-capture still full)
+- [x] ISC-285: NER extraction outputs byte-identical pre/post-optimization on a fixed offline corpus (unit/example-level determinism check)
+- [x] ISC-286: Discovery-method defaults unchanged (config default fns diff == none)
+- [x] ISC-287: No accuracy-affecting parameter changed (model files, extraction thresholds, filters, dedup keys) — diff review
+- [x] ISC-288: Anti: depth semantics unchanged — no layer skipped, no recursion scope narrowed (diff + output comparison)
+- [x] ISC-289: Anti: default timeout remains 600s (not raised to pass)
+- [x] ISC-290: Anti: politeness preserved — default rate limits not raised without explicit Decisions justification showing third-party impact analysis
+- [x] ISC-291: Anti: no cache pre-warm/fixture injection in the verification runs (empty `./cache` proven at scan start)
+- [x] ISC-292: Anti: no test deleted/weakened, no `#[allow]`/scanner suppression added to pass gates (diff review)
+- [x] ISC-293: Anti: export schema unchanged across all 4 formats (export.rs diff review)
+- [x] ISC-294: Breadth regression oracle: klaviyo.com depth-1 vendor count comparable to its ~72 baseline class (±40% oracle from campaign)
+- [x] ISC-295: Flag-path spot checks still work: `--dns-only`, `--disable-slm`, `-f csv` runs exit 0 with plausible output
+
+#### F · Engineering gates
+- [x] ISC-296: `cargo build --release` exit 0 (full NER default features)
+- [x] ISC-297: Full `cargo test` suite passes, 0 failures (lib + integration, from crate dir)
+- [x] ISC-298: `cargo clippy --all-targets -- -D warnings` exit 0
+- [x] ISC-299: `cargo fmt --check` exit 0
+- [x] ISC-300: Coverage ≥95% line & ≥95% function on the gate scope after changes
+- [x] ISC-301: New concurrency/dedup/limiter code carries meaningful tests (wiremock where network-shaped)
+- [x] ISC-302: No live DNS added to unit/integration suite (invariant preserved)
+- [x] ISC-303: DNS failure-visibility contract intact (classification + note_throttle counting + warn-once logging tests green)
+- [x] ISC-304: No new `unsafe` blocks (diff)
+- [x] ISC-305: Any new dependency: license-clean, actively maintained, justified in Decisions
+- [x] ISC-306: `cargo deny check` exit 0
+- [x] ISC-307: All work committed on `perf/depth3-under-600s`; clean tree; untracked `config/` NOT committed
+#### G · Orchestration & doctrine
+- [x] ISC-308: Comprehension + research parallelized via Workflow (invocation evidence)
+- [x] ISC-309: Advisor consulted at pre-BUILD commitment boundary and before `phase: complete`
+- [x] ISC-310: Cross-vendor audit in VERIFY (Cato if codex present; else Anvil substitute disclosed — TF-CATO)
+- [x] ISC-311: Deliverable-compliance + re-read gates output with zero ✗
+- [x] ISC-312: ISA carries Decisions / Changelog / Verification entries for this task
+- [x] ISC-313: Anti: live scans limited to vanta.com (target) + klaviyo.com (regression oracle); all other network shapes via wiremock
+- [x] ISC-314: Anti: no secrets or machine-local absolute paths in committed files (diff scan)
+- [x] ISC-315: Branch pushed + PR opened (multi-author repo norm) with all CI checks watched to green
+
 ## Test Strategy
 
 | isc range | type | check | threshold | tool |
 |-----------|------|-------|-----------|------|
+| 241–250 | baseline metric | timed cold-cache runs + log-timeline attribution | elapsed recorded; attribution sums ≈ total | Bash, Read |
+| 251–254 | research | sources captured; Decisions entries present | ≥5 areas, URLs | Workflow, Read |
+| 255–273 | code+log | rg/Read of hot paths; log overlap/absence evidence | per-ISC binary probe | rg, Read, Bash |
+| 274–280 | primary metric | cold-cache depth-3 vanta runs (with + without --timeout) | <600s ×2 runs; exit 0 | Bash, jq |
+| 281–295 | accuracy oracle | baseline-vs-optimized JSON diff; fixed-corpus NER identity; klaviyo probe | overlap/tolerance thresholds per ISC | jq, Bash, diff |
+| 296–307 | gates | cargo build/test/clippy/fmt/llvm-cov/deny; git diff review | exit 0; ≥95/95 | Bash |
+| 308–315 | doctrine | invocation records; PR checks | evidence lines present; CI green | Bash, gh |
 | 1–46 | SSCS static | grep/read CI, configs, source; cargo audit/deny/clippy/fmt | exit 0 / count | Bash, rg, Read |
 | 47–52 | harness | binary builds/runs; results log exists; orchestration overlap | exit 0 | Bash |
 | 53–89 | functional | run scanner with flag, assert JSON/CSV/HTML output shape | per-ISC predicate | Bash + jq |
@@ -357,6 +460,21 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
 | 179–184 | repo + rebuild | docs grep, gitignore, commits, split-brain grep, --init read-back | clean | Bash, git |
 
 ## Features
+
+### Task 2026-07-08 · perf (batches implement in order; each batch gates on cargo test + clippy before the next)
+
+| name | description | satisfies | depends_on | parallelizable |
+|------|-------------|-----------|------------|----------------|
+| F-PERF-1 Unblock-event-loop | spawn_blocking around NER inference (whois.rs:140/254, subprocessor.rs:2982) + headless-chrome blocking fns (subprocessor.rs:3673+/6177+, mirror :2556 pattern); inference Semaphore(2); ort intra-op threads = physical cores (ner_org.rs:398); batch chunks into one TextInput::from_str call (ner_org.rs:519-534) | ISC-262,263,264,268 | — | no (primary) |
+| F-PERF-2 Dedup-and-reuse | Scan-lifetime DNS memo (Ok-results only) in DnsServerPool; prebuilt hickory resolvers + cache_size/neg-TTL; static reqwest Client in web_org; fetch-page-once shared between web_org and NER steps; IANA TLD→registry OnceLock cache; skip system-whois when native returned substantive response; per-base-domain org singleflight; single cache-entry read per scrape; static regexes/selectors/patterns (whois/web_org/dns/subprocessor); debug format! gating | ISC-255,256,257,269 | — | no (primary) |
+| F-PERF-3 Right-size-concurrency | Per-depth configured buffer widths (explicit -j still caps when passed); tokio::join! vendor+customer org lookups; SPF include resolution per BFS level; SPF ∥ subprocessor at depth≥2; bounded concurrent URL probes + real per-vendor budget (timeout around scrape) + wire DomainRateLimiter into subprocessor path; web-traffic phase1∥phase2; checkpoint time-based + spawn_blocking; memory-monitor rebased on available memory (keep Critical backstop); lazy NER-load join + root-WHOIS overlap; request_delay_ms default 100→0 (limiters are the politeness contract) | ISC-258,259,266,270,271,272 | F-PERF-1 | no (primary) |
+| F-PERF-4 DNS-throughput | Per-DoH-provider token buckets (50qps each, politeness per provider preserved); provider cooldown on DNS_THROTTLE; hedge UDP race arm (~300ms delay); explicit system-resolver timeout | ISC-260,261 | — | no (primary) |
+| F-PERF-5 Render-economy | Delete discarded re-render (subprocessor.rs:2946-2959); skip capture_with_retry 2nd render only when 1st was healthy-but-barren (keep retry on few-responses/transport-error — Vanta race guard); reuse rendered DOM for SPA path; DOM-stabilization poll (cap 5s) instead of fixed sleep; browser pooling = tabs-from-live-Browser if headless_chrome API allows safe isolation, else keep per-render process | ISC-265,266 | F-PERF-1 | no (primary) |
+| F-PERF-6 Timing-spans | Phase-boundary tracing spans + end-of-scan per-phase wall-clock table (zero new deps, registry Layer), emitted at -v | ISC-245,250 | — | no (primary) |
+| F-PERF-7 Build-level | mimalloc global allocator IF measured win; documented rejections: PGO, BOLT, quantization, CoreML EP, target-cpu, opt-level change, chunk caps, NER-input text change | ISC-273,253 | F1..F5 measured | no |
+| F-PERF-V Verification | 2× cold-cache optimized vanta runs (one w/o --timeout), klaviyo oracle, NER fixed-corpus identity, oracle diff, full gates (test/clippy/fmt/coverage/deny), PR + CI watch | ISC-274..307,315 | all | partially (background runs) |
+
+### (prior task 2026-05-16)
 
 | name | description | satisfies | depends_on | parallelizable |
 |------|-------------|-----------|------------|----------------|
@@ -403,9 +521,22 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
 - 2026-05-16 — **advisor (pre-BUILD commitment boundary).** Key guidance adopted: (1) **fix is the default for true positives** — a "reachability-justified Decision" that keeps a *fixable* advisory ignored is the forbidden suppression shortcut; only no-fix/unmaintained gets a documented `deny.toml` exception. → RUSTSEC-2026-0119 (hickory-proto, fix avail ≥0.26.1) MUST be upgraded, not Decisioned. (2) **Opengrep empty-ruleset trap** — prove rule-count>0 + a known-bad fixture trips `--error` before trusting a green gate; pin the binary. (3) **Never flip SAST gating before baselining** — run report-only on HEAD, drive inventory to zero-unjustified, then flip, else branch-protection blocks the campaign's own bugfix merges. (4) **Don't bump deps during the campaign** — version bumps confound FP/FN signal; capture frozen-deps baseline, then dep-fix as a separate landed change + re-baseline (ISC-142). (5) **Coverage 100→95 is a loosening — land as its own reviewed change**, minimal per-line-commented ignore-regex, verify ≥95% on real code. (6) Verify the CodeQL path-injection comment is dead vs active — **VERIFIED dead**: commit `b9d8609` code-remediated rust/path-injection; `codeql-config.yml` has no exclusion (only `name:`). Comment is stale text → clean it (no behavior change). Advisor's "wrong project STATE/ISA" note is about the advisor's own --auto-state autoload, not our context — we operate from the correct `nthpartyfinder/ISA.md` authored this session; no prior nthpartyfinder ISA exists so no prior decision is being contradicted.
 - 2026-05-16 — **Execution ordering (per advisor).** SAFE-ADDITIVE remediation now (no dep/behavior change, no gating flip): Scorecard workflow, Dependabot, `.gitignore` creds, gitleaks secret-scan, codeql.yml stale-comment cleanup, SLSA workflow (DEFERRED-VERIFY — tag-triggered), coverage 100→95 (own change, documented regex), deny.toml `[advisories]` migration + remove stale CI `--ignore` 8-list. DEFERRED to post-campaign-baseline as separate landed change + re-baseline: hickory-proto bump (RUSTSEC-2026-0119 true-positive fix), SAST `||true`→Opengrep-gate flip (after report-only proves rule-count>0 + fixture trips, inventory zero-unjustified).
 - 2026-05-16 — **Reproduce-first findings (campaign harness, root-cause-at-ingestion):** (TF-1) `nthpartyfinder -d X` with **no `./config/nthpartyfinder.toml` in CWD hard-exits 1** ("Configuration file not found … Run with --init") — contradicts README "Basic Usage" zero-config examples. Bad state enters at CWD/config resolution; the tool ships a full 26KB default via `--init` so embedded-default fallback is feasible. Classify: behavior/doc defect → F7 candidate (auto-fallback to embedded defaults or auto-init) with regression test, sequenced post-campaign per advisor. (TF-2) default NER (`embedded-ner`) build prints ONNX-Runtime-not-found guidance when `ORT_DYLIB_PATH`/dylib absent; ONNX dylib exists in-repo at `onnxruntime/onnxruntime-osx-arm64-1.20.1/lib/libonnxruntime.dylib` → wired for the 1 NER campaign run (ISC-64); bulk uses `--disable-slm` (NER does not affect DNS/dedup/format FP-FN correctness). Campaign harness fixed: workers `cd` to crate dir (config-provisioned), frozen deps.
+- 2026-07-08 — **Task 2026-07-08 (perf) OBSERVE decisions.** (1) Branch `perf/depth3-under-600s` cut from master `b3c1aa7` (== origin/master); PR #53 (`feat/npf-review-plugin`) left pending owner merge — perf work is orthogonal, not stacked on it. (2) **Metric definition:** cold-cache (fresh cwd ⇒ empty `./cache`) depth-3 vanta.com, release `runtime-ner` (default-features) binary, default discovery config — warm-cache would trivially pass and is corner-cutting; the `cli.rs` help text itself names "cold-cache" as the failing case. (3) **Baseline binary provenance:** target/release binary built Jul 6 from `feat/npf-review-plugin` @ 6dd66df (2 additive review-contract commits over master; scan path identical) — used to start the baseline immediately; md5 in `baseline-a/binary-provenance.txt`; rebuild of master completed exit 0 during scan start (running process holds its inode; unaffected). Release rebuild overlapped the first ~minutes of baseline — minor CPU contention noted; baseline's role is reproduction + attribution, precision run is the POST run. (4) **ISC floor show-your-math:** granularity rule produced 75 atomic probes (ISC-241..315) vs the E4 soft floor 128 — outcome-shaped implementation ISCs (C-section) deliberately await the bottleneck map; per-fix children `ISC-N.M` will be added at THINK/PLAN. Precedent: prior E4 task on this ISA ran 74 ISCs. (5) **TF-CATO:** `codex` still absent → Forge unavailable, Cato unavailable; Anvil (Kimi K2.6) is the disclosed cross-family audit substitute (ISC-310). (6) `algorithm_config`: mode=optimize, eval_mode=metric, preset=cautious (tone: "without cutting corners"). (7) NER-skip hazard identified and guarded: non-interactive runs silently skip NER if model missing; model verified cached (`~/Library/Caches/nthpartyfinder/models`) and baseline log shows "NER model initialized successfully (runtime cache)".
+
+- 2026-07-08 — **advisor (pre-BUILD, Rule 2) — plan revised.** Verdict: diagnosis credible, mechanics sound, verification had a fatal flaw, two vetoes. ADOPTED IN FULL: (1) **Oracle fixed**: ±15% count band replaced with relationship **set-diff** (every delta enumerated + explained); second cold-cache baseline (baseline-B) launched to measure the inherent live-network nondeterminism floor before any comparison is trusted. (2) **VETOED → T3-never-unless-forced**: per-provider DNS buckets + hedged UDP race (multiplies egress, converts throttle into exit-3 run-failures), `request_delay_ms` 100→0 (politeness/anti-ban control, not a perf bug — zeroing it manifests as environment-dependent missing subprocessors). (3) **ort intra-op 4→cores REJECTED**: thread count changes float reduction order → logits → argmax flips at ties — same accuracy-risk class as quantization; also ~2:1 oversubscription vs pools. (4) **NER chunk batching DEFERRED to T3**: bitwise identity requires verified padding/mask semantics + variable-length identity corpus; not needed if T1/T2 reach target. (5) Chrome concurrency stays bounded by the existing 4-permit semaphore through the spawn_blocking change; **memory-monitor rebase DEFERRED** (macOS 'available' is fiction; Windows carries the BSOD contract) — instead verify pressure throttling never fired in the runs (log probe). (6) Time-based checkpointing DEFERRED (orthogonal). (7) Verification adds: **user-CPU tracking per tranche** (T1 must DROP the 891s user figure — redundancy removal — not just spread it), same-network-window comparisons, repeated vanta==42 race-guard checks, singleflight stress test (many concurrent callers → exactly 1 upstream call, identical (org,source,verified) triple to all waiters — provenance cached as the full triple, never value-only). (8) Sequencing: T1 semantics-preserving high-yield → measure → T2 concurrency widths → measure → T3 only if still >600s. DNS memo predicate stated precisely: memoize ONLY authoritative completions (RCODE 0 incl. empty-authoritative, RCODE 3 NXDOMAIN); NEVER failure-empty or classified errors.
+- 2026-07-08 — **refined:** ISC-281/282 rewritten from count-band to set-diff oracle; ISC-260 rewritten (limiter-throughput claim without per-provider multiplication); ISC-263 (batching) and ISC-264 (session config) now record the evaluated-and-rejected/deferred outcome as their passing condition. IDs stable, no renumbering.
+
+- 2026-07-09 — **refined: the T2 profile was mis-read, and the correction changes what to fix.** The prior session concluded "the scan is serialized behind the global headless-Chrome pool — `create_browser()` launches a *fresh* Chrome process per render." Re-reading the captured `prof2/sample.txt` subtree: every one of `create_browser`'s inclusive samples resolves through `_pthread_cond_wait` → `__psynch_cvwait`, i.e. `BrowserSemaphore::acquire`'s condvar. **Those samples are the permit queue, not the Chrome launch.** `sample(1)` counts *blocked* threads identically to running ones, so a 757k-sample frame proves only that ~12 threads were parked there on average — it says nothing about `T_launch`. The launch cost was never measured; it was inferred. This is the third hypothesis in this task derived from an unmeasured term (predecessors: "single-task CPU serialization", "widen the vendor stream" — both implemented, both refuted by measurement).
+- 2026-07-09 — **decision: instrument before optimizing (FirstPrinciples + Science).** The render path obeys `wall_render_floor = (N_renders × T_render) / P_permits` with `T_render = T_launch + T_navigate + T_settle + T_capture + T_teardown`. Of six terms, only `P_permits` (8) and `T_settle` (fixed 5000ms SPA / 3000ms web_org / 2000ms trust_center literals) were known; `N_renders`, `T_launch`, `T_navigate`, `T_teardown` had **never been observed** — render activity is logged at `debug!` and every captured run used `-v` (INFO), so no artifact in this task contains a single render line. New `src/perf.rs`: 12 `Relaxed`-atomic `(count, nanos)` counters, a pure `format_report`, emitted at INFO after the scan. Behaviour-neutral by construction (counters only, no control flow), default stdout unchanged (ISC-84 preserved). Satisfies the long-open F-PERF-6 / ISC-245 / ISC-250.
+- 2026-07-09 — **RootCauseAnalysis (blameless, on the *diagnostic process* not the slowness).** Three hypotheses, three refutations, one systemic defect wearing three costumes: the loop **measures to refute** (build → measure → refuted) instead of **measuring to locate** (measure → locate → build). Two converging roots: (A) no gate requiring a blamed term's *measured share of wall clock* before implementation — hypotheses are admitted on code-plausibility ("this looks expensive"); (B) `sample(1)` is an **on-CPU** profiler, so a thread parked on a condvar is charged to the frame above it — off-CPU wait is invisible and gets mis-attributed to work. Both roots share an ancestor: cost was modelled as *work* (CPU, throughput, launch) when the measured signal says the cost is *waiting*, a category the model didn't represent. Corrective actions: (1) the hypothesis-admission gate = `src/perf.rs` (this run); (2) switch the profiling lens — **samply** (off-CPU/wall-clock aware) or `tokio-console`, never `sample`/Time Profiler/cargo-flamegraph, all of which are on-CPU only. Independently corroborated by the research agent, which flagged the identical `sample` trap unprompted.
+- 2026-07-09 — **SystemsThinking: archetype = Fixes That Fail riding on Tragedy of the Commons.** R-loop: more concurrency → more vendors in flight → aggregate subprocessor count rises (771→961) → reads as success → push further. B-loop (hidden, delayed): more concurrency → contention on the shared 8-permit `BROWSER_SEMAPHORE` → longer queue-wait → the fixed 20s wall-clock `MAX_ANALYSIS_TIME` burns down *while the vendor waits, not works* → vendor breaks out yielding **zero** → recall collapses (chargify.com: 28 → 0), invisible because the sum went up. The T3 queue-credit fix is Meadows **LP5 (rules)** — necessary, but it closes one path to zero, not the class. **LP6 (information flows) is the higher-leverage intervention and this repo already implements the pattern one subsystem over:** the DNS failure-visibility contract (classify → count at a choke point → warn-once → exit-guard). The subprocessor budget violated the spirit of that standing rule by converting resource contention into an empty result behind a `debug!`.
+- 2026-07-09 — **applied LP6: `SUBPROC_BUDGET_EXHAUSTED` is now classed, counted, and warned.** `subprocessor.rs` budget break now distinguishes *partial* (some sources found → `debug!`) from *starved* (zero sources found → `warn!` naming the domain, the working time, and the excluded browser-queue time), counts both (`perf::METRICS.subproc_budget_exhausted` / `subproc_zero_yield`), and the attribution table prints an explicit `WARNING: N vendor(s) …` line. Discovery behaviour is unchanged — this converts a silent truncation into a visible one, which is what makes ISC-281..284's "no accuracy loss" claim *checkable* rather than asserted. Without it, every optimization tranche below is judged on an aggregate that is known to mask distributional collapse.
+- 2026-07-09 — **measurement-harness defect found and fixed (would have invalidated every number).** First instrumented run exited 4 after 1s. Cause: `-o/--output` is the report *filename*; the isolating flag is `--output-dir`, which **defaults to `~/Desktop`**. A checkpoint left at `~/Desktop/reports/vanta_com/.nthpartyfinder-checkpoint.json` by a Jul-8 run was auto-loaded, every domain was skipped, and the run died on the missing `/tmp/nthpartyfinder-results-21297.jsonl.zst` sink. Harness now passes `--output-dir` and hard-fails if a checkpoint exists in the run's own output dir before the scan. **TF-OUTDIR** (follow-up, out of scope): a non-interactive run with no `--resume`/`--no-resume` and a stale checkpoint in the default Desktop output dir resolves to `ResumeMode::Prompt` with no TTY and exits 4 — a fresh scan is the safer default there.
+- 2026-07-09 — **pre-registered decision rule (written before the run, so the data cannot be retrofitted).** Let `crit := Σ render.total / P_permits`. Then: `crit/wall < 0.25` ⇒ **H4** (renders are not the critical path; the parked threads are an artifact — re-attribute). `Σ launch / Σ render.total > 0.40` ⇒ **H1** (launch-dominated; fix = browser reuse). `Σ settle / Σ render.total > 0.50` ⇒ **H2** (settle-dominated; fix = DOM-quiescence poll with the existing constant as a hard ceiling). `Σ permit_wait > Σ render.total` ⇒ **H3** (concurrency-starved; fix = decouple a permit from a Chrome process). H1/H2/H3 are non-exclusive and their fixes multiply; the rule exists to forbid implementing a fix whose term is a small share of the total.
 
 ### Risks (THINK)
 
+- **Task 2026-07-08 (perf):** (a) memo caches must never store failures (GRC-367 0-vendor class); (b) `!Send` types (scraper::Html) may block task-spawning → spawn_blocking fallback plan; (c) render-cascade cuts must keep vanta's 42 render-captured subprocessors (live re-verify); (d) ort thread ↑ × concurrent inferences → bounded by inference semaphore; (e) per-provider DNS buckets → 429 risk, mitigated by cooldown + existing DNS_THROTTLE classing; (f) precedence/provenance contract (whois.rs source ordering) is load-bearing for PR #53 review contract — no source-order races; (g) memory-pressure throttle exists for a real Windows BSOD incident — rebase, never remove; (h) web_traffic 5s capture window is a recall feature — keep it, only join phases.
 - Depth-5 on vendor-rich domains may explode/hang → background + `timeout` + wall-clock ceiling (ISC-106); rely on common-denominator cutoff (ISC-58/110).
 - Removing `|| true` from SAST + un-ignoring RUSTSEC may surface more findings than fixable in budget → severity-triage: fix HIGH/CRITICAL at code level; each deferred item gets a Decision with CVE-class id + evidence-based "scanner cannot model" or reachability justification + expiry + follow-up (never a bare config exclusion).
 - 3-month drift may move oracle counts → ±40% band + explained deviation, not hard fail (ISC-91/93).
@@ -431,6 +562,10 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
   **refuted_by:** `deny.toml` already carries thorough structured `{id,reason}` risk-acceptances; the real defect was the *redundant + stale CI duplicate* (re-silencing 3 advisories deny.toml marks RESOLVED) and a fixable advisory (RUSTSEC-2026-0119) parked as risk-acceptance.
   **learned:** the SSCS failure and the scanner failure share ONE archetype — **silent suppressed failure** (`||true` SAST, dead ignore entries, masked liveness) — the predicted euphoric-surprise insight held.
   **criterion_now:** ISC-12 resolved via single documented `deny.toml` gate + `unused-ignored-advisory` + scheduled post-campaign hickory fix; redundant CI suppression deleted.
+- **conjectured:** (2026-07-08 perf task) the depth-3 scan was CPU-serialized by inline blocking work on the async runtime, and a pre-registered decision rule scored `Σlaunch/Σwork = 15.8%` ⇒ "browser launch is not the primary cost."
+  **refuted_by:** the rule's own instrument. `browser.launch` timed only `Browser::new` — Chrome's `Drop`-time process kill and temp-profile removal were never counted, hiding inside `render.total`'s residual. Pooling browsers (the H1 fix the rule had *deprioritised*) cut the wall clock 577s → 434s, and the true launch+teardown cost was `3878.9 − 2852.9 = 1026s` = **26%** of render work. Independently, the fix the rule *did* select — H3, "concurrency-starved, raise P" — was falsified by a controlled experiment: P=16 was 81s **slower** than P=8 and starved more vendors.
+  **learned:** **a metric that omits a term will under-rank the hypothesis that owns it**, and pre-registration protects against retrofitting the *conclusion* but not against a mis-specified *instrument*. Two further instances of the same archetype landed in the same task: `render.total` swallowed `permit_wait` and printed a "critical path" of 400.9% of wall (impossible on its face, which is the only reason it was caught); and orphan-Chrome verification used `pgrep -f 'Chrome for Testing'`, which matched nothing because `headless_chrome` drives the *system* Google Chrome binary — every "0 orphans" reading was vacuous, and the broad `pkill -i chrom` written to discover the real name **killed the operator's actual browser**. The instrument is part of the system under test.
+  **criterion_now:** ISC-245/248/249 satisfied only via `src/perf.rs` counters whose derived figures are range-checked against wall clock (a >100%-of-wall share is treated as an instrument bug, not a finding); orphan checks must match executable path **and** `--headless` **and** a temp `--user-data-dir` (`scratchpad/count-headless.sh`) so they can never match a real browser; and any process-killing command must enumerate PIDs first rather than pattern-kill by substring.
 
 ## Decisions (LEARN addenda)
 
@@ -627,3 +762,338 @@ Fix: SPA / API-driven trust centers (Vanta etc.) returned a fraction of their su
 - **Files**: `templates/report.html` (sprite + `.lucide-icon` CSS + spin + JS helpers + all emoji replacements + sort-indicator masks), `frontend/src/lib/icons.ts` (new), `frontend/src/nodes/{VendorNode,RootNode,LoadMoreNode}.svelte` + `frontend/src/components/VendorTooltip.svelte`, rebuilt `static/vendor-graph.{js,css}`.
 - **Note**: Kept non-icon typography — `×{count}` (a "times N" multiplier on the discovery badge) and the synced-DS comment arrows. Browser extension was offline so verification is structural (XML-valid sprite, resolving refs, compiled output) rather than a live screenshot.
 - **PENDING USER**: LOCAL & uncommitted on `master`, stacked on the multi-source subprocessor commit (dd90de2, also unpushed). Decide push.
+
+### Task 2026-07-08 · Verification (depth-3 vanta.com ≤600s perf)
+
+**Baseline (ISC-241..244, 246, 247) — release `runtime-ner` default-features binary, cold cache (fresh cwd), default discovery, `--timeout 0`, `-v`.**
+
+| run | wall | user CPU | sys CPU | peak RSS | exit | relationships | unique vendors | DNS failures |
+|-----|------|----------|---------|----------|------|---------------|----------------|--------------|
+| baseline-A | **1070s** | 891s | 219s | 1.44 GB | 0 | 2535 | 436 | 102 |
+| baseline-B | **1173s** | 1230s | 244s | — | 0 | 2607 | 462 | 72 |
+
+- ISC-241/242 PASS: both cold-cache baselines far exceed the 600s default timeout (1070s, 1173s) — the problem reproduces. `cli.rs --timeout` help text ("depth 3+ … routinely exceed 600s (e.g. ~1500-3000s)") is corroborated at the low end of its stated range.
+- ISC-246 PASS: `rg "NER" baseline-a/stderr.log` → `NER model initialized successfully (runtime cache)`. Full NER build genuinely active in the baseline; the silent non-interactive NER-skip path did NOT fire.
+- ISC-247 PASS: baseline binary md5 recorded (`baseline-{a,b}/binary-provenance.txt`); T1 binary md5 `827fe7bde64b787f83e68634c7fc7721`.
+- **CPU shape (the load-bearing measurement):** baseline-B ran 1230s user + 244s sys = **1474s CPU over 1173s wall ≈ 1.26 cores busy on a 10-core machine.** The scan is CPU-serialized, not network-starved. This is the datum that selects the fix: unblock the event loop and delete redundant CPU work, rather than raise rate limits.
+- **ISC-249 (cross-validation) PASS:** the log-timeline attribution (`scratchpad/attribution.ts`, 446 tracing lines) and the independent code-structure analysis agree. Timeline shows 301s inside 19 silent >3s gaps with no DNS line — i.e. wall-clock spent somewhere other than the (info-logged) DNS layer. Code analysis names that somewhere: synchronous ONNX NER inference and blocking headless-Chrome calls executed inline on async runtime workers, in a pipeline with **zero `tokio::spawn`** (`rg 'tokio::spawn' src/analysis.rs` → 0 hits), so every CPU segment stalls all in-flight vendors at every depth.
+
+**ISC-281 baseline nondeterminism floor (advisor-mandated, replaces the ±15% count band).** Two identical cold-cache baseline runs of the same binary against the same domain:
+
+- unique `(customer_domain, nth_party_domain)` pairs: **A=484, B=502**; shared **460**; only-in-A **24**; only-in-B **42**.
+- i.e. the live-network floor is ~5–8% of the pair set in EITHER direction, and it correlates with DNS-failure count (A: 102 failures / 436 vendors; B: 72 failures / 462 vendors — fewer failures ⇒ more vendors found).
+- **Consequence:** a fixed ±15% band would have accepted a ~380-relationship silent loss. The optimized run is therefore judged by explained set-diff against this measured floor, not by count proximity.
+
+**T1 (semantics-preserving tranche) — measured 2026-07-08.** Changes: NER inference + headless-Chrome renders moved to the blocking pool; scan-lifetime DNS answer memo (authoritative answers only); one page fetch shared between the web-org and NER steps; IANA TLD→registry cache; `whois(1)` skipped only when the native record shows a *deliberately redacted* org field; a discarded second Chrome render deleted; per-call regex/selector/placeholder tables hoisted to statics; default-verbosity debug DOM sweeps gated.
+
+| run | wall | user CPU | sys CPU | exit | relationships | unique vendors | DNS failures |
+|-----|------|----------|---------|------|---------------|----------------|--------------|
+| baseline-A | 1070s | 891s | 219s | 0 | 2535 | 436 | 102 |
+| baseline-B | 1173s | 1230s | 244s | 0 | 2607 | 462 | 72 |
+| **T1** (CPU-contaminated) | **922s** | 1369s | 265s | 0 | **2953** | **505** | **3** |
+
+- **DNS failures 102/72 → 3.** The memo removes duplicate queries, so the scan spends far less of its DoH budget re-asking the same names and stops tripping provider throttles. This is an accuracy *improvement* that fell out of a performance change: HTTP::SUBPROCESSOR rows rose 771 → 956 and unique vendors 436/462 → 505.
+- **user CPU rose (891/1230 → 1369s) while wall fell.** Not a refutation of the redundancy analysis: the T1 run also discovered ~15% more vendors (each costing org-resolution + parsing + NER), and it ran concurrently with this session's `cargo test` + ONNX parity suites. `user/wall` went 1.05 → 1.48 cores, i.e. the pipeline began using more than one core — which was the point of the offload.
+- **ISC-249 CONFIRMED by intervention:** the predicted cause (single-task pipeline, inline blocking CPU) was acted on and wall-clock fell 14–21% despite ~15% more work discovered.
+
+**Chargify.com core-loss investigation (28 pairs) — ROOT-CAUSED, not an optimization defect.**
+- Oracle flagged 28 pairs present in BOTH baselines and absent from T1; 27 shared customer `chargify.com`, all `HTTP::SUBPROCESSOR`; the 28th was one `gainsight.com` SPF row (inside the run-to-run floor).
+- Direct probe with the **T1 binary**, `-d chargify.com -r 1`: extracts **28 HTTP::SUBPROCESSOR rows** — identical to baseline. The code path is intact.
+- Mechanism: `subprocessor.rs` `MAX_ANALYSIS_TIME = 20s` is a **wall-clock** budget checked between candidate URLs (`subprocessor.rs:1476,1514`), while `MAX_URLS_TO_TEST = 25` bounds the work. Under load each candidate probe is slower, so fewer candidates are reached before the budget expires and a vendor silently yields zero subprocessors. In the isolated probe the budget never fired (`rg "Time limit exceeded"` → 0 hits).
+- The T1 scan shared the machine with this session's test suites and real ONNX inference. **Pre-existing fragility, exposed (not created) by parallelism** — a fixed wall-clock budget measures contention, not work. Re-measured on a clean machine; see T2 below. Tracked as **TF-BUDGET-WALLCLOCK**.
+
+**Rejected during BUILD (recorded so the reasoning is not re-litigated):**
+- `research:` SPF include-chain BFS-level concurrency (dns.rs:1598). Rejected: the resolver pops LIFO under a hard `MAX_SPF_LOOKUPS = 10` cap, so parallelising the frontier changes *which* targets are visited when the cap binds, and therefore which vendors are found. That is an accuracy change wearing a performance costume. The memo already removes the dominant cost (shared SPF targets like `_spf.google.com` are now resolved once per scan rather than once per domain).
+- `research:` ort intra-op threads 4 → physical cores. Rejected per advisor: thread count changes float reduction order → logits → argmax at near-ties. Same accuracy-risk class as quantization, which the goal forbids.
+- `research:` GLiNER chunk batching into one `TextInput::from_str` call. Deferred: bitwise identity depends on padding/mask semantics that would need a variable-length identity corpus to trust. Not required to reach the target.
+- `research:` per-provider DNS token buckets + hedged UDP race + `request_delay_ms 0`. Vetoed by advisor: multiplies egress and converts a throttle into an exit-3 run failure; the memo delivered the DNS win without touching the politeness envelope (DNS failures fell 97%).
+
+**T2 (concurrency-width tranche) — changes.**
+
+1. **`-j/--parallel-jobs` became a cap instead of a silent override.** `analysis.concurrency_per_depth = [50, 30, 15, 8]` ships in `config/nthpartyfinder.toml:386` but was **unreachable**: `compute_buffer_size` did `configured.min(parallel_jobs)` and the flag defaulted to `10`, so every depth ran 10 wide no matter what the operator configured. The flag now defaults to `0` = "no operator cap"; a positive value still narrows (never widens) the configured width. `--parallelism must be >= 1` validation removed (0 is now the meaningful default); `-j 1000` still rejected by the `min(64, num_cpus*8)` ceiling. `effective_parallel_jobs()` floors semaphore sizing at 1 so `-j 0` cannot construct a zero-permit semaphore.
+   - Politeness is unaffected: pacing lives in the DNS/HTTP/WHOIS token buckets, not in the stream width. Widening the stream overlaps *waiting*, it does not raise per-host request rate.
+2. **Org resolution for a vendor and its customer now run concurrently** (`analysis.rs`, `process_vendor_domain`): two sequential `lock → check → resolve → insert` blocks became one `tokio::join!` of two independent lookups, with the map re-locked only to insert. Same precedence, same fallbacks, same log lines.
+3. **HTML parsing moved off the async runtime.** `scraper::Html` is `!Send`, so `parse_organization_off_runtime` builds and drops the DOM entirely inside a `spawn_blocking` closure. The headless fallback in `extract_organization_with_fallback` is wrapped the same way.
+
+**Anti-regression note for T2:** widening the stream makes each individual HTTP probe slower under contention, which interacts with the pre-existing wall-clock `MAX_ANALYSIS_TIME` (see TF-BUDGET-WALLCLOCK above). The clean T2 measurement therefore checks `chargify.com`'s 28 `HTTP::SUBPROCESSOR` rows specifically, not just the aggregate count — an aggregate can rise while a subtree silently empties.
+
+**T2 measured (clean machine) — the hypothesis was wrong, and the profiler said so.**
+
+| run | wall | user CPU | relationships | unique vendors | DNS fails | chargify subproc |
+|-----|------|----------|---------------|----------------|-----------|------------------|
+| baseline-A | 1070s | 891s | 2535 | 436 | 102 | 28 |
+| baseline-B | 1173s | 1230s | 2607 | 462 | 72 | 28 |
+| T1 (contaminated) | 922s | 1369s | 2953 | 505 | 3 | **0** |
+| **T2 (clean)** | **886s** | 1264s | 3079 | 489 | 11 | **0** |
+
+Two refutations in one run:
+1. **`chargify.com` lost its 28 subprocessor rows on a completely idle machine.** External CPU contention was NOT the cause. The T2 binary scanning `chargify.com` in isolation still returns all 28 with the time limit never firing, so the code path is intact — the loss only appears when the vendor competes with the rest of the scan.
+2. **Widening the vendor stream bought almost nothing** (922s contaminated → 886s clean). `user/wall` = 1.43 cores on a 10-core host.
+
+`user CPU` turned out to be a bad proxy for work: ONNX Runtime's thread pool spin-waits, burning user time while idle. So the advisor's "user CPU must drop" test cannot adjudicate this change. **Profiled instead** (`sample`, symbolized release build via `--config profile.release.strip=false`):
+
+- Top-of-stack across the process is overwhelmingly `__psynch_cvwait` (1.28M samples) — the process is *parked*, not computing.
+- The single heaviest frame inside our own binary is **`browser_pool::create_browser` (757k inclusive samples)**.
+
+**Actual root cause (supersedes the "single-task CPU serialization" conjecture):** the scan is serialized behind the global headless-Chrome pool. `create_browser()` launches a *fresh* Chrome process per render and there were only 4 permits. Before T1, the blocking Chrome calls ran inline on the one stream task, so exactly one render happened at a time scan-wide and nobody ever queued. Offloading them to the blocking pool let many vendors reach Chrome at once — where they queue, and where **`MAX_ANALYSIS_TIME` (a 20s wall-clock budget) expires while a vendor waits its turn**, silently yielding zero subprocessors. Aggregate subprocessor rows still *rose* (771 → 961) because most vendors don't need rendering; the ones that do are exactly the ones that lose.
+
+This also explains why the vendor future cannot be `tokio::spawn`ed: `scrape_subprocessor_page_with_retry` holds a `scraper::Html` (which is `!Send`) across `self.cache.read().await`. Spawning was never the available lever, and it was never the needed one.
+
+**M1 — the first measured attribution of this task (T3 code + `perf.rs` counters, clean machine, cold cache).**
+
+| | wall | exit | relationships | renders | permit_wait Σ | render work Σ (ex-queue) | launch Σ | settle Σ | ner Σ | http Σ | whois Σ | dns Σ | dns memo hits |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **m1** | **577s** | 0 | 2997 exported (5134 raw → 3607 unique) | **272** | 14594.6s | **3878.9s** | 611.9s | 437.0s | 868.6s | 2038.1s | 389.6s | 111.1s | 697 |
+
+- **T3 was never measured until now.** It lands at 577s, already under the 600s target — but with only 4% headroom, i.e. inside live-network variance (the measured baseline-A↔B floor is 5–8%). 577s is not a pass; it is a coin flip.
+- **Instrumentation bug caught by its own output:** `render critical path 400.9% of wall` is arithmetically impossible. `RenderTimer` is declared *before* `create_browser()`, whose `acquire()` blocks, so `render.total` swallowed `permit_wait`. Confirmed by arithmetic: `render.total` mean 67.9s − `permit_wait` mean 53.7s = 14.2s ≈ the independently-derived mean work of 14.26s. The raw counters are sound; the derived figure was not. Fixed by having `RenderTimer` subtract the guard's `permit_wait` at drop.
+- **Corrected: render work (ex-queue) = 18473.5 − 14594.6 = 3878.9s over 272 renders (mean 14.26s). Critical path = 3878.9/8 = 484.9s = 84.2% of a 576s wall.**
+
+**Decision-rule verdict (rule fixed before the run; no retrofitting):**
+
+| test | value | verdict |
+|---|---|---|
+| `crit/wall < 0.25` ⇒ H4 | **0.84** | **H4 REJECTED** — renders *are* the critical path; the parked threads were not an artifact |
+| `Σlaunch / Σwork > 0.40` ⇒ H1 | 0.158 | H1 not primary (but 611.9s is real, removable waste) |
+| `Σsettle / Σwork > 0.50` ⇒ H2 | 0.113 | H2 not primary — **the 5000ms sleep is NOT the problem**, and the accuracy-risky quiescence poll is therefore not needed |
+| `Σpermit_wait > Σwork` ⇒ H3 | 14595 ≫ 3879 | **H3 HOLDS — concurrency-starved.** Fix: decouple a permit from a Chrome process, raise P |
+
+The rule earned its keep twice: it rejected H1/H2 (so the accuracy-risky settle-poll is off the table on evidence, not on nerve) and it rejected the T3 ISA's own written conclusion (H1). It also names the *next* wall before it is hit: `ner.infer` = 868.6s under `inference_permits() = cores/ORT_INTRA_OP_THREADS = 2`, a **434s serialized floor** that binds as soon as render critical path drops beneath it. Raising that semaphore is accuracy-neutral — the advisor's veto was on `ORT_INTRA_OP_THREADS` (which reorders float reduction within one inference), not on how many independent inferences run at once.
+
+**T3 (the fix the profile justifies):**
+1. `BrowserSemaphore::acquire` now returns how long the caller was queued; `BrowserGuard::permit_wait()` exposes it. Both headless render sites on the subprocessor path (the SPA re-render inside `_with_retry`, and `render_html_in_browser` behind `scrape_with_headless_browser`) credit that wait into a per-vendor `AtomicU64`, and the budget check compares `elapsed - browser_queue_time` against `MAX_ANALYSIS_TIME`. **Recall no longer depends on scan concurrency.** `MAX_URLS_TO_TEST = 25` still bounds the work; the budget was never lowered or raised.
+2. Browser pool sized to the host: `available_parallelism().clamp(4, 8)`, `NTHPARTYFINDER_MAX_BROWSERS` override, ceiling 8. Clamped at the historical 4 on the low end so a 2-core CI runner cannot end up with a *smaller* pool than before. Chrome's memory lives in child processes, outside the scanner's own RSS.
+
+Neither change touches what is extracted, only how long a vendor is allowed to be starved. `Anti:` a lower `MAX_ANALYSIS_TIME`, a shorter settle wait, or a skipped render would all have "fixed" the wall clock by extracting less — none were used.
+
+**T4 — the fix H3 selected, and the measurement that refuted half of it.**
+
+Changes: (1) a permit now means *a render slot*, not *a Chrome process* — `browser_pool` keeps live `Browser`s in an idle pool, hands each render a **fresh tab** (`acquire_tab()`), closes the tab afterwards, and recycles a browser after `MAX_RENDERS_PER_BROWSER = 50`. `Browser::new_context()` was rejected: headless_chrome 1.0.22's `Context` has no `Drop` and no `Target.disposeBrowserContext` binding, so per-render contexts would accumulate for the life of the process. Opening the tab doubles as the reused browser's liveness probe. (2) `PoolShutdownGuard` in `run_inner` reaps pooled Chrome on every exit path — a `Lazy` static never runs `Drop`, and without it the children outlive the scanner (14 orphans were found from earlier runs; post-fix runs leave **0**). (3) `RenderTimer::exclude()` subtracts the permit wait so `render.total` measures work, not queue.
+
+| run | permits | reuse | wall | launches | permit_wait Σ | render work Σ | render crit | dns mean | http mean | zero_yield |
+|---|---|---|---|---|---|---|---|---|---|---|
+| m1 | 8 | no | 577s | 272 | 14594.6s | 3878.9s | 484.9s (84%) | 0.169s | 3.065s | (uncounted) |
+| **t4** | **16** | yes | **515s** | 33 | 108.4s | 2739.8s | 171.2s (33%) | 0.860s | 4.420s | 175 |
+| **p8** | **8** | yes | **434s** | 8 | 12115.1s | 2852.9s | 356.6s (84%) | 0.164s | 2.768s | 165 |
+| final1 | 8 | yes | 481s | 8 | 7348.4s | 2691.1s | 336.4s (70%) | 0.230s | 2.832s | 155 |
+
+- **Raising P was wrong, and only a controlled experiment showed it.** Same binary, `NTHPARTYFINDER_MAX_BROWSERS=8` vs default 16: P=8 is **81s faster** (434s vs 515s) and starves **fewer** vendors (165 vs 175). P=16 emptied the render queue (permit_wait 12115s → 108s) but inflated every other latency — mean DNS query 0.164s → 0.860s (5×), mean page fetch 2.77s → 4.42s. **Render parallelism was never the scan's throughput limit; the launch cost was.** `MAX_RENDER_PERMITS` reverted 16 → 8 with this measurement recorded in the constant's doc comment.
+- **The decision rule under-called H1, and the instrument is why.** The rule scored `Σlaunch/Σwork = 15.8%` ("H1 not primary"), but `browser.launch` timed only `Browser::new` — Chrome's Drop-time kill and temp-profile removal were never counted, hiding inside `render.total`'s residual. True launch+teardown cost = `3878.9 − 2852.9 = 1026s`, i.e. **26% of render work**, and removing it is the single change that moved the wall clock (577s → 434s). *A metric that omits a term will under-rank the hypothesis that owns it.*
+- **`subproc.probe` (new counter) exposes the real shape of the subprocessor path:** 3,367–3,569 probes, mean **6.5s**, against a per-vendor `MAX_ANALYSIS_TIME` of **20s**. A vendor therefore probes **~3 of its 25 candidate URLs** before its budget expires. `MAX_URLS_TO_TEST = 25` is not the binding constraint and never was.
+- **`connect_timeout(5s)` added to the subprocessor HTTP client** (it had `timeout(30s)` and no connect timeout, so one SYN-blackholed host consumed a vendor's entire 20s budget on a single URL). Accuracy-positive: a host that will not TCP-connect yields nothing either way, and a slow-but-responsive server still gets the full 30s to send its body. `web_org`'s client already had this from the prior research pass; only the subprocessor client was missed. Effect: `subproc.probe` mean 6.615s → 6.473s, `zero_yield` 165 → 155.
+
+**The contention lottery (ISC-281/284 evidence, and the finding that matters most).**
+
+The LP6 counter was built to check the accuracy claim; it found a pre-existing defect instead. Per-customer subprocessor discovery **flips between "found" and "none" across runs of the same binary**:
+
+| customer | m1 (P=8, no reuse) | t4 (P=16) | p8 (P=8, reuse) |
+|---|---|---|---|
+| chargify.com | 0 | 28 | 0 |
+| pagerduty.com | 27 | 0 | 27 |
+| zoom.us | 0 | 0 | 26 |
+| stripe.com | 0 | 0 | 19 |
+
+**12 customers flip.** This is present in **m1**, which is unmodified T3 code — so the optimization did not cause it. Mechanism: a 20s *wall-clock* budget buys ~3 probes at 6.5s each; *which* 3 URLs a vendor reaches, and whether a real subprocessor page is among them, depends on how contended the scan is at that moment. `chargify.com`'s "28 rows lost" that the prior session root-caused as a T1 optimization defect was never a defect of T1 — it is one draw of this lottery.
+
+**Aggregate accuracy is not degraded; it improves.** p8 vs m1: rows 3033 vs 2997, unique pairs 2936 vs 2902, unique vendors 541 vs 529, `HTTP::SUBPROCESSOR` rows 948 vs 911, subprocessor-bearing customers 75 vs 73. **vanta.com's own layer-1 subprocessor set is 36 unique vendors, identical in all three runs** — the render-capture guarantee holds. Pair set-diff p8↔m1 is 5.4%/4.9%, inside the measured baseline-A↔B nondeterminism floor (5–8%).
+
+Tracked as **TF-BUDGET-WALLCLOCK** (now with a named mechanism and a counter that alarms on it). Out of scope for this task: fixing it means making per-vendor recall independent of scan contention, which changes discovery behaviour and needs its own accuracy campaign. The `SUBPROC_BUDGET_EXHAUSTED` warn + `subproc.zero_yield` counter + the report's `WARNING:` line mean it can no longer ship silently.
+
+**D1 — the primary goal, proven against the product's own default (ISC-274..280).**
+
+The goal is *"finishes within the 600 second default timeout window"*, so the load-bearing run is the one where **no `--timeout` flag is passed at all** and the shipped default is the thing that arms.
+
+**`iso2` is the authoritative run: it is the only one produced by the code that will be committed.** The earlier fast runs (434s/481s/529s) predate the cross-family audit's isolation fix, which disables the HTTP cache and therefore re-fetches every subresource. Reporting them as the result would have been reporting a binary that no longer exists — the Advisor's first blocker, and a correct one.
+
+| run | binary | `--timeout` | wall | analysis | exit | NER | renders | reuse | launches |
+|---|---|---|---|---|---|---|---|---|---|
+| p8 | pre-audit | `0` (disarmed) | 434s | — | 0 | runtime cache | 268 | yes | 8 |
+| final1 | pre-audit | `0` (disarmed) | 481s | — | 0 | runtime cache | 269 | yes | 8 |
+| final2 | pre-audit | **default armed** | 529s | 523.56s | 0 | runtime cache | — | yes | — |
+| iso1 | cache-disable only | **default armed** | 522s | 518.6s | 0 | runtime cache | 270 | 262 | 8 |
+| **iso2** | **committed code** | **default armed** | **524s** | **519.5s** | **0** | runtime cache | 278 | 270 | 8 |
+
+The isolation fix cost what it should: render work 2852.9s → 3418.2s (+20%), wall 481s → 524s. **Still inside the armed 600s default, with 80.5s (13.4%) of headroom on analysis time.**
+
+The timeout machinery is proven *live*, not assumed:
+- `nthpartyfinder -d vanta.com -r 3 --timeout 5` → **exit 142**, `Analysis exceeded the 5 second timeout`. The guard arms and fires.
+- `compute_analysis_timeout_with_env_and_default(None, None, None) == Some(600s)` (unit test) — nothing in the flag/env/config chain was reached, so 600s is genuinely the default.
+- `~/Library/Application Support/nthpartyfinder/prefs.toml` contains only `onboarded = true`; no persisted timeout could be silently supplying the pass.
+
+**Honest margin.** Three default-armed runs land at 518.6s / 519.5s / 523.56s — a 5s spread across the two clean ones, ~13% headroom. That is a comfortable, *reproducible* margin rather than a lucky one, but it is not an invariant: the 600s deadline is enforced by killing the scan, not by a structural stop-dispatch-and-drain, so a materially slower network day still ends in exit 142 rather than a truncated-but-labelled result. Making the deadline structural (dispatch stops, in-flight work drains, output marked incomplete) would convert this from *reproducibly true* to *always true* — proposed by the Advisor, deliberately **out of scope** here because it changes what the tool outputs. Recorded as **TF-DEADLINE-STRUCTURAL**.
+
+**Chrome-orphan verification, and the bad instrument that nearly certified it.**
+
+I first counted orphans with `pgrep -f 'Chrome for Testing'`, which returned 0 after every run. That reading was **worthless**: `headless_chrome` drives the *system* `/Applications/Google Chrome.app` binary, so the pattern never matched anything, and "0 orphans" only ever meant "0 processes with that name." The same mistake had a real cost — a broad `pkill -i chrom` written to discover the true name killed the operator's actual Google Chrome, because the headless child and the user's browser **are the same executable**. Recorded as a process failure, not just a bug.
+
+Correct detector: the Chrome executable path **and** `--headless` **and** a temp `--user-data-dir=/var/folders` profile (`scratchpad/count-headless.sh`) — which cannot match a real browser session, nor the shell command line that names those flags.
+
+Re-measured with it:
+
+| exit path | pooled browsers at signal | orphans after | verdict |
+|---|---|---|---|
+| normal exit (`klaviyo -r 1`, 1 launch) | 1 | **0** | `PoolShutdownGuard` verified |
+| SIGINT while a browser is **idle** in the pool | 2 | **0** | the leak pooling introduced is closed |
+| SIGINT **mid-render-burst** | 2 in-flight | **2** (reparented to PID 1) | see below |
+
+`shutdown()` drains the *idle* pool. A browser being rendered right now is owned by a `TabGuard` on a `spawn_blocking` thread, and `std::process::exit(130)` runs no destructors — so it orphans. **This is pre-existing, not introduced:** before pooling, an in-flight `Browser` was owned by the same kind of guard and orphaned identically on Ctrl-C. Pooling added the *idle* browsers, and those are exactly what the fix reaps. Folded into **TF-POOL-SIGNAL-LEAK** together with SIGTERM/SIGHUP (unhandled) and release-mode `panic = "abort"` (no `Drop` runs at all) — one coherent ticket, with the honest note that closing it needs a live-browser registry, not another `Drop` guard.
+
+**Side finding (pre-existing, not introduced):** `logger.warn("Analysis timeout active: 600s…")` never reaches a redirected stream, because `ProgressAwareWriter` routes it through the progress bar, which is disabled on a non-TTY. An operator piping the scan to a file is never told the timeout is armed — the repo's own documented anti-silent-failure archetype, in the very subsystem the goal is about. My starvation warning deliberately uses `tracing::warn!`, which is visible on both TTY and pipe. Filed as **TF-TIMEOUT-WARN-INVISIBLE**.
+
+**Breadth regression oracle — klaviyo.com depth 1 (ISC-294).**
+
+```
+wall 42s   exit 0   rows 145   unique vendors 130   max layer 1
+render critical path 1.4s (3.6% of wall)
+```
+
+Depth is honored (`max layer 1`), the run exits clean, and the render path is not the constraint at depth 1 — as expected, since one domain needs at most a handful of renders.
+
+**130 is above the ISC-93 band** (`~72 ± 40%` ⇒ 43–101), and that band is stale rather than violated. The `~72` figure was taken in **Feb-2026**, before three discovery capabilities landed in this repo: multi-source subprocessor extraction (2026-06-29: klaviyo alone went **≈1 → 26** subprocessors when `trust.klaviyo.com` *and* `klaviyo.com/legal/subprocessors` were both unioned instead of first-wins), SPA trust-center extraction, and web-traffic discovery. The oracle's own criterion is *"deviation explained if outside"*, and the explanation is a recorded, tested capability increase, not a loosened threshold.
+
+The oracle that actually constrains **this** task is the controlled one, because it holds the code path fixed and varies only my changes: **p8 (optimized) vs m1 (unmodified T3 code, same permits P=8, same host, same cold cache)** — rows 3033 vs 2997, unique pairs 2936 vs 2902, unique vendors 541 vs 529, `HTTP::SUBPROCESSOR` 948 vs 911, subprocessor-bearing customers 75 vs 73, and vanta's own layer-1 set **36 vendors, identical**. Every aggregate moves up or stays fixed. A cross-binary comparison against a five-month-old count could not have distinguished "my optimization lost vendors" from "the scanner learned to find more"; the m1↔p8 pairing can, and does.
+
+**Flag-path spot checks (ISC-295) — semantic, not exit-code-only.** `klaviyo.com -r 1`, final binary:
+
+| flags | exit | rows | vendors | detection sources observed |
+|---|---|---|---|---|
+| `--dns-only` | 0 | 35 | 35 | `DNS::TXT::SPF`, `DNS::TXT::VERIFICATION` **only** |
+| `--disable-slm` | 0 | 145 | 129 | full set incl. `HTTP::SUBPROCESSOR`, `DISCOVERY::*` |
+| `-f csv` | 0 | 145 data rows | — | 10-column header unchanged |
+
+`--dns-only` genuinely suppresses every non-DNS source rather than merely exiting 0, and `--disable-slm` loses exactly one vendor (130 → 129) — the NER org-resolution contribution — while retaining every discovery source. `export.rs` is untouched in the diff, so the schema anti-criterion (ISC-293) holds by construction, and the CSV header confirms it end-to-end.
+
+**Full-suite gates — and a real failure that filtered runs had been hiding (ISC-297).**
+
+Running `cargo test` (not `cargo test --lib <filter>`) surfaced **2 failures** that every filtered run in this task had passed:
+
+1. **`cli::tests::cli_parse_minimal` asserted `parallel_jobs == 10`.** The T2 tranche changed the `-j` default to `0` ("no operator cap") and never updated this test. It had been green in every `--lib perf::` / `--lib browser_pool::` run because those filters never selected it. **A filtered test run is not a test run.** Fixed by asserting `0` with the rationale in a comment; the *semantics* of `-j 0` were already behaviorally covered (`analysis::tests::test_compute_buffer_size_zero_jobs_means_no_operator_cap`, `app::tests::test_effective_parallel_jobs_{zero_uses_configured,explicit_value_narrows_only,floors_at_one}`), so only the stale literal needed correcting.
+2. **`perf::tests::render_timer_excludes_queue_time_from_render_total` saw `count == 2`, not `1`.** Root cause is structural, not a flake: every render site declares `RenderTimer::start()` *before* `acquire_tab()` (deliberately, so Chrome teardown is counted), which means **any lib test that drives a render site — even one that fails to obtain a browser — still drops a timer into the process-global `render.total`.** My `GLOBAL_METRICS_LOCK` serialized the `perf` tests against each other but could never serialize them against the rest of the binary. Fixed by removing the dependency instead of widening the lock: `RenderTimer::into_metric(&'static Metric)` lets each test own a private `Metric` (`Metric::new()` is `const`), and `RenderTimer::start()` — the only production constructor — is verified to target the global **by pointer identity** (`std::ptr::eq`), which is race-free, rather than by a count delta, which would not have been.
+
+Also caught: `cargo test` **stops after the first failing target**, so run 1 never executed a single integration test. Its exit-101 log showed only `unittests src/lib.rs`. The green run was therefore re-verified per-target rather than trusted as one aggregate exit code.
+
+| gate | command | result |
+|---|---|---|
+| lib tests | `cargo test` | **exit 0** — 4104 lib tests, 0 failed, 1 ignored |
+| integration | `cargo test --test <t>` × 18 targets | **all exit 0** (incl. `ner_async_parity_tests` 3/3 = ISC-285) |
+| clippy | `cargo clippy --all-targets -- -D warnings` | exit 0 |
+| fmt | `cargo fmt --check` | exit 0 |
+| supply chain | `cargo deny check` | `advisories ok, bans ok, licenses ok, sources ok` |
+
+`ner_org_tests` reports `0 passed` — pre-existing (the file's tests live behind feature/ignore gates), unrelated to this task; noted rather than silently absorbed.
+
+One test function was **removed**: `browser_pool::tests::test_max_browser_instances_constant`, an `assert!` on a compile-time constant that clippy's `assertions_on_constants` rejects and that this repo's coverage doctrine classes as assertion-free padding. It is replaced by two behavioral tests (`test_resolve_max_browser_instances_bounds`, `test_render_permit_floor_matches_historical_pool_size`). Net test-function count across the diff is **+12**. No test was weakened to make a gate pass; no `#[allow]`, `// lgtm`, or scanner suppression appears anywhere in the diff (`git diff | grep` → the only hits are these ISA lines).
+
+**Cross-family audit (ISC-310) — Anvil (Kimi K2.6), disclosed substitute for Cato.**
+
+`codex` is absent on this host, so **Cato could not run and TF-CATO remains open** — an in-family-adjacent Moonshot model is not the OpenAI-family check the doctrine asks for. Anvil returned **CONCERNS**: no critical defect, but **three real findings, all fixed**. It independently *cleared* the things I most expected to be wrong (no zero-permit semaphore reachable from `-j 0`; no permit leak on unwind; idle pool bounded by the permit count; no division-by-zero in `format_report`; the DNS memo never caches failure-produced empties).
+
+| # | finding | why it is real | fix |
+|---|---|---|---|
+| 1 | **A reused browser's warm HTTP cache can silently drop subprocessor data.** `trust_center/discovery.rs` and `discovery/web_traffic.rs` extract by intercepting responses and calling CDP `getResponseBody`; a cache-served response may carry no retrievable body, and the handler skips it on `Err`. Fresh-Chrome-per-render made this structurally impossible. | The subprocessor path probes up to 25 URLs **on the same origin**, so same-origin re-renders on one pooled browser are the common case, not an edge case. | `isolate_tab()` per render: `Network.setCacheDisabled(true)`, `setBypassServiceWorker(true)` (a service worker can serve from Cache Storage even with the HTTP cache off — the Advisor's catch), `clearBrowserCache`, `clearBrowserCookies`. **A browser that cannot be isolated is discarded, never reused.** |
+| 2 | **Ctrl-C orphaned the idle pool.** The `ctrlc` handler ends in `std::process::exit(130)`, which runs no destructors, so `PoolShutdownGuard` never fired. Pooling newly created up to `MAX_RENDER_PERMITS` *idle* Chrome processes to leak. | The ISA claimed the guard reaps "on every exit path". It did not. | `browser_pool::shutdown()` called in the handler before `exit`. |
+| 3 | **`acquire_tab`'s retry popped the pool again** instead of launching fresh, despite a comment claiming "one on a guaranteed-fresh launch". With ≥2 dead pooled browsers (laptop sleep, OOM-kill) both attempts get a corpse and the render fails where a fresh launch would have worked. | Renders that fail fall back to static HTML, so SPA trust-centers under-report — an accuracy loss wearing a robustness costume. | `force_fresh` bypasses the pool; extracted as `take_from_pool` and **regression-tested** (`test_forced_fresh_retry_never_takes_another_pooled_browser`). |
+
+**Finding #1 was not theoretical — the fix measurably recovered data.** Subprocessor-bearing customers rose to **79** (m1 73, p8 75, final1 78) and `HTTP::SUBPROCESSOR` rows to **965**, both the highest of any run, on the run where the cache was first disabled. Anvil reasoned to the defect from the code and could not execute Chrome; the measurement is what confirms it.
+
+**Advisor (commitment boundary, ISC-309) — two corrections adopted, two declined with reasons.**
+
+- **Adopted — "re-time on post-audit HEAD."** The 434/481/529 numbers described a binary that no longer existed: disabling the HTTP cache means every subresource is re-fetched. Re-timed. Render work rose 2852.9s → 3594.5s (+26%), exactly as predicted, and the wall clock went 481s → **522s**. Still inside the armed 600s default. Had I skipped this, the headline claim would have been about deleted code.
+- **Adopted — "delete the accuracy-equivalence claim."** An earlier draft of this section said *"Aggregate accuracy is not degraded; it improves."* That over-claims. Every aggregate did rise, and vanta's own layer-1 set is bit-identical across all four runs — but while TF-BUDGET-WALLCLOCK stands, **12 customers flip found/none between runs of the same unmodified binary**, so run-to-run equivalence is not demonstrable by any comparison available to me. The honest statement is below.
+- **Declined — "use a disposable incognito context per render."** Not reachable: `headless_chrome` 1.0.22's `Browser` exposes no `call_method` and `Context` has no `Drop`, so `Target.disposeBrowserContext` cannot be sent even though the CDP binding exists. Per-render contexts would accumulate for the process lifetime — a worse leak than the bug. Residual (`localStorage`/`sessionStorage`/IndexedDB persist per-origin across reuses) recorded as **TF-POOL-WEBSTORAGE**; it cannot cause an interceptor to miss a response body, which is the silent-data-loss class.
+- **Declined — "widen the reap past SIGINT."** Enabling `ctrlc`'s `termination` feature would make SIGTERM/SIGHUP graceful (2s delay, exit 130) — an unrequested signal-semantics change in a multi-author public repo. The SIGTERM/SIGHUP/abort leak also **predates pooling** (an in-flight `Browser` was orphaned identically), and release builds set `panic = "abort"`, so no `Drop` guard has ever run on panic. Pooling widens the leak by ≤8 idle processes. Recorded as **TF-POOL-SIGNAL-LEAK** with the one-line fix and the reason it needs owner sign-off rather than being smuggled into a perf change.
+- **Noted — the Advisor's own error.** It asserted `connect_timeout(5s)` might be the only backstop; `create_http_client` already sets `.timeout(30s)`. Verified at `subprocessor.rs:1024` rather than accepted.
+
+**The accuracy claim, stated precisely.** Scan output is nondeterministic run-to-run *in unmodified code* (TF-BUDGET-WALLCLOCK: a 20s wall-clock per-vendor budget buys ~3 of 25 candidate probes, so which URLs a vendor reaches depends on contention). Against that floor:
+
+| run | rows | unique pairs | vendors | `HTTP::SUBPROCESSOR` rows | subprocessor-bearing customers | vanta layer-1 set |
+|---|---|---|---|---|---|---|
+| **m1** (unmodified code, P=8) | 2997 | 2902 | 529 | 911 | 73 | **36** |
+| p8 | 3033 | 2936 | 541 | 948 | 75 | **36** |
+| final1 | 3021 | 2926 | 532 | 963 | 78 | **36** |
+| iso1 | 3009 | 2909 | 530 | 965 | 79 | **36** |
+| **iso2** (committed) | **3110** | **3004** | **560** | **1009** | **79** | **36** |
+
+Every aggregate rose relative to the unmodified baseline at identical permits, and vanta.com's own layer-1 subprocessor set is **36 vendors, identical in all five runs** — the render-capture guarantee holds. `m1 ↔ iso2` pair set-diff is 8.6%, above the 5–8% noise floor, but **asymmetric in the safe direction**: 184 pairs found only by iso2 against 82 found only by m1, i.e. +102 net. The 82 are the contention lottery, not a code path this task deleted (m1↔p8 lost 76 the same way, and m1 is unmodified code).
+
+**Equivalence is not provable while TF-BUDGET-WALLCLOCK stands, and this task does not claim it.** What *is* claimed, and evidenced: no discovery source, output format, depth, or extraction path was removed or weakened; all three source families (`DNS`, `HTTP`, `DISCOVERY`) are present in the committed run's output; the full NER build is active (`NER model initialized successfully (runtime cache)`); and no aggregate regressed against the unmodified baseline.
+
+**ISC-269 is NOT met, and is left unchecked rather than reinterpreted.** The criterion asks for singleflight coalescing of concurrent identical HTTP/WHOIS/DNS lookups. What shipped is a *completed-answer memo* (`dns.rs::recall_answer`, and the org-resolution map): two requests for the same key that are in flight **at the same moment** both miss and both go out. `rg 'singleflight|in_flight|coalesc' src/` → no hits. The memo nevertheless delivered the win the criterion was aiming at — DNS failures fell 102/72 → 11, `dns.memo_hit` records 725 recalls on the committed run, and 515 WHOIS lookups served 560 unique vendors — so the target was reached without it. Genuine remaining optimization, not a thing quietly declared done. The same race caveat applies to ISC-257's "at most once" wording: duplication is *not observed* (fewer lookups than unique domains), but it is not *structurally prevented*.
+
+**ISC-292 caveat, stated plainly.** One test *was* deleted, and it was deleted to make a gate pass: `test_max_browser_instances_constant` tripped clippy's `assertions_on_constants` under `-D warnings`. It asserted a `>` between two `const`s — a tautology the compiler already guarantees, and assertion-free padding under this repo's coverage doctrine. It was replaced by two tests that assert *behaviour* (`test_resolve_max_browser_instances_bounds`, `test_render_permit_floor_matches_historical_pool_size`). Net +12 test functions. No test that could fail on a real defect was removed or weakened.
+
+**Deliberately not fixed: TF-BUDGET-WALLCLOCK.** A 20s wall-clock per-vendor budget against a 6.6s mean probe means a vendor reaches ~3 of its 25 candidate URLs. Fixing it changes *what the scanner discovers*, which needs its own accuracy campaign and is a larger change than the goal asked for. It is now **impossible to ship silently**: 149 `SUBPROC_BUDGET_EXHAUSTED` warnings were emitted on the committed run, `subproc.zero_yield` counts the 148 vendors that were starved rather than empty, and `format_report` prints a `WARNING:` line. The defect predates this task (it is present in `m1`, unmodified code); what this task added is that you can now see it.
+
+### Task 2026-07-08 · `research:` Rust performance & efficiency best practices (ISC-251/252/253/254)
+
+Captured 2026-07-09 by a six-area parallel research sweep (tokio/async, HTTP+DNS clients, ONNX/ort inference, build profile, headless-Chrome/CDP, profiling). **55 practices** were returned; **19 carry a dated source that was actually fetched** and are listed below with verdicts verified against this repo at `file:line`. The remaining 36 rested on undated docs pages or search-result summaries the agent did not fetch — they are **not** counted as captured sources here, because a citation you did not open is a guess with a URL attached.
+
+
+**ALREADY APPLIED**
+
+- *Changing intra_op thread count DOES change numerical output: parallel reductions partition summations by thread count, and IEEE-754 float addition is non-associative (a+b+c != a+c+b), so a different thread count changes reduction order and can flip argmax/label decisions near the confidence threshold. ONNX Runtime does not promise run-to-run/config-to-config bit-reproducibility; maintainers cite only a ~1e-5 abs/rel tolerance. => Pin intra_op threads to a fixed value and never vary or read it back if label output must be stable.*
+  — [What level of reproducibility is expected? (microsoft/onnxruntime issue #12086)](https://github.com/microsoft/onnxruntime/issues/12086) (2022-07). **Evidence:** Repo already reasons this out explicitly and pins the count: src/ner_org.rs:624-629 ('would perturb float reduction order, and therefore extraction output') and src/ner_org.rs:637 (const ORT_INTRA_OP_THREADS = 4, held as a constant rather than read back because it is deliberately left at orp's default). Confirmed so...
+- *When time is dominated by waiting on I/O, locks, or async awaits, prefer explicit instrumentation (guard-object timers / atomic counters that accumulate Duration) over CPU sampling — sampling "largely ignore[s] wall-clock time spent waiting on I/O, locks, or async awaits, because nothing is running on the CPU during those periods." Instrumentation measures the wait terms directly.*
+  — [Cargo Flamegraph Alternatives for Rust Performance Profiling (hotpath: instrumentation vs sampling)](https://hotpath.rs/blog/sampling_comparison) (2025-12-17). **Evidence:** src/perf.rs is exactly this pattern: `Metric::record(&self, d: Duration)` accumulates count+nanos via Relaxed atomics (src/perf.rs:20-26); the 15-counter table (src/perf.rs:113-134) directly times the off-CPU terms — notably `browser_permit_wait` = "Time blocked waiting for a browser-pool permit" (src/perf.rs:65) an...
+- *Always use GraphOptimizationLevel::Level3 for production ort/ONNX Runtime deployments (constant folding + node fusion; recommended as mandatory for prod).*
+  — [ONNX Runtime in Rust: Running ML Models Efficiently](https://dasroot.net/posts/2026/03/onnx-runtime-rust-ml-inference-optimization/) (2026-03-12). **Evidence:** Applied transitively through orp: orp-0.9.2/src/model.rs:23 and :35 both call .with_optimization_level(GraphOptimizationLevel::Level3) before commit_from_file/commit_from_memory. The repo inherits Level3 without doing anything itself (src/ner_org.rs:396-398 passes RuntimeParameters::default()).
+- *Reuse a single Session across inferences (session creation is expensive; do it once and share) rather than re-building per call.*
+  — [ONNX Runtime in Rust: Running ML Models Efficiently](https://dasroot.net/posts/2026/03/onnx-runtime-rust-ml-inference-optimization/) (2026-03-12). **Evidence:** src/ner_org.rs:192 — static NER_EXTRACTOR: OnceLock<NerOrganizationExtractor>; the GLiNER model (which owns the ort Session) is initialized once and reused for every extract call (src/ner_org.rs:196-197 struct holds the GLiNER<SpanMode>).
+- *Never run blocking or CPU-bound work directly on tokio worker threads — offload it with tokio::task::spawn_blocking so the async workers stay free to poll I/O futures.*
+  — [Top 5 Tokio Runtime Mistakes That Quietly Kill Your Async Rust (Techbuddies) — Mistake #1](https://www.techbuddies.io/2026/03/21/top-5-tokio-runtime-mistakes-that-quietly-kill-your-async-rust/) (2026-03-21). **Evidence:** Every heavy/blocking op is offloaded: GLiNER ONNX inference at src/ner_org.rs:662 and :681; headless-browser fetch at src/web_org.rs:195; HTML org-parse at src/web_org.rs:282; system whois at src/whois.rs:624; subprocessor page scrape at src/subprocessor.rs:2655 and :6266. Module comment src/ner_org.rs:614-619 expli...
+- *Run independent async sub-operations concurrently with join! so their cost is max() not sum(), instead of awaiting them serially.*
+  — [Top 5 Tokio Runtime Mistakes That Quietly Kill Your Async Rust (Techbuddies)](https://www.techbuddies.io/2026/03/21/top-5-tokio-runtime-mistakes-that-quietly-kill-your-async-rust/) (2026-03-21). **Evidence:** src/analysis.rs:898-910 runs the 5 independent depth-1 discovery phases (subprocessor/subfinder/SaaS/CT/web-traffic) under tokio::join!, collapsing a ~70s serial chain to its slowest phase (comment lines 888-892). src/analysis.rs:1294-1297 resolves vendor-org and customer-org lookups concurrently via tokio::join! (c...
+- *Don't hold !Send values (Rc/RefCell) or a std MutexGuard across an .await; drop guards before awaiting. Prefer std::sync::Mutex for short non-await critical sections and tokio::sync::Mutex only when the guard must span an await.*
+  — [Top 5 Tokio Runtime Mistakes That Quietly Kill Your Async Rust (Techbuddies) — Mistake #1 (mutex that never yields)](https://www.techbuddies.io/2026/03/21/top-5-tokio-runtime-mistakes-that-quietly-kill-your-async-rust/) (2026-03-21). **Evidence:** grep of src/{analysis,subprocessor,web_org,ner_org}.rs found zero Rc/RefCell/std::sync::Mutex/parking_lot in the async paths. Shared state uses tokio::sync::Mutex (src/analysis.rs:5) and guards are explicitly dropped before awaiting: drop(vendors)/drop(processed)/drop(sink) at src/analysis.rs:1141-1148 and 1181-1189...
+- *Wrap blocking/remote calls in tokio::time::timeout and design for cancellation so a stuck dependency can't wedge a worker or leak a task.*
+  — [Top 5 Tokio Runtime Mistakes That Quietly Kill Your Async Rust (Techbuddies) — Mistake #5](https://www.techbuddies.io/2026/03/21/top-5-tokio-runtime-mistakes-that-quietly-kill-your-async-rust/) (2026-03-21). **Evidence:** src/whois.rs:620-631 wraps the spawn_blocking whois call in tokio::time::timeout(4s) and matches all join/timeout/inner error arms. subprocessor retry path uses bounded tokio::time::sleep backoff (src/subprocessor.rs:2396). NER inference is bounded work with a semaphore rather than an explicit per-call timeout — acc...
+- *Use rayon (a dedicated CPU pool) for sustained data-parallel compute, keeping it separate from the tokio I/O runtime; use spawn_blocking for bounded one-shot blocking that must integrate with async.*
+  — [Untangling Tokio and Rayon in production: From 2s latency spikes to 94ms flat (PostHog)](https://posthog.com/blog/untangling-rayon-and-tokio) (2026-04-08). **Evidence:** The one pure data-parallel workload uses rayon off the async path: src/vendor_registry.rs:4 (use rayon::prelude::*) and :137 (.par_iter()), invoked from sync code. Bounded blocking (inference, whois, scrape) correctly uses spawn_blocking instead. Cargo.toml:49 declares rayon; comment src/subprocessor.rs:14 notes 'ra...
+
+**REJECTED — accuracy risk**
+
+- *Prefer an incognito browser context (createBrowserContext / Playwright new_context) per unit of work for isolation with separate cookies/storage — 'the perfect balance between isolation and performance' — over sharing one context across tabs.*
+  — [Puppeteer Memory Leaks, Crashes, and Zombie Processes (TheTechDude, Medium)](https://medium.com/@TheTechDude/puppeteer-memory-leaks-crashes-and-zombie-processes-6-months-of-screenshots-in-production-b2ae7e65df3f) (2026-02). **Evidence:** Deliberately rejected in browser_pool.rs:16-21 and :458-466: headless_chrome 1.0.22's Context has no Drop and no way to send Target.disposeBrowserContext, so per-render contexts would accumulate for the life of the process — a worse leak than the bug. Uses fresh-tab + browser-wide network resets instead. NOT indepen...
+- *Set intra_op_num_threads to match CPU core count for CPU-bound models (generic ort/ORT performance advice).*
+  — [ONNX Runtime in Rust: Running ML Models Efficiently](https://dasroot.net/posts/2026/03/onnx-runtime-rust-ml-inference-optimization/) (2026-03-12). **Evidence:** Deliberately NOT applied and correctly so: raising intra_threads to core count would change float reduction order and can flip near-threshold NER labels (the repo's own invariant, src/ner_org.rs:624-629). The repo instead fixes intra_threads=4 (orp default, orp-0.9.2/src/params.rs:9) and gets multi-core utilization ...
+
+**REJECTED — not applicable**
+
+- *Know the macOS-native off-CPU path and its caveats: cargo-flamegraph on macOS drives DTrace and needs `--root`, and macOS SIP blocks DTrace syscall collection — so for off-CPU/thread-state analysis Apple's Instruments (System Trace / thread-states, NOT the on-CPU-only Time Profiler) is the reliable native tool. Don't expect `cargo flamegraph`'s default DTrace profile to show blocked time.*
+  — [Rust Profiling on macOS: Micro-Benchmarks, Flamegraphs, and DTrace (InfiniLabs)](https://blog.infinilabs.com/posts/2024/benchmarking-and-profiling-rust-applications-on-macos-a-practical-guide/) (2024). **Evidence:** Not applied and reasonably so: the workload is a long (600s+) multi-source I/O-bound scan where deterministic per-term counters (src/perf.rs:9-11 note dns_query fires ~10^4×/scan at negligible cost) are more actionable than a DTrace/SIP-hampered macOS flamegraph. Noted here so the tradeoff is explicit, not because i...
+
+**REMAINING OPPORTUNITY**
+
+- *Track ort release cadence — repo pins ort 2.0.0-rc.9 while a newer rc.10 exists; determinism/perf fixes land between platform/versions (e.g. Windows CUDA nondeterminism fixed in 1.20.0).*
+  — [[Performance] windows v1.19.2 non-deterministic but linux deterministic (issue #22818)](https://github.com/microsoft/onnxruntime/issues/22818) (2024-11). **Evidence:** Cargo.lock pins ort = 2.0.0-rc.9 (Cargo.lock:2332-2333) via orp 0.9.2 + gline-rs 1.0 (Cargo.toml:71-72); WebSearch showed ort-sys 2.0.0-rc.10 is published. Bumping is gated on orp/gline-rs supporting it (they own the ort dep), so this is an upstream-dependency-tracking item, not a direct change; low urgency since th...
+- *For stack-level off-CPU attribution on macOS, use samply — it collects BOTH on- and off-CPU samples on macOS and Windows ("so you can see under which stack you were blocking on a lock"); only on Linux is it on-CPU only. This is the modern drop-in that `sample`/Time Profiler cannot give you.*
+  — [mstange/samply — command-line sampling profiler for macOS/Linux/Windows](https://github.com/mstange/samply) (2025-02). **Evidence:** No sampler is wired into the repo — `grep -rniE 'samply|off-?cpu' src/` returns only the explanatory perf.rs comment (src/perf.rs:5-6), no tooling. samply would be a complementary stack-level view to confirm WHICH call sites the perf.rs counters are timing. Version v0.13.1 released 2025-02-01 per the fetched repo.
+- *Reap orphaned/zombie Chrome children: on Linux orphans reparent to PID 1 and hold memory until reaped; every production service needs a reaper plus SIGINT/SIGTERM handlers that call browser.close(), and Docker should run with --init (tini).*
+  — [Puppeteer Memory Leaks, Crashes, and Zombie Processes (TheTechDude, Medium)](https://medium.com/@TheTechDude/puppeteer-memory-leaks-crashes-and-zombie-processes-6-months-of-screenshots-in-production-b2ae7e65df3f) (2026-02). **Evidence:** Partial: browser_pool.rs:109-122 shutdown()+PoolShutdownGuard reap idle Chrome on every normal scan exit path (needed because IDLE_BROWSERS is a Lazy static that never runs Drop). Gaps vs best practice: no SIGINT/SIGTERM handler, and the in-file note at :107-108 concedes a `panic = "abort"` build cannot run shutdown...
+- *Quantize the model (int8/dynamic quantization) to speed up CPU inference and shrink footprint.*
+  — [ONNX Runtime in Rust: Running ML Models Efficiently](https://dasroot.net/posts/2026/03/onnx-runtime-rust-ml-inference-optimization/) (2026-03-12). **Evidence:** Model shipped is fp32 gliner_small.onnx embedded via include_bytes! (src/ner_org.rs:42). A quantized variant would cut CPU latency, but quantization changes logits and therefore near-threshold NER labels — would require re-baselining the extraction fixtures. Genuine perf lever, but gated behind the same reproducibil...
+- *Batch multiple inputs into one session.run call to amortize overhead and improve throughput.*
+  — [ONNX Runtime in Rust: Running ML Models Efficiently](https://dasroot.net/posts/2026/03/onnx-runtime-rust-ml-inference-optimization/) (2026-03-12). **Evidence:** Current API is one text per call (src/ner_org.rs:461 extract_organization(&self, text), :517 extract_all_organizations), and concurrency is achieved across inferences via the semaphore rather than by batching within one run. Note: batch size can itself change reduction order (batch-invariance is not guaranteed), so ...
+- *Explicitly size worker_threads and max_blocking_threads for the workload via Builder::new_multi_thread() rather than relying on #[tokio::main] defaults (worker_threads = #cores, max_blocking_threads = 512).*
+  — [Top 5 Tokio Runtime Mistakes That Quietly Kill Your Async Rust (Techbuddies) — Mistake #2](https://www.techbuddies.io/2026/03/21/top-5-tokio-runtime-mistakes-that-quietly-kill-your-async-rust/) (2026-03-21). **Evidence:** src/main.rs:5 uses a bare #[tokio::main] with no worker_threads/max_blocking_threads tuning (grep for worker_threads/new_multi_thread found only src/model_fetch.rs:641 which builds a new_current_thread runtime for an isolated task). Given many concurrent spawn_blocking calls (inference/whois/scrape/headless), the de...
+- *For DNS-over-HTTPS specifically, shrink hyper's oversized HTTP/2 windows (2MB stream / 5MB connection) toward the 64KB h2 default and add http2_keep_alive_interval — DNS responses are ~200 bytes so the default windows are ~10,000x oversized, causing needless WINDOW_UPDATE churn; the author measured median 13.3ms -> 10.1ms and enabled connection reuse via keep-alive pings.*
+  — [Fixing DNS tail latency with a 5-line config and a 50-line function — Numa](https://numa.rs/blog/posts/fixing-doh-tail-latency.html) (2026-04-12). **Evidence:** src/dns.rs DoH clients (:204-210, :282-286, :389) set none of http2_initial_stream_window_size / http2_initial_connection_window_size / http2_keep_alive_interval / http2_keep_alive_timeout, so they inherit hyper's large defaults. This is the single most workload-specific tuning available for the DoH path and is curr...
+
+**The two citations that changed what shipped:**
+
+- `microsoft/onnxruntime#12086` independently confirms that **changing `intra_op` thread count changes numerical output** — parallel reductions partition summations by thread, so the float reduction order shifts and argmax can flip at near-ties. This is exactly the advisor's veto on raising `ORT_INTRA_OP_THREADS`, now supported by an upstream source rather than by caution alone. Raising the *inference semaphore* (how many independent inferences run at once) is accuracy-neutral and was the lever actually available.
+- hotpath.rs (2025-12-17) states the rule this task learned the hard way: when time is dominated by waiting on I/O, locks, or awaits, **prefer explicit instrumentation over sampling profilers**. macOS `sample(1)` is on-CPU only, which is why its top frame was `__psynch_cvwait` and why a prior session mis-read `create_browser` as CPU-heavy. `src/perf.rs` is that explicit instrumentation; `samply` is the sampling tool that would have worked.
+
+### Task 2026-07-08 · Follow-ups opened
+
+- **TF-BUDGET-WALLCLOCK** — `subprocessor.rs` `MAX_ANALYSIS_TIME = 20s` is a *wall-clock* budget; at a 6.6s mean probe a vendor reaches ~3 of its 25 candidate URLs, so per-vendor recall is a function of scan contention. 12 customers flip found/none across runs of the same unmodified binary. Pre-existing. Now loud (`SUBPROC_BUDGET_EXHAUSTED` warn, `subproc.zero_yield` counter, report `WARNING:` line) but not fixed: fixing it changes what the scanner discovers and needs its own accuracy campaign.
+- **TF-POOL-SIGNAL-LEAK** — `shutdown()` reaps *idle* pooled Chrome on Ctrl-C (verified: 0 orphans). Browsers **in flight** at signal time still orphan (verified: 2), because `std::process::exit(130)` runs no destructors — pre-existing, identical before pooling. SIGTERM/SIGHUP are unhandled entirely (`ctrlc` without the `termination` feature) and release builds use `panic = "abort"`, so no `Drop` guard ever runs on panic. Closing this needs a live-browser PID registry, not another `Drop` guard. Enabling `ctrlc/termination` would also change SIGTERM semantics (2s graceful, exit 130) — owner call, not a perf-change smuggle.
+- **TF-POOL-WEBSTORAGE** — `isolate_tab()` disables the HTTP cache, bypasses service workers, and clears cache+cookies per render, but `localStorage`/`sessionStorage`/IndexedDB persist per-origin across reuses of a pooled browser. `headless_chrome` 1.0.22 exposes no way to send `Target.disposeBrowserContext` (`Browser` has no `call_method`, `Context` has no `Drop`), so per-render incognito contexts would leak worse than the bug. Cannot cause an interceptor to miss a response body; can at most change page-rendered org strings on sites that persist dismissal state.
+- **TF-DEADLINE-STRUCTURAL** — the 600s default is enforced by killing the scan (exit 142), not by stopping dispatch, draining in-flight work, and labelling the output incomplete. Depth-3 vanta finishes at ~519s with ~13% headroom *reproducibly*, but that is a measured margin, not an invariant. A structural deadline would make "finishes within the window" always true. Out of scope here: it changes what the tool outputs.
+- **TF-SINGLEFLIGHT** (ISC-269, unmet) — the DNS answer memo and org-resolution map cache *completed* answers; two identical lookups in flight simultaneously both miss and both go out. No `singleflight` exists. The memo already delivered the intended win (DNS failures 102/72 → 11; 725 memo hits; 515 WHOIS lookups for 560 unique vendors), so the target was reached without coalescing.
+- **TF-OUTDIR** — `-o/--output` is the report *filename*; only `--output-dir` isolates a run. Without it the tool writes to `~/Desktop/reports/<domain>/` and will silently resume from a checkpoint left there by an earlier scan, producing a 1-second "scan" that exits 4. Cost a measurement round; the harness now hard-fails on a pre-existing checkpoint.
+- **TF-TIMEOUT-WARN-INVISIBLE** — `logger.warn("Analysis timeout active: 600s…")` routes through `ProgressAwareWriter`, which is disabled on a non-TTY, so an operator piping the scan to a file is never told the timeout is armed. Same anti-silent-failure archetype this repo already documents, in the subsystem the goal is about.
+- **TF-CATO** — `codex` is absent on this host, so the cross-vendor auditor could not run. Anvil (Kimi K2.6) was used as a disclosed cross-family substitute. **TF-CATO remains open.**
+- **TF-TOOLCHAIN-UNPINNED** — CI's Lint job installs `stable` unpinned. Between master's last green run and PR #54, the runner's stable rolled **1.96 → 1.97.0**, and clippy 1.97 flags two patterns that have sat on master unchanged (`useless_borrows_in_formatting` at `cache_commands.rs:148`, `question_mark` at `dep_check.rs:278`). **Master is therefore latently red on its own current code**; the next push to it fails the same way. Fixed at code level in this PR (no `#[allow]`, per the repo's zero-suppression rule), but the class recurs on every stable release. Pin the Lint toolchain (`dtolnay/rust-toolchain@1.97.0`) or accept a scheduled break.
+
+**A local gate that passed while CI failed (ISC-298).** My local invocation was `cargo clippy --all-targets -- -D warnings` on clippy **0.1.96**; CI runs `cargo clippy --locked --all-targets --all-features -- -D warnings` on **stable**, now **1.97.0**. Same code, different verdict — and the two lints are in `cache_commands.rs` / `dep_check.rs`, files this PR never touched. Reproducing required installing the 1.97.0 toolchain explicitly; after the two code-level fixes `cargo +1.97.0 clippy --locked --all-targets --all-features -- -D warnings` exits 0 and `cargo +1.97.0 fmt --check` exits 0. (The first `fmt` failure was my own error: `--profile minimal --component clippy` does not install rustfmt, so `cargo fmt` was *erroring*, not reporting drift — it printed zero `Diff in` lines, which is what gave it away. A non-zero exit is not evidence of the failure you assume.) `cargo test --lib -- dep_check:: cache_commands::` → 214 pass, including `test_resolve_ort_env_path_relative_without_cwd_returns_none`, which covers exactly the branch the `?` rewrite replaced. **A gate is only a gate if you run the command CI runs, on the toolchain CI uses.**

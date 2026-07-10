@@ -243,6 +243,20 @@ pub fn compute_analysis_timeout_with_env(
     compute_analysis_timeout_with_env_and_default(cli_timeout, env_value, None)
 }
 
+/// Resolve `--parallel-jobs` against the configured concurrency.
+///
+/// `0` means the operator supplied no cap, so the configured value stands. Any positive
+/// value narrows it. The result is floored at 1 so semaphores built from it always have a
+/// permit to hand out.
+pub fn effective_parallel_jobs(parallel_jobs: usize, configured: usize) -> usize {
+    let resolved = if parallel_jobs == 0 {
+        configured
+    } else {
+        configured.min(parallel_jobs)
+    };
+    resolved.max(1)
+}
+
 /// Resolve the analysis timeout with full precedence (#4): explicit `--timeout` CLI value
 /// wins, then `NTHPARTY_ANALYSIS_TIMEOUT_SECS`, then the user's persisted default, then the
 /// built-in 600s. `0` at any layer disables the timeout (returns None).
@@ -871,6 +885,10 @@ async fn run_review(action: &ReviewCommands) -> Result<()> {
 // collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
+    // Chrome processes are now pooled and reused across renders rather than killed after each
+    // one. The pool is a `Lazy` static, and statics never run `Drop`, so this guard is what
+    // reaps them — on every return path out of the scan, including `?` and `bail!`.
+    let _browser_pool = crate::browser_pool::PoolShutdownGuard;
     if args.init {
         // --init previously overwrote an existing (possibly customized) config
         // while printing "Created" — silent data loss. Refuse and instruct.
@@ -1224,6 +1242,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         analysis::set_interrupted();
         eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
         std::thread::sleep(std::time::Duration::from_secs(2));
+        // `std::process::exit` runs no destructors, so the `PoolShutdownGuard` in `run_inner`
+        // never fires here. Browsers are pooled now, so up to MAX_RENDER_PERMITS idle Chrome
+        // processes would outlive the scanner on every Ctrl-C. Reap them explicitly; `shutdown`
+        // is idempotent and recovers from a poisoned pool lock.
+        //
+        // Not unit-tested: this path ends in `process::exit`. Verified empirically instead —
+        // SIGINT a live depth-3 scan and assert zero surviving Chrome processes.
+        crate::browser_pool::shutdown();
         eprintln!("⚠️  Force exiting (checkpoint may be incomplete).");
         std::process::exit(130);
     }).unwrap_or_else(|e| {
@@ -1710,7 +1736,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
     let processed_domains = Arc::new(Mutex::new(processed_domains_set));
-    let semaphore = Arc::new(Semaphore::new(args.parallel_jobs));
+    // `--parallel-jobs 0` means "no operator cap", so the semaphore falls back to the
+    // depth-1 configured concurrency. A zero-permit semaphore would deadlock any future
+    // caller that acquires it.
+    let semaphore = Arc::new(Semaphore::new(effective_parallel_jobs(
+        args.parallel_jobs,
+        _app_config.analysis.get_concurrency_for_depth(1),
+    )));
 
     // GRC-367 (fix 1): wire the pool's choke-point throttle counter to the SAME atomic the
     // exit-3 guard reads (`logger.has_dns_failures()`), so a DoH throttle on any path — incl.
@@ -1971,14 +2003,12 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         None
     };
 
-    let recursive_limit = _app_config
-        .analysis
-        .get_concurrency_for_depth(1)
-        .min(args.parallel_jobs);
+    let depth_one_concurrency = _app_config.analysis.get_concurrency_for_depth(1);
+    let recursive_limit = effective_parallel_jobs(args.parallel_jobs, depth_one_concurrency);
     let recursive_semaphore = Arc::new(Semaphore::new(recursive_limit));
     logger.debug(&format!(
         "Configured concurrency: {} main jobs, {} initial recursive jobs (strategy: {:?})",
-        args.parallel_jobs, recursive_limit, _app_config.analysis.strategy
+        recursive_limit, recursive_limit, _app_config.analysis.strategy
     ));
     logger.debug(&format!(
         "Concurrency per depth: {:?}, request delay: {}ms",
@@ -2092,6 +2122,8 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         ));
     }
 
+    let scan_started = std::time::Instant::now();
+
     let analysis_future = analysis::discover_nth_parties(
         domain,
         args.depth,
@@ -2169,6 +2201,19 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     } else {
         analysis_future.await?
     };
+
+    // Attribution table for the scan that just finished. INFO-level, so a default run's
+    // stdout stays clean and only `-v` surfaces it.
+    if tracing::enabled!(tracing::Level::INFO) {
+        tracing::info!(
+            "\n{}",
+            crate::perf::format_report(
+                &crate::perf::METRICS.snapshot(),
+                scan_started.elapsed(),
+                crate::browser_pool::permits(),
+            )
+        );
+    }
 
     if analysis::is_interrupted() {
         logger.warn("Analysis interrupted by user.");
@@ -3400,6 +3445,27 @@ mod tests {
     fn test_timeout_default_prefs_zero_disables() {
         let t = compute_analysis_timeout_with_env_and_default(None, None, Some(0));
         assert_eq!(t, None);
+    }
+
+    // ── effective_parallel_jobs (`-j 0` = use configured per-depth concurrency) ────────
+    #[test]
+    fn test_effective_parallel_jobs_zero_uses_configured() {
+        assert_eq!(effective_parallel_jobs(0, 50), 50);
+        assert_eq!(effective_parallel_jobs(0, 8), 8);
+    }
+
+    #[test]
+    fn test_effective_parallel_jobs_explicit_value_narrows_only() {
+        assert_eq!(effective_parallel_jobs(4, 50), 4);
+        assert_eq!(effective_parallel_jobs(100, 8), 8);
+    }
+
+    /// A semaphore built from this value must always have at least one permit, or every
+    /// acquirer deadlocks. A zero config must still floor to 1.
+    #[test]
+    fn test_effective_parallel_jobs_floors_at_one() {
+        assert_eq!(effective_parallel_jobs(0, 0), 1);
+        assert_eq!(effective_parallel_jobs(1, 0), 1);
     }
 
     // ── parse_timeout_choice (#4 first-run prompt) ────────────────────

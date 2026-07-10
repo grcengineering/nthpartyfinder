@@ -197,12 +197,11 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
 
     // headless_chrome operations are blocking, run in a blocking thread
     let handle = tokio::task::spawn_blocking(move || -> Result<Vec<InterceptedResponse>> {
-        let guard = crate::browser_pool::create_browser()?;
-
-        let tab = guard
-            .browser
-            .new_tab()
-            .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
+        // Declared before the guard so tab close and Chrome recycling are measured.
+        let mut render_timer = crate::perf::RenderTimer::start();
+        let guard = crate::browser_pool::acquire_tab()?;
+        render_timer.exclude(guard.permit_wait());
+        let tab = guard.tab();
 
         // Capture JSON API responses (GraphQL/REST/XHR) as the page loads.
         // Handler signature: (ResponseReceivedEventParams, &dyn Fn() -> Result<GetResponseBodyReturnObject>)
