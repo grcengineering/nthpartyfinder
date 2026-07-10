@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-10
+
+### Added
+- **Vendor-mapping review contract + Claude Code plugin.** New `nthpartyfinder review` subcommand (`--review-json`, `apply|list|revert|path`) lets Claude accept/modify/save uncertain domain↔org mappings under a deterministic, evidence-gated writer: a mapping is written only with a machine source, ≥2 quoted signals from ≥2 distinct discovery layers, and cross-layer agreement on the same organization name. Ships with a `vendor-mapping-review` Claude Code Skill and `/npf-*` commands (`plugin/`).
+
+### Performance
+- Depth-3 scans now complete within the default 600s timeout (was ~1070s) via a pooled, per-render-isolated headless Chrome browser pool (`src/browser_pool.rs`, `src/perf.rs`) — Chrome launches dropped from ~272 to ~8 on a depth-3 `vanta.com` run. Each render disables the HTTP cache, bypasses service workers, and clears cache/cookies before use so pooled reuse cannot silently drop response bodies.
+
+### Security
+- Removed a provably-safe-but-scanner-flagged `.unwrap()` in `src/discovery/subfinder.rs` (`child.stdout.take()`) in favor of a proper `Result` propagation.
+- Dependency bumps: `base64` 0.21.7→0.22.1, `sysinfo` 0.39.3→0.39.5, `indicatif` 0.18.4→0.18.6, plus the GitHub Actions group and Docker base image (chainguard/wolfi-base, rust, debian) digest bumps.
+
 ## [1.2.1] - 2026-07-08
 
 <!-- 1.2.0 was never released: GitHub's immutable-releases feature permanently
