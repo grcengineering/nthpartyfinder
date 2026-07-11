@@ -1,12 +1,12 @@
 ---
 project: nthpartyfinder
-task: "Merge all 9 open PRs (no breaking changes) + local release build/test (depth-3 vanta.com, HTML report) + publish v1.3.0 GitHub release (2026-07-10)"
+task: "Fix depth-3 report Layer-3 gap: dynamic graph tier bands + run all discovery methods at every depth + optimize web-traffic browser path (network-idle), no recall loss (2026-07-11)"
 effort: E4
-phase: complete
-progress: 48/48 (task ISC-316..363)
+phase: verify
+progress: "verified: graph L3 band renders on real report; deep scan L2/L3 now carry subprocessor/subdomain/SaaS/web-traffic (1245->15210 rels); gates green (fmt/clippy -D/4131 tests/coverage 99.47% lines-98.75% fn); pending ship (PR — ruleset blocks direct master)"
 mode: algorithm
-started: 2026-07-10T00:00:00-07:00
-updated: 2026-07-10T09:34:00-07:00
+started: 2026-07-11T00:00:00-07:00
+updated: 2026-07-11T08:35:00-07:00
 algorithm_config:
   effort_source: classifier
   classifier: { mode: ALGORITHM, tier: E4, source: classifier }
@@ -15,6 +15,7 @@ algorithm_config:
   preset: cautious
   metric: "all 9 PRs merged, master gates green, local release binary verified via depth-3 vanta.com HTML-report scan, v1.3.0 tagged+published with CI-built cross-platform assets"
 prior_tasks:
+  - { task: "Merge 9 PRs + publish v1.3.0 release", started: 2026-07-10, phase: complete, progress: "48/48 (ISC-316..363)" }
   - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
   - { task: "DNS demo-solid (Vanta TPRM)", started: 2026-06-11, phase: complete, progress: "42/42" }
   - { task: "Resolve ALL open PRs + Security findings", started: 2026-06-16, phase: complete, progress: "30/32 (194+216 pended on owner merges)" }
@@ -22,6 +23,34 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-07-11 — Depth-3 report Layer-3 gap: dynamic bands + all-methods-at-every-depth + web-traffic network-idle
+
+**Trigger.** Owner: a depth-3 vanta.com HTML report showed no Layer-3 subprocessors/subdomains. Question: scan failure or output bug? Answer proven: **both**.
+
+**Root causes (Reproduce-First, headless-Chrome render of the real report + embedded `window.graphData`).**
+- **Output:** `frontend/src/VendorGraph.svelte` hardcoded a 3-element `layerBands` overlay (layers 0–2) that *shadowed* the already-dynamic band logic in `lib/transform.ts`; CSS only styled `data-layer=0|1|2`. Layer-3 data (430 rels present) rendered with no tier band → "empty".
+- **Scan:** `src/analysis.rs` recursion passed `None,None,None,None` for subdomain/SaaS/CT/web-traffic into `discover_nth_parties` at depth+1 (via `process_vendor_domain`, which lacked those params), so the full suite ran at depth 1 only; deeper layers were DNS + subprocessor. Confirmed by the user's own report layer×method histogram (L2/L3 = DNS-only).
+
+**Decisions.**
+- **Graph:** made `layerBands` dynamic (union of layers present in `vendors`), added labels for L3/L4 + `Layer N` fallback, CSS for `data-layer` 3–6 + neutral default chip. Node colors already covered layers 1–4 (fallback→4), so only the overlay was broken. Rebuilt `static/vendor-graph.{js,css}` via `bun run build`. Also regenerated the owner's existing report via anchored bundle-swap (`…(fixed).html` on Desktop) — no rescan needed.
+- **Deep discovery:** owner chose (AskUserQuestion) **all methods at every depth**. Added the 4 discovery-config params to `process_vendor_domain`, threaded the real `Option<&…>` refs (Copy) through the borrowed `async move` (not a `'static` spawn), and removed the `depth==1`-only phase gate (progress-bar UI stays depth-1-gated). Each phase Option-gates internally, so this only affects scans that ENABLE the extended methods — a default DNS+subprocessor scan is unchanged.
+- **Web-traffic optimization (owner mandate: faster, zero recall loss):** replaced the fixed `sleep(5000ms)` settle in `web_traffic.rs::analyze_network_traffic` with in-flight-aware network-idle. Kept `register_response_handling` capture UNCHANGED (identical recall); added an `add_event_listener` counting `requestWillBeSent`(+1)/`loadingFinished|Failed`(−1) into `AtomicI64` + a `last_activity` clock; exit when `!pending && quiet≥800ms`, `stall_window` 2500ms guards redirect/WebSocket counter drift, hard cap = old `wait_ms` (5s) so worst-case is unchanged and no exit ever occurs while a request is pending.
+- **Research (both source-backed).** (a) Static/HTTP cannot replace the browser — owner report's own L1 data: NetworkTraffic 36 vs PageSource 3 (12×); WWW 2020 crawler-comparison confirms non-JS crawlers reach "orders of magnitude fewer destinations." Keep browser; keep static Phase 1 as additive only. (b) `browser_oxide` (owner-surfaced): real from-scratch Rust engine (V8/deno_core), but v0.1.0/~1mo/32★/self-described not-production-ready → recall-parity + supply-chain risk; recommend against now, gate any switch on a head-to-head recall benchmark.
+
+**Verification.**
+- Graph: real deep report + owner's `(fixed).html` both render `data-layer=0..3` incl. amber **Layer 3 — Nth Parties** (headless DOM + screenshot).
+- Deep scan (release binary, depth-3 vanta.com, all extended methods, `--timeout 0`, exit 0): **1,245 → 15,210 relationships**, unique orgs ~464 → 2,226. L3 method histogram now: WebTraffic 4379, SaaS 1951, subdomains 1677, subprocessor 514 (+DNS) — previously DNS-only. L2 likewise gained all methods.
+- Gates: fmt clean; clippy `--lib -D warnings` clean; full lib suite **4131 passed / 0 failed**; coverage **99.47% lines / 98.75% functions** (≥95 floor); `analyze_network_traffic` idle loop is `coverage(off)` (browser path).
+- Perf: wall ~3842s (~64min) but doing 12× the discovery (1138 renders vs 252) under machine load ~30; `permit_wait` dominates. Network-idle savings NOT cleanly isolable from a contended run — not claimed.
+
+**Follow-ups (TF).**
+- **TF-SUBPROC-SETTLE:** `subprocessor.rs:2673` still uses a fixed `sleep(5000ms)` SPA-render settle — the actual dominant cost (`subproc.probe` ~186k s cumulative). Same network-idle/content-stability optimization applies but touches the #1 discovery path → its own benchmarked change (out of the web-traffic mandate).
+- **TF-WT-BLOCK:** resource-blocking (Fetch record-then-abort on font/media only) deferred — aborting image pixels truncates cookie-sync redirect chains (recall risk); crate supports `enable_fetch`/`enable_request_interception` if pursued.
+- **TF-WT-REQCAPTURE:** optional recall *improvement* — capture at `requestWillBeSent` (catches WebSockets, errored, unfinished) instead of `loadingFinished`; kept capture unchanged this pass to stay provably non-degrading.
+- **TF-BROWSEROXIDE:** revisit if it reaches 1.0 + passes a vanta.com recall-parity benchmark vs Chrome.
+- **TF-DEEP-PERF:** re-measure depth-3 wall-clock on a quiet machine (this run was contended); consider per-depth method controls if deep web-traffic proves too heavy in practice.
+
 
 > Project ISA (system of record). This task: (WS1) apply all relevant SupplyChainSecurity baselines; (WS2) run a parallelized depth-1→5 scan test campaign over 10 domains to find/fix bugs, false positives, false negatives across all scanner functionality.
 
