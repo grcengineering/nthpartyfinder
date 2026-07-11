@@ -885,47 +885,44 @@ pub async fn discover_nth_parties(
             all_vendor_domains.push(base_vd);
         }
 
-        // Discovery phases. At depth 1 the five independent scanners run concurrently
-        // (each hits a different source and shares no mutable state) via tokio::join!,
-        // collapsing the previously serial ~70s root chain to ~its slowest single phase.
-        // Deeper levels run subprocessor only, as before. Discovery logic per phase is
-        // unchanged, so vendor recall is identical — only the orchestration is parallel.
+        // Discovery phases. The five independent scanners run concurrently (each hits
+        // a different source and shares no mutable state) via tokio::join!, collapsing
+        // the serial chain to ~its slowest single phase. The full suite now runs at
+        // EVERY depth (previously depth 1 only): deeper layers get subprocessor +
+        // subfinder + SaaS + CT + web traffic, so an Nth-party org's subprocessors and
+        // subdomains are discovered instead of DNS records alone. The number of vendors
+        // processed at each depth is bounded by the per-depth vendor limits, and the
+        // browser-based web-traffic phase waits on adaptive network-idle rather than a
+        // fixed sleep, so the added deep renders stay affordable. Each phase Option-gates
+        // internally (a disabled/None method is a no-op), so this respects the operator's
+        // enabled-methods configuration at every depth.
         if current_depth == 1 {
             logger
                 .update_progress("Discovery: subprocessor + subfinder + SaaS + CT + web traffic")
                 .await;
             logger.set_progress_position(16).await;
-            let (sp, sf, st, ct_v, wt) = tokio::join!(
-                run_subprocessor_phase(
-                    domain,
-                    subprocessor_analyzer,
-                    subprocessor_enabled,
-                    verification_logger,
-                    &logger,
-                ),
-                run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
-                run_saas_phase(domain, saas_tenant_discovery, &logger),
-                run_ct_phase(domain, ct_discovery, &logger),
-                run_webtraffic_phase(domain, web_traffic_discovery, &logger),
-            );
-            all_vendor_domains.extend(sp);
-            all_vendor_domains.extend(sf);
-            all_vendor_domains.extend(st);
-            all_vendor_domains.extend(ct_v);
-            all_vendor_domains.extend(wt);
+        }
+        let (sp, sf, st, ct_v, wt) = tokio::join!(
+            run_subprocessor_phase(
+                domain,
+                subprocessor_analyzer,
+                subprocessor_enabled,
+                verification_logger,
+                &logger,
+            ),
+            run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
+            run_saas_phase(domain, saas_tenant_discovery, &logger),
+            run_ct_phase(domain, ct_discovery, &logger),
+            run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+        );
+        all_vendor_domains.extend(sp);
+        all_vendor_domains.extend(sf);
+        all_vendor_domains.extend(st);
+        all_vendor_domains.extend(ct_v);
+        all_vendor_domains.extend(wt);
+        if current_depth == 1 {
             logger.clear_sub_progress().await;
             logger.set_progress_position(30).await;
-        } else {
-            all_vendor_domains.extend(
-                run_subprocessor_phase(
-                    domain,
-                    subprocessor_analyzer,
-                    subprocessor_enabled,
-                    verification_logger,
-                    &logger,
-                )
-                .await,
-            );
         }
 
         {
@@ -1083,6 +1080,10 @@ pub async fn discover_nth_parties(
                             web_org_enabled,
                             web_org_min_confidence,
                             &analysis_config_inner,
+                            subdomain_discovery,
+                            saas_tenant_discovery,
+                            ct_discovery,
+                            web_traffic_discovery,
                             checkpoint_clone,
                             checkpoint_output_dir_clone,
                             result_sink_clone.clone(),
@@ -1243,6 +1244,13 @@ pub async fn process_vendor_domain(
     web_org_enabled: bool,
     web_org_min_confidence: f32,
     analysis_config: &AnalysisConfig,
+    // Threaded through so the recursive discover_nth_parties call runs the full
+    // discovery suite at deeper layers (previously these were passed as None,
+    // restricting subdomain/SaaS/CT/web-traffic discovery to depth 1).
+    subdomain_discovery: Option<&SubfinderDiscovery>,
+    saas_tenant_discovery: Option<&SaasTenantDiscovery>,
+    ct_discovery: Option<&CtLogDiscovery>,
+    web_traffic_discovery: Option<&WebTrafficDiscovery>,
     checkpoint: Arc<Mutex<Checkpoint>>,
     checkpoint_output_dir: String,
     result_sink: Arc<Mutex<ResultSink>>,
@@ -1386,10 +1394,15 @@ pub async fn process_vendor_domain(
         web_org_enabled,
         web_org_min_confidence,
         analysis_config,
-        None,
-        None,
-        None,
-        None,
+        // Full discovery suite at every depth (previously restricted to depth 1 by
+        // passing None here). Deeper layers now get subdomain/SaaS/CT/web-traffic
+        // discovery too — bounded by the per-depth vendor limits, and the
+        // browser-based web-traffic phase uses adaptive network-idle so the added
+        // renders stay affordable.
+        subdomain_discovery,
+        saas_tenant_discovery,
+        ct_discovery,
+        web_traffic_discovery,
         checkpoint,
         &checkpoint_output_dir,
         result_sink,
