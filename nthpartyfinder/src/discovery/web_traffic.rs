@@ -13,7 +13,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::debug;
 use url::Url;
 
@@ -170,29 +170,67 @@ impl WebTrafficDiscovery {
     ) -> Result<Vec<WebTrafficResult>> {
         let captured_urls = Arc::new(Mutex::new(Vec::<String>::new()));
         let captured_clone = captured_urls.clone();
+        // Network-idle bookkeeping, updated from the browser's event thread. `in_flight`
+        // counts requests that have started but not yet finished/failed; `last_activity`
+        // is the instant of the most recent request start or completion. The wait loop
+        // uses them to release the scarce render permit as soon as the page has genuinely
+        // settled instead of always sleeping the full cap. Capture is unchanged (still via
+        // register_response_handling on loadingFinished), and we never exit while a request
+        // is in flight, so this shortens the idle tail without dropping any captured URL.
+        let in_flight = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let last_activity = Arc::new(Mutex::new(Instant::now()));
+        let in_flight_evt = in_flight.clone();
+        let last_activity_evt = last_activity.clone();
         let url_owned = url.to_string();
         let wait_ms = self.network_wait_ms;
 
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            use std::sync::atomic::Ordering;
             // Declared before the guard so tab close and Chrome recycling are measured.
             let mut render_timer = crate::perf::RenderTimer::start();
             let guard = crate::browser_pool::acquire_tab()?;
             render_timer.exclude(guard.permit_wait());
             let tab = guard.tab();
 
-            // Intercept ALL network responses (not just JSON like trust_center does)
+            // Intercept ALL network responses (not just JSON like trust_center does).
+            // This is the capture path and also calls Network.enable, so the activity
+            // listener registered next receives Network.* events.
             tab.register_response_handling(
                 "web_traffic_discovery",
                 Box::new(move |event_params, _fetch_body| {
-                    let resp = &event_params.response;
-                    let resp_url = &resp.url;
-                    // Capture the URL of every network request
+                    // Capture the URL of every network response
                     if let Ok(mut urls) = captured_clone.lock() {
-                        urls.push(resp_url.clone());
+                        urls.push(event_params.response.url.clone());
                     }
                 }),
             )
             .map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
+
+            // Activity listener: a request start (+1) or a finish/failure (-1) both mark
+            // activity, so late-firing beacons keep the page "active" and are still waited
+            // out. It only reads the counter/clock — capture stays on the response handler.
+            let activity_listener = tab
+                .add_event_listener(std::sync::Arc::new(
+                    move |event: &headless_chrome::protocol::cdp::types::Event| {
+                        use headless_chrome::protocol::cdp::types::Event;
+                        match event {
+                            Event::NetworkRequestWillBeSent(_) => {
+                                in_flight_evt.fetch_add(1, Ordering::SeqCst);
+                                if let Ok(mut t) = last_activity_evt.lock() {
+                                    *t = Instant::now();
+                                }
+                            }
+                            Event::NetworkLoadingFinished(_) | Event::NetworkLoadingFailed(_) => {
+                                in_flight_evt.fetch_sub(1, Ordering::SeqCst);
+                                if let Ok(mut t) = last_activity_evt.lock() {
+                                    *t = Instant::now();
+                                }
+                            }
+                            _ => {}
+                        }
+                    },
+                ))
+                .map_err(|e| anyhow::anyhow!("Failed to add network activity listener: {}", e))?;
 
             // Navigate to page
             tab.navigate_to(&url_owned)
@@ -201,9 +239,39 @@ impl WebTrafficDiscovery {
             tab.wait_until_navigated()
                 .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
 
-            // Wait for runtime JavaScript to make its network calls
-            // (self-hosted SDKs like Pendo, DataDog init and phone home during this period)
-            std::thread::sleep(Duration::from_millis(wait_ms));
+            // Adaptive network-idle wait. Previously a fixed `sleep(wait_ms)`; now `wait_ms`
+            // is only the hard cap. Exit as soon as no request is in flight and the network
+            // has been quiet for `idle_window`. `stall_window` forces an exit under total
+            // silence even if the in-flight counter is left non-zero by redirect chains or
+            // WebSockets (which need not emit a matching loadingFinished) — nothing is
+            // happening then, so no capture is lost. The hard cap preserves the previous
+            // worst-case wait exactly, and because we never exit while a request is pending,
+            // recall on any page still doing work is identical to the old fixed wait.
+            let hard_cap = Duration::from_millis(wait_ms);
+            let idle_window = hard_cap.min(Duration::from_millis(800));
+            let stall_window = hard_cap.min(Duration::from_millis(2500));
+            let min_wait = hard_cap.min(Duration::from_millis(600));
+            let poll = Duration::from_millis(50);
+            let started = Instant::now();
+            loop {
+                std::thread::sleep(poll);
+                let elapsed = started.elapsed();
+                if elapsed >= hard_cap {
+                    break;
+                }
+                if elapsed < min_wait {
+                    continue;
+                }
+                let quiet = last_activity
+                    .lock()
+                    .map(|t| t.elapsed())
+                    .unwrap_or(Duration::ZERO);
+                let pending = in_flight.load(Ordering::SeqCst) > 0;
+                if (!pending && quiet >= idle_window) || quiet >= stall_window {
+                    break;
+                }
+            }
+            let _ = tab.remove_event_listener(&activity_listener);
 
             // Deregister and collect. Recover from a poisoned mutex rather than
             // panicking: the guarded Vec<String> is a plain URL accumulator, so
