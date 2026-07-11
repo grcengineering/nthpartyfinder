@@ -93,11 +93,31 @@
   let tooltipSources = $state<DiscoverySource[]>([]);
   let tooltipPosition = $state({ x: 0, y: 0 });
 
-  const layerBands: LayerBand[] = [
-    { layer: 0, label: 'Target Organization', y: 0, height: 0, width: 0 },
-    { layer: 1, label: 'Layer 1 — Direct Vendors', y: 0, height: 0, width: 0 },
-    { layer: 2, label: 'Layer 2 — Sub-processors', y: 0, height: 0, width: 0 }
-  ];
+  // Band labels are derived from the layers actually present in the scan data,
+  // not hardcoded — a depth-N scan must show a band for every layer it reached.
+  // (Previously fixed to 0-2, so Layer 3+ organizations rendered with no tier
+  // band at all, making a deep scan look like it found nothing past Layer 2.)
+  const LAYER_LABELS: Record<number, string> = {
+    0: 'Target Organization',
+    1: 'Layer 1 — Direct Vendors',
+    2: 'Layer 2 — Sub-processors',
+    3: 'Layer 3 — Nth Parties',
+    4: 'Layer 4 — Deep Dependencies'
+  };
+  const presentLayers = (() => {
+    const set = new Set<number>([0]);
+    for (const v of vendors.values()) {
+      for (const l of v.layers && v.layers.length ? v.layers : [v.layer]) set.add(l);
+    }
+    return Array.from(set).sort((a, b) => a - b);
+  })();
+  const layerBands: LayerBand[] = presentLayers.map((layer) => ({
+    layer,
+    label: LAYER_LABELS[layer] || `Layer ${layer} — Nth Parties`,
+    y: 0,
+    height: 0,
+    width: 0
+  }));
 
   function handleShowVendorInfo(e: Event) {
     const detail = (e as CustomEvent).detail;
@@ -581,10 +601,17 @@
   .layer-band-label {
     padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600;
     letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.8;
+    /* Neutral default so any layer beyond the explicitly-styled ones below
+       still renders as an intentional chip rather than transparent/black. */
+    background: rgba(100, 116, 139, 0.15); color: #64748b;
   }
   .layer-band-label[data-layer="0"] { background: rgba(99, 102, 241, 0.15); color: #6366f1; }
   .layer-band-label[data-layer="1"] { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
   .layer-band-label[data-layer="2"] { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+  .layer-band-label[data-layer="3"] { background: rgba(245, 158, 11, 0.15); color: #d97706; }
+  .layer-band-label[data-layer="4"] { background: rgba(249, 115, 22, 0.15); color: #ea580c; }
+  .layer-band-label[data-layer="5"] { background: rgba(217, 70, 239, 0.15); color: #c026d3; }
+  .layer-band-label[data-layer="6"] { background: rgba(225, 29, 72, 0.15); color: #e11d48; }
 
   :global(.svelte-flow) { background-color: #eef2f9; }
   :global(.svelte-flow .svelte-flow__edge path) { stroke: #b0bec5; stroke-width: 1.5; }
