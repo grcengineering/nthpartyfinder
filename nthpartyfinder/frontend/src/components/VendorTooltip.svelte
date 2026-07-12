@@ -84,20 +84,22 @@
 
   .tooltip {
     position: fixed;
-    background: white;
-    border-radius: 8px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    background: var(--surface-card, #fff);
+    border: 1px solid var(--border-subtle, transparent);
+    border-radius: var(--radius-lg, 8px);
+    box-shadow: var(--shadow-xl, 0 4px 20px rgba(0, 0, 0, 0.15));
     min-width: 280px;
     max-width: 400px;
     max-height: 400px;
     overflow: hidden;
     z-index: 1000;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--body-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
   }
 
+  /* The evidence panel wears the brand fusion gradient, matching the report hero. */
   .tooltip-header {
-    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-    color: white;
+    background: var(--gradient-fusion, linear-gradient(135deg, #6366f1 0%, #4f46e5 100%));
+    color: var(--text-on-accent, #fff);
     padding: 12px 16px;
     position: relative;
   }
@@ -144,8 +146,8 @@
 
   .section-title {
     font-size: 12px;
-    font-weight: 600;
-    color: #374151;
+    font-weight: var(--fw-semibold, 600);
+    color: var(--text-strong, #374151);
     margin-bottom: 8px;
   }
 
@@ -155,18 +157,19 @@
 
   .source-type {
     font-size: 11px;
-    font-weight: 600;
-    color: #6366f1;
+    font-weight: var(--fw-semibold, 600);
+    font-family: var(--font-mono, inherit);
+    color: var(--eng-blue-700, #6366f1);
     margin-bottom: 4px;
     padding: 2px 8px;
-    background: #eef2ff;
-    border-radius: 4px;
+    background: var(--eng-blue-50, #eef2ff);
+    border-radius: var(--radius-sm, 4px);
     display: inline-block;
   }
 
   .source-item {
     padding: 6px 0;
-    border-bottom: 1px solid #f3f4f6;
+    border-bottom: 1px solid var(--border-subtle, #f3f4f6);
   }
 
   .source-item:last-child {
@@ -175,17 +178,17 @@
 
   .source-parent {
     font-size: 12px;
-    color: #6b7280;
+    color: var(--text-muted, #6b7280);
   }
 
   .source-record {
     font-size: 10px;
-    color: #9ca3af;
-    font-family: monospace;
+    color: var(--text-muted, #9ca3af);
+    font-family: var(--font-mono, monospace);
     margin-top: 4px;
     padding: 4px 6px;
-    background: #f9fafb;
-    border-radius: 4px;
+    background: var(--surface-inset, #f9fafb);
+    border-radius: var(--radius-sm, 4px);
     word-break: break-all;
     max-height: 60px;
     overflow-y: auto;

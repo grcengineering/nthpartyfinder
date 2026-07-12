@@ -10,7 +10,7 @@
   import FitViewHelper from './components/FitViewHelper.svelte';
 
   import type { XYFlowNode, XYFlowEdge, Relationship, DiscoverySource, AggregatedVendor, LayerBand } from './lib/transform';
-  import { aggregateVendors, buildChildrenMap } from './lib/transform';
+  import { aggregateVendors, buildChildrenMap, clampLayer } from './lib/transform';
 
   let { relationships: relationshipsProp = [], rootDomain: rootDomainProp = '' }:
     { relationships?: Relationship[]; rootDomain?: string } = $props();
@@ -357,27 +357,23 @@
       return n;
     });
 
-    // Layer colors for edges
-    const layerEdgeColors: Record<number, string> = {
-      1: '#3b82f6', 2: '#10b981', 3: '#f59e0b', 4: '#ef4444'
-    };
-
-    // Show edges
+    // Show edges. Colors resolve against the --npf-l{N}-solid custom properties
+    // defined on .vendor-graph-container, so a shared edge picks up the design
+    // system's layer ramp (and its light/dark values) instead of a literal.
     edges = edges.map(e => {
       if (e.source === nodeId && allVisible.includes(e.target)) {
         const isShared = alreadyVisible.includes(e.target);
         if (isShared) {
           // Use the child's layer from this parent's perspective (parentLayer + 1)
-          const deeperLayer = parentLayer + 1;
-          const edgeColor = layerEdgeColors[deeperLayer] || layerEdgeColors[4] || '#94a3b8';
+          const deeperLayer = clampLayer(parentLayer + 1);
           return {
             ...e, hidden: false, type: 'straight',
-            style: `stroke: ${edgeColor}; stroke-width: 1; stroke-dasharray: 6 4;`
+            style: `stroke: var(--npf-l${deeperLayer}-solid); stroke-width: 1; stroke-dasharray: 6 4;`
           };
         }
         return {
           ...e, hidden: false, type: 'straight',
-          style: 'stroke: #b0bec5; stroke-width: 1.5;'
+          style: 'stroke: var(--npf-edge); stroke-width: 1.5;'
         };
       }
       return e;
@@ -572,7 +568,7 @@
     minZoom={0.05}
     maxZoom={2}
     onnodeclick={handleNodeClick}
-    defaultEdgeOptions={{ type: 'straight', style: 'stroke: #b0bec5; stroke-width: 1.5;' }}
+    defaultEdgeOptions={{ type: 'straight', style: 'stroke: var(--npf-edge); stroke-width: 1.5;' }}
   >
     <Controls />
     <Background variant={BackgroundVariant.Dots} gap={24} />
@@ -588,37 +584,129 @@
 </div>
 
 <style>
-  .vendor-graph-container { width: 100%; height: 100%; position: relative; }
+  /* ── The layer ramp — single source of truth ───────────────────────────────
+     Layer identity runs engineering-blue (direct vendors) -> amber -> legacy-GRC
+     orange (deep nth parties): the further from the target organization, the more
+     "legacy GRC" the colour. These custom properties inherit to every node, edge
+     and chip below, and they are the ONLY place a layer colour is decided.
+
+     Every value resolves against a GRC Engineering design-system token with the
+     component's original literal as fallback, so the graph renders unchanged when
+     mounted standalone (vite dev) where the design system is not loaded.
+
+     The brand ramps (--eng-blue-*, --grc-orange-*, --amber-*) are theme-INVARIANT
+     by design, so a Layer 3 vendor keeps its identity when the report is flipped
+     to dark. Only chrome and text below bind to the semantic (theme-flipping)
+     tokens: --surface-*, --text-*, --border-*.                                  */
+  .vendor-graph-container {
+    width: 100%; height: 100%; position: relative;
+
+    --npf-l0-fill: var(--gradient-ocean, linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%));
+    --npf-l0-solid: var(--eng-blue-500, #6366f1);
+
+    --npf-l1-solid: var(--eng-blue-500, #3b82f6);
+    --npf-l1-fill: linear-gradient(135deg, var(--eng-blue-400, #3b82f6) 0%, var(--eng-blue-600, #2563eb) 100%);
+
+    --npf-l2-solid: var(--eng-blue-700, #10b981);
+    --npf-l2-fill: linear-gradient(135deg, var(--eng-blue-600, #10b981) 0%, var(--eng-blue-800, #059669) 100%);
+
+    --npf-l3-solid: var(--amber-500, #f59e0b);
+    --npf-l3-fill: linear-gradient(135deg, var(--amber-500, #f59e0b) 0%, var(--amber-600, #d97706) 100%);
+
+    --npf-l4-solid: var(--grc-orange-500, #ef4444);
+    --npf-l4-fill: linear-gradient(135deg, var(--grc-orange-400, #ef4444) 0%, var(--grc-orange-600, #dc2626) 100%);
+
+    --npf-l5-solid: var(--grc-orange-700, #c026d3);
+    --npf-l5-fill: linear-gradient(135deg, var(--grc-orange-600, #c026d3) 0%, var(--grc-orange-800, #a21caf) 100%);
+
+    --npf-l6-solid: var(--grc-orange-800, #e11d48);
+    --npf-l6-fill: linear-gradient(135deg, var(--grc-orange-700, #e11d48) 0%, var(--grc-orange-900, #be123c) 100%);
+
+    /* Chrome — these DO follow light/dark. */
+    --npf-edge: var(--border-strong, #b0bec5);
+    --npf-edge-hover: var(--brand-accent, #6366f1);
+    --npf-canvas: var(--surface-sunken, #eef2f9);
+    --npf-ink: var(--text-strong, #1e293b);
+    --npf-ink-muted: var(--text-muted, #64748b);
+    --npf-ink-faint: var(--text-faint, #94a3b8);
+    --npf-card: var(--surface-card, #ffffff);
+    --npf-raised: var(--surface-raised, #f1f5f9);
+    --npf-hairline: var(--border-subtle, #e2e8f0);
+  }
+
   .graph-controls { position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 8px; }
-  .btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; }
-  .btn-primary { background-color: #6366f1; color: white; }
-  .btn-primary:hover { background-color: #4f46e5; }
+  .btn {
+    padding: 8px 16px; border-radius: var(--radius-md, 6px); border: none; cursor: pointer;
+    font-family: var(--ui-family, inherit);
+    font-size: 14px; font-weight: var(--fw-semibold, 500);
+    transition: var(--transition-control, all 0.2s);
+  }
+  .btn-primary { background: var(--brand-accent, #6366f1); color: var(--text-on-accent, #fff); }
+  .btn-primary:hover { background: var(--brand-accent-strong, #4f46e5); }
 
   .layer-bands-overlay {
     position: absolute; top: 10px; right: 10px; z-index: 10;
     display: flex; flex-direction: column; gap: 4px; pointer-events: none;
   }
+  /* Chips mirror the report table's .layer-N badges exactly — one layer language
+     across the whole report. Layers past the ramp fall back to this neutral. */
   .layer-band-label {
-    padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600;
-    letter-spacing: 0.5px; text-transform: uppercase; opacity: 0.8;
-    /* Neutral default so any layer beyond the explicitly-styled ones below
-       still renders as an intentional chip rather than transparent/black. */
-    background: rgba(100, 116, 139, 0.15); color: #64748b;
+    padding: 4px 10px; border-radius: var(--radius-sm, 4px);
+    font-family: var(--font-mono, inherit);
+    font-size: 11px; font-weight: var(--fw-semibold, 600);
+    letter-spacing: 0.5px; text-transform: uppercase;
+    background: var(--surface-inset, rgba(100, 116, 139, 0.15));
+    color: var(--npf-ink-muted);
+    border: 1px solid var(--npf-hairline);
   }
-  .layer-band-label[data-layer="0"] { background: rgba(99, 102, 241, 0.15); color: #6366f1; }
-  .layer-band-label[data-layer="1"] { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
-  .layer-band-label[data-layer="2"] { background: rgba(16, 185, 129, 0.15); color: #10b981; }
-  .layer-band-label[data-layer="3"] { background: rgba(245, 158, 11, 0.15); color: #d97706; }
-  .layer-band-label[data-layer="4"] { background: rgba(249, 115, 22, 0.15); color: #ea580c; }
-  .layer-band-label[data-layer="5"] { background: rgba(217, 70, 239, 0.15); color: #c026d3; }
-  .layer-band-label[data-layer="6"] { background: rgba(225, 29, 72, 0.15); color: #e11d48; }
+  .layer-band-label[data-layer="0"] { background: var(--surface-inset, rgba(99,102,241,0.15)); color: var(--npf-ink); }
+  .layer-band-label[data-layer="1"] { background: var(--eng-blue-50, rgba(59,130,246,0.15)); color: var(--eng-blue-700, #3b82f6); border-color: var(--eng-blue-200, transparent); }
+  .layer-band-label[data-layer="2"] { background: var(--status-info-bg, rgba(16,185,129,0.15)); color: var(--status-info-fg, #10b981); border-color: var(--eng-blue-300, transparent); }
+  .layer-band-label[data-layer="3"] { background: var(--amber-100, rgba(245,158,11,0.15)); color: var(--amber-600, #d97706); border-color: var(--amber-500, transparent); }
+  .layer-band-label[data-layer="4"] { background: var(--grc-orange-100, rgba(249,115,22,0.15)); color: var(--grc-orange-700, #ea580c); border-color: var(--grc-orange-300, transparent); }
+  .layer-band-label[data-layer="5"] { background: var(--grc-orange-200, rgba(217,70,239,0.15)); color: var(--grc-orange-800, #c026d3); border-color: var(--grc-orange-400, transparent); }
+  .layer-band-label[data-layer="6"] { background: var(--grc-orange-300, rgba(225,29,72,0.15)); color: var(--grc-orange-900, #e11d48); border-color: var(--grc-orange-500, transparent); }
 
-  :global(.svelte-flow) { background-color: #eef2f9; }
-  :global(.svelte-flow .svelte-flow__edge path) { stroke: #b0bec5; stroke-width: 1.5; }
-  :global(.svelte-flow .svelte-flow__edge:hover path) { stroke: #6366f1; stroke-width: 2.5; }
+  /* ── XYFlow chrome bridge ──────────────────────────────────────────────────
+     XYFlow resolves every themeable value as
+       var(--xy-<thing>, var(--xy-<thing>-default))
+     and declares the -default values ON the .svelte-flow element itself, so an
+     ancestor cannot override them by inheritance. Bind them here, where the
+     descendant combinator out-specifies the library's own single-class rule.
+     This is the whole reason the canvas, controls and minimap now follow the
+     report's light/dark theme instead of staying permanently light.            */
+  .vendor-graph-container :global(.svelte-flow) {
+    --xy-background-color-default: var(--npf-canvas);
+    --xy-background-pattern-dots-color-default: var(--npf-hairline);
+    --xy-edge-stroke-default: var(--npf-edge);
+    --xy-edge-stroke-selected-default: var(--npf-edge-hover);
+    --xy-connectionline-stroke-default: var(--npf-edge);
+    --xy-controls-button-background-color-default: var(--npf-card);
+    --xy-controls-button-background-color-hover-default: var(--npf-raised);
+    --xy-controls-button-color-default: var(--npf-ink);
+    --xy-controls-button-color-hover-default: var(--npf-edge-hover);
+    --xy-controls-button-border-color-default: var(--npf-hairline);
+    --xy-controls-box-shadow-default: var(--shadow-md, 0 0 2px 1px rgba(0,0,0,.08));
+    --xy-minimap-background-color-default: var(--npf-card);
+    --xy-minimap-node-background-color-default: var(--npf-edge);
+    /* The mask dims everything OUTSIDE the current viewport rect. Its stock
+       default is an opaque-ish light grey, which reads as a bright slab on a
+       dark canvas — derive it from the canvas colour instead so it dims in
+       whichever direction the theme is going. */
+    --xy-minimap-mask-background-color-default: rgba(240, 240, 240, .6);
+    --xy-minimap-mask-background-color-default: color-mix(in srgb, var(--npf-canvas) 72%, transparent);
+    --xy-minimap-mask-stroke-color-default: var(--npf-edge);
+    --xy-attribution-background-color-default: transparent;
+  }
 
-  :global(.svelte-flow .svelte-flow__handle) {
+  .vendor-graph-container :global(.svelte-flow .svelte-flow__edge path) {
+    stroke: var(--npf-edge); stroke-width: 1.5;
+  }
+  .vendor-graph-container :global(.svelte-flow .svelte-flow__edge:hover path) {
+    stroke: var(--npf-edge-hover); stroke-width: 2.5;
+  }
+
+  .vendor-graph-container :global(.svelte-flow .svelte-flow__handle) {
     width: 1px; height: 1px; background: transparent; border: none; opacity: 0;
   }
-
 </style>
