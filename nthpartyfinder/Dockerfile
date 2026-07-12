@@ -27,6 +27,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && \
 
 # Copy actual source and assets
 COPY src/ src/
+COPY data/ data/
 COPY config/ config/
 COPY templates/ templates/
 COPY static/ static/
@@ -86,6 +87,9 @@ RUN ln -s /usr/local/lib/libonnxruntime.so.1.20.1 /usr/local/lib/libonnxruntime.
 
 # Copy config files
 COPY --from=builder /build/config/ /app/config/
+# The binary embeds data/companies.tsv (CC BY-SA 4.0, AdGuard companiesdb); distributing this
+# image distributes that dataset, so its license and attribution must ride along.
+COPY --from=builder /build/data/README.md /build/data/LICENSE.CC-BY-SA-4.0 /app/data/
 
 # Create output and cache directories
 RUN mkdir -p /output /cache && \

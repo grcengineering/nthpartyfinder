@@ -25,6 +25,123 @@ const MAX_REGEX_PATTERN_LENGTH: usize = 500;
 /// from adversarial or unexpectedly large responses.
 const MAX_HTTP_BODY_BYTES: usize = 10 * 1024 * 1024;
 
+/// Minimum length of an organization-name key in the learned org→domain mapping.
+///
+/// These keys are matched against scraped organization text, and the matched key's value is
+/// emitted as a vendor domain — one the scanner then resolves and fetches. A one-character key
+/// matches nearly every organization name, so a single bad mapping attributes half a report to
+/// one domain AND points live traffic at it. The `s.com` / `src.com` entries found in the on-disk
+/// cache were produced exactly this way (from an `"S, Inc."` suffix-strip and from HTML `src`
+/// attributes leaking into the name-extraction path).
+///
+/// One character is refused outright. Two and three are kept but may only match a WHOLE
+/// organization name (see [`EXACT_MATCH_MAX_LEN`]) — the danger was never the key's length, it
+/// was the FRAGMENT match, and banning short keys threw away IBM, HP, EY, GE and 3M with it.
+const MIN_ORG_KEY_LEN: usize = 2;
+
+/// Keys this short must match the WHOLE organization string, never a fragment of it.
+///
+/// Banning short keys outright was the first attempt, and it traded one bug for another: "IBM",
+/// "AWS", "SAP", "Box", "EY", "GE", "HP" and "3M" are real organizations, and refusing their
+/// keys silently dropped their subprocessor rows. The danger was never the key's length — it
+/// was substring matching, which let "s" match every name on earth. So short keys are allowed
+/// and matched exactly; only the fragment match is taken away.
+const EXACT_MATCH_MAX_LEN: usize = 3;
+
+/// Insert an org→domain mapping key, refusing keys too short to match safely.
+/// See [`MIN_ORG_KEY_LEN`].
+fn insert_org_key(
+    mapping: &mut std::collections::HashMap<String, String>,
+    key: &str,
+    domain: &str,
+) {
+    let key = key.trim();
+    if key.len() < MIN_ORG_KEY_LEN {
+        debug!(
+            "Refusing org mapping key '{}' -> '{}': shorter than {} chars",
+            key, domain, MIN_ORG_KEY_LEN
+        );
+        return;
+    }
+    mapping.insert(key.to_string(), domain.to_string());
+}
+
+/// Trim the punctuation that a scraped name carries at its edges ("ibm," -> "ibm").
+fn trim_org_punct(s: &str) -> &str {
+    s.trim().trim_matches(|c: char| !c.is_alphanumeric())
+}
+
+/// Where (if anywhere) an org-mapping key matches an organization string.
+///
+/// Long keys match at a word boundary; short keys must be the entire name. This is the single
+/// place that decides, so the safety rule and the recall rule cannot drift apart.
+fn org_key_matches(cleaned_org: &str, key: &str) -> Option<usize> {
+    let key_trimmed = key.trim();
+    if key_trimmed.len() < MIN_ORG_KEY_LEN {
+        return None;
+    }
+    if key_trimmed.len() <= EXACT_MATCH_MAX_LEN {
+        let key_core = trim_org_punct(key_trimmed);
+        return (trim_org_punct(cleaned_org).eq_ignore_ascii_case(key_core)
+            && !key_core.is_empty())
+        .then_some(0);
+    }
+    find_word_bounded(cleaned_org, key_trimmed)
+}
+
+/// Is `domain` a syntactically real domain that may be emitted as a vendor?
+///
+/// This is deliberately NOT `is_valid_vendor_domain`, whose rules reject two-character second-
+/// level labels — and `hp.com`, `ey.com`, `ge.com` and `3m.com` are all real vendors whose rows
+/// were being dropped. What must be rejected is the INVENTED domain: `s.com`, synthesized from a
+/// one-character token, which the scanner then sends live DNS and HTTP traffic to. A registrable
+/// label of at least two characters, under a listed public suffix, draws that line exactly.
+fn is_emittable_vendor_domain(domain: &str) -> bool {
+    let domain = domain.trim();
+    if domain.is_empty() || domain.contains(char::is_whitespace) {
+        return false;
+    }
+    crate::domain_utils::registrable_label(domain).is_some_and(|label| label.len() >= 2)
+}
+
+/// Find `needle` in `haystack` at a word boundary, returning its position.
+///
+/// Plain substring search let the key "box" match "Dropbox" and "sap" match "Sapient". The
+/// boundary is any non-alphanumeric character (organization names are matched after
+/// punctuation stripping, so a trailing comma in a key still lines up).
+fn find_word_bounded(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut from = 0;
+    while let Some(idx) = haystack[from..].find(needle) {
+        let start = from + idx;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after_ok = end == haystack.len()
+            || !haystack[end..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            return Some(start);
+        }
+        // Advance by one CHARACTER, not one byte. `start + 1` lands inside a multi-byte
+        // character whenever the needle begins with one, and the next slice panics. These
+        // needles are cache keys learned from scraped organization names, so an ordinary German
+        // or French vendor name was one accented character away from crashing an entire scan.
+        from = start + haystack[start..].chars().next().map_or(1, |c| c.len_utf8());
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    None
+}
+
 /// Read an HTTP response body with streaming truncation.
 /// Reads the body in chunks, stopping at `max_bytes` to prevent
 /// memory exhaustion. Returns the body as a String (lossy UTF-8 conversion
@@ -966,20 +1083,26 @@ impl SubprocessorCache {
             .custom_org_to_domain_mapping
             .get_or_insert_with(std::collections::HashMap::new);
 
-        // Add confirmed mappings with multiple variations of the org name
+        // Add confirmed mappings with multiple variations of the org name.
+        //
+        // Every key written here is later matched against scraped organization text by
+        // substring, and its VALUE is emitted as a vendor domain. A key of one or two
+        // characters therefore matches almost any organization name and attributes it to
+        // whatever domain the key was learned against — which is how a mapping for "S, Inc."
+        // produced the key "s" and, from it, the `s.com` / `src.com` vendors found in the
+        // cache. That is not merely a wrong name in a report: the scanner then performs DNS
+        // and HTTP requests against an invented domain that belongs to an unrelated third
+        // party. Keys shorter than MIN_ORG_KEY_LEN are refused.
         for (org_name, domain_name) in mappings {
             let org_lower = org_name.trim().to_lowercase();
-            org_mapping.insert(org_lower.clone(), domain_name.clone());
+            insert_org_key(org_mapping, &org_lower, domain_name);
 
             // Add variations to improve matching
             // Remove trailing comma variation
             if org_lower.ends_with(',') {
-                org_mapping.insert(
-                    org_lower.trim_end_matches(',').to_string(),
-                    domain_name.clone(),
-                );
+                insert_org_key(org_mapping, org_lower.trim_end_matches(','), domain_name);
             } else {
-                org_mapping.insert(format!("{},", org_lower), domain_name.clone());
+                insert_org_key(org_mapping, &format!("{},", org_lower), domain_name);
             }
 
             // Remove business suffixes for base name
@@ -989,7 +1112,7 @@ impl SubprocessorCache {
             ];
             for suffix in &suffixes {
                 if let Some(base) = org_lower.strip_suffix(suffix) {
-                    org_mapping.insert(base.trim().to_string(), domain_name.clone());
+                    insert_org_key(org_mapping, base.trim(), domain_name);
                 }
             }
         }
@@ -5372,12 +5495,26 @@ impl SubprocessorAnalyzer {
         // where both "loom" and "atlassian" are valid patterns. The primary entity appears first
         // in the organization name, so we prefer the match closest to the start of the string.
         // Ties are broken by preferring the longest (most specific) pattern.
+        //
+        // Two guards, both load-bearing (see `org_key_matches` and `is_emittable_vendor_domain`).
+        // A cached mapping is untrusted input — it was learned from scraped text — and its value
+        // becomes a domain the scanner sends live DNS and HTTP traffic to. So: a key never
+        // matches a fragment of an unrelated name (long keys are word-bounded, short keys must
+        // be the whole name), and a value must be a syntactically real domain rather than one
+        // synthesized from a stray token.
         if let Some(special_handling) = &custom_rules.special_handling {
             if let Some(custom_mappings) = &special_handling.custom_org_to_domain_mapping {
                 let mut best_match: Option<(usize, usize, &str)> = None; // (position, pattern_len, domain)
                 for (org_pattern, domain) in custom_mappings {
                     let pattern_lower = org_pattern.to_lowercase();
-                    if let Some(pos) = cleaned_org.find(&pattern_lower) {
+                    if !is_emittable_vendor_domain(domain) {
+                        debug!(
+                            "Ignoring cached org mapping '{}' -> '{}': not an emittable vendor domain",
+                            org_pattern, domain
+                        );
+                        continue;
+                    }
+                    if let Some(pos) = org_key_matches(&cleaned_org, &pattern_lower) {
                         let is_better = match best_match {
                             None => true,
                             Some((best_pos, best_len, _)) => {
@@ -7095,6 +7232,78 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use crate::vendor::RecordType;
+
+    #[test]
+    fn short_org_keys_match_the_whole_name_but_never_a_fragment() {
+        // Banning short keys outright dropped IBM, HP, EY, GE and 3M — all real vendors. The
+        // danger was never the length, it was the FRAGMENT match: "s" matching every name on
+        // earth is what synthesized `s.com` and pointed live scanner traffic at it.
+        assert_eq!(org_key_matches("ibm", "ibm"), Some(0));
+        assert_eq!(org_key_matches("ibm,", "ibm"), Some(0));
+        assert_eq!(org_key_matches("hp", "hp"), Some(0));
+        // ...but never inside another company's name.
+        assert_eq!(org_key_matches("sapient corporation", "sap"), None);
+        assert_eq!(org_key_matches("dropbox", "box"), None);
+        assert_eq!(org_key_matches("ibm global services", "ibm"), None);
+        // A one-character key cannot match anything at all.
+        assert_eq!(org_key_matches("s, inc.", "s"), None);
+        // Long keys still match at a word boundary inside a longer name.
+        assert_eq!(
+            org_key_matches("loom, inc. (atlassian)", "atlassian"),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn emittable_vendor_domains_admit_real_short_brands_and_reject_invented_ones() {
+        // `is_valid_vendor_domain` rejects two-character second-level labels, which threw away
+        // hp.com and ey.com — real vendors. The line that matters is the INVENTED domain.
+        for real in [
+            "hp.com",
+            "ey.com",
+            "3m.com",
+            "ge.com",
+            "stripe.com",
+            "monzo.co.uk",
+        ] {
+            assert!(is_emittable_vendor_domain(real), "{real} is a real domain");
+        }
+        for invented in ["s.com", "x", "", "not a domain", "192.168.1.1"] {
+            assert!(
+                !is_emittable_vendor_domain(invented),
+                "{invented:?} must never be emitted as a vendor domain"
+            );
+        }
+    }
+
+    #[test]
+    fn the_writer_never_persists_a_one_character_key() {
+        // The write side of the same guard: `"S, Inc."` suffix-stripped to the key "s", which is
+        // how `s.com` got into the on-disk cache in the first place. Reading is gated, but a
+        // poisoned key must not be written either — a cache is forever.
+        let mut mapping = std::collections::HashMap::new();
+        insert_org_key(&mut mapping, "s", "s.com");
+        insert_org_key(&mut mapping, "", "empty.com");
+        assert!(
+            mapping.is_empty(),
+            "a one-character key was persisted: {mapping:?}"
+        );
+
+        // ...while real short names are still learned.
+        insert_org_key(&mut mapping, "ibm", "ibm.com");
+        insert_org_key(&mut mapping, "hp", "hp.com");
+        assert_eq!(mapping.get("ibm").map(String::as_str), Some("ibm.com"));
+        assert_eq!(mapping.get("hp").map(String::as_str), Some("hp.com"));
+    }
+
+    #[test]
+    fn word_bounded_search_does_not_panic_on_multibyte_haystacks() {
+        // `from = start + 1` advanced one BYTE and sliced mid-character on the next pass. The
+        // needles here are cache keys learned from scraped names, so an accented vendor name
+        // crashed the scan.
+        assert_eq!(find_word_bounded("xüber über gmbh", "über"), Some(7));
+        assert_eq!(find_word_bounded("münchen re", "re"), Some(9));
+    }
 
     fn make_domain(domain: &str) -> SubprocessorDomain {
         SubprocessorDomain {
