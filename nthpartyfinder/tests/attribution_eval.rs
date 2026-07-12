@@ -19,7 +19,6 @@
 //! part that must be right without the network's help. The network tiers are exercised by the
 //! integration suite; the *coverage* number they produce is measured on real scans, not here.
 
-use nthpartyfinder::org_role;
 use nthpartyfinder::whois::{domain_derived_organization, resolve_curated, OrganizationResult};
 
 /// Resolve a domain the way production does when no network source answers: curated tiers
