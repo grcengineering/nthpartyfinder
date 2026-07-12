@@ -212,10 +212,7 @@ pub fn resolve_curated(domain: &str) -> Option<OrganizationResult> {
     // useless, and it is exactly the kind of row a user would otherwise hand-map.
     if let Some(org) = brand_tld_owner(domain) {
         debug!("{} sits under the .{} brand TLD", domain, org);
-        return Some(OrganizationResult::verified(
-            org.to_string(),
-            "brand_tld",
-        ));
+        return Some(OrganizationResult::verified(org.to_string(), "brand_tld"));
     }
 
     None
@@ -1350,7 +1347,15 @@ mod tests {
         // .microsoft each shipped as its own bare label — "Blog", "Calculator", "Core" — because
         // nothing in the chain looked at the suffix. ICANN Spec 13 makes a .brand TLD
         // single-registrant, so the suffix alone settles ownership.
-        for (domain, expected) in [
+        // The suffix rule itself.
+        assert_eq!(brand_tld_owner("blog.google"), Some("Google"));
+        assert_eq!(brand_tld_owner("calculator.aws"), Some("Amazon"));
+        assert_eq!(brand_tld_owner("core.microsoft"), Some("Microsoft"));
+
+        // And end-to-end through the real chain. A more specific tier may name the company more
+        // fully ("Microsoft Corporation") — that is the precedence working, so assert the company
+        // is identified rather than pinning the exact string an earlier tier chose.
+        for (domain, company) in [
             ("blog.google", "Google"),
             ("about.google", "Google"),
             ("ai.google", "Google"),
@@ -1360,9 +1365,16 @@ mod tests {
             ("cloud.microsoft", "Microsoft"),
         ] {
             let got = resolve_curated(domain)
-                .unwrap_or_else(|| panic!("{domain} should resolve from its brand TLD"));
-            assert_eq!(got.name, expected, "{domain}");
-            assert!(got.is_verified, "{domain} is settled by the registry, not inferred");
+                .unwrap_or_else(|| panic!("{domain} should resolve without a network call"));
+            assert!(
+                got.name.contains(company),
+                "{domain} resolved to {:?}, which does not name {company}",
+                got.name
+            );
+            assert!(
+                got.is_verified,
+                "{domain} is settled by the registry, not inferred"
+            );
         }
     }
 

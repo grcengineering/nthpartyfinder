@@ -27,6 +27,7 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && \
 
 # Copy actual source and assets
 COPY src/ src/
+COPY data/ data/
 COPY config/ config/
 COPY templates/ templates/
 COPY static/ static/
