@@ -23,7 +23,9 @@ pub mod memory_monitor;
 #[cfg(feature = "runtime-ner")]
 pub mod model_fetch;
 pub mod ner_org;
+pub mod org_dataset;
 pub mod org_normalizer;
+pub mod org_role;
 pub mod perf;
 pub mod prefs;
 pub mod rate_limit;

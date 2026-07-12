@@ -1310,8 +1310,27 @@ pub async fn process_vendor_domain(
         };
         match result {
             Ok(org_result) => {
+                // Backstop against extracted taglines reaching the report ("Connective
+                // Infrastructure for Production AI" as a company name). The chain already
+                // gates every extracted name at its source (`whois::accept_extracted_name`),
+                // so this should never fire; it is here because the cost of a scraped
+                // sentence appearing as a vendor's identity is much higher than the cost of
+                // one extra check.
+                //
+                // Applies to INFERRED names only. A curated source (the user's own overrides,
+                // the vendor registry, the embedded dataset) is the most trustworthy evidence
+                // the tool has, and a plausibility heuristic must never overrule it — real
+                // legal names are odd enough ("Meta Platforms, Inc.") that the heuristic, not
+                // the curated datum, is the thing more likely to be wrong.
+                let resolved = if org_result.is_verified
+                    || org_normalizer::is_plausible_org_name(&org_result.name)
+                {
+                    org_normalizer::normalize(&org_result.name)
+                } else {
+                    org_normalizer::normalize(&domain)
+                };
                 let mut vendors = discovered_vendors.lock().await;
-                vendors.insert(domain.clone(), org_normalizer::normalize(&org_result.name));
+                vendors.insert(domain.clone(), resolved);
                 logger.log_whois_lookup(&domain, org_result.is_verified);
             }
             Err(e) => {

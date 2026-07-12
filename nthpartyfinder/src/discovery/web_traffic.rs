@@ -401,6 +401,15 @@ pub fn filter_network_urls(
 /// Check if a domain is generic infrastructure/browser noise that shouldn't be reported
 /// as a vendor relationship (e.g., Chrome DevTools, localhost, browser internals).
 fn is_infrastructure_noise(domain: &str) -> bool {
+    // An IP address is not a vendor. A page fetching `https://44.238.122.172/...` is talking to a
+    // host with no organization behind it — and the address used to be chopped into "122.172" by
+    // the base-domain extractor, which is not merely a junk row: "122.172" is inet_aton shorthand
+    // for 122.0.0.172, so the scanner would then aim DNS and a real browser at an arbitrary,
+    // unrelated live host. Whole or fragmented, an IP must never become a vendor.
+    if is_ip_host(domain) {
+        return true;
+    }
+
     matches!(
         domain,
         "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"
@@ -408,6 +417,18 @@ fn is_infrastructure_noise(domain: &str) -> bool {
         // W3C/standards bodies
         | "w3.org" | "schema.org" | "ogp.me"
     )
+}
+
+/// An IP literal (bracketed or bare), or the numeric fragment of one — never a hostname.
+fn is_ip_host(host: &str) -> bool {
+    let unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    if unbracketed.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !unbracketed.is_empty()
+        && unbracketed
+            .split('.')
+            .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Check if a domain is a social media platform. Social media domains should only be

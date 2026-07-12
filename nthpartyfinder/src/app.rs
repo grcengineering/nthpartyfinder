@@ -1709,7 +1709,15 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 let normalized_name = org_normalizer::normalize(&org_result.name);
                 discovered_vendors.insert(domain.clone(), normalized_name.clone());
                 logger.log_whois_lookup(domain, true);
-                if !org_result.is_verified {
+                // Ask the user to confirm a name only when the tool does not actually KNOW it —
+                // when the name is a domain-derived echo. `is_verified` alone is the wrong
+                // trigger: it means "a CURATED source attested this", so gating on it would
+                // prompt for every organization whose name came from its own web page or WHOIS
+                // record — most of them. Prompting on a name we extracted correctly is exactly
+                // the hand-mapping burden this work exists to remove.
+                if !org_result.is_verified
+                    && analysis::is_likely_inferred_org(domain, &normalized_name)
+                {
                     unverified_orgs.push(UnverifiedOrgMapping {
                         domain: domain.clone(),
                         inferred_org: normalized_name,

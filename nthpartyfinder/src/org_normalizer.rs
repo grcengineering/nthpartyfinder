@@ -33,6 +33,14 @@ const CORPORATE_SUFFIXES: &[&str] = &[
     "proprietary limited",
     "private limited",
     "public benefit corporation",
+    // Two-word abbreviated forms MUST precede their one-word tails. "pty ltd" listed after
+    // "ltd" would match "ltd" first and leave "Acme Pty" — a dangling fragment that no longer
+    // dedups with the same company's suffix-less form. Every Australian ("Pty Ltd") and Indian
+    // ("Pvt Ltd") company hit this.
+    "pty ltd",
+    "pty. ltd.",
+    "pvt ltd",
+    "pvt. ltd.",
     "limited",
     "company",
     // Abbreviated forms
@@ -107,21 +115,23 @@ impl OrgNormalizer {
     pub fn new() -> Self {
         let mut aliases = HashMap::new();
 
-        // Built-in common aliases
+        // Built-in common aliases.
+        //
+        // Deliberately WITHOUT the dangerous whole-word tickers that used to live here:
+        // "meta" (a common English word), "fb", "ms", "crm", "hp" and "twtr" rewrote any
+        // organization whose name normalized to those letters — and they fired on names
+        // from every source, including curated ones. An alias must be unambiguous enough
+        // that no real company shares it.
         let builtin_aliases = [
-            // Stock ticker symbols
+            // Stock ticker symbols (unambiguous — no company is literally named these)
             ("msft", "Microsoft"),
             ("goog", "Google"),
             ("googl", "Google"),
             ("amzn", "Amazon"),
             ("aapl", "Apple"),
-            ("meta", "Meta Platforms"),
-            ("fb", "Meta Platforms"),
             ("nflx", "Netflix"),
             ("ibm", "IBM"),
             ("orcl", "Oracle"),
-            ("crm", "Salesforce"),
-            ("twtr", "Twitter"),
             ("tsla", "Tesla"),
             ("nvda", "NVIDIA"),
             ("intc", "Intel"),
@@ -131,9 +141,6 @@ impl OrgNormalizer {
             ("aws", "Amazon Web Services"),
             ("gcp", "Google Cloud Platform"),
             ("azure", "Microsoft Azure"),
-            ("ms", "Microsoft"),
-            ("ibm", "IBM"),
-            ("hp", "Hewlett-Packard"),
             ("hpe", "Hewlett Packard Enterprise"),
             ("dell emc", "Dell Technologies"),
             ("vmware", "VMware"),
@@ -253,6 +260,11 @@ impl OrgNormalizer {
         // Remove corporate suffixes
         result = remove_corporate_suffixes(&result);
 
+        // Strip the domain suffix AGAIN: "Salesforce.com, Inc." only exposes its ".com"
+        // once the legal suffix is gone, and running this only before suffix removal left
+        // "Salesforce.com" and "Salesforce" as two different organizations in the report.
+        result = strip_domain_suffix(&result);
+
         // Normalize punctuation (remove apostrophes, normalize spaces)
         result = normalize_punctuation(&result);
 
@@ -262,6 +274,16 @@ impl OrgNormalizer {
         // Convert to title case
         result = to_title_case(&result);
 
+        // Never emit an empty organization: a blank name renders as an attributed vendor
+        // with no company, which is worse than an honest domain-derived label.
+        if result.trim().is_empty() {
+            debug!(
+                "Normalization of '{}' emptied the name; keeping the original",
+                name
+            );
+            return normalize_whitespace(name);
+        }
+
         // Check aliases again after normalization
         let lower_result = result.to_lowercase();
         if let Some(canonical) = self.aliases.get(&lower_result) {
@@ -270,6 +292,14 @@ impl OrgNormalizer {
                 name, canonical
             );
             return canonical.clone();
+        }
+
+        // Final step: correct known-brand casing that title-casing gets wrong
+        // ("Openai" -> "OpenAI", "Mongodb" -> "MongoDB"). Applied last so it fixes the
+        // output of every attribution source. Leaves unknown names untouched.
+        if let Some(canonical) = brand_casing(&result) {
+            debug!("Corrected brand casing '{}' -> '{}'", result, canonical);
+            return canonical;
         }
 
         debug!("Normalized '{}' to '{}'", name, result);
@@ -382,28 +412,62 @@ impl OrgNormalizer {
     }
 }
 
-/// Strip trailing domain suffixes from org names (R005 fix).
-/// e.g., "Monday.com" -> "Monday", "Bigmarker.com" -> "Bigmarker"
-/// Only strips if the name ends with a known TLD suffix preceded by a dot.
+/// Strip a trailing domain suffix from an org name (R005 fix).
+/// e.g. "Monday.com" -> "Monday", "Bigmarker.com" -> "Bigmarker".
+///
+/// The suffix set is the Public Suffix List, not a hardcoded list of fifteen TLDs: names
+/// arriving as "Example.co.uk" or "Beispiel.de" kept their suffix under the old list and
+/// became distinct organizations from their suffix-less twins. A name is only stripped when
+/// what remains is a plausible label — never down to nothing.
 fn strip_domain_suffix(name: &str) -> String {
-    let domain_suffixes = [
-        ".com", ".io", ".net", ".org", ".co", ".us", ".ai", ".dev", ".app", ".tech", ".cloud",
-        ".so", ".ly", ".me", ".to",
-    ];
-
-    let lower = name.to_lowercase();
-    for suffix in &domain_suffixes {
-        if lower.ends_with(suffix) {
-            let stripped = &name[..name.len() - suffix.len()];
-            // Only strip if the remaining part is non-empty and looks like a name
-            // (not something like just ".com" or "a.com")
-            if stripped.len() >= 2 && !stripped.ends_with('.') {
-                return stripped.to_string();
-            }
+    let trimmed = name.trim();
+    let Some((head, tail)) = trimmed.rsplit_once('.') else {
+        return trimmed.to_string();
+    };
+    // A dot inside a NAME is not a domain suffix: "U.S. Bancorp", "A.P. Moller - Maersk",
+    // "St. Jude Medical". The tail of a domain-suffixed name is one bare token at the very end
+    // ("Monday.com"), so anything with whitespace in it disqualifies the whole match — without
+    // this the last-dot split treats " Bancorp" as the suffix and ships "U.s".
+    if tail.contains(char::is_whitespace) {
+        return trimmed.to_string();
+    }
+    // The tail must be a real public suffix, and the head must survive as a name.
+    if head.len() < 2 || head.ends_with('.') || head.contains(' ') {
+        return trimmed.to_string();
+    }
+    let candidate_suffix = tail.trim().to_lowercase();
+    if candidate_suffix.is_empty() {
+        return trimmed.to_string();
+    }
+    // Check the longest suffix the name could carry ("co.uk" in "Example.co.uk") first.
+    if let Some((head2, tail2)) = head.rsplit_once('.') {
+        let compound = format!("{}.{}", tail2.to_lowercase(), candidate_suffix);
+        if head2.len() >= 2
+            && !tail2.contains(char::is_whitespace)
+            && is_listed_public_suffix(&compound)
+        {
+            return head2.to_string();
         }
     }
+    if is_listed_public_suffix(&candidate_suffix) {
+        return head.to_string();
+    }
 
-    name.to_string()
+    trimmed.to_string()
+}
+
+/// Is `candidate` a suffix the Public Suffix List actually **lists**?
+///
+/// This must ask for a LISTED suffix, not merely a suffix-shaped answer. The PSL algorithm has
+/// an implicit `*` rule: every unknown single label is treated as a public suffix, so
+/// `psl::suffix_str("x.bancorp")` cheerfully returns `Some("bancorp")` — and a check that only
+/// compares the string would then "strip the domain suffix" off `U.S. Bancorp` and ship `U.s`.
+/// A listed suffix carries a `typ()` (ICANN or private); the implicit wildcard does not.
+fn is_listed_public_suffix(candidate: &str) -> bool {
+    psl::suffix(format!("x.{candidate}").as_bytes()).is_some_and(|suffix| {
+        suffix.typ().is_some()
+            && std::str::from_utf8(suffix.as_bytes()).is_ok_and(|s| s == candidate)
+    })
 }
 
 /// Remove "The " prefix from the beginning of a name.
@@ -431,39 +495,51 @@ fn normalize_ampersand(name: &str) -> String {
     normalize_whitespace(&result)
 }
 
-/// Remove corporate suffixes from a name.
+/// Remove a trailing corporate suffix from a name.
+///
+/// The suffix must be a whole trailing WORD, not merely trailing characters. The previous
+/// implementation also matched the bare suffix with `ends_with`, so any name whose final
+/// letters happened to spell one was silently truncated: "Cisco" → "Cis" (`co`), "Visa" →
+/// "Vi" (`sa`), "Zinc" → "Z" (`inc`), "Maytag" → "Mayt" (`ag`), "Sysco" → "Sys". These are
+/// real vendors, and the mangled names shipped straight into reports.
+///
+/// A name that is *entirely* a suffix ("Limited") is left alone — stripping it would return
+/// an empty string, and an empty organization renders as an attributed-but-nameless vendor.
 fn remove_corporate_suffixes(name: &str) -> String {
-    let mut result = name.to_string();
-    let lower = name.to_lowercase();
+    let trimmed = name.trim();
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() < 2 {
+        // Single word: never strip. Either it is the company name, or it is a bare suffix
+        // with no name attached — and neither case is improved by returning "".
+        return trimmed.trim_end_matches([',', ' ']).to_string();
+    }
 
-    // Try each suffix (order matters - longer ones first)
+    // Compare the trailing word(s) against each suffix, longest first. Multi-word suffixes
+    // ("limited liability company") need multiple trailing words.
     for suffix in CORPORATE_SUFFIXES {
-        // Check for suffix at the end, optionally preceded by comma or space
-        let patterns = [
-            format!(", {}", suffix),
-            format!(" {}", suffix),
-            suffix.to_string(),
-        ];
-
-        for pattern in &patterns {
-            let pattern_lower = pattern.to_lowercase();
-            if lower.ends_with(&pattern_lower) {
-                let end_pos = result.len() - pattern.len();
-                result = result[..end_pos].trim().to_string();
-                break;
-            }
+        let suffix_words: Vec<&str> = suffix.split_whitespace().collect();
+        if suffix_words.len() >= words.len() {
+            continue; // stripping would consume the whole name
         }
+        let tail_start = words.len() - suffix_words.len();
+        let tail_matches =
+            words[tail_start..]
+                .iter()
+                .zip(suffix_words.iter())
+                .all(|(word, suffix_word)| {
+                    // Trailing punctuation belongs to the suffix, not the name: "Inc.," == "inc".
+                    let word = word.trim_end_matches([',', '.']);
+                    let suffix_word = suffix_word.trim_end_matches([',', '.']);
+                    word.eq_ignore_ascii_case(suffix_word)
+                });
 
-        // Check if we've modified the result
-        if result.len() < name.len() {
-            break;
+        if tail_matches {
+            let head = words[..tail_start].join(" ");
+            return head.trim_end_matches([',', ' ']).to_string();
         }
     }
 
-    // Also remove trailing punctuation like commas, periods
-    result = result.trim_end_matches([',', '.', ' ']).to_string();
-
-    result
+    trimmed.trim_end_matches([',', ' ']).to_string()
 }
 
 /// Normalize punctuation: remove apostrophes, normalize quotes, etc.
@@ -485,15 +561,214 @@ fn normalize_whitespace(name: &str) -> String {
     name.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
+/// Canonical brand casing for organization names that naive title-casing gets wrong.
+///
+/// `to_title_case` produces "Openai"/"Mongodb"/"Hubspot" for domain-derived and
+/// web-scraped names because it only knows a short acronym list. These are real,
+/// well-known vendors whose correct casing is a fixed fact — a lookup table is the
+/// right tool. Keyed by the fully-lowercased name; value is the canonical display form.
+/// This is applied as the final step of `normalize`, so it corrects the output of
+/// EVERY attribution source (known-vendors, web, WHOIS, NER, domain fallback) at once.
+fn brand_casing_canonical(lower: &str) -> Option<&'static str> {
+    Some(match lower {
+        "openai" => "OpenAI",
+        "anthropic" | "anthropicai" => "Anthropic",
+        "mongodb" => "MongoDB",
+        "hubspot" => "HubSpot",
+        "docusign" => "DocuSign",
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "paypal" => "PayPal",
+        "youtube" => "YouTube",
+        "linkedin" => "LinkedIn",
+        "mysql" => "MySQL",
+        "postgresql" | "postgres" => "PostgreSQL",
+        "graphql" => "GraphQL",
+        "nodejs" | "node.js" => "Node.js",
+        "typescript" => "TypeScript",
+        "javascript" => "JavaScript",
+        "pagerduty" => "PagerDuty",
+        "godaddy" => "GoDaddy",
+        "woocommerce" => "WooCommerce",
+        "wordpress" => "WordPress",
+        "ebay" => "eBay",
+        "icloud" => "iCloud",
+        "doordash" => "DoorDash",
+        "surveymonkey" => "SurveyMonkey",
+        "sendgrid" => "SendGrid",
+        "mailchimp" => "Mailchimp",
+        "auth0" => "Auth0",
+        "onetrust" => "OneTrust",
+        "servicenow" => "ServiceNow",
+        "vmware" => "VMware",
+        "netsuite" => "NetSuite",
+        "quickbooks" => "QuickBooks",
+        "zoominfo" => "ZoomInfo",
+        "semrush" => "SEMrush",
+        "launchdarkly" => "LaunchDarkly",
+        "logrocket" => "LogRocket",
+        "fullstory" => "FullStory",
+        "browserstack" => "BrowserStack",
+        "digitalocean" => "DigitalOcean",
+        "jetbrains" => "JetBrains",
+        "bigquery" => "BigQuery",
+        "dynamodb" => "DynamoDB",
+        "cockroachdb" => "CockroachDB",
+        "clickhouse" => "ClickHouse",
+        "planetscale" => "PlanetScale",
+        "supabase" => "Supabase",
+        "netapp" => "NetApp",
+        "workos" => "WorkOS",
+        "typeform" => "Typeform",
+        "notioniq" => "Notion",
+        "e2b" => "E2B",
+        "cloudamqp" => "CloudAMQP",
+        "keycdn" => "KeyCDN",
+        "maxcdn" => "MaxCDN",
+        "jsdelivr" => "jsDelivr",
+        "npm" => "npm",
+        "pypi" => "PyPI",
+        "webrtc" => "WebRTC",
+        "openssl" => "OpenSSL",
+        "letsencrypt" | "let's encrypt" => "Let's Encrypt",
+        "hashicorp" => "HashiCorp",
+        "influxdb" => "InfluxDB",
+        "elasticsearch" => "Elasticsearch",
+        "opensearch" => "OpenSearch",
+        "getsentry" | "sentry" => "Sentry",
+        "statuspage" => "Statuspage",
+        "squarespace" => "Squarespace",
+        "sharepoint" => "SharePoint",
+        "onedrive" => "OneDrive",
+        "outsystems" => "OutSystems",
+        "coinbase" => "Coinbase",
+        "youtubetv" => "YouTube TV",
+        _ => return None,
+    })
+}
+
+/// Correct known-brand casing. Matches on the lowercased name, also trying the form
+/// with a trailing legal suffix stripped (so "Openai Inc." and "OpenAI, Inc." both map).
+/// Returns `None` when the name is not a known brand, leaving it untouched.
+fn brand_casing(name: &str) -> Option<String> {
+    let lower = name.trim().to_lowercase();
+    if let Some(c) = brand_casing_canonical(&lower) {
+        return Some(c.to_string());
+    }
+    // Strip a single trailing corporate suffix and retry, so brand-casing still applies
+    // to fallback names like "Openai Inc." that carry a suffix `remove_corporate_suffixes`
+    // did not reach.
+    let stripped = lower
+        .trim_end_matches('.')
+        .trim_end()
+        .trim_end_matches(", inc")
+        .trim_end_matches(" inc")
+        .trim_end_matches(" llc")
+        .trim_end_matches(" ltd")
+        .trim_end_matches(" corp")
+        .trim_end_matches(" co")
+        .trim();
+    if stripped != lower {
+        if let Some(c) = brand_casing_canonical(stripped) {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+/// Whether a string looks like a real organization NAME rather than a tagline,
+/// marketing description, or extracted sentence fragment.
+///
+/// Web/OpenGraph/NER extraction sometimes returns a page's descriptive text
+/// ("Connective Infrastructure for Production AI", "ETL and Reverse ETL Platform and
+/// API") instead of the company name. Used as a gate in the attribution pipeline so
+/// such a candidate is rejected and a cleaner source (WHOIS registrant, domain
+/// fallback) wins instead. Deliberately CONSERVATIVE — it only rejects on strong
+/// phrase signals, so it never discards a legitimate multi-word company name
+/// ("Amazon Web Services", "Zoom Video Communications", "Bank of America").
+pub fn is_plausible_org_name(name: &str) -> bool {
+    let t = name.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let words: Vec<&str> = t.split_whitespace().collect();
+    // Real organization names are short. Six or more words is a description/tagline,
+    // not a name (the longest common legitimate names — "International Business
+    // Machines Corporation" — are five words including the suffix).
+    if words.len() >= 6 {
+        return false;
+    }
+    let ll = t.to_lowercase();
+    // Leading indefinite article — sentences start this way ("A platform for teams"),
+    // company names essentially never do.
+    //
+    // "The " is deliberately NOT rejected: The Trade Desk, The New York Times and The Home
+    // Depot are real companies, and rejecting them demoted a correct attribution to a
+    // domain fragment. `normalize` strips the article anyway, so the two forms still dedup.
+    if ll.starts_with("a ") || ll.starts_with("an ") {
+        return false;
+    }
+    // Mid-string phrase/verb markers. Each is a strong "this is a sentence" signal that
+    // essentially never appears inside a real company name. `" of "` is deliberately
+    // EXCLUDED (Bank of America, Board of Trade). Padded with spaces so substrings of a
+    // single word ("Forward", "Yourbrand") do not match.
+    let padded = format!(" {} ", ll);
+    const PHRASE_MARKERS: [&str; 12] = [
+        " for ",
+        " that ",
+        " your ",
+        " helps ",
+        " enables ",
+        " enabling ",
+        " powering ",
+        " powered by ",
+        " building ",
+        " simplify ",
+        " automate ",
+        " designed ",
+    ];
+    for marker in PHRASE_MARKERS {
+        if padded.contains(marker) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Convert string to title case (capitalize first letter of each word).
 /// Known acronyms and very short all-caps words (2 chars) are preserved.
 /// Longer all-caps words are converted to title case since they're more likely normal words.
 /// L011 fix: Common English prepositions/articles stay lowercase when not the first word.
+/// Convert a name to title case, preserving casing that is already meaningful.
+///
+/// The rule that matters: **a word whose casing carries information is left alone.**
+/// "SendGrid", "DataDog", "iCloud", "eBay" and "OpenAI" are mixed-case on purpose, and the
+/// previous implementation lower-cased everything after the first letter of every word —
+/// so a *correct* curated name like "SendGrid" was actively corrupted into "Sendgrid", and
+/// every acronym outside a 13-entry list ("SAP", "AMD", "IBM"'s neighbours) was flattened
+/// to "Sap"/"Amd". Only all-lowercase and all-uppercase words are re-cased here; anything
+/// with internal capitals is already telling us how it wants to be written.
+///
+/// This is why the brand-casing table needs so few entries: it now only has to fix names
+/// that arrive *without* case information (from a domain label, say), not repair names the
+/// normalizer itself broke.
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn to_title_case(name: &str) -> String {
-    // Known acronyms that should be preserved regardless of length
+    // Known acronyms that should be preserved regardless of length.
+    //
+    // This stays a curated list rather than a heuristic on purpose. The obvious heuristic —
+    // "a lone all-caps token of 3-4 letters is an acronym" — preserves SAP and AMD but also
+    // preserves OKTA and EBAY, and WHOIS registrant fields are shouty enough ("OKTA, INC.")
+    // that those arrive all-caps routinely. Guessing wrong invents a name; the curated list
+    // cannot.
+    // "AT" and "IT" are deliberately NOT here. The match is case-insensitive, so listing them
+    // force-uppercased the ordinary English words: "At Home Group Inc." (NYSE: HOME) became
+    // "AT Home Group", and "It Works Marketing" became "IT Works Marketing". Nothing is lost by
+    // omitting them — an input that is genuinely the acronym arrives all-caps ("AT&T", "IT
+    // Services"), and the two-character all-caps rule below preserves it.
     let known_acronyms = [
-        "IBM", "AT", "AWS", "GCP", "USA", "UK", "EU", "AI", "IT", "HR", "PR", "QA", "HP",
+        "IBM", "AWS", "GCP", "USA", "UK", "EU", "AI", "HR", "PR", "QA", "HP", "SAP", "AMD", "SAS",
+        "EMC", "NCR",
     ];
 
     // L011 fix: common prepositions/articles/conjunctions that should stay lowercase
@@ -510,21 +785,13 @@ fn to_title_case(name: &str) -> String {
             let chars: Vec<char> = word.chars().collect();
             let len = chars.len();
 
-            // Check if word is all uppercase
-            let is_all_upper = word.chars().all(|c| c.is_uppercase() || !c.is_alphabetic());
+            let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+            let is_all_upper = !letters.is_empty() && letters.iter().all(|c| c.is_uppercase());
+            let is_all_lower = !letters.is_empty() && letters.iter().all(|c| c.is_lowercase());
 
-            // Check if it's a known acronym (case-insensitive)
-            if known_acronyms.iter().any(|a| a.eq_ignore_ascii_case(word)) {
-                return word.to_uppercase();
-            }
-
-            // Preserve only very short all-caps words (2 chars) as likely acronyms
-            // e.g., IT, HR, etc. Words like NEW, THE are too common as normal words
-            if is_all_upper && len == 2 && chars.iter().any(|c| c.is_alphabetic()) {
-                return word.to_string();
-            }
-
-            // L011: lowercase prepositions/articles when not the first word
+            // L011: lowercase prepositions/articles when not the first word. Checked BEFORE
+            // the acronym list, which otherwise force-uppercased a mid-name "at"/"it" —
+            // "Bank at It" out of "bank at it".
             if i > 0
                 && lowercase_words
                     .iter()
@@ -533,15 +800,33 @@ fn to_title_case(name: &str) -> String {
                 return word.to_lowercase();
             }
 
-            // Convert to title case
-            let mut result_chars = chars;
-            if let Some(first) = result_chars.first_mut() {
-                *first = first.to_uppercase().next().unwrap_or(*first);
+            // Known acronym (case-insensitive)
+            if known_acronyms.iter().any(|a| a.eq_ignore_ascii_case(word)) {
+                return word.to_uppercase();
             }
-            for c in &mut result_chars[1..] {
-                if c.is_alphabetic() {
+
+            // Mixed case already — the name is telling us how it is spelled. Leave it.
+            if !is_all_upper && !is_all_lower {
+                return word.to_string();
+            }
+
+            // Preserve short all-caps words (2 chars) as likely acronyms (IT, HR).
+            if is_all_upper && len == 2 && !letters.is_empty() {
+                return word.to_string();
+            }
+
+            // Convert to title case. A hyphen, slash, ampersand or dot starts a new word inside
+            // the token: "COCA-COLA" -> "Coca-Cola", and the initials in "U.S. Bancorp" stay
+            // capitalised instead of decaying to "U.s.".
+            let mut result_chars = chars;
+            let mut at_word_start = true;
+            for c in &mut result_chars {
+                if at_word_start {
+                    *c = c.to_uppercase().next().unwrap_or(*c);
+                } else if c.is_alphabetic() {
                     *c = c.to_lowercase().next().unwrap_or(*c);
                 }
+                at_word_start = matches!(*c, '-' | '/' | '&' | '.');
             }
             result_chars.into_iter().collect::<String>()
         })
@@ -719,11 +1004,27 @@ mod tests {
     fn test_case_variations() {
         let n = normalizer();
 
-        // All should normalize to "Google"
+        // Case-less inputs (all-upper or all-lower) are title-cased.
         assert_eq!(n.normalize("GOOGLE"), "Google");
         assert_eq!(n.normalize("google"), "Google");
         assert_eq!(n.normalize("Google"), "Google");
-        assert_eq!(n.normalize("GooGle"), "Google");
+    }
+
+    #[test]
+    fn test_internal_capitals_are_preserved() {
+        // Mixed-case words carry information and are left alone. The normalizer used to
+        // lowercase everything after each word's first letter, which CORRUPTED correct
+        // names arriving from curated sources: "SendGrid" became "Sendgrid", "DataDog"
+        // became "Datadog", and every acronym outside a 13-entry list ("SAP", "AMD") was
+        // flattened. Structurally, a typo like "GooGle" is indistinguishable from
+        // "SendGrid", so the normalizer no longer tries to tell them apart — protecting the
+        // thousands of real brands is worth leaving one hypothetical typo unfixed.
+        let n = normalizer();
+        assert_eq!(n.normalize("SendGrid"), "SendGrid");
+        assert_eq!(n.normalize("DataDog"), "DataDog");
+        assert_eq!(n.normalize("iCloud"), "iCloud");
+        assert_eq!(n.normalize("SAP"), "SAP");
+        assert_eq!(n.normalize("AMD"), "AMD");
     }
 
     #[test]
@@ -733,8 +1034,11 @@ mod tests {
         // IBM should stay uppercase (known acronym in the list)
         assert_eq!(n.normalize("IBM"), "IBM");
 
-        // HP has a builtin alias -> "Hewlett-Packard"
-        assert_eq!(n.normalize("HP"), "Hewlett-Packard");
+        // "HP" now stays "HP". The builtin alias used to rewrite it to "Hewlett-Packard" —
+        // a company that stopped existing under that name in 2015 (it split into HP Inc.
+        // and Hewlett Packard Enterprise), so the alias was actively producing a wrong,
+        // stale organization name.
+        assert_eq!(n.normalize("HP"), "HP");
 
         // AWS has a builtin alias -> "Amazon Web Services"
         assert_eq!(n.normalize("AWS"), "Amazon Web Services");
@@ -1550,5 +1854,178 @@ mod tests {
     fn test_module_normalize_fn() {
         let result = normalize("anything");
         assert!(!result.is_empty());
+    }
+
+    // =========================================================================
+    // Regressions: names the normalizer used to destroy
+    // =========================================================================
+
+    #[test]
+    fn test_names_ending_in_suffix_letters_are_not_truncated() {
+        // `remove_corporate_suffixes` matched the BARE suffix with `ends_with`, so any name
+        // whose final letters happened to spell one was silently truncated. Every one of
+        // these is a real vendor that shipped into reports mangled:
+        //   Cisco -> "Cis" (co), Visa -> "Vi" (sa), Zinc -> "Z" (inc),
+        //   Maytag -> "Mayt" (ag), Sysco -> "Sys" (co)
+        let n = normalizer();
+        assert_eq!(n.normalize("Cisco"), "Cisco");
+        assert_eq!(n.normalize("Visa"), "Visa");
+        assert_eq!(n.normalize("Zinc"), "Zinc");
+        assert_eq!(n.normalize("Maytag"), "Maytag");
+        assert_eq!(n.normalize("Sysco"), "Sysco");
+        assert_eq!(n.normalize("Cargo"), "Cargo");
+        // ...while a genuine trailing suffix WORD is still removed.
+        assert_eq!(n.normalize("Cisco Systems, Inc."), "Cisco Systems");
+        assert_eq!(n.normalize("Visa Inc"), "Visa");
+    }
+
+    #[test]
+    fn test_normalize_never_returns_empty_for_a_nonempty_name() {
+        // A name that is entirely a legal suffix would strip to "", and an empty org renders
+        // as an attributed-but-nameless vendor.
+        let n = normalizer();
+        for name in ["Limited", "Inc.", "LLC", "Corporation", "Co."] {
+            assert!(
+                !n.normalize(name).trim().is_empty(),
+                "normalize({name:?}) emptied the name"
+            );
+        }
+    }
+
+    #[test]
+    fn test_domain_suffix_stripped_after_legal_suffix() {
+        // "Salesforce.com, Inc." only exposes its ".com" once the legal suffix is gone.
+        // Running the domain-suffix strip only BEFORE suffix removal left "Salesforce.com"
+        // and "Salesforce" as two different organizations in the same report.
+        let n = normalizer();
+        assert_eq!(n.normalize("Salesforce.com, Inc."), "Salesforce");
+        assert_eq!(n.normalize("Salesforce"), "Salesforce");
+    }
+
+    #[test]
+    fn test_domain_suffix_strip_is_public_suffix_aware() {
+        // The old 15-TLD list left ccTLD and multi-label suffixes attached, so
+        // "Example.co.uk" and "Example" were distinct organizations.
+        let n = normalizer();
+        assert_eq!(n.normalize("Beispiel.de"), "Beispiel");
+        assert_eq!(n.normalize("Example.co.uk"), "Example");
+    }
+
+    #[test]
+    fn test_mid_name_connectors_are_not_force_uppercased() {
+        // The known-acronym check ran BEFORE the lowercase-words check, so a mid-name "at"
+        // was force-uppercased into a fake acronym: "Bank AT Home".
+        assert_eq!(to_title_case("bank at home"), "Bank at Home");
+        assert_eq!(to_title_case("bank of the west"), "Bank of the West");
+    }
+
+    #[test]
+    fn test_at_and_it_led_company_names_survive() {
+        // "AT" and "IT" were in the known-acronym list, which matches case-insensitively, so
+        // two real companies were being renamed into fake acronyms.
+        assert_eq!(to_title_case("At Home Group Inc."), "At Home Group Inc.");
+        assert_eq!(to_title_case("it works marketing"), "It Works Marketing");
+        // An input that really IS the acronym arrives all-caps, and the two-character all-caps
+        // rule still preserves it — including through normalize()'s "&" -> "and" rewrite.
+        assert_eq!(to_title_case("AT"), "AT");
+        assert_eq!(to_title_case("IT"), "IT");
+        assert_eq!(normalizer().normalize("AT&T"), "AT and T");
+    }
+
+    #[test]
+    fn test_a_dot_inside_a_name_is_not_a_domain_suffix() {
+        // `strip_domain_suffix` split on the LAST dot and asked the PSL whether the tail was a
+        // public suffix — but the PSL's implicit `*` rule answers "yes" for any unknown single
+        // label, so "U.S. Bancorp" was truncated to "U.s" and "Node.js" to "Node". Every one of
+        // these names reached the report corrupted, from curated sources included.
+        let n = normalizer();
+        assert_eq!(n.normalize("U.S. Bancorp"), "U.S. Bancorp");
+        assert_eq!(n.normalize("A.P. Moller - Maersk"), "A.P. Moller - Maersk");
+        assert_eq!(n.normalize("St. Jude Medical"), "St. Jude Medical");
+        assert_eq!(n.normalize("Node.js"), "Node.js");
+        // A real domain-suffixed name is still stripped — that is what the function is for.
+        assert_eq!(n.normalize("Monday.com"), "Monday");
+        assert_eq!(n.normalize("Salesforce.com, Inc."), "Salesforce");
+        assert_eq!(n.normalize("Example.co.uk"), "Example");
+    }
+
+    #[test]
+    fn test_two_word_legal_suffixes_are_removed_whole() {
+        // "pty ltd" sat AFTER "ltd" in the suffix list, so "ltd" matched first and left the
+        // dangling fragment "Acme Pty" — which then failed to dedup with plain "Acme".
+        let n = normalizer();
+        assert_eq!(n.normalize("Acme Pty Ltd"), "Acme");
+        assert_eq!(n.normalize("Tata Motors Pvt Ltd"), "Tata Motors");
+    }
+
+    #[test]
+    fn test_hyphenated_all_caps_names_recase_each_part() {
+        assert_eq!(to_title_case("COCA-COLA"), "Coca-Cola");
+    }
+
+    #[test]
+    fn test_ambiguous_ticker_aliases_no_longer_rewrite_real_names() {
+        // "meta", "fb", "ms", "crm" and "hp" were whole-string aliases that fired on ANY
+        // source's output — including curated names — rewriting them to unrelated companies.
+        // The property under test is that an ambiguous token is never rewritten into some
+        // other company's name; its casing is not the point.
+        let n = normalizer();
+        assert_eq!(n.normalize("Meta"), "Meta");
+        assert_ne!(n.normalize("MS"), "Microsoft");
+        assert_ne!(n.normalize("CRM"), "Salesforce");
+        assert_ne!(n.normalize("FB"), "Facebook");
+        // The unambiguous ticker aliases still work.
+        assert_eq!(n.normalize("MSFT"), "Microsoft");
+        assert_eq!(n.normalize("AWS"), "Amazon Web Services");
+    }
+
+    // =========================================================================
+    // is_plausible_org_name / brand_casing (previously untested)
+    // =========================================================================
+
+    #[test]
+    fn test_plausible_org_name_rejects_taglines() {
+        // The class of value the web/NER tiers produce instead of a company name.
+        assert!(!is_plausible_org_name(
+            "Connective Infrastructure for Production AI"
+        ));
+        assert!(!is_plausible_org_name(
+            "Payments infrastructure for the internet"
+        ));
+        assert!(!is_plausible_org_name("A platform that helps teams ship"));
+        assert!(!is_plausible_org_name(
+            "The fastest way to build your next app today"
+        ));
+        assert!(!is_plausible_org_name(""));
+    }
+
+    #[test]
+    fn test_plausible_org_name_accepts_real_company_names() {
+        for name in [
+            "Stripe",
+            "Amazon Web Services",
+            "Zoom Video Communications",
+            "Bank of America",
+            "The Trade Desk", // leading "The" is a real company pattern, not a sentence
+            "The New York Times",
+            "8x8",
+            "23andMe Holding Co.",
+        ] {
+            assert!(is_plausible_org_name(name), "rejected real name: {name}");
+        }
+    }
+
+    #[test]
+    fn test_brand_casing_fixes_names_that_arrive_without_case_information() {
+        // A domain-derived label carries no casing, so "openai" must become "OpenAI" rather
+        // than the title-cased "Openai" that shipped in reports.
+        let n = normalizer();
+        assert_eq!(n.normalize("openai"), "OpenAI");
+        assert_eq!(n.normalize("OPENAI"), "OpenAI");
+        assert_eq!(n.normalize("mongodb"), "MongoDB");
+        assert_eq!(n.normalize("github"), "GitHub");
+        assert_eq!(n.normalize("e2b"), "E2B");
+        // An unknown brand is left alone rather than guessed at.
+        assert_eq!(n.normalize("zzzunknownbrand"), "Zzzunknownbrand");
     }
 }

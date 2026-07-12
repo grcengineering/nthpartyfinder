@@ -27,6 +27,8 @@ pub struct OrganizationResult {
 }
 
 impl OrganizationResult {
+    /// An attribution backed by evidence outside the vendor's own marketing surface:
+    /// a curated store, the embedded dataset, or a registrant record filed with a registry.
     pub fn verified(name: String, source: &str) -> Self {
         Self {
             name,
@@ -35,6 +37,33 @@ impl OrganizationResult {
         }
     }
 
+    /// A name the operator published about itself (Schema.org, OpenGraph, page title).
+    ///
+    /// Self-declaration is real evidence but it is not independent: the party being
+    /// identified wrote it, and parking pages, bot interstitials and taglines all live in
+    /// exactly this channel. Marked unverified so the report can say so and the review
+    /// contract can pick it up — previously every one of these was laundered into
+    /// `is_verified = true`, which is why a scraped tagline was indistinguishable from a
+    /// curated attribution.
+    pub fn self_declared(name: String, source: &str) -> Self {
+        Self {
+            name,
+            is_verified: false,
+            source: source.to_string(),
+        }
+    }
+
+    /// A machine-inferred name (NER span), carrying its source so downstream can tell it
+    /// apart from a bare domain fallback.
+    pub fn inferred_by(name: String, source: &str) -> Self {
+        Self {
+            name,
+            is_verified: false,
+            source: source.to_string(),
+        }
+    }
+
+    /// No source could attribute the domain: the name is derived from the domain itself.
     pub fn inferred(name: String) -> Self {
         Self {
             name,
@@ -50,8 +79,13 @@ pub async fn get_organization_with_status(domain: &str) -> Result<OrganizationRe
     get_organization_with_status_and_config(domain, true, 0.6).await
 }
 
-/// Get organization with verification status and optional rate limiting
-/// This is the preferred method when using rate limiting
+/// Get organization with verification status and optional rate limiting.
+///
+/// This used to be a SECOND copy of the whole attribution chain, and it had drifted: no embedded
+/// dataset tier, web/NER results marked `verified = true`, and a domain-less WHOIS extraction
+/// that could never apply the self-attribution rescue. Two chains means two answers to the same
+/// question, and the copy nobody calls is the one nobody notices going wrong. There is now one
+/// chain; this wrapper only adds the rate-limit permit.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_rate_limit(
     domain: &str,
@@ -59,136 +93,14 @@ pub async fn get_organization_with_rate_limit(
     min_confidence: f32,
     rate_limit_ctx: Option<&RateLimitContext>,
 ) -> Result<OrganizationResult> {
-    debug!("Looking up organization for domain: {}", domain);
-
-    // Priority 1: Check known vendors database (fastest and most reliable - no rate limit needed)
-    if let Some(kv_result) = known_vendors::lookup(domain) {
-        debug!(
-            "Found {} in known vendors database: {} (source: {})",
-            domain, kv_result.organization, kv_result.source
-        );
-        return Ok(OrganizationResult::verified(
-            kv_result.organization,
-            &kv_result.source.to_string(),
-        ));
+    // The curated tiers need no network, so they must not spend a WHOIS permit.
+    if let Some(curated) = resolve_curated(domain) {
+        return Ok(curated);
     }
-
-    // Priority 1.5: Vendor registry (authoritative, instant — no network).
-    if let Some(org) = vendor_registry::lookup_organization(domain) {
-        debug!("Found {} in vendor registry: {}", domain, org);
-        return Ok(OrganizationResult::verified(org, "vendor_registry"));
-    }
-
-    // Priority 2: Web page analysis (HTTP-only — no per-vendor headless browser).
-    // The fetched body is retained so the Priority-5 NER step can reuse it rather than
-    // re-fetching the same page.
-    let mut prefetched_html: Option<String> = None;
-    if web_org_enabled {
-        if let Ok((web_result, html)) =
-            web_org::extract_organization_http_only_with_body(domain).await
-        {
-            prefetched_html = html;
-            if let Some(web_result) = web_result {
-                if web_result.confidence >= min_confidence {
-                    debug!(
-                        "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                        domain, web_result.organization, web_result.source, web_result.confidence
-                    );
-                    return Ok(OrganizationResult::verified(
-                        web_result.organization,
-                        &format!("web_{}", web_result.source),
-                    ));
-                } else {
-                    debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
-                           domain, web_result.confidence, min_confidence);
-                }
-            }
-        }
-    }
-
-    // Apply WHOIS rate limiting before actual WHOIS queries
     if let Some(ctx) = rate_limit_ctx {
         ctx.whois_limiter.acquire().await;
     }
-
-    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
-    let native_org_is_redacted = match try_native_whois(domain).await {
-        Ok(result) => {
-            if let Some(organization) = extract_organization_from_whois(&result) {
-                debug!(
-                    "Found organization via native WHOIS for {}: {}",
-                    domain, organization
-                );
-                return Ok(OrganizationResult::verified(organization, "whois"));
-            }
-            debug!(
-                "native WHOIS returned placeholder organization for {}, trying fallbacks",
-                domain
-            );
-            whois_org_field_is_redacted(&result)
-        }
-        Err(_) => false,
-    };
-
-    // Priority 4: System whois command (if available) - also uses the same rate limit token.
-    //
-    // Skipped when the native record already showed the organization to be deliberately
-    // redacted: `whois(1)` queries the same servers over the same protocol and returns the
-    // same redaction, so it can only cost a subprocess and up to 4s. It is still tried
-    // whenever the native client failed outright or returned a record with no org field —
-    // the cases where a different client can genuinely learn something.
-    if !native_org_is_redacted {
-        if let Ok(result) = try_system_whois(domain).await {
-            if let Some(organization) = extract_organization_from_whois(&result) {
-                debug!(
-                    "Found organization via system whois for {}: {}",
-                    domain, organization
-                );
-                return Ok(OrganizationResult::verified(organization, "system_whois"));
-            }
-            debug!(
-                "System whois returned placeholder organization for {}, trying NER fallback",
-                domain
-            );
-        }
-    } else {
-        debug!(
-            "Skipping system whois for {}: native WHOIS org field is redacted at the source",
-            domain
-        );
-    }
-
-    // Priority 5: NER-based extraction (if embedded-ner feature enabled)
-    if ner_org::is_available() {
-        debug!("NER is available, attempting extraction for {}", domain);
-        let page_content = fetch_org_page_content(domain, prefetched_html).await;
-        let content_ref = page_content.as_deref();
-
-        if let Ok(Some(ner_result)) = ner_org::extract_organization_async(domain, content_ref).await
-        {
-            debug!(
-                "Found organization via NER for {}: {} (confidence: {:.2})",
-                domain, ner_result.organization, ner_result.confidence
-            );
-            return Ok(OrganizationResult::verified(
-                ner_result.organization,
-                "ner_gliner",
-            ));
-        }
-        debug!(
-            "NER could not determine organization for {}, using domain fallback",
-            domain
-        );
-    }
-
-    // Final fallback to domain-based organization name (marked as unverified)
-    debug!(
-        "All lookup methods failed or returned placeholders for {}, using domain-based fallback",
-        domain
-    );
-    Ok(OrganizationResult::inferred(
-        extract_organization_from_domain(domain),
-    ))
+    get_organization_with_status_and_config(domain, web_org_enabled, min_confidence).await
 }
 
 /// Whether a WHOIS record carries an organization/registrant field whose value is a
@@ -230,6 +142,183 @@ async fn fetch_org_page_content(domain: &str, prefetched_html: Option<String>) -
     }
 }
 
+/// The curated, offline prefix of the attribution chain — the tiers that need no network
+/// and make no inference, in precedence order:
+///
+/// 1. **Known vendors** (ships with the tool + the user's own local overrides). The user's
+///    own decisions always win.
+/// 2. **Vendor registry** (config-backed, verification-token-derived).
+/// 3. **Embedded public dataset** (AdGuard companiesdb, CC BY-SA) — ~5.1k domains curated by
+///    an independent maintainer. This is the single largest coverage lever in the chain: the
+///    first two tiers know ~280 domains between them, while a depth-3 scan surfaces thousands,
+///    so most domains previously fell all the way through to inference.
+///
+/// Returns `None` when no curated source knows the domain — the caller then descends into the
+/// network and inference tiers, which are the ones that can be wrong.
+///
+/// The production chain calls this function first, and the hermetic attribution eval
+/// (`tests/attribution_eval.rs`) calls this same function, so the eval cannot drift away from
+/// the behaviour that actually ships.
+pub fn resolve_curated(domain: &str) -> Option<OrganizationResult> {
+    if let Some(kv_result) = known_vendors::lookup(domain) {
+        debug!(
+            "Found {} in known vendors database: {} (source: {})",
+            domain, kv_result.organization, kv_result.source
+        );
+        return Some(OrganizationResult::verified(
+            kv_result.organization,
+            &kv_result.source.to_string(),
+        ));
+    }
+
+    if let Some(org) = vendor_registry::lookup_organization(domain) {
+        debug!("Found {} in vendor registry: {}", domain, org);
+        return Some(OrganizationResult::verified(org, "vendor_registry"));
+    }
+
+    // A domain the dataset gets WRONG for our purposes — see `STALE_ROLLUP`.
+    if let Some(correct) = stale_rollup_correction(domain) {
+        debug!("Using curated correction for {}: {}", domain, correct);
+        return Some(OrganizationResult::verified(
+            correct.to_string(),
+            "curated_correction",
+        ));
+    }
+
+    // An independently-maintained mapping beats anything scraped off the vendor's own page, so
+    // the dataset sits above every inference source — and below the user's tiers, which always
+    // win.
+    //
+    // No intermediary filter here, deliberately. That filter exists for WHOIS, where a registrar
+    // or privacy proxy LEAKS into the registrant field of a domain it does not own. A dataset row
+    // is the opposite: it is a positive ownership assertion, and registrars really do own domains
+    // (`secureserver.net` is GoDaddy's, `trafficfacts.com` is GoDaddy's). Filtering the dataset
+    // through it threw away correct answers.
+    if let Some(org) = crate::org_dataset::lookup(domain) {
+        debug!("Found {} in embedded dataset: {}", domain, org);
+        return Some(OrganizationResult::verified(
+            org.to_string(),
+            "embedded_dataset",
+        ));
+    }
+
+    // A brand TLD names its owner outright. ICANN Registry Agreement Specification 13 makes a
+    // .brand a single-registrant TLD: nobody but Google may hold a name under `.google`. So the
+    // suffix itself is proof of ownership — stronger evidence than any WHOIS record — and it
+    // costs no network call.
+    //
+    // Without this, `blog.google` shipped as "Blog", `calculator.aws` as "Calculator", and
+    // `core.microsoft` as "Core": the domain-derived label is technically honest and completely
+    // useless, and it is exactly the kind of row a user would otherwise hand-map.
+    if let Some(org) = brand_tld_owner(domain) {
+        debug!("{} sits under the .{} brand TLD", domain, org);
+        return Some(OrganizationResult::verified(
+            org.to_string(),
+            "brand_tld",
+        ));
+    }
+
+    None
+}
+
+/// TLDs that ICANN delegated to a single company. The suffix *is* the attribution.
+///
+/// Deliberately a hand-curated list, not "any suffix that looks like a company". The generic
+/// TLDs are the trap: `.app`, `.dev`, and `.cloud` are Google-operated *registries* open to
+/// anyone, so treating a Google-run registry as a Google-owned domain would attribute half the
+/// internet to Google. Only genuine single-registrant .brand TLDs belong here.
+const BRAND_TLDS: &[(&str, &str)] = &[
+    ("google", "Google"),
+    ("gle", "Google"), // goo.gle
+    ("youtube", "Google"),
+    ("android", "Google"),
+    ("chrome", "Google"),
+    ("gmail", "Google"),
+    ("aws", "Amazon"),
+    ("amazon", "Amazon"),
+    ("microsoft", "Microsoft"),
+    ("azure", "Microsoft"),
+    ("xbox", "Microsoft"),
+    ("bing", "Microsoft"),
+    ("apple", "Apple"),
+    ("icloud", "Apple"),
+    ("meta", "Meta"),
+    ("facebook", "Meta"),
+    ("instagram", "Meta"),
+    ("whatsapp", "Meta"),
+    ("oracle", "Oracle"),
+    ("java", "Oracle"),
+    ("ibm", "IBM"),
+    ("cisco", "Cisco"),
+    ("intel", "Intel"),
+    ("dell", "Dell"),
+    ("hp", "HP"),
+    ("sap", "SAP"),
+    ("salesforce", "Salesforce"),
+    ("adobe", "Adobe"),
+    ("netflix", "Netflix"),
+    ("linkedin", "LinkedIn"),
+    ("paypal", "PayPal"),
+    ("visa", "Visa"),
+    ("mastercard", "Mastercard"),
+    ("walmart", "Walmart"),
+    ("target", "Target"),
+    ("nike", "Nike"),
+    ("bmw", "BMW"),
+    ("audi", "Audi"),
+    ("ford", "Ford"),
+    ("toyota", "Toyota"),
+];
+
+/// The company that owns the domain's brand TLD, if its suffix is one.
+fn brand_tld_owner(domain: &str) -> Option<&'static str> {
+    let suffix = crate::domain_utils::icann_suffix(domain)?;
+    BRAND_TLDS
+        .iter()
+        .find(|(tld, _)| *tld == suffix)
+        .map(|(_, org)| *org)
+}
+
+/// Domains where the embedded dataset's answer is wrong for THIS tool's question.
+///
+/// The dataset answers *"which company ultimately receives this traffic"* — a tracker-ownership
+/// question — so it rolls domains up to their **parent** company, and those rollups go stale when
+/// companies split. A vendor graph asks a different question: *who is this vendor?*
+///
+/// This is a hand-curated list of the conflicts, not a heuristic, because the heuristic version of
+/// this idea ("if the domain's label is a brand we know, prefer the brand") was worse than the
+/// disease: it also fired on `icloud.com` → "iCloud" (instead of Apple), `sharepoint.com` →
+/// "SharePoint" (instead of Microsoft) and `wordpress.com` → "WordPress" (instead of Automattic),
+/// replacing correct company names with product names. A product is not a vendor you contract
+/// with. Only a human can tell the difference, so a human (this list) does.
+const STALE_ROLLUP: &[(&str, &str)] = &[
+    // Dataset says "eBay". PayPal was spun off from eBay in 2015.
+    ("paypal.com", "PayPal"),
+    // Dataset says "Microsoft Corporation" — the parent, not the vendor. A vendor graph that
+    // reports github.com as Microsoft has lost the fact the user needs.
+    ("github.com", "GitHub"),
+    ("linkedin.com", "LinkedIn"),
+];
+
+fn stale_rollup_correction(domain: &str) -> Option<&'static str> {
+    let base = crate::domain_utils::extract_base_domain(domain);
+    STALE_ROLLUP
+        .iter()
+        .find(|(d, _)| *d == base)
+        .map(|(_, org)| *org)
+}
+
+/// The terminal tier: the domain's own registrable label, honestly marked unverified.
+///
+/// This is what a domain gets when every curated, network and inference source has failed.
+/// It invents nothing — no legal suffix, no company — it just says "the owner of
+/// `stripe.com` calls itself something, and the only part of that we actually know is
+/// 'Stripe'". Exposed so the attribution eval can assert the honest-fallback properties
+/// against the real implementation.
+pub fn domain_derived_organization(domain: &str) -> OrganizationResult {
+    OrganizationResult::inferred(extract_organization_from_domain(domain))
+}
+
 /// Get organization with verification status, with configurable web org lookup
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_status_and_config(
@@ -239,32 +328,22 @@ pub async fn get_organization_with_status_and_config(
 ) -> Result<OrganizationResult> {
     debug!("Looking up organization for domain: {}", domain);
 
-    // Priority 1: Check known vendors database (fastest and most reliable)
-    if let Some(kv_result) = known_vendors::lookup(domain) {
-        debug!(
-            "Found {} in known vendors database: {} (source: {})",
-            domain, kv_result.organization, kv_result.source
-        );
-        return Ok(OrganizationResult::verified(
-            kv_result.organization,
-            &kv_result.source.to_string(),
-        ));
-    }
-
-    // Priority 1.5: Vendor registry (config-backed, verification-token-derived org
-    // names). Authoritative and instant — avoids any network call for the many
-    // registry-known domains, the single biggest per-vendor speedup at scale.
-    if let Some(org) = vendor_registry::lookup_organization(domain) {
-        debug!("Found {} in vendor registry: {}", domain, org);
-        return Ok(OrganizationResult::verified(org, "vendor_registry"));
+    // Priorities 1 / 1.5 / 1.7 — the curated, offline, no-inference tiers.
+    if let Some(curated) = resolve_curated(domain) {
+        return Ok(curated);
     }
 
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags), HTTP-only.
     // The headless-browser fallback is intentionally NOT used here: this runs once per
     // discovered vendor (hundreds per scan) and a Chrome launch each was the dominant
-    // cost. Org name is cosmetic (uniqueness keys on domain), so HTTP-only is recall-safe.
-    // The fetched body is retained for the Priority-5 NER step, which would otherwise
+    // cost. The fetched body is retained for the Priority-5 NER step, which would otherwise
     // re-fetch the same page.
+    //
+    // A page is the *operator's own* claim about itself, so it is accepted as
+    // `is_verified = false` (self-declared, not independently attested) and only after
+    // `accept_extracted_name` clears it. Rejection here FALLS THROUGH to WHOIS rather than
+    // dead-ending at the domain fallback — a scraped tagline must never outrank a real
+    // registrant record, which is precisely what used to happen.
     let mut prefetched_html: Option<String> = None;
     if web_org_enabled {
         if let Ok((web_result, html)) =
@@ -273,14 +352,20 @@ pub async fn get_organization_with_status_and_config(
             prefetched_html = html;
             if let Some(web_result) = web_result {
                 if web_result.confidence >= min_confidence {
+                    if let Some(name) = accept_extracted_name(&web_result.organization, domain) {
+                        debug!(
+                            "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
+                            domain, name, web_result.source, web_result.confidence
+                        );
+                        return Ok(OrganizationResult::self_declared(
+                            name,
+                            &format!("web_{}", web_result.source),
+                        ));
+                    }
                     debug!(
-                        "Found {} via web page analysis: {} (source: {}, confidence: {:.2})",
-                        domain, web_result.organization, web_result.source, web_result.confidence
+                        "Web result '{}' for {} rejected (tagline/intermediary), trying WHOIS",
+                        web_result.organization, domain
                     );
-                    return Ok(OrganizationResult::verified(
-                        web_result.organization,
-                        &format!("web_{}", web_result.source),
-                    ));
                 } else {
                     debug!("Web page result for {} had low confidence ({:.2} < {:.2}), trying other methods",
                            domain, web_result.confidence, min_confidence);
@@ -289,10 +374,13 @@ pub async fn get_organization_with_status_and_config(
         }
     }
 
-    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912)
+    // Priority 3: Native Rust WHOIS lookup (in-process TCP client, RFC 3912). Registration
+    // data — asserted by the registrant to a registry, which is a materially stronger claim
+    // than a page the operator wrote about itself.
     let native_org_is_redacted = match try_native_whois(domain).await {
         Ok(result) => {
-            if let Some(organization) = extract_organization_from_whois(&result) {
+            if let Some(organization) = extract_organization_from_whois_for_domain(&result, domain)
+            {
                 debug!(
                     "Found organization via native WHOIS for {}: {}",
                     domain, organization
@@ -300,7 +388,7 @@ pub async fn get_organization_with_status_and_config(
                 return Ok(OrganizationResult::verified(organization, "whois"));
             }
             debug!(
-                "native WHOIS returned placeholder organization for {}, trying fallbacks",
+                "native WHOIS returned no usable registrant organization for {}, trying fallbacks",
                 domain
             );
             whois_org_field_is_redacted(&result)
@@ -312,7 +400,8 @@ pub async fn get_organization_with_status_and_config(
     // already showed a deliberately-redacted org — see the sibling chain for the rationale.
     if !native_org_is_redacted {
         if let Ok(result) = try_system_whois(domain).await {
-            if let Some(organization) = extract_organization_from_whois(&result) {
+            if let Some(organization) = extract_organization_from_whois_for_domain(&result, domain)
+            {
                 debug!(
                     "Found organization via system whois for {}: {}",
                     domain, organization
@@ -320,7 +409,7 @@ pub async fn get_organization_with_status_and_config(
                 return Ok(OrganizationResult::verified(organization, "system_whois"));
             }
             debug!(
-                "System whois returned placeholder organization for {}, trying NER fallback",
+                "System whois returned no usable registrant organization for {}, trying NER fallback",
                 domain
             );
         }
@@ -331,7 +420,11 @@ pub async fn get_organization_with_status_and_config(
         );
     }
 
-    // Priority 5: NER-based extraction (if embedded-ner feature enabled)
+    // Priority 5: NER extraction. A model's guess over page text — the weakest evidence the
+    // chain produces, and the one that most reliably invents taglines and third-party names.
+    // It is accepted as `is_verified = false` and only through the same gate as the web tier,
+    // so that a low-quality span becomes an honest unattribution rather than a confident
+    // wrong answer.
     if ner_org::is_available() {
         debug!("NER is available, attempting extraction for {}", domain);
         let page_content = fetch_org_page_content(domain, prefetched_html).await;
@@ -339,14 +432,17 @@ pub async fn get_organization_with_status_and_config(
 
         if let Ok(Some(ner_result)) = ner_org::extract_organization_async(domain, content_ref).await
         {
+            if let Some(name) = accept_extracted_name(&ner_result.organization, domain) {
+                debug!(
+                    "Found organization via NER for {}: {} (confidence: {:.2})",
+                    domain, name, ner_result.confidence
+                );
+                return Ok(OrganizationResult::inferred_by(name, "ner_gliner"));
+            }
             debug!(
-                "Found organization via NER for {}: {} (confidence: {:.2})",
-                domain, ner_result.organization, ner_result.confidence
+                "NER result '{}' for {} rejected (tagline/intermediary), using domain fallback",
+                ner_result.organization, domain
             );
-            return Ok(OrganizationResult::verified(
-                ner_result.organization,
-                "ner_gliner",
-            ));
         }
         debug!(
             "NER could not determine organization for {}, using domain fallback",
@@ -354,14 +450,90 @@ pub async fn get_organization_with_status_and_config(
         );
     }
 
-    // Final fallback to domain-based organization name (marked as unverified)
+    // Final fallback: the domain's own registrable label, honestly marked unverified. No
+    // legal suffix is invented — see `extract_organization_from_domain`.
     debug!(
         "All lookup methods failed or returned placeholders for {}, using domain-based fallback",
         domain
     );
-    Ok(OrganizationResult::inferred(
-        extract_organization_from_domain(domain),
-    ))
+    Ok(domain_derived_organization(domain))
+}
+
+/// The gate every *extracted* organization name (web page, NER) must clear.
+///
+/// Extracted names come from text the vendor — or an attacker, or a parking provider —
+/// controls, so they are the source of the tagline, interstitial and third-party-name
+/// misattributions. Three checks, each cheap:
+///
+/// 1. It must look like an organization name and not a sentence ([`org_normalizer::is_plausible_org_name`]).
+/// 2. It must not name an intermediary (registrar, privacy proxy, registry, address).
+/// 3. It must not be a bare echo of the domain label, which adds nothing over the fallback
+///    yet would otherwise be presented as an attributed name.
+///
+/// Returning `None` means "keep looking", not "give up" — every caller falls through to the
+/// next evidence source.
+fn accept_extracted_name(candidate: &str, domain: &str) -> Option<String> {
+    // Clean FIRST, then judge. The gates must see exactly the string that would ship: a candidate
+    // carrying embedded newlines ("Acme\nfor\nTeams") reads as a name to the plausibility check
+    // (whose phrase probes are space-padded) but as a tagline once collapsed, so gating the raw
+    // form let the two checks disagree about the same name.
+    let cleaned = clean_organization_name(candidate.trim());
+    let name = cleaned.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if is_interstitial(name) {
+        return None;
+    }
+    if !crate::org_normalizer::is_plausible_org_name(name) {
+        return None;
+    }
+    if crate::org_role::is_intermediary_for_domain(name, domain) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// A page that is not the vendor's site: a bot check, an error page, a parking lander.
+///
+/// These read as perfectly plausible organization names — "Attention Required! | Cloudflare" has
+/// capitals, a proper noun and no tagline grammar — so they sail through every other check and
+/// get printed as the company that owns the domain. What the scanner actually reached was a
+/// challenge page, which means it learned nothing at all, and the honest answer is to keep
+/// looking (WHOIS) rather than to report the interstitial as a company.
+fn is_interstitial(name: &str) -> bool {
+    const INTERSTITIALS: &[&str] = &[
+        "attention required",
+        "just a moment",
+        "checking your browser",
+        "verify you are human",
+        "are you a robot",
+        "security check",
+        "access denied",
+        "403 forbidden",
+        "page not found",
+        "404 not found",
+        "domain for sale",
+        "buy this domain",
+        "this domain is for sale",
+        "under construction",
+        "coming soon",
+        "index of /",
+        "example domain",
+        // Some registries answer WHOIS with prose instead of a record. DNS Belgium's reply
+        // shipped verbatim as the organization for `youtu.be`: "Not shown, please visit
+        // www.dnsbelgium.be for webbased whois." It parses as a name because it is a sentence.
+        "please visit",
+        "webbased whois",
+        "web-based whois",
+        "whois server",
+        "not shown",
+        "see the whois",
+        "query the whois",
+        "for more information",
+    ];
+    let lower = name.to_lowercase();
+    INTERSTITIALS.iter().any(|phrase| lower.contains(phrase))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -655,20 +827,28 @@ fn execute_whois_command(domain: &str) -> Result<String> {
     Err(anyhow!("No working whois command found"))
 }
 
+/// The honest display name for a domain nobody could attribute.
+///
+/// This used to append a fabricated `" Inc."` to the title-cased second-to-last label,
+/// turning "we could not identify the owner of acme.io" into "Acme Inc." — a
+/// confident-looking company that does not exist. Every unattributed domain in every
+/// report was therefore indistinguishable from a real attribution, which is why
+/// misattribution looked rampant: most of it was not a wrong lookup, it was an invented
+/// answer to a lookup that had failed.
+///
+/// The replacement invents nothing: the registrable label the owner actually chose,
+/// title-cased, with no legal suffix. Paired with `OrganizationResult::inferred` (which
+/// sets `is_verified = false`), a guess stays distinguishable from an attribution. The
+/// label comes from the PSL, so `monzo.co.uk` yields "Monzo" rather than "Co".
 fn extract_organization_from_domain(domain: &str) -> String {
-    // Extract a reasonable organization name from the domain
-    let parts: Vec<&str> = domain.split('.').collect();
-    if parts.len() >= 2 {
-        // Convert domain to title case organization name
-        let org_name = parts[parts.len() - 2];
-        let mut chars: Vec<char> = org_name.chars().collect();
-        if !chars.is_empty() {
-            chars[0] = chars[0].to_uppercase().next().unwrap_or(chars[0]);
-        }
-        format!("{} Inc.", chars.into_iter().collect::<String>())
-    } else {
-        domain.to_string()
+    let Some(label) = crate::domain_utils::registrable_label(domain) else {
+        return domain.to_string();
+    };
+    let mut chars: Vec<char> = label.chars().collect();
+    if let Some(first) = chars.first_mut() {
+        *first = first.to_uppercase().next().unwrap_or(*first);
     }
+    chars.into_iter().collect::<String>()
 }
 
 /// Organization field patterns, in precedence order. Compiled once: a scan parses one
@@ -684,16 +864,37 @@ fn compile_patterns(patterns: &[&str]) -> Vec<Regex> {
     patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
 }
 
+/// Registrant-organization field patterns, in precedence order.
+///
+/// Anchored to line starts (`(?im)^`). The unanchored versions matched
+/// `Admin Organization:` and `Tech Organization:` — the registrar's or a law firm's
+/// contact, not the registrant — and matched organization-looking text inside registry
+/// disclaimer paragraphs. Whichever line appeared first in the response won, which made
+/// the attribution depend on registry response ordering.
+///
+/// Registrant-scoped patterns come first so an explicit `Registrant Organization:` beats a
+/// bare `Organization:` elsewhere in the record. The Nominet (.uk) form — where the value
+/// sits on the line *after* `Registrant:` — has its own pattern; the same-line regex could
+/// never capture it, so every .uk domain fell through to the fabricated fallback.
 fn organization_patterns() -> &'static [Regex] {
     ORGANIZATION_PATTERNS.get_or_init(|| {
+        // Order is precedence. Every ORGANIZATION field comes before every NAME field, because
+        // `Registrant Name` is a PERSON field in most registries — a WHOIS record carrying both
+        // "Registrant Name: Jane Doe" and "Organization: Acme GmbH" must attribute the domain to
+        // Acme, not to Jane. (It is kept at all because many records carry only the name field,
+        // and a company name in it is better than no attribution.)
         compile_patterns(&[
-            r"(?i)Organization:\s*(.+)",
-            r"(?i)Registrant Organization:\s*(.+)",
-            r"(?i)Registrant:\s*(.+)",
-            r"(?i)OrgName:\s*(.+)",
-            r"(?i)org-name:\s*(.+)",
-            r"(?i)organisation:\s*(.+)",
-            r"(?i)Company:\s*(.+)",
+            r"(?im)^\s*Registrant Organization:\s*(.+)$",
+            r"(?im)^\s*Registrant Organisation:\s*(.+)$",
+            r"(?im)^\s*Organization:\s*(.+)$",
+            r"(?im)^\s*Organisation:\s*(.+)$",
+            r"(?im)^\s*OrgName:\s*(.+)$",
+            r"(?im)^\s*org-name:\s*(.+)$",
+            r"(?im)^\s*Company:\s*(.+)$",
+            r"(?im)^\s*Registrant Name:\s*(.+)$",
+            r"(?im)^\s*Registrant:\s*(.+)$",
+            // Nominet .uk: "Registrant:\n    Acme Widgets Limited"
+            r"(?im)^\s*Registrant:\s*$\r?\n\s+(\S.*)$",
         ])
     })
 }
@@ -708,21 +909,52 @@ fn registrar_patterns() -> &'static [Regex] {
     })
 }
 
+/// Extract the registrant organization from a WHOIS response.
+///
+/// Two rules that were previously wrong:
+///
+/// 1. **The registrar is never the owner.** This used to fall back to the `Registrar:`
+///    field whenever the organization field was missing or redacted, and return it as the
+///    owning organization with `is_verified = true`. Post-GDPR that is the common case, so
+///    the single largest source of confidently-wrong attributions was the tool reporting
+///    "MarkMonitor" / "GoDaddy" / "Cloudflare" as the vendor. A redacted registrant means
+///    we do not know the owner — the honest answer is `None`, and the caller falls through
+///    to the next evidence source.
+///
+/// 2. **Intermediaries are filtered with domain context.** A registrant string naming a
+///    privacy proxy, registrar, registry operator or postal address is not an owner —
+///    unless it is that provider's *own* domain (cloudflare.com really is Cloudflare's).
+///    [`crate::org_role`] makes that judgment for every source, not just this one.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
+fn extract_organization_from_whois_for_domain(whois_data: &str, domain: &str) -> Option<String> {
     for regex in organization_patterns() {
         if let Some(cap) = regex.captures(whois_data) {
             if let Some(org_match) = cap.get(1) {
                 let org = org_match.as_str().trim();
-                if !org.is_empty() && !is_placeholder_organization(org) {
-                    return Some(clean_organization_name(org));
+                if org.is_empty() {
+                    continue;
                 }
+                let cleaned = clean_organization_name(org);
+                if crate::org_role::is_intermediary_for_domain(&cleaned, domain) {
+                    debug!(
+                        "WHOIS organization '{}' for {} names an intermediary, not the owner",
+                        cleaned, domain
+                    );
+                    continue;
+                }
+                return Some(cleaned);
             }
         }
     }
 
-    // If no organization found, try to extract from registrar (but filter placeholders)
-    extract_registrar_from_whois(whois_data)
+    // Deliberately NO registrar fallback: see rule 1 above.
+    None
+}
+
+/// Domain-less variant, kept for callers that only have a response body.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn extract_organization_from_whois(whois_data: &str) -> Option<String> {
+    extract_organization_from_whois_for_domain(whois_data, "")
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1113,6 +1345,115 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_brand_tld_attributes_every_domain_beneath_it() {
+        // Found in a real depth-3 scan of vanta.com: 15 domains across .google, .aws and
+        // .microsoft each shipped as its own bare label — "Blog", "Calculator", "Core" — because
+        // nothing in the chain looked at the suffix. ICANN Spec 13 makes a .brand TLD
+        // single-registrant, so the suffix alone settles ownership.
+        for (domain, expected) in [
+            ("blog.google", "Google"),
+            ("about.google", "Google"),
+            ("ai.google", "Google"),
+            ("calculator.aws", "Amazon"),
+            ("api.aws", "Amazon"),
+            ("core.microsoft", "Microsoft"),
+            ("cloud.microsoft", "Microsoft"),
+        ] {
+            let got = resolve_curated(domain)
+                .unwrap_or_else(|| panic!("{domain} should resolve from its brand TLD"));
+            assert_eq!(got.name, expected, "{domain}");
+            assert!(got.is_verified, "{domain} is settled by the registry, not inferred");
+        }
+    }
+
+    #[test]
+    fn a_google_operated_registry_is_not_a_google_owned_domain() {
+        // The trap this table exists to avoid. Google *operates* the .app, .dev and .cloud
+        // registries, but anyone may register under them — so the suffix proves nothing about
+        // ownership. Attributing them to Google would hand half the internet to Google.
+        for domain in ["dagster.cloud", "sentry.dev", "slater.app", "linear.app"] {
+            assert_eq!(
+                brand_tld_owner(domain),
+                None,
+                "{domain} sits under an open registry, not a .brand TLD"
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_that_answers_whois_with_prose_is_not_a_company() {
+        // Real output from a depth-3 scan: youtu.be shipped with the organization
+        // "Not shown, please visit www.dnsbelgium.be for webbased whois." It survived the older
+        // gate because it is a grammatical sentence with capitalised words — it looks like a name.
+        assert!(is_interstitial(
+            "Not shown, please visit www.dnsbelgium.be for webbased whois."
+        ));
+        assert_eq!(
+            accept_extracted_name(
+                "Not shown, please visit www.dnsbelgium.be for webbased whois.",
+                "youtu.be"
+            ),
+            None
+        );
+        // ...while a real company whose name merely contains an innocent word still passes.
+        assert!(!is_interstitial("Visa"));
+        assert!(!is_interstitial("Information Services Group"));
+    }
+
+    #[test]
+    fn accept_extracted_name_rejects_taglines_and_intermediaries() {
+        // This gate is what stands between a scraped page and the report. Everything a vendor's
+        // own page (or an attacker's, or a parking provider's) says about itself arrives here.
+
+        // A tagline is not a company name. Rejecting it means "keep looking" — the caller falls
+        // through to WHOIS — which is why returning None here is the safe answer, not a loss.
+        assert_eq!(
+            accept_extracted_name("Payments infrastructure for the internet", "stripe.com"),
+            None
+        );
+        assert_eq!(
+            accept_extracted_name("Connective Infrastructure for Production AI", "e2b.dev"),
+            None
+        );
+        // An interstitial served instead of the site.
+        assert_eq!(
+            accept_extracted_name("Attention Required! | Cloudflare", "some-vendor.com"),
+            None
+        );
+        // An intermediary is never the owner of someone else's domain...
+        assert_eq!(
+            accept_extracted_name("GoDaddy.com, LLC", "some-customer.com"),
+            None
+        );
+        assert_eq!(
+            accept_extracted_name("REDACTED FOR PRIVACY", "some-customer.com"),
+            None
+        );
+        // ...but it IS the owner of its own.
+        assert_eq!(
+            accept_extracted_name("GoDaddy.com, LLC", "godaddy.com").as_deref(),
+            Some("GoDaddy.com, LLC")
+        );
+        // A real name passes, cleaned.
+        assert_eq!(
+            accept_extracted_name("  Stripe, Inc.  ", "stripe.com").as_deref(),
+            Some("Stripe, Inc.")
+        );
+        assert_eq!(accept_extracted_name("", "stripe.com"), None);
+    }
+
+    #[test]
+    fn accept_extracted_name_judges_the_string_it_would_ship() {
+        // The gates used to run on the RAW candidate while the CLEANED form was what shipped, so
+        // a tagline broken across lines slipped past the plausibility probes and was only caught
+        // (or not) further downstream.
+        assert_eq!(
+            accept_extracted_name("Payments\ninfrastructure\nfor the internet", "stripe.com"),
+            None
+        );
+    }
+
+    #[test]
     fn test_whois_tld_query() {
         assert_eq!(whois_tld_query("example.com"), "com");
         assert_eq!(whois_tld_query("sub.example.co.uk"), "uk");
@@ -1191,25 +1532,29 @@ mod tests {
 
     #[test]
     fn test_extract_organization_from_domain() {
-        // Basic domain extraction
-        assert_eq!(
-            extract_organization_from_domain("example.com"),
-            "Example Inc."
-        );
+        // The domain fallback no longer fabricates a legal suffix. It previously returned
+        // "Example Inc." — a company that does not exist — for every domain no source could
+        // attribute, which made an unattributed domain indistinguishable from a real
+        // attribution in the report. The label is what the owner chose; the " Inc." was ours.
+        assert_eq!(extract_organization_from_domain("example.com"), "Example");
         assert_eq!(
             extract_organization_from_domain("test-company.org"),
-            "Test-company Inc."
+            "Test-company"
         );
 
-        // Subdomains should use the second-to-last part
+        // Subdomains resolve to the registrable label.
         assert_eq!(
             extract_organization_from_domain("www.example.com"),
-            "Example Inc."
+            "Example"
         );
         assert_eq!(
             extract_organization_from_domain("api.sub.example.com"),
-            "Example Inc."
+            "Example"
         );
+
+        // Multi-label public suffixes now resolve correctly (PSL-backed): the old
+        // second-to-last-label rule produced "Co" for every .co.uk domain.
+        assert_eq!(extract_organization_from_domain("monzo.co.uk"), "Monzo");
     }
 
     #[test]
@@ -1288,17 +1633,14 @@ mod tests {
             Some("Acme Inc".to_string())
         );
 
-        // Privacy protected - registrar fallback may be used if registrar is a valid org
+        // Privacy-protected registrant: the answer is "we do not know", NOT the registrar.
+        // This assertion used to expect "Real Registrar" — the registrar reported as the
+        // domain's owning organization. See test_registrar_is_never_returned_as_the_owner.
         let whois_data = "Domain Name: example.com\nOrganization: REDACTED FOR PRIVACY\nRegistrar: Real Registrar";
-        // The registrar "Real Registrar" is not in the placeholder list, so it gets returned as fallback
-        assert_eq!(
-            extract_organization_from_whois(whois_data),
-            Some("Real Registrar".to_string())
-        );
+        assert_eq!(extract_organization_from_whois(whois_data), None);
 
-        // Privacy protected with registrar that is a known placeholder
+        // Same, with a registrar that was already denylisted.
         let whois_data = "Domain Name: example.com\nOrganization: REDACTED FOR PRIVACY\nRegistrar: GoDaddy.com, LLC";
-        // GoDaddy is in the placeholder list, so should return None
         assert!(extract_organization_from_whois(whois_data).is_none());
 
         // Registry operator as organization (BUG-006) — should be rejected
@@ -1309,14 +1651,12 @@ mod tests {
             "Registry operator should be rejected as placeholder"
         );
 
-        // Registry operator with valid registrar
+        // Registry operator as registrant, with a valid-looking registrar: still None. The
+        // registrar is not evidence of ownership no matter how ordinary its name looks —
+        // this assertion previously expected "Acme Corp" (the registrar) as smtp.com's owner.
         let whois_data =
             "Domain Name: smtp.com\nOrganization: VeriSign, Inc.\nRegistrar: Acme Corp";
-        // VeriSign is rejected, but Acme Corp is a valid registrar org name
-        assert_eq!(
-            extract_organization_from_whois(whois_data),
-            Some("Acme Corp".to_string())
-        );
+        assert_eq!(extract_organization_from_whois(whois_data), None);
 
         // Amazon Registrar as registrar — should be rejected (not the domain owner)
         let whois_data = "Domain Name: example.com\nOrganization: REDACTED FOR PRIVACY\nRegistrar: Amazon Registrar, Inc.";
@@ -1517,11 +1857,9 @@ mod tests {
 
     #[test]
     fn test_extract_organization_from_domain_capitalization() {
-        assert_eq!(
-            extract_organization_from_domain("stripe.com"),
-            "Stripe Inc."
-        );
-        assert_eq!(extract_organization_from_domain("UPPER.com"), "UPPER Inc.");
+        // No fabricated legal suffix — see test_extract_organization_from_domain.
+        assert_eq!(extract_organization_from_domain("stripe.com"), "Stripe");
+        assert_eq!(extract_organization_from_domain("UPPER.com"), "Upper");
     }
 
     // --- extract_organization_from_whois additional patterns ---
@@ -1756,26 +2094,29 @@ mod tests {
 
     #[test]
     fn test_extract_org_from_domain_standard() {
+        // No fabricated " Inc." — see test_extract_organization_from_domain.
         let result = extract_organization_from_domain("stripe.com");
-        assert_eq!(result, "Stripe Inc.");
+        assert_eq!(result, "Stripe");
     }
 
     #[test]
     fn test_extract_org_from_domain_with_subdomain() {
         let result = extract_organization_from_domain("api.stripe.com");
-        assert_eq!(result, "Stripe Inc.");
+        assert_eq!(result, "Stripe");
     }
 
     #[test]
     fn test_extract_org_from_domain_bare_tld() {
+        // A bare public suffix has no owner to name, so it is returned untouched rather
+        // than becoming the organization "Com".
         let result = extract_organization_from_domain("com");
-        assert_eq!(result, "com"); // Single part domain returned as-is
+        assert_eq!(result, "com");
     }
 
     #[test]
     fn test_extract_org_from_domain_hyphenated() {
         let result = extract_organization_from_domain("my-company.com");
-        assert_eq!(result, "My-company Inc.");
+        assert_eq!(result, "My-company");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1977,9 +2318,16 @@ mod tests {
         assert!(result.is_ok());
         let org_name = result.unwrap();
         assert!(!org_name.is_empty());
+        // The fallback names the domain's own label and invents nothing. This assertion used
+        // to REQUIRE the fabricated "Inc." suffix.
         assert!(
-            org_name.contains("Inc."),
-            "Fallback should produce domain-based name with 'Inc.', got: {}",
+            !org_name.contains("Inc."),
+            "Fallback must not fabricate a legal suffix, got: {}",
+            org_name
+        );
+        assert!(
+            org_name.to_lowercase().starts_with("zzz-nonexistent"),
+            "Fallback should be derived from the domain label, got: {}",
             org_name
         );
     }
@@ -2446,10 +2794,40 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_org_first_pattern_valid_returns_early() {
+    fn test_registrant_scoped_field_wins_over_bare_organization() {
+        // Precedence now favours the registrant-SCOPED field. A bare "Organization:" line
+        // can belong to any contact block in a WHOIS record (admin, tech, billing — often
+        // the registrar's own staff), while "Registrant Organization:" unambiguously names
+        // the party that registered the domain. When a record carries both, the registrant
+        // one is the answer. (Previously the array order decided, so whichever pattern was
+        // listed first won regardless of which field was more specific.)
         let whois = "Organization: ValidCorp\nRegistrant Organization: OtherCorp";
         let result = extract_organization_from_whois(whois);
-        assert_eq!(result, Some("ValidCorp".to_string()));
+        assert_eq!(result, Some("OtherCorp".to_string()));
+    }
+
+    #[test]
+    fn test_admin_and_tech_organization_lines_are_not_the_registrant() {
+        // The unanchored regex matched "Admin Organization:" and "Tech Organization:" —
+        // the registrar's or a law firm's contact — and whichever appeared first in the
+        // response won. Anchoring to line starts confines matching to the real fields.
+        let whois = "Admin Organization: Law Firm LLP\nTech Organization: Hosting Provider\nRegistrant Organization: Real Owner Ltd";
+        assert_eq!(
+            extract_organization_from_whois(whois),
+            Some("Real Owner Ltd".to_string())
+        );
+    }
+
+    #[test]
+    fn test_nominet_next_line_registrant_is_parsed() {
+        // Nominet (.uk) puts the registrant on the line AFTER "Registrant:", so the
+        // same-line regex could never capture it and every .uk domain fell through to the
+        // fabricated domain fallback.
+        let whois = "Domain name:\n    example.co.uk\n\nRegistrant:\n    Acme Widgets Limited\n\nRegistrant type:\n    UK Limited Company";
+        assert_eq!(
+            extract_organization_from_whois(whois),
+            Some("Acme Widgets Limited".to_string())
+        );
     }
 
     #[test]
@@ -2460,10 +2838,29 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_org_no_org_fields_registrar_valid() {
+    fn test_registrar_is_never_returned_as_the_owner() {
+        // THE single largest producer of confidently-wrong attributions: when the registrant
+        // organization was missing or redacted (the post-GDPR default for most gTLDs), the
+        // chain fell back to the "Registrar:" field and reported it as the owning company —
+        // marked verified. Reports therefore attributed thousands of domains to MarkMonitor,
+        // GoDaddy and Cloudflare. A redacted registrant means we do NOT know the owner, and
+        // saying so lets the caller fall through to real evidence instead.
         let whois = "Domain Name: test.com\nStatus: active\nRegistrar: ActualCorp Inc";
-        let result = extract_organization_from_whois(whois);
-        assert_eq!(result, Some("ActualCorp Inc".to_string()));
+        assert_eq!(extract_organization_from_whois(whois), None);
+
+        let redacted = "Domain Name: test.com\nRegistrant Organization: REDACTED FOR PRIVACY\nRegistrar: MarkMonitor Inc.";
+        assert_eq!(extract_organization_from_whois(redacted), None);
+    }
+
+    #[test]
+    fn test_registrar_named_as_registrant_on_its_own_domain_is_the_owner() {
+        // The mirror case: Cloudflare really is the registrant of cloudflare.com. The
+        // intermediary filter is domain-aware precisely so self-attribution survives.
+        let whois = "Domain Name: cloudflare.com\nRegistrant Organization: Cloudflare, Inc.";
+        assert_eq!(
+            extract_organization_from_whois_for_domain(whois, "cloudflare.com"),
+            Some("Cloudflare, Inc.".to_string())
+        );
     }
 
     #[test]
@@ -2501,12 +2898,15 @@ mod tests {
 
     #[test]
     fn test_extract_org_from_domain_two_parts_only() {
-        assert_eq!(extract_organization_from_domain("a.b"), "A Inc.");
+        // ".b" is not a real public suffix, so there is no registrable label and no owner
+        // to name — the input is returned untouched instead of inventing "A Inc.".
+        assert_eq!(extract_organization_from_domain("a.b"), "a.b");
     }
 
     #[test]
     fn test_extract_org_from_domain_empty_first_char() {
-        assert_eq!(extract_organization_from_domain(".com"), " Inc.");
+        // A leading dot leaves a bare public suffix: no owner to name, nothing invented.
+        assert_eq!(extract_organization_from_domain(".com"), ".com");
     }
 
     #[tokio::test]

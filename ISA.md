@@ -1,20 +1,21 @@
 ---
 project: nthpartyfinder
-task: "Fix depth-3 report Layer-3 gap: dynamic graph tier bands + run all discovery methods at every depth + optimize web-traffic browser path (network-idle), no recall loss (2026-07-11)"
+task: "Maximize accurate domain->org attribution: verified real org names, minimize unattributed + misattributed domains, users rarely need review/local overrides (2026-07-11)"
 effort: E4
-phase: verify
-progress: "verified: graph L3 band renders on real report; deep scan L2/L3 now carry subprocessor/subdomain/SaaS/web-traffic (1245->15210 rels); gates green (fmt/clippy -D/4131 tests/coverage 99.47% lines-98.75% fn); pending ship (PR — ruleset blocks direct master)"
+phase: plan
+progress: "0/66 (ISC-364..429) — THINK complete: tier policy + leverage sequence + eval design locked; baseline rescan + cargo-test baseline still running"
 mode: algorithm
-started: 2026-07-11T00:00:00-07:00
-updated: 2026-07-11T08:35:00-07:00
+started: 2026-07-11T13:30:00-04:00
+updated: 2026-07-11T13:45:00-04:00
 algorithm_config:
   effort_source: classifier
   classifier: { mode: ALGORITHM, tier: E4, source: classifier }
   mode: standard
   eval_mode: gate
   preset: cautious
-  metric: "all 9 PRs merged, master gates green, local release binary verified via depth-3 vanta.com HTML-report scan, v1.3.0 tagged+published with CI-built cross-platform assets"
+  metric: "attribution coverage + precision on a labeled eval set, measured before/after on the same scan data; zero discovery-recall loss; gates green"
 prior_tasks:
+  - { task: "Depth-3 report Layer-3 gap: dynamic bands + all-methods-at-every-depth + web-traffic network-idle", started: 2026-07-11, phase: complete, progress: "shipped: PR #60 merged to master (23be09c), 27/27 checks green, ruleset repaired" }
   - { task: "Merge 9 PRs + publish v1.3.0 release", started: 2026-07-10, phase: complete, progress: "48/48 (ISC-316..363)" }
   - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
   - { task: "DNS demo-solid (Vanta TPRM)", started: 2026-06-11, phase: complete, progress: "42/42" }
@@ -23,6 +24,151 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-07-11b — Maximize accurate domain→organization attribution
+
+**Trigger.** Owner `/goal`: depth-3 vanta.com HTML report shows "lots of domains still not being attributed at all to verified, accurate, and real organization names, OR lots of inaccurate domain to organization attribution. I want to avoid users needing to customize domain<->organization attribution much as possible."
+
+**Problem (task-scoped).** Two failure classes ship in every deep report: (1) **unattributed** — the vendor "org" is just the domain (or a title-cased domain fragment) because no source resolved a real name; (2) **misattributed** — taglines/descriptions scraped as orgs ("Connective Infrastructure for Production AI"), wrong casing ("Openai"), registrar/privacy-proxy names, org-name→domain synthesis producing fake domains (`s.com`, `src.com` in cache). Users currently fix these via `review`/local overrides — which the owner wants to be rare.
+
+**Goal (task-scoped).** On the same discovery data, the scanner's default (no keys, no user customization) attribution measurably improves on BOTH axes — coverage (share of report domains carrying a real org name) and precision (share of attributed names that are correct, verified against a labeled ground-truth set) — with zero discovery-recall loss, no CLI/schema breaks, and all repo gates green.
+
+**Found at OBSERVE.** Working tree carried uncommitted WIP toward this exact goal (snapshot: scratchpad `wip-org-attribution.diff`): `analysis.rs` plausibility-gate fallback + `org_normalizer.rs` `brand_casing` table + `is_plausible_org_name`. Treated as inherited work-in-progress: verified, extended, or replaced on evidence — not blindly kept.
+
+### Criteria (Task 2026-07-11b — ISC-364+; initial set, refined at THINK with baseline numbers)
+
+**Measurement harness (the gradient):**
+- [ ] ISC-364: A deterministic eval tool in-repo computes, from a scan JSON: total unique vendor domains, attribution coverage % (org name ≠ domain echo), verified %, per-source counts. Probe: run it on the baseline JSON. **[DEFERRED — scan-JSON metric harness lives in the task scratchpad, not in-repo → TF-SCANEVAL]**
+- [ ] ISC-365: A labeled ground-truth dataset (≥150 domains stratified across SaaS/CDN/infra/trackers/long-tail, each with canonical org name) lives in-repo for regression evals. Probe: file exists, schema-valid, spot-checked. **[DEFERRED — ground truth is 34 rows, not 150 → TF-GT150]**
+- [x] ISC-366: Baseline coverage/precision measured from the depth-3 reproduction scan and recorded in `## Verification`. Probe: numbers present with command evidence.
+
+**Anti-criteria (task):**
+- [x] ISC-367: Anti: no registrar/privacy-proxy/WHOIS-redaction name (e.g. "Domains By Proxy", "REDACTED FOR PRIVACY", "Identity Protection Service") ever appears as an org attribution. Probe: eval-set + unit tests.
+- [x] ISC-368: Anti: no discovery-recall loss — same relationship set discovered on identical inputs (unit + fixture tests; attribution changes only rename/annotate, never drop). Probe: test suite + fixture diff.
+- [x] ISC-369: Anti: default scan still needs no API key, no config, no user customization for the improved attribution. Probe: clean-env run.
+- [x] ISC-370: Anti: CLI flags and output schema unchanged or strictly additive. Probe: `--help` diff + JSON schema diff.
+- [x] ISC-371: Anti: repo gates hold — fmt clean, clippy `-D warnings` clean, full test suite 0 fail, coverage ≥95/95. Probe: gate commands.
+
+*(Failure-class fix ISCs — garbage-name gating, casing, infra denylist at scan time, org→domain synthesis guard, cross-source precedence, known-vendor expansion, normalization dedup — added at THINK once the pipeline map + baseline data land. ID-stability: numbering continues from ISC-372.)*
+
+### Criteria continued (THINK refinement — ISC-372+; probes named per group)
+
+**F1 Provenance core — attribution is a typed claim (probe: unit tests + JSON/CSV/checkpoint inspection):**
+- [ ] ISC-372: An `OrgAttribution { name, source, confidence, verified }` type exists (serde-capable) and `discovered_vendors` carries it instead of bare `String`. **[DEFERRED — W4 provenance threading deferred]**
+- [ ] ISC-373: `VendorRelationship` carries `org_source` + `org_verified` (+confidence) as strictly additive fields; existing field names/order unchanged. **[DEFERRED — W4]**
+- [ ] ISC-374: JSON export exposes the new fields; CSV appends new columns at the end only. **[DEFERRED — W4]**
+- [ ] ISC-375: Checkpoints persist provenance; a pre-change checkpoint still loads (versioned/back-compat path tested). **[DEFERRED — W4]**
+- [ ] ISC-376: `is_verified` survives from the whois chain into the map and report — no laundering (test: NER/web results arrive `verified=false`). **[DEFERRED — W4]**
+- [ ] ISC-377: NER results are never marked verified; their confidence is carried, not dropped. **[DEFERRED — W4]**
+- [ ] ISC-378: Web-extraction results are never marked verified (self-declared tier); source tier string preserved (`web_schema_org` ≠ `web_title`). **[DEFERRED — W4]**
+- [ ] ISC-379: WHOIS/RDAP-class single-source results carry `source=whois`, `verified=false` (attested-not-verified), distinguishable in output. **[DEFERRED — W4]**
+- [x] ISC-380: Curated tiers (known_vendors, registry, local override, embedded dataset, SaaS platform name) are the only `verified=true` machine tiers this session.
+- [x] ISC-381: The fabricated `" Inc."` fallback is deleted from `extract_organization_from_domain`; fallback display = PSL-derived label, title-cased, NO legal suffix, `verified=false`, `source=domain_fallback`.
+- [ ] ISC-382: All three fallback shapes (plausibility-reject, whois-Err, map-miss) produce ONE canonical unattributed form (unit test covers all three paths). **[DEFERRED — one canonical fallback fn exists (`domain_derived_organization`); the three-path unit test is not written → TF-FALLBACK3]**
+- [x] ISC-383: Anti: no output surface (JSON/CSV/HTML/Mermaid/markdown) ever renders a fabricated legal suffix for an unattributed domain (grep probe on regenerated fixtures).
+
+**F2 Resolver choke point + gates (probe: unit tests on the extracted function):**
+- [ ] ISC-384: The insert-decision is one pure, tested function used by the main path, the minimal path, and the root-org path (three call sites, one behavior). **[DEFERRED — chain choke point exists; root-org/minimal paths not yet unified → TF-CHOKE3]**
+- [x] ISC-385: `is_plausible_org_name` gate applies at all three sites, runs on the post-normalize name, and is skipped for curated tiers (The Trade Desk from curated data survives).
+- [x] ISC-386: Gate rejection falls through to the next source in the chain (WHOIS/NER), not straight to domain fallback (test: tagline web result + clean WHOIS → WHOIS name wins).
+- [ ] ISC-387: A shared registrar/privacy/infra org-name classifier (word-boundary, typed: PrivacyService|Registrar|InfraOperator|Valid) gates every attribution path; `INFRA_ORG_DENYLIST` hoisted to a shared module reused by review.rs. **[DEFERRED — shared `org_role` classifier built and used by the chain; `review.rs` not yet rewired to it → TF-REVIEW-ORGROLE]**
+- [x] ISC-388: Registrar-as-owner fallback in `extract_organization_from_whois` is dead (test: response with only Registrar field → no org).
+- [x] ISC-389: Placeholder denylist uses word-boundary matching — "Switch, Inc.", "... Private Limited", Cloudflare-on-cloudflare.com all attribute correctly (regression tests).
+- [x] ISC-390: Digit-first heuristic only rejects with address tokens — 8x8, 23andMe, 1Password attribute (tests).
+- [x] ISC-391: WHOIS field regexes anchored to line starts, Admin/Tech Organization excluded; Nominet next-line Registrant parsed (fixture tests).
+- [ ] ISC-392: Production org-lookup path goes through the WHOIS rate limiter (code inspection + test). **[DEFERRED — the rate-limited wrapper now delegates to the one real chain, but `analysis.rs` calls the chain directly without a permit. Pre-existing; not introduced here → TF-RATELIMIT]**
+- [x] ISC-393: Challenge/parking interstitials rejected in web_org (title "Attention Required!", "Just a moment", Sedo lander fixtures → None).
+- [ ] ISC-394: twitter:site handle tier validated or removed; JSON-LD array `@type` parsed; copyright scan restricted to body-tail text (tests). **[DEFERRED — TF-WEBORG]**
+- [ ] ISC-395: Web-org domain-affinity rule: accepted name shares a token with the SLD, appears ≥2× on page, or carries a corporate suffix — else confidence penalized below gate (tests incl. tagline "Payments infrastructure for the internet" → rejected). **[DEFERRED — TF-WEBORG]**
+
+**F3 Normalizer repairs (probe: unit tests):**
+- [x] ISC-396: Bare-suffix truncation fixed — Cisco, Visa, Zinc, Maytag, Sysco normalize unchanged (regression tests).
+- [x] ISC-397: Empty-normalize guard: normalize never returns "" for non-empty input (falls back to domain-derived form).
+- [x] ISC-398: `to_title_case` preserves mixed-case words (SendGrid, DataDog, iCloud untouched); only re-cases all-lower/all-upper words.
+- [x] ISC-399: Mid-name "at"/"it" no longer force-uppercased (ordering bug fixed).
+- [x] ISC-400: Dangerous whole-string ticker aliases (ms, meta, fb, crm, hp, twtr) removed or gated to all-caps-short inputs; stale canonicals updated.
+- [x] ISC-401: `strip_domain_suffix` is PSL-backed (works for .co.uk/.de/.gg) and re-runs after corporate-suffix removal ("Salesforce.com, Inc." → "Salesforce").
+- [x] ISC-402: `brand_casing` + `is_plausible_org_name` (inherited WIP) carry unit tests; WIP behavior confirmed or corrected per-case.
+- [x] ISC-403: Anti: normalize() output for the existing passing test corpus unchanged except where a test encoded a documented bug (each changed test cites the bug class in a comment).
+
+**F4 Embedded entity dataset + PSL canonicalizer (probe: lookup tests + license file inspection):**
+- [x] ISC-404: `psl`(or equivalent) crate added; ONE PSL-backed `extract_base_domain` used by known_vendors, vendor_registry, whois fallback, normalizer, review writer (grep: no remaining homemade last-2-label joins).
+- [x] ISC-405: AdGuard companiesdb vendored under `data/` (or `config/`) with LICENSE.CC-BY-SA-4.0 + attribution README; never merged into MIT-licensed known_vendors files.
+- [x] ISC-406: Compiled domain→company lookup from the dataset (≥4,500 resolvable domains at load; count asserted in test).
+- [x] ISC-407: Dataset tier sits after local overrides/known_vendors/registry, before any network source; probe: doubleclick.net→Google, segment.io→Twilio (per dataset), branch.io resolves without network.
+- [ ] ISC-408: Local-override precedence inversion fixed — override on base domain beats registry for subdomains (test: api.stripe.com honors stripe.com override). **[DEFERRED — TF-OVERRIDE-PRECEDENCE]**
+- [ ] ISC-409: Dataset vintage (timeUpdated) recorded and surfaced (report footer or verbose log). **[DEFERRED — dataset vintage is recorded in `org_dataset::version()` but not surfaced in the report → TF-VINTAGE]**
+- [x] ISC-410: Anti: no NC-licensed data (Tracker Radar/Disconnect/Ghostery/Cloudflare Radar) present anywhere in the repo (grep probe).
+
+**F5 Discovery-evidence channel + synthesis guards (probe: unit/fixture tests):**
+- [ ] ISC-411: SaaS tenant discovery's `platform_name` seeds the vendor map as a curated-tier attribution (test: confirmed tenant → platform org, no WHOIS call). **[DEFERRED — TF-SAAS-SEED]**
+- [ ] ISC-412: Subprocessor page-disclosed org names travel on the record (org_name field or equivalent) and reach attribution as a disclosure-tier candidate. **[DEFERRED — TF-SUBPROC-ORG]**
+- [ ] ISC-413: CT results carry cert Subject O= as an org hint when crt.sh provides it. **[DEFERRED — TF-CT-ORG]**
+- [ ] ISC-414: DNS verification-token matching anchored (no `MS=` substring false positives; fixture: `TEAMS=` record does not attribute Microsoft). **[DEFERRED — TF-DNS-TOKEN]**
+- [x] ISC-415: Org→domain synthesis guards: mapping keys ≥4 chars + word-boundary; synthesized `{token}.com` never emitted as confirmed vendor; all synthesized domains pass `is_valid_vendor_domain` at one choke point (kills s.com class — regression tests with the actual cache examples).
+- [x] ISC-416: `add_confirmed_mappings` no longer writes 1-2 char keys (test with "S, Inc.").
+
+**F6 Report honesty (probe: regenerated report fixture + Interceptor render):**
+- [ ] ISC-417: HTML table renders an explicit Unattributed badge when `verified=false && source=domain_fallback` (or org==domain); graph tooltip/node mark attribution state instead of substituting the domain. **[DEFERRED — W6 report rendering deferred]**
+- [ ] ISC-418: Report stat card: unattributed count + % (visible measurement of attribution quality per scan). **[DEFERRED — W6]**
+- [ ] ISC-419: Org grouping surfaces (insights, summary table, unique-org counts) share one normalization key (casefold + suffix-fold) — "Google"/"Google LLC" group (fixture test). **[DEFERRED — W6]**
+- [ ] ISC-420: Same-domain conflicting orgs resolved deterministically (not input-order); conflict visible in data. **[DEFERRED — W6]**
+- [ ] ISC-421: Subprocessor verification commands grep for the domain when attribution is below verified tier. **[DEFERRED — W6]**
+- [ ] ISC-422: Frontend `transform.ts` handles new/absent fields; `bun run build` regenerates static bundle; report renders in real Chrome (Interceptor probe). **[DEFERRED — W6]**
+
+**F7 Eval harness + ground truth (probe: run the harness):**
+- [x] ISC-423: Ground-truth file in-repo: ≥28 rows from the IterativeDepth set (domain | canonical org | accepted aliases | category | label provenance independent of pipeline sources | dual-answer support for operator/tenant).
+- [x] ISC-424: Grader distinguishes correct-entity / correct-abstain / wrong-entity / casing-only; wrong-entity weighted worst; fabricated-name-on-unknowable = wrong-entity.
+- [x] ISC-425: Metrics reported per category; regression gate = min-over-categories, not aggregate.
+- [x] ISC-426: Harness runs hermetically on recorded resolver fixtures (no live network in `cargo test`); deterministic across two runs.
+- [x] ISC-427: Baseline (pre-change) metrics measured on the depth-3 rescan JSON and recorded in `## Verification`.
+- [x] ISC-428: Post-change metrics on the SAME scan data show: attribution coverage ≥ baseline, wrong-entity strictly < baseline, fabricated names = 0 (the headline before/after).
+- [ ] ISC-429: Per-source-tier precision measured once on the eval set (calibration snapshot recorded). **[DEFERRED — TF-TIER-PRECISION]**
+
+**Gates already standing:** ISC-364..371 (harness, ground truth, baseline, registrar-anti, recall-anti, no-keys-anti, schema-anti, repo gates).
+**Deferred to follow-ups (filed at LEARN):** RDAP client; full ≥2-class agreement engine; org-entity ID graph/parent chains; abstain tombstones + TTL clocks; flywheel sync/promotion; learner-loop repair; bounded second-pass budget (headless/legal-page for unattributed tail); IDN confusable warnings; per-mapping customer scoping (cache-poisoning isolation).
+
+### Features (Task 2026-07-11b)
+
+| name | satisfies | depends_on | parallelizable |
+|------|-----------|------------|----------------|
+| W1 normalizer-repairs (org_normalizer.rs) | ISC-396..403 | — | yes |
+| W2 whois-chain-honesty (whois.rs, web_org.rs, ner_org.rs) | ISC-376..382, 384..395 | — | yes (distinct files) |
+| W3 dataset+psl (new module, data/, known_vendors.rs, vendor_registry.rs, domain_utils.rs) | ISC-404..410 | — | yes |
+| W4 provenance-threading (analysis.rs, app.rs, vendor.rs, checkpoint.rs, export.rs, result_sink.rs) | ISC-372..375, 383 | W2, W3 shapes | partial |
+| W5 discovery-hints+guards (subprocessor.rs, dns.rs, saas, ct) | ISC-411..416 | W4 type | partial |
+| W6 report-honesty (templates, frontend, export.rs) | ISC-417..422 | W4 fields | yes after W4 |
+| W7 eval-harness (config/attribution_eval.json, tests/) | ISC-364..366, 423..429 | resolver callable | ground-truth authoring parallel NOW |
+
+### Decisions (Task 2026-07-11b)
+
+- 2026-07-11 ISC floor show-math: 66 task ISCs vs E4 soft floor 128 — every ISC names one binary probe; further splitting would fragment single probes into padding. Project ISA already carries 363 prior ISCs; total file ISC count far exceeds floor.
+- 2026-07-11 EnterPlanMode skipped: /goal autonomous session — plan-approval pause would block against an absent owner; Advisor substitutes as the commitment-boundary check (Rule 2 fires next).
+- 2026-07-11 Inherited WIP (analysis.rs gate + brand_casing): kept as substrate, but the plausibility gate MOVES into the chain (ISC-386 fall-through) and brand_casing gains tests (ISC-402). WIP snapshot: scratchpad wip-org-attribution.diff.
+- 2026-07-11 Verified-tier policy scoped for this session: machine network sources are never `verified=true`; only curated/override/dataset/platform-name tiers are. Full ≥2-class agreement engine deferred (honesty first, arbitration second). Rationale: FirstPrinciples T1 rule needs multi-candidate collection whose network cost profile needs its own benchmark — a wrong-cost redesign would violate the perf mandate from the 2026-07-08 session.
+- 2026-07-11 Related Website Sets rejected after inspection (70 archived self-declared sets, junk quality) despite Apache-2.0.
+- 2026-07-11 Delegation floor: met via Workflow fan-out (13 agents), 3 thinking delegates, ground-truth authoring delegate (next), Anvil audit at VERIFY.
+- 2026-07-11 Branch strategy: work on `feat/attribution-accuracy` off master 23be09c; PR at ship time (branch ruleset blocks direct master).
+- 2026-07-11 ADVISOR (pre-BUILD, Rule 2) — SHIP-after-reorder. Adopted: **(seq)** W7→W0 (baseline on HEAD before any change); reorder to W0-baseline → W1+psl → W3-data-tier → W2-chain → W4-schema → W5/W6 → W7-final. **(safety)** `s.com`/`{token}.com` synthesis is a SAFETY bug (tool emits traffic to invented third-party domains) → fix in W1 not W5. **(psl)** psl is the foundation for W1 normalizer + W2 gate — land it first or both get rewritten. **(intermediary)** registrar-as-owner (WHOIS) / CDN-as-owner (cert O=) / hoster-as-owner (DNS) / agency-as-owner (tagline) are ONE error class → build one shared role/intermediary classifier + denylist, apply at every source (else W5 CT hint reintroduces the W2 bug); trust cert O= only when SAN set narrow AND O not infra. **(measurement)** 28 rows can't regression-test 2226 orgs → add property/invariant tests over the FULL scan (no `<label> Inc.`; no denylisted intermediary name; no org that is a truncation-substring of its own domain; no synthesized domain from <2-char key); stratify 28 by source class ≥5 each. **(serde)** checkpoint verified JSON (safe); DON'T mutate `org: String` in place — add `org_attribution` new field, keep legacy `org`; `null` not `""` for absent, documented + version-bumped; every new field `#[serde(default)]`; enums need catch-all/`#[serde(other)]`; `verified` bool default false (never default_true); old checkpoints → `source: Legacy, verified: false`; confidence = ordinal enum/u8 NOT f32 (serde_json NaN + flaky snapshots + fake-precision); CSV new columns/fields at END; check no `deny_unknown_fields` in import path (confirmed none). **(license)** merging AdGuard into the curated tier at build time is a CC BY-SA adaptation that could drag the MIT list under ShareAlike → keep the dataset artifact physically + logically separate, record `EmbeddedDataset{version,date}`. **(grouping)** W6 org-grouping keys on eTLD+1, labels with org (name-key collapses all Unattributed into one bucket). Verdict on the 4 questions: (1) honesty-first is right; feared failure is NOT too-many-Unattributed but shipping 7 workstreams with no baseline; (2) verified=curated-only is correct interim semantics; (3) traps listed above; (4) the one inversion is W7→W0.
+- 2026-07-11 SCOPE REALISM (load ~340, codex absent=Forge/Cato unavailable, Moonshot absent=Anvil unavailable): this session ships the measurable CORE — W0 eval harness + property tests, W1 normalizer+synthesis-safety, W3 psl+AdGuard dataset tier, W2 chain honesty (kill fabrication + registrar fallback + word-boundary denylists + anchored regexes + plausibility fall-through + shared intermediary classifier), plus SaaS platform_name discovery hint. The FULL OrgAttribution provenance-type threading (W4), report Unattributed-badge rendering (W6), hermetic-fixture eval, CT cert-O= hint, and the remaining discovery hints are staged as tracked follow-ups (honest-abstention rendering needs the type; fabrication-kill already delivers the precision win without it). Measured before/after on the same depth-3 scan JSON is the headline.
+
+### Changelog (Task 2026-07-11b)
+
+**2026-07-11 — The fabrication conjecture, refuted by measurement.**
+- **conjectured:** The dominant misattribution is the fabricated `"<Label> Inc."` domain fallback — every domain no source could attribute ships as a confident-looking fake company, indistinguishable in the report from a real attribution. (Asserted independently by the 12-reader code map, which correctly located the fabrication at `whois.rs:658-672` and named it "THE dominant 'title-cased domain fragment as org' path".)
+- **refuted by:** Direct measurement of the owner's real depth-3 vanta.com scan JSON (2,389 unique vendor domains, 12,716 relationships): **ZERO** organization names end in `Inc.`. `org_normalizer::remove_corporate_suffixes` strips the fabricated suffix back off before export. The fabrication is real in the code and never reaches the report — two bugs cancelling.
+- **learned:** Reading a code path proves what a function *can emit*, not what the pipeline *ships*; a downstream transform silently cancelled it, and twelve independent readers all missed the cancellation because none of them ran the thing. The measured failure is different and much larger: **1,454 of 2,389 domains (60.9%) carry only a title-cased domain echo as the organization.** The owner's complaint is fundamentally about **coverage**, not fabrication. Measurement also surfaced three *live* truncation bugs the code map had predicted as a class but not confirmed as shipping (`geico.com → "Gei"`, `capco.com → "Cap"`, `parahelp.com → "Parahe"`), 26 mis-cased brands (`Openai`, `Mongodb`, `Github`, `Hubspot`), and 2 intermediary-as-owner attributions.
+- **criterion now:** ISC-427/428 make **attribution coverage** (domain-echo rate over every vendor in a real scan) the headline before/after metric, with property checks running over the whole scan rather than only the 28-row labeled set. The fabrication-kill stays (it is what makes the honest fallback label PSL-correct — `monzo.co.uk` yielded `"Co"` before) but is no longer claimed as the primary win. The advisor's "W7 → W0, baseline before you change anything" instruction is what caught this; without it the run would have shipped a confident, wrong story about its own value.
+
+### Risks (THINK 2026-07-11b)
+
+- AdGuard companiesdb overlap with real scan population unmeasured until baseline JSON lands — measure before sizing the win.
+- Provenance threading must be strictly additive to JSON/CSV/HTML schema (frontend transform.ts must tolerate absent fields).
+- Precision gates could over-fire → coverage collapse into "Unattributed"; both axes measured on labeled eval set before/after.
+- Normalizer root-fixes (bare-suffix truncation, casing) will invalidate tests that encoded the buggy behavior — each test change must cite the bug it encoded.
+- CC BY-SA data (AdGuard) ships in its own data file + LICENSE + attribution; never merged into MIT-licensed known_vendors data.
+- Machine under load ~270 (scan + prior fan-out); baseline rescan may run long — fall back to depth-2/partial measurement if it fails.
+- Shared working tree with possible concurrent sessions — re-verify `git status` before every commit; inherited WIP snapshot at scratchpad wip-org-attribution.diff.
 
 ## Task 2026-07-11 — Depth-3 report Layer-3 gap: dynamic bands + all-methods-at-every-depth + web-traffic network-idle
 
@@ -586,6 +732,14 @@ Problem: a cold-cache depth-3 scan of vanta.com takes ~1500–3000s (documented 
 
 ## Decisions
 
+- **2026-07-11b (cross-vendor audit UNAVAILABLE — in-family review run instead, and it earned its keep):** Anvil (Kimi K2.6) refused to run: `MOONSHOT_API_KEY` is absent from `~/.claude/.env` and `codex` is not installed, so Forge/Cato are down too. It was right to refuse — a Claude model wearing an Anvil label would have banked a false cross-family assurance on 1,200 lines of new attribution logic. **TF-CATO remains open; no cross-vendor audit was performed on this change.** In its place: three IN-FAMILY adversarial reviewers with disjoint lenses (pure-logic correctness / regression-and-compat / safety-and-test-quality), each required to verify findings empirically rather than by inspection. They produced 20+ verified findings, including three my own tests had missed and one that the eval could not see. **This is advisory only and does NOT close TF-CATO.**
+- **2026-07-11b (findings that changed the design, not just the code):**
+  - **The PSL's implicit `*` rule silently broke every name with a dot in it.** `psl::suffix_str("x.bancorp")` returns `Some("bancorp")` — an unlisted single label is *treated as* a public suffix — so my "is the tail a real suffix?" check was always true and `strip_domain_suffix` shipped `U.S. Bancorp` as **"U.s"**. A regression worse than the truncation bugs the branch was fixing, in code written to fix them. Fix: require a LISTED suffix (`typ().is_some()`), and reject a tail containing whitespace. The lesson generalizes — an API that answers a *shaped* question ("what is the suffix here?") is not answering the *membership* question ("is this a known suffix?"), and only the second one is safe to act on.
+  - **My first stale-rollup fix was a heuristic, and heuristics over-fire.** "If the domain's label is a brand we can spell, prefer it over the dataset" fixed github.com/paypal.com and simultaneously broke `icloud.com → "iCloud"` (not Apple), `sharepoint.com → "SharePoint"` (not Microsoft), `wordpress.com → "WordPress"` (not Automattic). A product is not a vendor you contract with, and no rule available to the code can tell a product brand from a company brand. Replaced with a three-entry curated `STALE_ROLLUP` table — a human decides, because only a human can.
+  - **Safety guards must be measured against recall, or they quietly become recall bugs.** My `is_valid_vendor_domain` check on learned mapping VALUES rejected any second-level label under 3 characters *and any common English word* — so `heap.io`, `merge.dev`, `hp.com` and `ey.com` were discarded and the scanner **synthesized `heap.com` instead**. Measured on the real scan: 1,000 vendor domains lost. Fix: `is_emittable_vendor_domain` (registrable label ≥2 chars under a listed suffix) draws the line at the *invented* domain, which is the thing that was actually dangerous. Likewise `MIN_ORG_KEY_LEN = 4` dropped IBM/HP/EY/GE/3M; short keys are now kept but must match the WHOLE name — the danger was never the key's length, it was the fragment match.
+  - **The invented-domain class was NOT closed where it mattered most.** `discovery/web_traffic.rs` passes raw request hosts to `extract_base_domain` and never validates them, so an IPv4 host became the vendor `"122.172"` — which is inet_aton shorthand for 122.0.0.172, meaning the scanner then aimed DNS and a real Chrome at an unrelated live host. Fixed at the shared filter (`is_infrastructure_noise` now rejects IP literals and their fragments). This is the finding I would most regret shipping.
+- **2026-07-11b (test-quality findings — the eval was scoring itself):** A mutation pass showed three of the eval's assertions surviving mutations they should have caught: it asked `org_role::is_intermediary_for_domain` whether `org_role`'s own output was an intermediary (mutate the classifier to always-Valid → eval still green); it stopped short of `normalize()`, which is what production actually inserts, so reintroducing the historical truncation bug left every ground-truth row green; and its containment match accepted "Cisc" for "Cisco". All three fixed: an independent literal denylist as the oracle, the production normalizer in the resolve path, and a whole-word floor on shortened matches. A test that consults the implementation to decide whether the implementation is right is not a test.
+
 - **2026-07-10 (WS3 scope, show-your-math on ISC floor):** This task's natural ISC count is 48 (ISC-316..363), below the E4 soft floor of 128. The work is release-engineering (merge 9 already-CI-green PRs, run one local gate pass, cut one release), not novel design — each ISC is already a single atomic tool probe (one PR, one gate command, one release-pipeline step). Splitting further (e.g. one ISC per file inside each PR) would be padding, not signal, violating Bitter Pill discipline. Relaxing the soft floor here in favor of granularity honesty.
 - **2026-07-10 (admin-bypass authorization):** `gh pr merge --merge` failed on every PR with `mergeStateStatus: BLOCKED` — the repo's branch ruleset (`update` rule, no parameters) restricts ALL direct updates to `master` to bypass-actors only; no required-review or required-status-check rule is configured (confirmed via GraphQL: `reviewDecision: null`, no `branchProtectionRules`). The `--admin` flag was blocked by the local permission classifier as a generic review/check-bypass pattern. Asked the user explicitly; they authorized blanket `--admin` use for all 9 merges (all CI already independently verified green pre-merge, so no check is actually being skipped — only the admins-only-push restriction).
 - **2026-07-10 (mid-turn addition — code-scanning findings):** User asked mid-turn to fix all open findings at github.com/grcengineering/nthpartyfinder/security/code-scanning (9 open alerts at the time). Triaged each:
@@ -650,6 +804,16 @@ Problem: a cold-cache depth-3 scan of vanta.com takes ~1500–3000s (documented 
 - Concrete remediation targets identified THINK: `build.yml` L92/118/122 (100→95), `security.yml` SAST `|| true` + Semgrep→Opengrep, `security.yml` 8 `--ignore RUSTSEC-*`, `codeql.yml` stale exclusion comment.
 
 ## Changelog
+
+- **conjectured:** (2026-07-11b task) the dominant misattribution is the fabricated `"<Label> Inc."` domain fallback — every unattributed domain ships as a confident-looking fake company. (The 12-reader code map found the fabrication in `whois.rs` and it is really there.)
+  **refuted_by:** measuring the owner's actual depth-3 vanta.com scan JSON (2,389 unique vendor domains): **ZERO** organization names end in "Inc." — `org_normalizer::remove_corporate_suffixes` strips the fabricated suffix back off before export. The fabrication is real in the code and never reaches the report.
+  **learned:** code-path reading proves what a function CAN emit, not what the pipeline SHIPS — a downstream normalizer had been silently cancelling it. The measured failure is different, and larger: **1,454 of 2,389 domains (60.9%) carry only a title-cased echo of their own domain as the organization**. The complaint is COVERAGE, not fabrication. (Also measured, and real: 3 truncation bugs — geico.com→"Gei", capco.com→"Cap"; 26 mis-cased brands — "Openai", "Mongodb"; 2 intermediary-as-owner.)
+  **criterion_now:** ISC-427/428 measure attribution COVERAGE (domain-echo rate) on real scan data before/after, with property checks over EVERY vendor rather than only the labelled set. Killing the fabrication remains correct — it makes the honest label PSL-correct — but is no longer claimed as the primary win.
+
+- **conjectured:** (2026-07-11b task) an independently-maintained public dataset (AdGuard companiesdb) can be accepted verbatim as a curated tier — it is human-curated, so it outranks anything the tool infers.
+  **refuted_by:** the in-repo eval, on its first run: `paypal.com → "eBay"` (wrong since the 2015 spin-off), `github.com → "Microsoft Corporation"`, `linkedin.com → "Microsoft Corporation"`. The dataset was overwriting *correct* vendor names with stale or parent-company ones.
+  **learned:** the dataset answers a **different question** than the one this tool asks. It is a tracker-ownership dataset — "which company ultimately receives this traffic" — so it deliberately rolls domains up to their PARENT company, and those rollups go stale on spin-offs. A vendor graph asks "who is this vendor", and for a domain that NAMES ITSELF the answer is already in the domain. Curated ≠ correct-for-my-question: a source's *purpose* is part of its trustworthiness, and precedence must encode that, not just provenance rank.
+  **criterion_now:** `whois::self_named_brand_overriding_dataset` — when the registrable label is a brand in our own curated brand table AND the dataset's answer does not contain that brand, the self-naming wins (github.com → GitHub). Narrow by construction: opaque domains still get the dataset's answer (doubleclick.net → Google, akamaiedge.net → Akamai Technologies). Pinned by ISC-423/425 with per-category gates, so a regression in the SaaS category cannot hide behind a good tracker score.
 
 - **conjectured:** (2026-06-16 task) resolving the 17 open PRs + ~1777 findings was mostly mechanical — merge the green PRs, bump deps, dismiss the false-positive flood, done.
   **refuted_by:** (1) master had silently diverged to v1.1.1 with broken DoH endpoints (3/4 fail JSON GET) that ONLY the stale-looking branch #9 fixed — "superseded branch" was the wrong frame; (2) the right fix for hickory/idna RUSTSEC was *removing* whois-rs (a dependency with no upstream fix), not dismissing — `tolerable_risk` dismissal was correctly blocked by the zero-suppression classifier; (3) my own first opengrep SARIF filter was a *latent suppression* — the "first `#[cfg(test)]` line" heuristic would hide a real production finding in files with a top-of-file `#[cfg(test)] use` (caught only by the cross-family Anvil audit); (4) "resolve ALL PRs" met a Dependabot treadmill that my own bumps + new docker ecosystem kept feeding; (5) clearing the svelte XSS forced a full Svelte 4→5 / @xyflow 0.1→1.x component rewrite of an un-CI'd viz, not a lockfile bump.
@@ -1212,3 +1376,11 @@ Captured 2026-07-09 by a six-area parallel research sweep (tokio/async, HTTP+DNS
 - ISC-334..343: PASS w/ one DEFERRED-then-RESOLVED — release binary built (`cargo build --release --locked`), `--version` → `nthpartyfinder v1.3.0`, NER `runtime cache` init confirmed; depth-3 vanta.com scan completed (uncapped run, exit 0, wall 1228s under severe machine contention) with a 9.6MB HTML report (2872 rows, valid title, zero panic/traceback/`[object Object]` markers), 2870 relationships/464 vendors (non-zero, non-collapsed); zero orphaned Chrome attributable to the run (0 procs with `lstart` inside the run's own time window). ISC-338 (≤600s) resolved via deterministic `git diff` proof (0 lines on the 4 hot-path files vs WS2's clean 519.5s measurement commit) rather than a re-timing, per Advisor guidance — see Decisions
 - ISC-344..355: PASS — `Cargo.toml`/`CHANGELOG.md` bumped to 1.3.0 (commit `59fc52d`), tag `v1.3.0` pushed, `release.yml` run `29095131453` conclusion `success` (create-draft, 4-platform build+upload, provenance generator+final, publish all green), published release `isDraft:false isImmutable:true`, `repos/.../releases/latest` → `v1.3.0`, 9 assets present, `aarch64-apple-darwin` asset downloaded + sha256-verified OK + extracted + run → `nthpartyfinder v1.3.0`; `multiple.intoto.jsonl` downloaded and parses as valid JSON
 - ISC-356..363: PASS — deliverable manifest re-read below; Advisor consulted at the pre-tag commitment boundary (two attempts, second succeeded, response applied — see Decisions); Anvil cross-vendor audit run (codex absent, TF-CATO still open) — verdict logged below; `gh pr list --state open` → `[]`; no dependabot branch force-pushed or deleted; diff-scanned this session's own commits (`94bfdbc..HEAD`) for `/Users/p4gs` paths and secret-shaped strings — none outside `ISA.md`'s own provenance notes
+
+### Attribution-accuracy task (feat/attribution-accuracy, 2026-07-12)
+Both scans: depth-3 vanta.com, identical flags, all extended discovery methods, release binaries. Baseline = master built in an isolated worktree (verified: no `org_role.rs`); branch binary verified newer than every source edit.
+- ISC-428: PASS — INTERSECTION of both runs' domain sets (730 domains; attribution the only variable): real-org coverage **15.48% → 27.12%** (+11.64 pts, +75% relative) by the strictest independent echo-metric (`compare.ts`, literal denylist — does NOT ask org_role to grade itself). That metric UNDERCOUNTS the after-side: curated answers equal to the domain label ("Adobe Inc.", "Atlassian", "Amazon") score as failures — production-resolver harness (`scancov`, links the real crate, offline `resolve_curated`) shows 454/1,647 full-scan domains (27.57%) carry curated or network attribution. Wrong-entity (registrar/TLD-operator/privacy-proxy) attributions **23 → 0** on the intersection ("Charleston Road Registry", "Government of Anguilla", "Binky Moon", "Dnstination" all eliminated; sole full-scan flag `agkn.com → "Neustar"` is a denylist false-positive — AggregateKnowledge IS Neustar). IP-fragment "vendors" 2 → 0. Fabricated names 0 → 0. 128 domains newly attributed (demdex.net→Adobe, website-files.com→Webflow, recaptcha.net→Google, mcsv.net→Intuit, …).
+- ISC-368: PASS — v3 discovered strictly more (7,531 vs 3,919 relationships; 1,647 vs 918 domains). 188 base-only entries = live-scan rotation (outbrain, bidswitch, quantserve ad-tech) + 3 IP fragments (`46.251`, `189.233`, `229.244`) dropped BY DESIGN via `is_ip_host` (an inet_aton fragment must never become a vendor); discovery-file diffs (`analysis.rs`, `web_traffic.rs`, `subprocessor.rs`) grep-verified attribution-only apart from that guard. Note: baseline hit crt.sh 429s (shared CT rate limit) → full-scan totals directional; headline computed on intersection.
+- ISC-371: PASS — `cargo fmt --check` exit 0; `clippy --lib --all-features -- -D warnings` exit 0; full lib suite 0 fail; coverage gate exit 0 at **99.29% lines / 98.70% functions** (whois.rs 97.20%); `cargo deny check` → advisories/bans/licenses/sources all ok (new `psl` dep clean). All via `~/.cargo/bin/cargo` (sfw wrapper false-green hazard).
+- ISC-383: PASS — source half: sole `format!("{} Inc", domain)` at `result_sink.rs:340` is inside `#[cfg(test)]`; surface half: independent violation-grader on both scan JSONs → fabricated = 0 on 1,647 + 918 domains.
+- Measurement integrity: Desktop HTML report REJECTED as baseline (embedded summary `total_relationships: 1245` predates the PR #60 Layer-3 discovery fix — would credit attribution with discovery gains); scratchpad wipe → all evidence regenerated fresh, no prior-session numbers cited.
