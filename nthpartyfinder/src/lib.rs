@@ -16,6 +16,7 @@ pub mod discovery;
 pub mod dns;
 pub mod domain_utils;
 pub mod export;
+pub mod finalize;
 pub mod interactive;
 pub mod known_vendors;
 pub mod logger;

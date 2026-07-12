@@ -443,12 +443,29 @@ fn is_self_attribution(org: &str, domain: &str) -> bool {
     // networksolutions.com, "Identity Digital Inc." owns identitydigital.com. No single word
     // equals the label, so word-wise comparison alone judges each of these an intermediary
     // squatting on its own domain.
-    segments
+    if segments
         .windows(2)
         .any(|w| format!("{}{}", w[0], w[1]) == label)
         || segments
             .windows(3)
             .any(|w| format!("{}{}{}", w[0], w[1], w[2]) == label)
+    {
+        return true;
+    }
+
+    // The whole name, connectives and all, run together into the label.
+    //
+    // The segment list above drops words shorter than three characters, which is right for
+    // matching an individual word but wrong here: "Ministry of Supply" (a clothing company) owns
+    // ministryofsupply.com, and dropping "of" leaves "ministrysupply", which matches nothing. The
+    // company then failed the rescue, met the state-authority shape rule, and was disowned from
+    // its own domain. Compare the full alphanumeric run of the name against the label.
+    let whole: String = org
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    !whole.is_empty() && whole == label
 }
 
 /// Classify what an organization string names, in the context of the domain it is being
@@ -469,16 +486,29 @@ pub fn classify_for_domain(org: &str, domain: &str) -> OrgRole {
         return OrgRole::PrivacyService;
     }
 
-    // A state authority named as the registrant of a commercial domain is the ccTLD registry
-    // answering for itself — unless the domain genuinely belongs to a government, which the
-    // suffix reveals (`irs.gov`, `service.gouv.fr`, `canada.gc.ca`, `data.go.jp`).
+    // Self-attribution outranks every shape heuristic, and must be asked BEFORE them.
+    //
+    // A company whose domain is named after it owns that domain, whatever its name happens to
+    // resemble. "Ministry of Supply" is a clothing company and the rightful owner of
+    // ministryofsupply.com; "Ministry of Testing" owns ministryoftesting.com. Both trip the
+    // state-authority shape below, and when that check ran first it disowned them and shipped the
+    // bare domain label instead — the shape rule was written for a registry answering WHOIS for a
+    // domain it does NOT own, and self-attribution is exactly the evidence that this is not that.
+    //
+    // A redaction is never rescued this way, which is why the check above runs first: redactions
+    // QUOTE the domain they hide ("On Behalf of Polytomic.Com Owner"), so they would otherwise
+    // launder themselves through this very rule.
+    if is_self_attribution(org, domain) {
+        return OrgRole::Valid;
+    }
+
+    // A state authority named as the registrant of a commercial domain it is NOT named after is
+    // the ccTLD registry answering for itself — unless the domain genuinely belongs to a
+    // government, which the suffix reveals (`irs.gov`, `service.gouv.fr`, `canada.gc.ca`).
     if looks_like_state_authority(&cleaned(org)) && !is_governmental_domain(domain) {
         return OrgRole::RegistryOperator;
     }
 
-    if role.is_intermediary() && is_self_attribution(org, domain) {
-        return OrgRole::Valid;
-    }
     role
 }
 
