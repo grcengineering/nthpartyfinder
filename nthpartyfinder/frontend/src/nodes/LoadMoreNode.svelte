@@ -36,8 +36,8 @@
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    border: 2px dashed #9ca3af;
-    background: white;
+    border: 2px dashed var(--border-strong, #9ca3af);
+    background: var(--npf-card, #fff);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -45,17 +45,21 @@
   }
 
   .load-more-node:hover .node-circle {
-    border-color: #6366f1;
-    background: #f5f3ff;
+    border-color: var(--brand-accent, #6366f1);
+    background: var(--npf-raised, #f5f3ff);
     transform: scale(1.08);
   }
 
   .plus-icon {
-    font-size: 20px; font-weight: 300; color: #9ca3af; line-height: 1;
+    font-size: 20px; font-weight: 300; color: var(--npf-ink-muted, #9ca3af); line-height: 1;
   }
 
-  .load-more-node:hover .plus-icon { color: #6366f1; }
+  .load-more-node:hover .plus-icon { color: var(--brand-accent, #6366f1); }
 
-  .node-label { font-size: 11px; font-weight: 500; color: #6b7280; text-align: center; }
-  .node-hint { font-size: 9px; color: #9ca3af; }
+  .node-label {
+    font-size: 11px; font-weight: var(--fw-medium, 500);
+    color: var(--npf-ink-muted, #6b7280); text-align: center;
+    font-family: var(--ui-family, inherit);
+  }
+  .node-hint { font-size: 9px; color: var(--npf-ink-faint, #9ca3af); }
 </style>

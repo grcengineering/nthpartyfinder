@@ -595,26 +595,10 @@
            ============================================================ */
         .hover-tooltip { position: absolute; background: var(--surface-ink); color: var(--text-on-ink); padding: var(--space-2); border-radius: var(--radius-xs); font-family: var(--font-mono); font-size: var(--text-2xs); z-index: 1000; pointer-events: none; opacity: 0; transition: opacity 0.2s ease; }
 
-        /* ============================================================
-           VENDOR GRAPH — re-theme XYFlow to DS tokens
-           ============================================================ */
-        .svelte-flow { background-color: var(--surface-sunken) !important; }
-        .svelte-flow .svelte-flow__edge path { stroke: var(--border-strong) !important; }
-        .svelte-flow .svelte-flow__edge:hover path { stroke: var(--brand-accent) !important; }
-        /* Root node -> fusion ocean (overrides the scoped class gradient in vendor-graph.css) */
-        .root-node .node-circle { background: var(--gradient-ocean) !important; box-shadow: var(--glow-eng) !important; }
-        /* Node action badges + tooltip header -> DS (these are class rules, safely overridable) */
-        .root-node .badge, .vendor-node .expand-badge { background: var(--grc-orange-500) !important; }
-        .vendor-node .info-badge { background: var(--eng-blue-500) !important; }
-        .tooltip-header { background: var(--gradient-fusion) !important; }
-        .source-type { background: var(--eng-blue-50) !important; color: var(--eng-blue-700) !important; }
-        /* Legend band chips -> DS (data-layer attrs exist on these elements) */
-        .layer-band-label[data-layer="0"] { background: rgba(255,168,79,0.15) !important; color: var(--grc-orange-700) !important; }
-        .layer-band-label[data-layer="1"] { background: var(--eng-blue-50) !important; color: var(--eng-blue-700) !important; }
-        .layer-band-label[data-layer="2"] { background: var(--amber-100) !important; color: var(--amber-600) !important; }
-        /* NOTE: per-layer vendor-node circle colors are set inline by the Svelte component;
-           recoloring them to DS blue/amber/orange requires editing frontend/src/VendorGraph.svelte
-           and rebuilding vendor-graph.css/js (tracked follow-up). */
+        /* The vendor graph needs no overrides here: frontend/src/VendorGraph.svelte
+           defines the layer ramp against these same tokens and bridges XYFlow's
+           --xy-*-default variables to them, so the graph themes itself from the
+           cascade above. Change a layer colour there, not here. */
 
         /* ============================================================
            RESPONSIVE

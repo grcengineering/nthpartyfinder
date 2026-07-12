@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Handle, Position, type NodeProps } from '@xyflow/svelte';
-  import type { DiscoverySource } from '../lib/transform';
+  import { clampLayer, type DiscoverySource } from '../lib/transform';
   import { icons } from '../lib/icons';
 
   type VendorData = {
@@ -19,14 +19,11 @@
 
   let { data }: NodeProps & { data: VendorData } = $props();
 
-  const layerColors: Record<number, { bg: string; shadow: string; ring: string; solid: string }> = {
-    1: { bg: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', shadow: 'rgba(59, 130, 246, 0.35)', ring: 'rgba(59, 130, 246, 0.25)', solid: '#3b82f6' },
-    2: { bg: 'linear-gradient(135deg, #10b981 0%, #059669 100%)', shadow: 'rgba(16, 185, 129, 0.35)', ring: 'rgba(16, 185, 129, 0.25)', solid: '#10b981' },
-    3: { bg: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)', shadow: 'rgba(245, 158, 11, 0.35)', ring: 'rgba(245, 158, 11, 0.25)', solid: '#f59e0b' },
-    4: { bg: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)', shadow: 'rgba(239, 68, 68, 0.35)', ring: 'rgba(239, 68, 68, 0.25)', solid: '#ef4444' }
-  };
-
-  const colors = $derived(layerColors[data.layer] || layerColors[4]);
+  // The node's colour comes entirely from the layer ramp defined once on
+  // .vendor-graph-container (--npf-l{N}-fill / --npf-l{N}-solid), which inherits
+  // down to here. This component decides WHICH layer it is, never what that
+  // layer looks like.
+  const layer = $derived(clampLayer(data.layer));
 
   // Build concentric ring shadows from ACTIVE layers only (not all possible layers).
   // activeLayers is set by VendorGraph when edges become visible/hidden.
@@ -44,10 +41,8 @@
 
     const shadows: string[] = [];
     for (let i = 0; i < extraLayers.length; i++) {
-      const layer = extraLayers[i];
-      const color = (layerColors[layer] || layerColors[4]).solid;
       const offset = (i + 1) * 4;
-      shadows.push(`0 0 0 ${offset}px ${color}`);
+      shadows.push(`0 0 0 ${offset}px var(--npf-l${clampLayer(extraLayers[i])}-solid)`);
     }
     return shadows.join(', ');
   }
@@ -79,7 +74,7 @@
 >
   <Handle type="target" position={Position.Top} id="target" style="position: absolute; left: 50%; top: 24px; transform: translate(-50%, -50%);" />
 
-  <div class="node-circle" style="background: {colors.bg}; --shadow-color: {colors.shadow}; --ring-color: {colors.ring};{multiLayerShadow ? ` box-shadow: ${multiLayerShadow};` : ''}">
+  <div class="node-circle" style="--layer-fill: var(--npf-l{layer}-fill); --layer-solid: var(--npf-l{layer}-solid);{multiLayerShadow ? ` box-shadow: ${multiLayerShadow};` : ''}">
     <span class="node-icon">{@html icons.building2}</span>
   </div>
 
@@ -130,13 +125,23 @@
   }
 
   .node-circle {
+    /* --layer-fill / --layer-solid are set inline from the inherited layer ramp.
+       The glow and expanded ring are derived from the layer's own solid so they
+       stay in family for every layer; the plain rgba declaration ahead of each
+       color-mix() is the fallback for engines without relative colour support. */
+    --layer-glow: rgba(15, 23, 42, 0.22);
+    --layer-glow: color-mix(in srgb, var(--layer-solid) 35%, transparent);
+    --layer-ring: rgba(15, 23, 42, 0.15);
+    --layer-ring: color-mix(in srgb, var(--layer-solid) 25%, transparent);
+
     width: 48px;
     height: 48px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 2px 8px var(--shadow-color, rgba(59, 130, 246, 0.35));
+    background: var(--layer-fill);
+    box-shadow: 0 2px 8px var(--layer-glow);
     /* Smooth transition for ring grow/shrink animation */
     transition: box-shadow 0.4s ease, transform 0.2s;
     position: relative;
@@ -147,7 +152,7 @@
   }
 
   .vendor-node.expanded .node-circle {
-    box-shadow: 0 0 0 3px var(--ring-color, rgba(59, 130, 246, 0.25)), 0 2px 8px var(--shadow-color);
+    box-shadow: 0 0 0 3px var(--layer-ring), 0 2px 8px var(--layer-glow);
   }
 
   .node-icon { font-size: 20px; line-height: 1; color: #fff; display: inline-flex; }
@@ -178,22 +183,26 @@
     pointer-events: all;
   }
 
-  .expand-badge { top: -14px; right: -10px; background: #ef4444; color: white; }
-  .expand-badge:hover { background: #dc2626; transform: scale(1.1) !important; }
-  .info-badge { top: -14px; left: -10px; background: #6366f1; color: white; }
-  .info-badge:hover { background: #4f46e5; transform: scale(1.1) !important; }
+  .expand-badge { top: -14px; right: -10px; background: var(--grc-orange-500, #ef4444); color: var(--text-on-accent, #fff); }
+  .expand-badge:hover { background: var(--grc-orange-600, #dc2626); transform: scale(1.1) !important; }
+  .info-badge { top: -14px; left: -10px; background: var(--eng-blue-500, #6366f1); color: var(--text-on-accent, #fff); }
+  .info-badge:hover { background: var(--eng-blue-600, #4f46e5); transform: scale(1.1) !important; }
 
-  .badge-count { font-size: 10px; }
+  .badge-count { font-size: 10px; font-family: var(--font-mono, inherit); }
   .badge-icon { font-size: 9px; }
 
+  /* Labels sit on the canvas, so they bind to the theme-flipping ink tokens —
+     this is what kept them dark-on-dark (invisible) before. */
   .node-label {
-    font-size: 11px; font-weight: 600; color: #1e293b;
+    font-size: 11px; font-weight: var(--fw-semibold, 600);
+    color: var(--npf-ink, #1e293b);
+    font-family: var(--ui-family, inherit);
     text-align: center; max-width: 120px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
   .node-org {
-    font-size: 10px; color: #64748b;
+    font-size: 10px; color: var(--npf-ink-muted, #64748b);
     text-align: center; max-width: 120px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }

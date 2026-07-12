@@ -383,6 +383,20 @@ export function transformToXyflow(
   return { nodes, edges, vendors, layerBands };
 }
 
+/**
+ * Deepest layer with a dedicated colour in the design-system layer ramp.
+ * The ramp runs engineering-blue (near) -> amber -> legacy-GRC-orange (deep);
+ * layers past this point reuse the deepest orange rather than falling back to
+ * a neutral, so "deeper means more orange" holds for arbitrarily deep scans.
+ */
+export const LAYER_RAMP_MAX = 6;
+
+/** Clamp a scan layer onto the design-system layer ramp (1..LAYER_RAMP_MAX). */
+export function clampLayer(layer: number): number {
+  if (!Number.isFinite(layer) || layer < 1) return 1;
+  return Math.min(Math.trunc(layer), LAYER_RAMP_MAX);
+}
+
 export function formatRecordType(recordType: string): string {
   // Compact labels for the graph tooltip's source groupings. Covers every Rust
   // RecordType variant — keyed by both the serde variant name (DnsTxtSpf) and the
