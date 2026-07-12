@@ -85,6 +85,10 @@ const PHRASE_INTERMEDIARY: &[(&str, OrgRole)] = &[
     ("domain protection services", OrgRole::PrivacyService),
     ("privacyguardian", OrgRole::PrivacyService),
     ("registration private", OrgRole::PrivacyService),
+    // "Jewella Privacy LLC Privacy ID# 14492117" shipped as the owner of terminal.com on a real
+    // scan. Proxy services stamp a per-customer "Privacy ID#" into the registrant field; the
+    // phrase never appears in a real company name.
+    ("privacy id", OrgRole::PrivacyService),
     ("whois agent", OrgRole::PrivacyService),
     ("whoisproxy", OrgRole::PrivacyService),
     ("domain admin", OrgRole::PrivacyService),
@@ -465,10 +469,56 @@ pub fn classify_for_domain(org: &str, domain: &str) -> OrgRole {
         return OrgRole::PrivacyService;
     }
 
+    // A state authority named as the registrant of a commercial domain is the ccTLD registry
+    // answering for itself — unless the domain genuinely belongs to a government, which the
+    // suffix reveals (`irs.gov`, `service.gouv.fr`, `canada.gc.ca`, `data.go.jp`).
+    if looks_like_state_authority(&cleaned(org)) && !is_governmental_domain(domain) {
+        return OrgRole::RegistryOperator;
+    }
+
     if role.is_intermediary() && is_self_attribution(org, domain) {
         return OrgRole::Valid;
     }
     role
+}
+
+/// A state authority by SHAPE rather than by name.
+///
+/// The name-by-name entries above ("Government of Anguilla", "MinTIC") only ever catch the
+/// registries somebody has already seen. But the failure class is structural: repurposed ccTLDs
+/// (.to Tonga, .ma Morocco, .so Somalia, .sh St. Helena, .ai Anguilla) answer WHOIS with the
+/// national authority that operates the registry. A real depth-3 scan shipped "Government of the
+/// Kingdom of Tonga" as the owner of dev.to, "Agence Nationale de Réglementation des
+/// Télécommunications (ANRT)" as lu.ma, "Ministry of Post and Telecommunications" as cello.so and
+/// "Government of St. Helena" as cursor.sh. A state organ in the registrant field of a commercial
+/// vendor domain names the registry, not the owner.
+///
+/// The exemption for domains a government genuinely owns lives in [`classify_for_domain`], which
+/// can see the domain.
+fn looks_like_state_authority(lower: &str) -> bool {
+    const STATE_AUTHORITY_SHAPES: &[&str] = &[
+        "government of",
+        "ministry of",
+        "agence nationale",
+        "consulate of",
+        "embassy of",
+        "telecommunications regulatory",
+        "communications authority",
+        "posts and telecommunications",
+        "post and telecommunications",
+    ];
+    STATE_AUTHORITY_SHAPES
+        .iter()
+        .any(|s| contains_word_bounded(lower, s))
+}
+
+/// Suffix labels under which a state authority is a plausible legitimate owner rather than a
+/// registry answering for itself: `irs.gov`, `service.gouv.fr`, `canada.gc.ca`, `data.go.jp`.
+fn is_governmental_domain(domain: &str) -> bool {
+    domain
+        .to_ascii_lowercase()
+        .split('.')
+        .any(|label| matches!(label, "gov" | "gouv" | "gob" | "go" | "mil" | "gc"))
 }
 
 /// A redaction by SHAPE rather than by name.
@@ -857,5 +907,80 @@ mod tests {
         assert!(OrgRole::RegistryOperator.is_intermediary());
         assert!(OrgRole::AddressLeak.is_intermediary());
         assert!(!OrgRole::Valid.is_intermediary());
+    }
+
+    // --- State authorities by shape: the four leaks a real depth-3 scan shipped ---
+
+    #[test]
+    fn cctld_registry_authorities_are_never_the_owner_of_a_commercial_domain() {
+        // Each of these appeared VERBATIM as a vendor's organization on a real scan.
+        assert_eq!(
+            classify_for_domain(
+                "Government of the Kingdom of Tonga, H.R.H. Crown Prince Tupoutoa, C/O Consulate of Tonga",
+                "dev.to"
+            ),
+            OrgRole::RegistryOperator
+        );
+        assert_eq!(
+            classify_for_domain(
+                "Agence Nationale de Réglementation des Télécommunications (ANRT)",
+                "lu.ma"
+            ),
+            OrgRole::RegistryOperator
+        );
+        assert_eq!(
+            classify_for_domain("Ministry of Post and Telecommunications", "cello.so"),
+            OrgRole::RegistryOperator
+        );
+        assert_eq!(
+            classify_for_domain("Government of St. Helena", "cursor.sh"),
+            OrgRole::RegistryOperator
+        );
+    }
+
+    #[test]
+    fn governments_still_own_their_own_domains() {
+        // The shape must not disown domains a state genuinely holds — the suffix says so.
+        assert_eq!(
+            classify_for_domain("Government of Canada", "canada.gc.ca"),
+            OrgRole::Valid
+        );
+        assert_eq!(
+            classify_for_domain("Ministry of Justice", "justice.gouv.fr"),
+            OrgRole::Valid
+        );
+        assert_eq!(
+            classify_for_domain("Government of Singapore", "tech.gov.sg"),
+            OrgRole::Valid
+        );
+    }
+
+    #[test]
+    fn companies_with_incidental_state_words_stay_valid() {
+        // Word-bounded phrases, not keywords: none of these contains a state-authority shape.
+        assert_eq!(
+            classify_for_domain(
+                "Community Financial and Retirement Services",
+                "commfinancial.com"
+            ),
+            OrgRole::Valid
+        );
+        assert_eq!(
+            classify_for_domain("Federal Express Corporation", "fedex.com"),
+            OrgRole::Valid
+        );
+        assert_eq!(
+            classify_for_domain("National Instruments", "ni.com"),
+            OrgRole::Valid
+        );
+    }
+
+    #[test]
+    fn privacy_id_stamps_are_privacy_services() {
+        // "Jewella Privacy LLC Privacy ID# 14492117" shipped as the owner of terminal.com.
+        assert_eq!(
+            classify_for_domain("Jewella Privacy LLC Privacy ID# 14492117", "terminal.com"),
+            OrgRole::PrivacyService
+        );
     }
 }
