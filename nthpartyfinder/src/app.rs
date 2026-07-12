@@ -612,6 +612,8 @@ pub struct AssembledResults {
     pub dedup_count: usize,
     pub infra_removed: usize,
     pub marketing_removed: usize,
+    /// What report finalization changed. See [`crate::finalize`].
+    pub finalize: crate::finalize::FinalizeStats,
 }
 
 /// Combine new and resumed results, deduplicate, and optionally filter infra
@@ -627,12 +629,17 @@ pub fn assemble_and_filter_results(
     let dedup_count = deduped.len();
     let (filtered, infra_removed) = filter_infra_providers(deduped, include_infra);
     let (filtered, marketing_removed) = filter_marketing_tracking(filtered, include_infra);
+    // The single choke point. Every relationship from every source, every run mode (fresh,
+    // resumed, batch) passes through here, so this is the only place an attribution invariant
+    // can be enforced once instead of remembered at each new emit site.
+    let (filtered, finalize) = crate::finalize::finalize_report(filtered);
     AssembledResults {
         results: filtered,
         raw_count,
         dedup_count,
         infra_removed,
         marketing_removed,
+        finalize,
     }
 }
 
@@ -2333,6 +2340,27 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         logger.info(&format!(
             "Suppressed {} social/ad-network marketing-tracking entries from web traffic (use --include-infra to include)",
             assembled.marketing_removed
+        ));
+    }
+    // Finalization rewrites the report; say so. A silently-corrected name is indistinguishable
+    // from one that was right all along, and the counts are how a stale PSL snapshot or an
+    // over-eager gate would first show itself.
+    if assembled.finalize.non_registrable_dropped > 0 {
+        logger.info(&format!(
+            "Dropped {} entries whose host is not a registrable domain (truncated internal hostnames, URL fragments)",
+            assembled.finalize.non_registrable_dropped
+        ));
+    }
+    if assembled.finalize.intermediary_orgs_gated > 0 {
+        logger.info(&format!(
+            "Replaced {} organization names that identified a registrar, registry, privacy proxy or address rather than the domain's owner",
+            assembled.finalize.intermediary_orgs_gated
+        ));
+    }
+    if assembled.finalize.domains_reconciled > 0 {
+        logger.info(&format!(
+            "Reconciled {} domains that carried conflicting organization names into a single name each",
+            assembled.finalize.domains_reconciled
         ));
     }
     let results = assembled.results;
