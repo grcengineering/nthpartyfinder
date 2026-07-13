@@ -902,19 +902,42 @@ pub async fn discover_nth_parties(
                 .await;
             logger.set_progress_position(16).await;
         }
+        // Each arm is timed independently. They run concurrently, so these do not sum to the
+        // discovery wall time — the join costs roughly its slowest arm, and the point of the
+        // per-phase counters is to name which arm that is. The whole join is timed into the
+        // depth bucket, which is the term that actually adds up across the recursion.
+        let discovery_started = std::time::Instant::now();
         let (sp, sf, st, ct_v, wt) = tokio::join!(
-            run_subprocessor_phase(
-                domain,
-                subprocessor_analyzer,
-                subprocessor_enabled,
-                verification_logger,
-                &logger,
+            crate::perf::timed_async(
+                &crate::perf::METRICS.phase_subproc,
+                run_subprocessor_phase(
+                    domain,
+                    subprocessor_analyzer,
+                    subprocessor_enabled,
+                    verification_logger,
+                    &logger,
+                ),
             ),
-            run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
-            run_saas_phase(domain, saas_tenant_discovery, &logger),
-            run_ct_phase(domain, ct_discovery, &logger),
-            run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+            crate::perf::timed_async(
+                &crate::perf::METRICS.phase_subfinder,
+                run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
+            ),
+            crate::perf::timed_async(
+                &crate::perf::METRICS.phase_saas,
+                run_saas_phase(domain, saas_tenant_discovery, &logger),
+            ),
+            crate::perf::timed_async(
+                &crate::perf::METRICS.phase_ct,
+                run_ct_phase(domain, ct_discovery, &logger),
+            ),
+            crate::perf::timed_async(
+                &crate::perf::METRICS.phase_webtraffic,
+                run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+            ),
         );
+        crate::perf::METRICS
+            .depth_bucket(current_depth)
+            .record(discovery_started.elapsed());
         all_vendor_domains.extend(sp);
         all_vendor_domains.extend(sf);
         all_vendor_domains.extend(st);
