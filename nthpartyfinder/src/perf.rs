@@ -92,6 +92,18 @@ pub struct Metrics {
     /// Vendors that hit the budget having found *nothing* — starved, not empty. Any non-zero
     /// value means the scan under-reports, and the aggregate row count will not show it.
     pub subproc_zero_yield: Metric,
+    /// Renders attributed to the subprocessor path (per-source split of `render.total`).
+    pub render_subproc: Metric,
+    /// Renders attributed to the web-org enrichment path.
+    pub render_weborg: Metric,
+    /// Renders attributed to the web-traffic discovery path.
+    pub render_webtraffic: Metric,
+    /// Renders attributed to the trust-center discovery path.
+    pub render_trustcenter: Metric,
+    /// Subprocessor renders that fired the SPA fallback (static HTML looked like a skeleton).
+    /// On a warm-cache repeat scan, where every probed URL comes from cache, this equals the
+    /// count of renders spent on already-known cached URLs — the quantity B3 measures.
+    pub subproc_spa_render: Metric,
 }
 
 impl Metrics {
@@ -112,6 +124,11 @@ impl Metrics {
             dns_memo_hit: Metric::new(),
             subproc_budget_exhausted: Metric::new(),
             subproc_zero_yield: Metric::new(),
+            render_subproc: Metric::new(),
+            render_weborg: Metric::new(),
+            render_webtraffic: Metric::new(),
+            render_trustcenter: Metric::new(),
+            subproc_spa_render: Metric::new(),
         }
     }
 
@@ -122,7 +139,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 15] {
+    fn all(&self) -> [(&'static str, &Metric); 20] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -131,9 +148,14 @@ impl Metrics {
             ("render.settle", &self.render_settle),
             ("render.capture", &self.render_capture),
             ("render.total", &self.render_total),
+            ("render.subproc", &self.render_subproc),
+            ("render.weborg", &self.render_weborg),
+            ("render.webtraffic", &self.render_webtraffic),
+            ("render.trustcenter", &self.render_trustcenter),
             ("ner.infer", &self.ner_infer),
             ("http.fetch", &self.http_fetch),
             ("subproc.probe", &self.subproc_probe),
+            ("subproc.spa_render", &self.subproc_spa_render),
             ("whois.lookup", &self.whois_lookup),
             ("dns.query", &self.dns_query),
             ("dns.memo_hit", &self.dns_memo_hit),
@@ -320,6 +342,7 @@ pub fn scoped(metric: &'static Metric) -> ScopedTimer {
 /// of 400% of wall. Call [`RenderTimer::exclude`] with the guard's `permit_wait` to subtract it.
 pub struct RenderTimer {
     metric: &'static Metric,
+    source: Option<&'static Metric>,
     started: std::time::Instant,
     excluded: Duration,
 }
@@ -338,9 +361,23 @@ impl RenderTimer {
     pub fn into_metric(metric: &'static Metric) -> Self {
         Self {
             metric,
+            source: None,
             started: std::time::Instant::now(),
             excluded: Duration::ZERO,
         }
+    }
+
+    /// Also record this render's net duration into `source` — the per-call-site split of
+    /// `render.total`.
+    ///
+    /// The aggregate stays the denominator; the source counters partition it. Both receive the
+    /// identical exclusion-subtracted duration on drop, so `Σ render.<source> ≈ render.total` and
+    /// a source's share is directly readable. A render that fails still records into both, for
+    /// the same reason `render.total` counts failures: the slow failures are the ones worth
+    /// seeing.
+    pub fn with_source(mut self, source: &'static Metric) -> Self {
+        self.source = Some(source);
+        self
     }
 
     /// Subtract `d` from what this timer will record — the time spent queued, not working.
@@ -362,8 +399,11 @@ impl Default for RenderTimer {
 
 impl Drop for RenderTimer {
     fn drop(&mut self) {
-        self.metric
-            .record(self.started.elapsed().saturating_sub(self.excluded));
+        let net = self.started.elapsed().saturating_sub(self.excluded);
+        self.metric.record(net);
+        if let Some(source) = self.source {
+            source.record(net);
+        }
     }
 }
 
@@ -573,12 +613,17 @@ mod tests {
             "render.settle",
             "render.capture",
             "render.total",
+            "render.subproc",
+            "render.weborg",
+            "render.webtraffic",
+            "render.trustcenter",
             "ner.infer",
             "http.fetch",
             "whois.lookup",
             "dns.query",
             "dns.memo_hit",
             "subproc.probe",
+            "subproc.spa_render",
             "subproc.budget_exhausted",
             "subproc.zero_yield",
         ] {
@@ -587,7 +632,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 15);
+        assert_eq!(snap.rows.len(), 20);
     }
 
     /// A starved vendor under-reports its subprocessors while the scan-wide total can still
@@ -654,6 +699,65 @@ mod tests {
             total >= Duration::from_millis(15),
             "drop must record the elapsed time, got {total:?}"
         );
+    }
+
+    /// The per-source split must partition the aggregate, not shadow it: one render records the
+    /// *same* duration into both, so `Σ render.<source>` reconciles against `render.total`.
+    #[test]
+    fn with_source_records_the_same_duration_into_both_metrics() {
+        static AGGREGATE: Metric = Metric::new();
+        static SOURCE: Metric = Metric::new();
+        {
+            let _t = RenderTimer::into_metric(&AGGREGATE).with_source(&SOURCE);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let (agg_count, agg_total) = AGGREGATE.snapshot();
+        let (src_count, src_total) = SOURCE.snapshot();
+        assert_eq!(agg_count, 1, "aggregate must still count the render");
+        assert_eq!(src_count, 1, "source must count the render");
+        assert_eq!(
+            agg_total, src_total,
+            "both counters must receive the identical duration, got {agg_total:?} vs {src_total:?}"
+        );
+        assert!(agg_total >= Duration::from_millis(15));
+    }
+
+    /// The exclusion is queue time, not render work — it must be subtracted from the per-source
+    /// counter too, or a source's share of `render.total` would be inflated by the queue it
+    /// happened to wait in.
+    #[test]
+    fn with_source_subtracts_the_exclusion_from_both_metrics() {
+        static AGGREGATE: Metric = Metric::new();
+        static SOURCE: Metric = Metric::new();
+        {
+            let mut t = RenderTimer::into_metric(&AGGREGATE).with_source(&SOURCE);
+            std::thread::sleep(Duration::from_millis(30));
+            t.exclude(Duration::from_millis(25));
+        }
+        let (_, agg_total) = AGGREGATE.snapshot();
+        let (_, src_total) = SOURCE.snapshot();
+        assert_eq!(agg_total, src_total, "exclusion must apply to both");
+        assert!(
+            agg_total < Duration::from_millis(30),
+            "the excluded queue time must not be recorded, got {agg_total:?}"
+        );
+    }
+
+    /// A timer with no source declared must leave every other counter alone — the four
+    /// per-source counters exist to partition renders, not to collect stray ones.
+    #[test]
+    fn render_timer_without_source_records_only_its_own_metric() {
+        static AGGREGATE: Metric = Metric::new();
+        static UNTOUCHED: Metric = Metric::new();
+        {
+            let _t = RenderTimer::into_metric(&AGGREGATE);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (agg_count, _) = AGGREGATE.snapshot();
+        let (untouched_count, untouched_total) = UNTOUCHED.snapshot();
+        assert_eq!(agg_count, 1);
+        assert_eq!(untouched_count, 0, "no source declared, none recorded");
+        assert_eq!(untouched_total, Duration::ZERO);
     }
 
     /// The permit wait is queue time, not render work. Recording it inside `render.total`

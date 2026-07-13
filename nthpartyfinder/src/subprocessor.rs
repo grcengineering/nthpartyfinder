@@ -2775,10 +2775,12 @@ impl SubprocessorAnalyzer {
             if is_spa {
                 debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
                 let url_for_browser = url.to_string();
+                crate::perf::METRICS.subproc_spa_render.hit();
                 match tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
                     // Records `render.total` on drop — failures counted too. Before the guard,
                     // so tab close and Chrome recycling are inside the measurement.
-                    let mut render_timer = crate::perf::RenderTimer::start();
+                    let mut render_timer = crate::perf::RenderTimer::start()
+                        .with_source(&crate::perf::METRICS.render_subproc);
                     let guard = crate::browser_pool::acquire_tab()?;
                     let permit_wait = guard.permit_wait();
                     render_timer.exclude(permit_wait);
@@ -6405,7 +6407,8 @@ async fn render_html_in_browser(url: &str, settle: Duration) -> Result<(String, 
         // Otherwise the table's denominator would silently exclude the slow failures — the
         // renders most likely to be the problem. Declared before the guard so that tab close
         // and Chrome recycling land inside the measurement.
-        let mut render_timer = crate::perf::RenderTimer::start();
+        let mut render_timer =
+            crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_subproc);
         let guard = crate::browser_pool::acquire_tab()?;
         let permit_wait = guard.permit_wait();
         render_timer.exclude(permit_wait);
