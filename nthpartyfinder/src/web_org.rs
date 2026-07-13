@@ -291,7 +291,8 @@ fn fetch_page_with_headless(domain: &str) -> Result<String> {
 
     // Records `render.total` on drop — failures counted too. Before the guard, so tab close
     // and Chrome recycling are inside the measurement.
-    let mut render_timer = crate::perf::RenderTimer::start();
+    let mut render_timer =
+        crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_weborg);
     let guard = crate::browser_pool::acquire_tab()?;
     render_timer.exclude(guard.permit_wait());
     let tab = guard.tab();

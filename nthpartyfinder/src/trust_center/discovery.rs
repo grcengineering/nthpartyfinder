@@ -198,7 +198,8 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
     // headless_chrome operations are blocking, run in a blocking thread
     let handle = tokio::task::spawn_blocking(move || -> Result<Vec<InterceptedResponse>> {
         // Declared before the guard so tab close and Chrome recycling are measured.
-        let mut render_timer = crate::perf::RenderTimer::start();
+        let mut render_timer =
+            crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_trustcenter);
         let guard = crate::browser_pool::acquire_tab()?;
         render_timer.exclude(guard.permit_wait());
         let tab = guard.tab();

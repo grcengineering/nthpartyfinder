@@ -187,7 +187,8 @@ impl WebTrafficDiscovery {
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             use std::sync::atomic::Ordering;
             // Declared before the guard so tab close and Chrome recycling are measured.
-            let mut render_timer = crate::perf::RenderTimer::start();
+            let mut render_timer = crate::perf::RenderTimer::start()
+                .with_source(&crate::perf::METRICS.render_webtraffic);
             let guard = crate::browser_pool::acquire_tab()?;
             render_timer.exclude(guard.permit_wait());
             let tab = guard.tab();
