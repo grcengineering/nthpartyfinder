@@ -89,9 +89,8 @@ fn page_client() -> Result<&'static reqwest::Client> {
     if let Some(client) = PAGE_CLIENT.get() {
         return Ok(client);
     }
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::hardened_builder()
         .timeout(Duration::from_secs(10))
-        .connect_timeout(Duration::from_secs(5))
         .tcp_keepalive(Duration::from_secs(60))
         .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/grcengineering/nthpartyfinder)")
         .redirect(reqwest::redirect::Policy::limited(5))

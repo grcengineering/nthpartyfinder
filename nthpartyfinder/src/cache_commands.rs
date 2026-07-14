@@ -367,7 +367,9 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
     println!("Validating {} cached URLs...", urls_to_validate.len());
     println!();
 
-    let client = reqwest::Client::builder()
+    // `cache validate` fans out over many cached URLs across distinct hosts — the same
+    // conntrack failure mode as a scan — so it uses the shared connection-hardened client.
+    let client = crate::http_client::hardened_builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none()) // Don't follow redirects to detect them
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")

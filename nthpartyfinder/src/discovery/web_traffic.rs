@@ -77,7 +77,7 @@ pub struct WebTrafficDiscovery {
 
 impl WebTrafficDiscovery {
     pub fn new(timeout_secs: u64) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::hardened_builder()
             .timeout(Duration::from_secs(timeout_secs))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
             .redirect(reqwest::redirect::Policy::limited(5))

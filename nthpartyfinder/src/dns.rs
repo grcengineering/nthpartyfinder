@@ -201,7 +201,7 @@ impl DnsServerPool {
             })
             .collect();
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::hardened_builder()
             .timeout(std::time::Duration::from_secs(
                 config.http.request_timeout_secs,
             ))
@@ -279,7 +279,7 @@ impl DnsServerPool {
             },
         ];
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::hardened_builder()
             .timeout(std::time::Duration::from_secs(5))
             .user_agent("nthpartyfinder/1.0")
             .build()

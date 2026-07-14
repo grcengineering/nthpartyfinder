@@ -57,7 +57,7 @@ impl CtLogDiscovery {
     }
 
     pub fn with_base_url(timeout: Duration, base_url: String) -> Self {
-        let client = Client::builder()
+        let client = crate::http_client::hardened_builder()
             .timeout(timeout)
             .user_agent("nthpartyfinder/1.0")
             .build()
