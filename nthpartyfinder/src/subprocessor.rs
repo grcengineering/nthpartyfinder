@@ -1143,16 +1143,15 @@ pub struct SubprocessorAnalyzer {
 impl SubprocessorAnalyzer {
     /// Create HTTP client with production-ready configuration
     fn create_http_client() -> reqwest::Client {
-        reqwest::Client::builder()
+        // The shared hardened client bounds TCP connect (and the idle-connection pool). That
+        // connect bound is recall-positive here, not a corner cut: a vendor generates up to
+        // MAX_URLS_TO_TEST candidate subprocessor URLs and probes them against a MAX_ANALYSIS_TIME
+        // budget. Without it, a single host that blackholes SYN (dropped packets, dead IPv6 AAAA)
+        // would burn the FULL 30s request timeout on one URL that was never going to answer; a host
+        // we cannot connect to yields nothing either way, and a responsive-but-slow server still
+        // gets the full 30s to send its body.
+        crate::http_client::hardened_builder()
             .timeout(Duration::from_secs(30))  // Increased timeout for slower servers
-            // A vendor generates up to MAX_URLS_TO_TEST candidate subprocessor URLs and probes
-            // them against a MAX_ANALYSIS_TIME budget. Without a connect timeout, a single host
-            // that blackholes SYN (dropped packets, dead IPv6 AAAA) burns the FULL 30s request
-            // timeout and consumes the vendor's entire budget on one URL that was never going
-            // to answer. Bounding TCP connect at 5s is recall-positive, not a corner cut: a
-            // host we cannot connect to yields nothing either way, and a responsive-but-slow
-            // server still gets the full 30s to send its body.
-            .connect_timeout(Duration::from_secs(5))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")  // Realistic browser user agent
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false)  // Security: reject invalid certificates
