@@ -82,9 +82,49 @@ fn resolve_max_browser_instances() -> usize {
         .clamp(MIN_RENDER_PERMITS, MAX_RENDER_PERMITS)
 }
 
+/// A launched Chrome process that deregisters its PID from the reap registry when dropped.
+///
+/// The inner `Browser`'s own `Drop` kills the Chrome process; this wrapper's `Drop` runs first and
+/// removes the PID from `CHROME_PIDS`, so a *cleanly* retired browser can never be reaped later by
+/// PID — closing the window where the OS recycles that PID onto an unrelated process (e.g. the
+/// user's own Chrome on a long scan) before the terminal reap. A browser leaked by a hard exit
+/// (whose `Drop` never runs) stays registered and is reaped, exactly as intended.
+struct TrackedBrowser {
+    inner: headless_chrome::Browser,
+    pid: Option<u32>,
+}
+
+impl TrackedBrowser {
+    /// Wrap a freshly launched browser, registering its PID for reaping.
+    fn new(inner: headless_chrome::Browser) -> Self {
+        let pid = inner.get_process_id();
+        if let Some(pid) = pid {
+            register_chrome_pid(pid);
+        }
+        Self { inner, pid }
+    }
+}
+
+impl std::ops::Deref for TrackedBrowser {
+    type Target = headless_chrome::Browser;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Drop for TrackedBrowser {
+    fn drop(&mut self) {
+        // Runs before the inner `Browser::drop` kills the process: forget the PID so a later reap
+        // cannot target whatever the OS recycles it onto.
+        if let Some(pid) = self.pid {
+            deregister_chrome_pid(pid);
+        }
+    }
+}
+
 /// A Chrome process plus how many renders it has already served.
 struct PooledBrowser {
-    browser: headless_chrome::Browser,
+    browser: TrackedBrowser,
     served: usize,
 }
 
@@ -99,17 +139,139 @@ fn lock_idle() -> std::sync::MutexGuard<'static, Vec<PooledBrowser>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Kill every idle Chrome process.
+/// PIDs of every Chrome process this scanner has launched and not yet reaped.
 ///
-/// `IDLE_BROWSERS` is a `Lazy` static, and statics never run `Drop`, so without this the Chrome
-/// children outlive the scanner. Call it on every exit path from a scan.
+/// The idle pool holds the `Browser` objects whose `Drop` kills the process, but only for
+/// *idle* browsers. A browser handed out to a render lives inside a `TabGuard` owned by the
+/// render task — and a hard exit (`process::exit` on timeout, Ctrl-C, or a `panic = "abort"`
+/// build) runs no destructors, so those in-flight browsers are leaked. Tracking every launched
+/// PID lets [`reap_registered_chrome`] kill them by PID on any exit path, even the ones that
+/// skip `Drop`. This is what stopped depth-3 scans from leaving hundreds of orphaned Chrome
+/// trees pinned to `launchd` for days.
+static CHROME_PIDS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<u32>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn lock_pids() -> std::sync::MutexGuard<'static, std::collections::HashSet<u32>> {
+    CHROME_PIDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record a freshly launched Chrome's PID so it can be reaped on any exit path.
+fn register_chrome_pid(pid: u32) {
+    lock_pids().insert(pid);
+}
+
+/// Forget a Chrome PID once its `Browser` has been dropped (which kills the process cleanly).
 ///
-/// (A `panic = "abort"` build cannot run this, but neither could the old per-render guard, so
-/// abort behaviour is unchanged.)
+/// Deregistering on clean drop keeps the reap registry to *genuinely in-flight* PIDs. A browser
+/// retired mid-scan (recycled at the render quota, or evicted as unhealthy) has its process killed
+/// by `Browser::drop`; leaving its PID registered would let the terminal reap SIGKILL whatever
+/// unrelated process the OS later recycled that PID onto — including the user's own Chrome on a
+/// long scan. Removing it shrinks that reuse window from a whole scan to a single render.
+fn deregister_chrome_pid(pid: u32) {
+    lock_pids().remove(&pid);
+}
+
+/// Whether a still-alive process at a registered PID actually looks like a browser we launched.
+///
+/// A registered PID is only reaped if the process currently at that PID looks like the browser we
+/// started — the guard against the OS having recycled the PID for something unrelated between the
+/// launch and the reap. Chrome reports itself as `chrome`, `Chromium`, `Google Chrome for
+/// Testing`, or `chrome-headless-shell` (all contain `chrom`); the older standalone headless
+/// distributable is `headless_shell` (matched by `headless`).
+fn looks_like_chrome(process_name: &str) -> bool {
+    let name = process_name.to_ascii_lowercase();
+    name.contains("chrom") || name.contains("headless")
+}
+
+/// Take and clear the set of registered Chrome PIDs. Pure so the drain semantics are testable
+/// without touching the process table.
+fn drain_pids(pids: &mut std::collections::HashSet<u32>) -> Vec<u32> {
+    std::mem::take(pids).into_iter().collect()
+}
+
+/// SIGKILL a set of Chrome PIDs whose processes are still alive and still look like Chrome.
+///
+/// Split out so the normal reap and the panic-hook reap share one kill implementation and differ
+/// only in how they acquire the PID set (a blocking lock vs. `try_lock`).
+///
+/// Only the *main* browser process PID is tracked (that is all `headless_chrome` exposes). Killing
+/// it severs the CDP/IPC pipe its renderer and GPU helpers depend on, so they exit on their own
+/// shortly after; `scripts/safe-scan.sh` sweeps any straggler that outlives its parent as a
+/// backstop.
+// coverage(off): queries and kills real OS processes; the decision logic is tested via
+// looks_like_chrome and drain_pids.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn kill_chrome_pids(pids: Vec<u32>) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    if pids.is_empty() {
+        return;
+    }
+    let targets: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&targets),
+        false,
+        ProcessRefreshKind::everything(),
+    );
+    for pid in targets {
+        if let Some(process) = system.process(pid) {
+            if looks_like_chrome(&process.name().to_string_lossy()) {
+                process.kill();
+            }
+        }
+    }
+}
+
+/// Drain the registry and SIGKILL every still-alive Chrome it named. The registry is drained
+/// regardless of kill outcome, so a second call is a no-op.
+// coverage(off): delegates to kill_chrome_pids (also coverage-off).
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn reap_registered_chrome() {
+    kill_chrome_pids(drain_pids(&mut lock_pids()));
+}
+
+/// Reap Chrome from a panic hook without ever blocking.
+///
+/// A panicking thread must not deadlock the abort. This never touches the idle-pool lock — every
+/// launched PID, idle *and* in-flight, is in the registry, so a PID-only reap covers them all —
+/// and it takes the registry lock with `try_lock`: if that lock were somehow held (a future edit
+/// that panics inside a `lock_pids()` section), it skips rather than hangs. A poisoned-but-free
+/// lock is still drained. Temp profile dirs are left for `scripts/safe-scan.sh` to sweep; a hung
+/// network beats a clean `/tmp`.
+// coverage(off): only invoked from the panic hook under `panic = "abort"`; unreachable from a unit
+// test without aborting the process. Verified empirically.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn reap_on_panic() {
+    let pids = match CHROME_PIDS.try_lock() {
+        Ok(mut guard) => drain_pids(&mut guard),
+        Err(std::sync::TryLockError::Poisoned(p)) => drain_pids(&mut p.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    kill_chrome_pids(pids);
+}
+
+/// Kill every Chrome process this scanner launched — idle *and* in-flight.
+///
+/// `IDLE_BROWSERS` is a `Lazy` static and statics never run `Drop`, so clearing it is the only
+/// thing that reaps *idle* Chrome. In-flight browsers live in `TabGuard`s owned by render tasks
+/// that a hard exit tears down without running destructors, so clearing the idle pool is not
+/// enough — [`reap_registered_chrome`] kills the in-flight ones by PID. Call it on every exit
+/// path from a scan; it is idempotent and recovers from a poisoned pool lock.
+///
+/// A `panic = "abort"` build still runs no `Drop`, but the panic *hook* installed in
+/// `app::run` calls this before the abort, so even a panic reaps Chrome now.
 pub fn shutdown() {
-    let mut idle = lock_idle();
-    // Dropping a `Browser` kills its process and removes its temp profile dir.
-    idle.clear();
+    {
+        let mut idle = lock_idle();
+        // Dropping each `Browser` kills its process and removes its temp profile dir.
+        idle.clear();
+    }
+    // Kill any in-flight Chrome whose `TabGuard` was detached by a hard exit and never dropped.
+    // Idle browsers cleared above are already dead, so their drained PIDs are simply skipped.
+    reap_registered_chrome();
 }
 
 /// Runs `shutdown()` when dropped, so every return path from a scan reaps Chrome.
@@ -207,7 +369,7 @@ impl<'a> Drop for BrowserPermit<'a> {
 pub struct TabGuard {
     tab: Arc<headless_chrome::Tab>,
     /// `None` only transiently, while `Drop` moves the browser back into the pool.
-    browser: Option<headless_chrome::Browser>,
+    browser: Option<TrackedBrowser>,
     served: usize,
     _permit: BrowserPermit<'static>,
     permit_wait: std::time::Duration,
@@ -240,7 +402,8 @@ impl Drop for TabGuard {
             if tab_closed && served < MAX_RENDERS_PER_BROWSER {
                 lock_idle().push(PooledBrowser { browser, served });
             }
-            // else: dropping `browser` kills the Chrome process and removes its temp profile.
+            // else: dropping the `TrackedBrowser` deregisters its PID, then the inner `Browser`
+            // kills the Chrome process and removes its temp profile.
         }
     }
 }
@@ -328,7 +491,7 @@ fn build_launch_options(
 // coverage(off): launches real Chrome processes — all preparation logic is tested via
 // is_container_env_inner, find_chrome_binary_inner, next_debug_port, build_launch_options
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn launch_browser() -> anyhow::Result<headless_chrome::Browser> {
+fn launch_browser() -> anyhow::Result<TrackedBrowser> {
     let is_container = is_container_env();
     let chrome_path = find_chrome_binary();
     let debug_port = next_debug_port();
@@ -345,7 +508,10 @@ fn launch_browser() -> anyhow::Result<headless_chrome::Browser> {
     crate::perf::METRICS
         .browser_launch
         .record(launch_started.elapsed());
-    Ok(browser)
+    // Wrap so the PID is registered for reaping now (so every exit path can kill this Chrome by PID
+    // even if its `Drop` never runs — timeout `process::exit`, Ctrl-C, or a `panic = "abort"` build)
+    // and deregistered when the browser is cleanly dropped.
+    Ok(TrackedBrowser::new(browser))
 }
 
 /// Acquire a render permit and a fresh Chrome tab, reusing a pooled Chrome process when one is
@@ -686,6 +852,79 @@ mod tests {
         assert_eq!(lock_idle().len(), 0);
         shutdown();
         assert_eq!(lock_idle().len(), 0, "shutdown must be idempotent");
+    }
+
+    /// The PID reap only fires on a process that still looks like a browser we launched — the guard
+    /// against the OS recycling a dead Chrome's PID for something unrelated before shutdown runs.
+    /// Chrome names contain `chrom`; the standalone `headless_shell` distributable is matched by
+    /// `headless`.
+    #[test]
+    fn test_looks_like_chrome_matches_browser_process_names() {
+        for name in [
+            "chrome",
+            "Chromium",
+            "Google Chrome for Testing",
+            "chrome_crashpad_handler",
+            "CHROME",
+            "chrome-headless-shell",
+            "headless_shell",
+        ] {
+            assert!(
+                looks_like_chrome(name),
+                "{name} should be treated as a launched browser"
+            );
+        }
+    }
+
+    /// A registered PID recycled onto a non-browser process must never be killed.
+    #[test]
+    fn test_looks_like_chrome_rejects_non_browser_process_names() {
+        for name in ["firefox", "bash", "nthpartyfinder", "", "com.apple.WebKit"] {
+            assert!(
+                !looks_like_chrome(name),
+                "{name} must not be mistaken for Chrome"
+            );
+        }
+    }
+
+    /// Draining takes every PID and leaves the set empty, so a second reap is a no-op and no PID
+    /// is killed twice.
+    #[test]
+    fn test_drain_pids_returns_all_and_empties() {
+        let mut set = std::collections::HashSet::from([101u32, 202, 303]);
+        let mut drained = drain_pids(&mut set);
+        drained.sort_unstable();
+        assert_eq!(drained, vec![101, 202, 303]);
+        assert!(set.is_empty(), "drain must leave the set empty");
+        assert!(
+            drain_pids(&mut set).is_empty(),
+            "draining an empty set yields nothing"
+        );
+    }
+
+    /// A launched PID is recorded so a later reap can find it, and deregistering on clean drop
+    /// removes it so the terminal reap can never target a recycled PID. This is the only unit test
+    /// that touches the process-global registry, so its drains are race-free.
+    #[test]
+    fn test_register_then_deregister_chrome_pid() {
+        // Implausibly high values: never live PIDs on the test host, so nothing real is at risk.
+        let registered = 4_000_000_001u32;
+        let retired = 4_000_000_002u32;
+
+        register_chrome_pid(registered);
+        register_chrome_pid(retired);
+        // A cleanly-dropped browser deregisters its PID; the reap must then not see it.
+        deregister_chrome_pid(retired);
+
+        let drained = drain_pids(&mut lock_pids());
+        assert!(
+            drained.contains(&registered),
+            "an in-flight registered PID must remain drainable for reaping"
+        );
+        assert!(
+            !drained.contains(&retired),
+            "a deregistered PID must not remain for reaping"
+        );
     }
 
     /// `acquire_tab` retries once after a pooled browser fails. If the retry pops the pool again

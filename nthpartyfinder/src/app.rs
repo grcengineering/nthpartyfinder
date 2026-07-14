@@ -699,12 +699,33 @@ pub fn count_unique_vendors(results: &[VendorRelationship]) -> usize {
         .len()
 }
 
+/// Install a panic hook that reaps launched Chrome before the process aborts.
+///
+/// Chains the previous hook so the normal panic message still prints. The hook calls the
+/// PID-only reap (`reap_on_panic`), never `shutdown`, because a panicking thread may already hold
+/// the browser pool's idle lock and the std mutex is not reentrant.
+// coverage(off): the hook body only runs on a real panic under `panic = "abort"`, which cannot
+// be exercised from a unit test without aborting the test process. Verified empirically.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn install_chrome_reaping_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        crate::browser_pool::reap_on_panic();
+        previous(info);
+    }));
+}
+
 // coverage(off): CLI entry point — calls Cli::parse() (reads process args via std::env::args)
 // and std::process::exit(); both are process-level operations untestable in unit tests.
 // Delegates to run_inner() which has all pure logic extracted and tested.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run() -> Result<()> {
     eprintln!("nthpartyfinder v{}", env!("CARGO_PKG_VERSION"));
+
+    // `panic = "abort"` (Cargo.toml) runs no destructors, so a panic anywhere in a scan would
+    // leak every live headless-Chrome tree. A panic hook runs *before* the abort — reap Chrome
+    // there so even a panic cannot orphan browsers onto the network.
+    install_chrome_reaping_panic_hook();
 
     let cli = Cli::parse();
     if let Some(Commands::Cache { action }) = &cli.command {
@@ -1250,9 +1271,10 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
         std::thread::sleep(std::time::Duration::from_secs(2));
         // `std::process::exit` runs no destructors, so the `PoolShutdownGuard` in `run_inner`
-        // never fires here. Browsers are pooled now, so up to MAX_RENDER_PERMITS idle Chrome
-        // processes would outlive the scanner on every Ctrl-C. Reap them explicitly; `shutdown`
-        // is idempotent and recovers from a poisoned pool lock.
+        // never fires here. Without an explicit reap, every Chrome process — idle *and* the
+        // in-flight ones whose renders this interrupt is abandoning — would outlive the scanner.
+        // `shutdown` clears the idle pool and kills the in-flight browsers by PID; it is
+        // idempotent and recovers from a poisoned pool lock.
         //
         // Not unit-tested: this path ends in `process::exit`. Verified empirically instead —
         // SIGINT a live depth-3 scan and assert zero surviving Chrome processes.
