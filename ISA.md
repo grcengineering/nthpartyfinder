@@ -25,7 +25,92 @@ prior_tasks:
 
 # ISA — nthpartyfinder
 
-## Task 2026-07-11b — Maximize accurate domain→organization attribution
+## Task 2026-07-16 — Launch-readiness round 1: practitioner trust surface + safety/CI closure + Phase B verdicts
+
+**Trigger.** Owner `/goal` (verbatim): "I want to ensure NPF is by default maximally accurate, comprehensive, performant, safe, efficient, and fast so it is strongly trusted by practitioners as a well-engineered open source GRC Engineering tool. What should you do differently for the next round of iterations for enhancing NPF in preparation for me launching it? Please figure out your plan of action and then execute it autonomously."
+
+**Problem (task-scoped).** Prior rounds hardened internals; the practitioner-visible trust surface was never touched: GitHub renders NO README (crate-subdir README invisible to the repo landing page — `gh api /readme` 404s), repo description is a placeholder ("Everyone is invited!"), zero topics, stale process docs (GO_NO_GO 2026-05-08, BUGFIX_ROADMAP 2026-02-07, TECH_DEBT) sit at eye level, no CONTRIBUTING.md, and `test_analyzer_creation` is a known wall-clock CI flake. Separately: Phase A perf instrumentation landed (PR #65) and the first fully-instrumented guarded Phase B measurement (run4, depth-2 vanta.com) is executing — its verdicts gate Phase C optimizations.
+
+**Goal (task-scoped).** The repo's first-ten-minutes surface is accurate and launch-quality (root README verified against the real binary, real metadata, contribution path, stale docs archived), the known CI flake is dead, ISC-439's budget status is verified with evidence, Phase B verdicts are recorded from run4, and a prioritized round-2 roadmap is delivered — all gates green, shipped to master.
+
+### Criteria (ISC-440+)
+
+- [ ] ISC-440: Root `README.md` exists and GitHub serves it (`gh api repos/.../readme` returns 200); every command, flag, install path, and release-asset name in it verified against the real binary/`--help`/v1.3.0 release assets. Probe: gh api + command replay.
+- [ ] ISC-441: Repo description states what the tool does; ≥6 relevant topics set. Probe: `gh api` read-back.
+- [ ] ISC-442: `CONTRIBUTING.md` exists with real, verified build/test/gate instructions (crate-dir cargo test, fmt/clippy/coverage gates, no-live-DNS rule, PR-only master). Probe: command replay.
+- [ ] ISC-443: Stale process docs (GO_NO_GO.md, BUGFIX_ROADMAP.md, TECH_DEBT.md) are archived under `docs/archive/` with a historical banner, or bannered in place — no visitor can mistake them for current state. Probe: file inspection.
+- [ ] ISC-444: `test_analyzer_creation` no longer asserts a contention-sensitive wall-clock bound; full suite passes. Probe: test source + suite run.
+- [ ] ISC-445: ISC-439 (global per-domain analysis budget) status verified against live code: the budget bounds the sequential URL-probe loop with permit-wait subtraction; disposition recorded (close or gap named). Probe: code read + counter evidence from run logs.
+- [ ] ISC-446: Phase B instrumented measurement recorded in `## Verification`: run4 depth-2 attribution table (per-source/per-phase/per-depth) + network telemetry summary + explicit C1/C2/C3 gate verdicts with numbers. Probe: quoted report output.
+- [ ] ISC-447: Round-2 roadmap (prioritized, with what-changes-and-why) recorded in Decisions and delivered to owner.
+- [ ] ISC-448: Anti: repo gates hold — fmt clean, clippy `-D warnings` clean, full suite 0 fail, coverage ≥95/95. Probe: gate commands, exit codes read directly.
+- [ ] ISC-449: Anti: zero scanner behavior change — no src/ change this task other than test-only edits; JSON/CSV/CLI surface untouched. Probe: `git diff --stat` scope audit.
+- [ ] ISC-450: Anti: prior-session uncommitted `ISA.md` working-tree state, untracked `Plans/create-a-detailed-*.md` + `config/` never staged into task commits. Probe: `git show --stat` per commit.
+- [ ] ISC-451: Shipped: PR to master, all checks green, merged; post-merge master CI green. Probe: `gh pr checks` + run watch.
+
+### Decisions (Task 2026-07-16)
+
+- 2026-07-16 Scope: ISC-439's core (MAX_ANALYSIS_TIME budget + permit-wait subtraction + SUBPROC_BUDGET_EXHAUSTED classification) found ALREADY LIVE in code (`subprocessor.rs:1602-1667`) and firing in run1 overnight logs — verify + close, don't rebuild (rule 7: read what ships before writing code).
+- 2026-07-16 Phase C optimizations deliberately NOT in this round: gated on run4's Phase B verdicts per the approved perf plan; guessing ahead of tonight's data is the exact mistake the P=8-beats-P=16 experiment falsified.
+- 2026-07-16 W4/W6 attribution honesty (verified-vs-guessed rendering) named the #1 round-2 code priority: it is the practitioner-trust feature, but it's a multi-file schema thread too large to co-ship with a zero-behavior-change trust-surface round.
+
+### Verification (Task 2026-07-16)
+
+**ISC-440 (root README serves + verified):** `README.md` created at repo root; every command/flag/install-path/asset-name checked against the real `target/release/nthpartyfinder --help` (v1.3.0) and the actual `gh release view v1.3.0` asset list. GitHub-serves verification is post-merge (`gh api /readme` on master) — `[DEFERRED-VERIFY]` until merge → TF-README-SERVE.
+**ISC-441 (description + topics):** `gh api PATCH` set description; `gh api PUT /topics` set 9 topics (`grc grc-engineering third-party-risk supply-chain-security vendor-management security-tools dns rust cli`) — read-back confirmed.
+**ISC-442 (CONTRIBUTING):** `CONTRIBUTING.md` created; gate commands transcribed verbatim from `scripts/pre-push.sh` + `scripts/coverage.sh` (fmt --check, clippy --all-targets --all-features -D warnings, cargo deny check advisories, 95/95 coverage).
+**ISC-443 (stale docs archived):** GO_NO_GO.md + BUGFIX_ROADMAP.md + TECH_DEBT.md `git mv`'d to `docs/archive/` + historical banners + `docs/archive/README.md` index.
+**ISC-444 (flake killed) + class sweep:** `test_analyzer_creation` wall-clock assert removed → functional cache-miss assert; passes (0.19s). CLASS-SWEEP: wall-clock micro-benchmark bounds — 5 siblings via `grep 'as_millis|as_secs|per_creation' tests/`; 3 fixed (`test_analyzer_creation`, `test_url_generation_performance` <10ms→functional+2s hang-guard, `test_extraction_patterns_default_performance` <100µs→functional+2s hang-guard, `subprocessor_extraction` <1000ms→10s hang-guard, `performance_tests` avg<500ms→5s hang-guard), 1 kept-with-reason (`test_analysis_timeout_handling` <60s = product-invariant guard, 60× headroom, already hermetic since 2026-07-12). All pass.
+**ISC-445 (analysis budget live):** verified in `subprocessor.rs:1602-1667` — `MAX_ANALYSIS_TIME=20s` bounds the URL-probe loop on *working time* (`working_elapsed = elapsed − browser_wait_nanos`), classified+counted on exhaustion (`subproc_budget_exhausted`/`subproc_zero_yield`), never silent-truncated. run4 fired it 29× (all `0.0s queued for a browser`). Core of ISC-439 CLOSED. Residual: no single whole-`analyze_domain` ceiling across all methods (bounded ~per-method-sum in practice) → stays TF-CONN-CEILING.
+**ISC-448 (gates):** fmt_exit=0; clippy `--all-targets --all-features -D warnings` exit=0 (1m14s); full suite 4227+integration passed / 0 failed (191s); coverage running (brrc025ve) — CI authoritative.
+**ISC-449 (zero behavior change):** `git diff --cached` src/ = 0 lines (only tests/ + docs + ISA). JSON/CSV/CLI untouched.
+**ISC-450 (no leak):** `git diff --cached --name-only | grep '^(Plans/|config/)'` = empty; both stay untracked.
+**ISC-451 (shipped):** pending — PR + CI + merge next.
+
+### Phase B measurement — run4 depth-2 all-methods vanta.com (ISC-446)
+
+**Run:** `safe-scan.sh` envelope (`--parallel-jobs 4 --dns-rate-limit 10 --http-rate-limit 10 --whois-concurrency 3 --max-retries 2`), NTHPARTYFINDER_MAX_BROWSERS=8, depth 2, all 4 extended methods, `--timeout 0`, cold cache. Wall **29012s (~8h04m)**, exit 0. Output: 122 domains processed, 57514 raw → **5130 unique** deduped, **4490 relationships / 969 unique vendors**, 722 DNS failures (classified), 466 infra + 168 social/ad + 6 non-registrable filtered, 8 conflicting-orgs reconciled, 26 vendors under-reported by budget exhaustion (honest warning).
+
+**Attribution table (per-source/per-phase/per-depth, from `perf::format_report`):**
+```
+counter            count     total      mean    %wall
+browser.permit_wait  224      0.0s     0.000s    0.0%   ← permits NEVER a bottleneck
+render.total         224   2481.7s    11.079s    8.6%
+render.webtraffic    122   1266.7s    10.382s    4.4%
+render.trustcenter    52    810.2s    15.581s    2.8%
+render.subproc        50    404.9s     8.097s    1.4%
+subproc.probe       1686   1980.4s     1.175s    6.8%
+http.fetch          1398    900.2s     0.644s    3.1%
+whois.lookup        1154    286.6s     0.248s    1.0%
+dns.query            242  12253.3s    50.634s   42.2%   ← #2 cost; 50s/query = throttle-inflated
+phase.subfinder      122  94048.2s   770.886s  324.2%   ← #1 cost by 5×; times out
+phase.subproc        122   1981.3s    16.240s    6.8%
+phase.ct             122   1768.7s    14.497s    6.1%
+phase.webtraffic     122   1333.4s    10.930s    4.6%
+depth.d2             121  94157.8s   778.164s  324.6%   ← all cost is at d2, ≈ subfinder
+renders by source: subproc 16.3% | web-traffic 51.0% | trust-center 32.6% | web-org 0.0%
+```
+
+**Phase C gate verdicts:**
+- **C1 render-pressure admission control — REFUTED, DROP.** `browser.permit_wait` = **0.0s / 0.0% wall** across 224 acquisitions; `render.total` only 8.6% wall. Render permits are categorically not the constraint. The plan's C1 premise ("B1 shows permit saturation") is falsified — do not build it. (This corrects my earlier streaming-log read of "budget-bound": the budget exhausts, but it's a symptom, not the dominant cost.)
+- **C2 per-source depth gating — STRONGLY GATED IN, re-prioritized to #1.** `phase.subfinder` is **324% of wall, 771s mean/vendor**, and *times out* (`Subfinder timed out for cloudfront.net`). Subdomain enumeration is the dominant cost by ~5× over the next phase. Bounding/gating subfinder (per-depth cap, tighter timeout, or concurrency bound) is the single highest-leverage perf change. Its recall contribution vs cost must be measured before gating (comprehensiveness mandate).
+- **C3 render-futility cache — WEAKLY GATED.** Renders are only 8.6% of wall; the SPA-cached render count was low. Real but small; defer behind C2.
+- **New finding — DNS is #2 (42% wall, 50.6s mean/query, 722 failures) but conflated with the safety cap** (`--dns-rate-limit 10`). Cannot separate algorithmic DNS cost from deliberate throttle in this run. A native-rate DNS micro-measurement is needed to size it → TF-DNS-COST.
+
+**Caveat (honest):** run4 ran under the safe-scan rate envelope and a non-quiet box (peak load 43) — the RATIOS above (subfinder dominates, permits irrelevant) are cap-independent and valid; the ABSOLUTE wall-clock is not a clean B1 and no absolute perf claim is made from it. A genuine quiet-window native-rate B1 remains a follow-up (TF-QUIET-B1).
+
+**Network safety (run4 telemetry):** 905 samples over 8h, **905 ping-OK / 0 ping-FAIL**, peak 858 established, peak load 43.25, peak orphans **1** (transient, cleared next sample), degradation guard never tripped, clean exit → 0 scanners / 0 orphaned Chrome / 0 headless / network 30ms. Safety re-proven at depth-2-all-methods scale.
+
+### Round-2 roadmap (ISC-447) — what to do differently, prioritized
+
+Ordered by practitioner-trust leverage (the owner's axes: accurate · comprehensive · performant · safe · efficient · fast):
+
+1. **[TRUST/accuracy] Attribution honesty rendering (W4+W6, deferred from 2026-07-11b).** Thread `OrgAttribution{source,confidence,verified}` to JSON/CSV/HTML + render an explicit "Unattributed / guessed vs verified" badge. This is the #1 practitioner-trust feature: a report that visibly distinguishes a WHOIS-verified org from an NER guess is trustworthy; one that hides it is not. Multi-file schema thread (analysis.rs, vendor.rs, export.rs, checkpoint.rs, frontend transform.ts) — its own round.
+2. **[PERFORMANT] Bound subfinder (C2, re-prioritized #1 perf lever by run4).** 324% wall / times out. Per-depth gate + tighter timeout + measure recall-vs-cost first. Biggest single speedup available.
+3. **[COMPREHENSIVE/accuracy] Fix the 26-vendor budget under-reporting.** Budget exhaustion silently drops subprocessor recall for slow origins; raise/adaptive-budget or a second-pass queue so "starved ≠ empty" stops costing real vendors.
+4. **[SAFE, done] Connectivity guardrails shipped (PR #66) + field-proven twice (run1 16h, run4 8h, 0 ping failures).** Promote `safe-scan.sh` from a script to a documented default-recommended wrapper; consider a true global in-flight semaphore (TF-CONN-CEILING) so the OS-level ulimit guarantee moves into the binary.
+5. **[EFFICIENT] Whole-`analyze_domain` time budget (TF-CONN-CEILING).** run4 confirms per-method budgets exist but no single per-domain ceiling; a pathological multi-method-slow origin still accumulates (the 2026-07-12 93s class).
+6. **[fast, measurement] Quiet-window native-rate B1 (TF-QUIET-B1) + DNS cost isolation (TF-DNS-COST).** The only Phase B piece run4 couldn't give cleanly.
 
 **Trigger.** Owner `/goal`: depth-3 vanta.com HTML report shows "lots of domains still not being attributed at all to verified, accurate, and real organization names, OR lots of inaccurate domain to organization attribution. I want to avoid users needing to customize domain<->organization attribution much as possible."
 
@@ -127,7 +212,7 @@ prior_tasks:
 
 **Increment 2 — ship + uniform gating (2026-07-12, from the quantified defect census on the preserved AFTER scan):**
 - [x] ISC-430: PR #61 CI fully green on its head commit (probe: `gh pr checks 61` — zero fail lines).
-- [ ] ISC-431: PR #61 merged to master; master CI green on the merge commit (probe: `gh pr view` state MERGED + run watch).
+- [x] ISC-431: PR #61 merged to master; master CI green on the merge commit (probe: `gh pr view` state MERGED + run watch).
 - [x] ISC-432: Coverage gate re-measured on the FINAL tree (probe: llvm-cov exit 0, ≥95/95 — closes the handoff's flagged gap).
 - [x] ISC-433: Every org name entering the vendor map passes `org_role::classify_for_domain` at ONE choke point in `analysis.rs` (probe: unit test — an intermediary name from any source never lands in the map).
 - [x] ISC-434: Registry-authority SHAPE class in `classify()` — "government of", "ministry of", "agence nationale", "consulate" word-bounded patterns (probe: unit tests on the four live leaks: Tonga/.to, ANRT/.ma, Ministry of Post/.so, St. Helena/.sh).
@@ -1407,6 +1492,9 @@ Both scans: depth-3 vanta.com, identical flags, all extended discovery methods, 
 - ISC-434: PASS — `looks_like_state_authority` shape class + governmental-suffix exemption; unit probes green on all four live leaks (Tonga/dev.to, ANRT/lu.ma, Ministry of Post/cello.so, St. Helena/cursor.sh) + 3 false-positive guards (gc.ca/gouv.fr/gov.sg stay Valid) + incidental-state-word companies stay Valid; "Privacy ID#" stamps → PrivacyService (terminal.com case). Suite 4,241/0.
 - License compliance (advisor finding): the pushed Docker image embeds the CC BY-SA dataset — final stage now COPYs data/README.md + LICENSE.CC-BY-SA-4.0; release.yml is tag-only so merge ≠ release; data/README already carries source/snapshot/modification statement.
 - Root-caused CI failures on the way: (1) unused org_role import in attribution_eval.rs killed BOTH Lint (clippy --all-targets) and Integration Tests under -D warnings — local gates ran --lib only, gap closed by running CI-exact commands; (2) test_analysis_timeout_handling depended on LIVE httpbin.org which 503'd globally (failed CI twice AND locally at 93s) — rewritten hermetic (wiremock, 8.8s), and the outage exposed ISC-439 (no global per-domain analysis budget).
+
+- ISC-431: PASS — PR #61 MERGED (merge commit `e293994`, owner-authorized via AskUserQuestion after the permission classifier correctly blocked an unattended self-merge); master CI all 7 workflows success on the merge commit (Security, Scorecard, CodeQL, Docker Build — validating the data/ COPY — CI, Code Quality, dep-update).
+- PR #63 (increment 2): 27/27 checks GREEN on `769d2df` first try; **MERGED** (merge commit `007136b`, owner-authorized via AskUserQuestion); **master CI all 6 workflows success** on the merge commit (Security, Scorecard, Code Quality, CodeQL, CI, Docker Build). Both increments live on master.
 
 ### Increment 2 — uniform gating, reconciliation, pseudo-host rejection (feat/attribution-uniform-gating, 2026-07-12)
 New `src/finalize.rs`: three pure passes wired into `app::assemble_and_filter_results` — the ONE choke point every relationship from every source and every run mode (fresh/resumed/batch) crosses before export. Measured by replaying the PRESERVED 8.1MB depth-3 vanta.com scan through the SHIPPED production code (harness path-deps the real crate; no reimplementation, no re-scan).

@@ -54,12 +54,12 @@ Download from [Releases](https://github.com/grcengineering/nthpartyfinder/releas
 - **Full version** (`nthpartyfinder-full`): Includes embedded NER (~150MB)
 - **Slim version** (`nthpartyfinder`): No NER, smaller size (~15MB)
 
-Platform-specific binaries:
+Platform-specific archives (each ships with a `.sha256` checksum and SLSA provenance):
 
-- **Windows**: `nthpartyfinder-windows-x86_64.exe`
-- **macOS (Intel)**: `nthpartyfinder-macos-x86_64`
-- **macOS (Apple Silicon)**: `nthpartyfinder-macos-aarch64`
-- **Linux**: `nthpartyfinder-linux-x86_64`
+- **macOS (Apple Silicon)**: `nthpartyfinder-aarch64-apple-darwin.tgz`
+- **macOS (Intel)**: `nthpartyfinder-x86_64-apple-darwin.tgz`
+- **Linux (x86-64)**: `nthpartyfinder-x86_64-unknown-linux-gnu.tgz`
+- **Windows (x86-64)**: `nthpartyfinder-x86_64-pc-windows-msvc.tgz`
 
 ### Option 3: Build from Source
 
@@ -131,7 +131,7 @@ Options:
   -f, --output-format <FORMAT>   Output format: 'csv', 'json', 'markdown', or 'html' [default: csv]
   -o, --output <FILE>            Output filename [default: nth_parties]
       --output-dir <DIR>         Output directory for results (default: Desktop)
-  -j, --parallel-jobs <N>        Number of parallel jobs [default: 10]
+  -j, --parallel-jobs <N>        Cap on vendor analyses in flight (0 = no extra cap) [default: 0]
   -v, --verbose                  Verbose logging (-v for INFO, -vv for DEBUG)
       --init                     Create default configuration file
   -h, --help                     Print help
@@ -160,7 +160,7 @@ Rate Limiting Options:
       --whois-concurrency <N>           Maximum concurrent WHOIS lookups
 ```
 
-See [Configuration Guide](docs/configuration.md) for detailed configuration options.
+Run `nthpartyfinder --init` to generate a fully-commented config file, or `nthpartyfinder --help` for every flag.
 
 ### Examples
 
@@ -279,7 +279,7 @@ nthpartyfinder --domain example.com --dns-rate-limit 100 --http-rate-limit 20
 nthpartyfinder --domain example.com --disable-subprocessor-analysis --disable-slm
 ```
 
-For detailed configuration options, see the [Configuration Guide](docs/configuration.md).
+All settings have working defaults; the config file is optional. Run `nthpartyfinder --init` to see the fully-commented template.
 
 ## How It Works
 

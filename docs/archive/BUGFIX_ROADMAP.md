@@ -1,3 +1,5 @@
+> ⚠️ **ARCHIVED — HISTORICAL SNAPSHOT.** This document reflects a past point in time and is not current guidance. See the root [README](../../README.md) and [CONTRIBUTING](../../CONTRIBUTING.md) for present state.
+
 # nthpartyfinder Bug Fix Roadmap
 
 **Generated:** 2026-02-07
