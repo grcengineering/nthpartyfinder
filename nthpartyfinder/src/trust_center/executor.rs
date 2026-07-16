@@ -12,6 +12,7 @@ use super::{
     get_nested_str, navigate_json_path, EndpointConfig, ResponseMapping, StrategyType,
     TrustCenterStrategy,
 };
+use crate::http_client::GatedSend;
 use crate::subprocessor::SubprocessorDomain;
 use crate::vendor::RecordType;
 
@@ -144,7 +145,7 @@ async fn execute_graphql(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .json(&body)
-        .send()
+        .send_gated()
         .await?;
 
     if !response.status().is_success() {
@@ -203,7 +204,7 @@ async fn execute_rest(
         request = request.header(key, value);
     }
 
-    let response = request.send().await?;
+    let response = request.send_gated().await?;
 
     if !response.status().is_success() {
         return Err(anyhow::anyhow!(

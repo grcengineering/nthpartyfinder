@@ -913,6 +913,23 @@ async fn run_review(action: &ReviewCommands) -> Result<()> {
 // collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
+    // Install the global connection ceiling before any discovery opens a socket, so the whole scan
+    // — every method, at every depth — shares one bound on the peak number of simultaneously-open
+    // connections. That peak, not the request *rate*, is what exhausts a consumer router's
+    // NAT/conntrack table on a deep fan-out; bounding it here keeps a deep scan safe without
+    // throttling anyone. Precedence: `--max-connections` > `NTHPARTYFINDER_MAX_CONNECTIONS` > default.
+    let max_connections = args
+        .max_connections
+        .filter(|&n| n > 0)
+        .or_else(|| {
+            std::env::var("NTHPARTYFINDER_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+        })
+        .unwrap_or(crate::http_client::DEFAULT_MAX_CONNECTIONS);
+    crate::http_client::init_connection_ceiling(max_connections);
+
     // Chrome processes are now pooled and reused across renders rather than killed after each
     // one. The pool is a `Lazy` static, and statics never run `Drop`, so this guard is what
     // reaps them — on every return path out of the scan, including `?` and `bail!`.
@@ -2902,6 +2919,7 @@ mod tests {
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,
+            max_connections: None,
             http_rate_limit: None,
             backoff_strategy: None,
             max_retries: None,

@@ -1,5 +1,9 @@
 use crate::config::AppConfig;
 use crate::domain_utils;
+// All send_gated() sites in this file live in #[cfg(not(coverage))] DoH paths,
+// so the trait import is only referenced outside the coverage build.
+#[cfg(not(coverage))]
+use crate::http_client::GatedSend;
 use crate::rate_limit::{RateLimitContext, SharedRateLimiter};
 use crate::vendor::RecordType;
 use anyhow::Result;
@@ -459,7 +463,7 @@ impl DnsServerPool {
             .query(&query_params)
             .header("Accept", "application/dns-json")
             .timeout(std::time::Duration::from_secs(server.timeout_secs))
-            .send()
+            .send_gated()
             .await?;
         // GRC-367: a throttle (429) or provider 5xx MUST surface as a distinct error —
         // never be parsed into an empty answer, which the caller would otherwise mistake
@@ -571,7 +575,7 @@ impl DnsServerPool {
             .query(&query_params)
             .header("Accept", "application/dns-json")
             .timeout(std::time::Duration::from_secs(server.timeout_secs))
-            .send()
+            .send_gated()
             .await?;
         // GRC-367: surface DoH throttle/5xx as a distinct error, never an empty answer.
         let status = http_response.status();
@@ -956,7 +960,7 @@ impl DnsServerPool {
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(txt_lookup)) = tokio::time::timeout(
                 std::time::Duration::from_millis(2000),
-                resolver.txt_lookup(domain),
+                crate::http_client::with_connection_permit(resolver.txt_lookup(domain)),
             )
             .await
             {
@@ -1020,7 +1024,9 @@ impl DnsServerPool {
         if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
             if let Ok(Ok(lookup)) = tokio::time::timeout(
                 std::time::Duration::from_millis(2000),
-                resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
+                crate::http_client::with_connection_permit(
+                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
+                ),
             )
             .await
             {
@@ -1152,7 +1158,7 @@ pub async fn get_txt_records_with_rate_limit(
             Ok(r) => r,
             Err(_) => return None,
         };
-        match resolver.txt_lookup(domain).await {
+        match crate::http_client::with_connection_permit(resolver.txt_lookup(domain)).await {
             Ok(txt_lookup) => {
                 // 0.26: iterate answer Records and render each record's RData.
                 let records: Vec<String> = txt_lookup
@@ -1268,7 +1274,7 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
     } else {
         format!("{}.", domain)
     };
-    let txt_lookup = resolver.txt_lookup(fqdn).await?;
+    let txt_lookup = crate::http_client::with_connection_permit(resolver.txt_lookup(fqdn)).await?;
     // 0.26: iterate answer Records and render each record's RData.
     let records: Vec<String> = txt_lookup
         .answers()

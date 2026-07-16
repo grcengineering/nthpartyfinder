@@ -1,5 +1,7 @@
 //! Subdomain discovery using Project Discovery's subfinder tool.
 
+#[cfg(not(test))]
+use crate::http_client::GatedSend;
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -175,7 +177,7 @@ impl SubfinderDiscovery {
 
         let response = client
             .get(&download_url)
-            .send()
+            .send_gated()
             .await
             .map_err(|e| anyhow!("Failed to download subfinder: {}", e))?;
 

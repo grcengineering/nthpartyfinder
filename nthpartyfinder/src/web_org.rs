@@ -9,6 +9,7 @@
 //!
 //! This provides a reliable fallback when WHOIS data is unavailable or protected.
 
+use crate::http_client::GatedSend;
 use anyhow::{anyhow, Result};
 
 use regex::Regex;
@@ -109,13 +110,13 @@ pub async fn fetch_page_content(domain: &str) -> Result<String> {
     let client = page_client()?;
 
     let response =
-        match client.get(&url).send().await {
+        match client.get(&url).send_gated().await {
             Ok(resp) => resp,
             Err(e) => {
                 debug!("Failed to fetch {}: {}", url, e);
                 // Try HTTP fallback
                 let http_url = format!("http://{}", domain);
-                client.get(&http_url).send().await.map_err(|e2| {
+                client.get(&http_url).send_gated().await.map_err(|e2| {
                     anyhow!("Failed to fetch {}: HTTPS: {}, HTTP: {}", domain, e, e2)
                 })?
             }

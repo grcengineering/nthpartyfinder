@@ -9,6 +9,7 @@
 //!
 //! Lookup priority: Local overrides → VendorRegistry → Remote database → Base database
 
+use crate::http_client::GatedSend;
 use crate::vendor_registry;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -575,7 +576,7 @@ impl KnownVendors {
         let response = client
             .get(url)
             .header("Accept", "application/json")
-            .send()
+            .send_gated()
             .await
             .with_context(|| format!("Failed to fetch known vendors from {}", url))?;
 

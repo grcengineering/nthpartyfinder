@@ -25,6 +25,55 @@ prior_tasks:
 
 # ISA — nthpartyfinder
 
+## Task 2026-07-17 — Launch-readiness round 2 (PR-A): global connection ceiling — depth-3+ safe by default without throttling
+
+**Trigger.** Owner `/goal` (verbatim): "I want to ensure NPF is by default maximally accurate, comprehensive, performant, safe, efficient, and fast so it is strongly trusted by practitioners as a well-engineered open source GRC Engineering tool. I don't want this recent issue related to network congestion to result in an overcorrection of NPF's ability to accurately AND speedily AND safely perform depth 3+ scans. What should you do differently for the next round of iterations for enhancing NPF in preparation for me launching it? Please figure out your plan of action and then execute it autonomously." Owner chose (AskUserQuestion) "Root-cause, staged" → PR-A safety ceiling first, PR-B subfinder speed + wrapper relax.
+
+**Root cause (verified).** PR #66's `safe-scan.sh --dns-rate-limit 10` is a 5× throttle that risks over-correcting depth-3 speed. The true root cause is an architecture bug, not a tuning value: two global concurrency semaphores (`app.rs` `semaphore`/`recursive_semaphore`) are constructed and threaded through the recursion but `.acquire()` is **never called** — dead code. So the per-depth `buffer_unordered` widths multiply across recursion instead of capping, and there is **no global bound on peak simultaneously-open sockets** anywhere. That peak (not request *rate*) is what exhausts a consumer router's NAT/conntrack table. safe-scan.sh is opt-in (Docker/CI/raw CLI use the binary with its own defaults), so the fix must live in the **binary**.
+
+**Goal (task-scoped).** A process-global connection ceiling bounds the number of network sends in flight at once, and idle keep-alive pooling is disabled, so a deep scan's peak open-socket count stays far under a consumer conntrack table at any depth — safe by default without throttling request rate — with zero discovery-recall change, all gates green, shipped to master.
+
+### Criteria (ISC-452+)
+
+- [ ] ISC-452: A process-global `tokio::sync::Semaphore` ceiling exists in `http_client.rs`; a permit is acquired around each leaf network op and released the instant it returns (never held across recursion, a `join!`, or another permit). Deadlock-free by construction; unit test proves peak concurrency ≤ N and no permit leak, and a recursive-acquire test proves no deadlock. Probe: code read + `cargo test http_client`.
+- [ ] ISC-453: Every production `reqwest` send routes through `.send_gated()` and every raw-UDP hickory DNS lookup through `with_connection_permit(..)` — all socket funnels share the one ceiling. Probe: grep of `.send(`/`resolver.*_lookup` sites vs gated sites.
+- [ ] ISC-454: `POOL_MAX_IDLE_PER_HOST == 0` (idle keep-alive disabled) so a socket closes right after its request instead of lingering ~15s in ESTABLISHED across hundreds of one-off hosts — the dominant conntrack term a guarded depth-3 measurement exposed. Probe: const + bounds test.
+- [ ] ISC-455: Override plumbing: CLI `--max-connections N` > env `NTHPARTYFINDER_MAX_CONNECTIONS` > default 128, resolved once at startup before any discovery. Probe: `--help` + code read.
+- [ ] ISC-456: Guarded depth-3 vanta.com run through `scripts/safe-scan.sh` + telemetry sidecar: gateway ping stays green throughout; peak established stays far under a conntrack table and plateaus (does not grow unbounded with depth); a permit sampler confirms in-flight sends are bounded to the ceiling. Probe: telemetry log.
+- [ ] ISC-457: Orphaned-Chrome reaping still holds under the ceiling — no accumulation across the run; clean SIGINT stop reaps to zero. Probe: telemetry orphan column.
+- [ ] ISC-458: Anti: repo gates hold — fmt clean, clippy `-D warnings` clean, full suite 0 fail, coverage ≥95/95, cargo deny advisories ok. Probe: gate commands, exit codes read directly.
+- [ ] ISC-459: Anti: zero discovery-recall change — the ceiling and pool setting change *when* sockets open, never *whether* a request is made or *what* it returns; JSON/CSV/CLI output surface unchanged except the additive `--max-connections` flag. Probe: diff scope audit + no logic path removed.
+- [ ] ISC-460: Anti: `safe-scan.sh` unchanged in PR-A (belt-and-suspenders while the ceiling is proven); prior-session untracked `Plans/` + `config/` never staged. Probe: `git show --stat`.
+- [ ] ISC-461: Shipped: PR to master, all checks green, merged; post-merge master CI green. Probe: `gh pr checks` + run watch.
+
+### Verification (ISC-452+)
+
+**ISC-452 (ceiling primitive + deadlock-safety):** `http_client.rs` — `static CONNECTION_SEMAPHORE: OnceLock<Semaphore>`, `init_connection_ceiling(n)`, `gated(sem, op)` holds a permit only across `op.await`. Unit tests: `gated_bounds_peak_concurrency_and_never_leaks` (CEILING=3, 24 tasks → peak ≤ 3, permits refill), `gated_does_not_deadlock_under_recursive_acquire` (2 permits, 4×4 fan-out under a 5s timeout → completes), `gated_releases_the_permit_when_the_send_errors`. `cargo test` = 4233 lib + 22 suites, 0 failed.
+
+**ISC-453 (all funnels gated):** 16 production `reqwest` sends → `.send_gated()` (cache_commands, ct_logs, web_traffic, saas_tenant ×2, web_org ×2, trust_center ×2, subprocessor ×4, dns DoH ×2, model_fetch, known_vendors, subfinder); 4 raw-UDP hickory lookups → `with_connection_permit(..)` (dns.rs fast_txt/fast_cname/dns_fut/system-resolver). grep confirms the only remaining bare `.send()`/`reqwest::get` are `#[cfg(test)]`. DNS rate token acquired *before* the connection permit (never held across the rate bucket or the `get_txt_and_cname_fast` `join!`).
+
+**ISC-454 (idle pool disabled):** `POOL_MAX_IDLE_PER_HOST = 0` in `hardened_builder`; `test_connection_bounds_stay_conservative` asserts it. Measured effect at depth-3 (guarded, ceiling 16): established dropped 672 → 270 vs the prior pool=4. **Diagnostic that drove this:** at ceiling 16, the process held ~670 ESTABLISHED sockets across ~250 one-off hosts (1–4 each = idle keep-alive), while a permit sampler showed in-flight sends correctly pinned at 16/16 — proving the in-flight semaphore bounds concurrency but the idle pool, not in-flight sends, was the dominant socket source. A permit-across-body variant was built and measured to give no further reduction (270 vs 275 — the residual is connection close-lag, not body reads) and reverted to keep the change minimal.
+
+**ISC-455 (override plumbing):** `--max-connections <N>` in `--help`; `app.rs run_inner` resolves `args.max_connections` > env > `DEFAULT_MAX_CONNECTIONS=128` and calls `init_connection_ceiling` before any discovery. Runtime-confirmed via a temporary startup log: `resolved=16 live_permits=16` (flag path, no init race).
+
+**ISC-456 (guarded depth-3 — load-bearing):** shipping binary (default ceiling 128, pool=0), depth-3 vanta.com through `safe-scan.sh` + 15s telemetry sidecar (ping/established/orphan/load, auto-kill on 2 ping fails, 210s hard wall). **ping=ok on all 13 samples; established peaked 356 then plateaued and dropped to ~84 (t=119s onward); sys_est peaked 338.** Bounded and stabilizing — the opposite of the pre-fix unbounded storm. A ceiling=16 run + permit sampler independently confirmed in-flight is bounded to the ceiling (16/16 at peak). Network never degraded across any run this task.
+
+**ISC-457 (orphan reaping):** telemetry orphan column stayed 0–1 across the run (reaped to 0 by the next 15s sample every time, never accumulated); clean SIGINT stop → final orphans=0. Pre-run also swept a prior-session leak of ~30 orphaned Chrome trees (ppid==1 + `rust-headless-chrome-profile` signature, no live scan) — the exact leak class the fix targets.
+
+**ISC-458 (gates):** fmt --check exit 0; clippy `--all-targets --all-features -D warnings` exit 0; `cargo test` 4233 lib + 22 suites, 0 failed; coverage 99.30% line / 98.69% function (http_client.rs 100/100), ≥95/95 gate OK; `cargo deny check advisories` ok; coverage-cfg build warning-free.
+
+**ISC-459 (zero recall change):** the ceiling gates *when* a send runs (queues on a permit), never *whether*; pool=0 changes socket lifetime, not request content. No discovery logic path removed. Output surface unchanged except the additive `--max-connections` flag.
+
+**ISC-460 (safe-scan.sh unchanged + no leak):** `safe-scan.sh` not in the diff; `Plans/` + `config/` stay untracked, never staged.
+
+**ISC-461 (shipped):** pending — PR + CI + merge next.
+
+### Decisions (round 2)
+
+- 2026-07-17 The connection ceiling bounds *in-flight sends*, which is necessary but not sufficient alone: a guarded measurement proved the *idle keep-alive pool* (pool=4 × ~8 clients × hundreds of one-off hosts, each socket lingering 15s in ESTABLISHED) was the dominant conntrack term. Fix = ceiling **+** `POOL_MAX_IDLE_PER_HOST=0`. Total established at depth-3 then peaks in the low hundreds and plateaus, vs the pre-fix unbounded thousands.
+- 2026-07-17 Rejected a permit-across-body (GatedResponse) refactor: built, measured (270→275, no improvement — the residual is TCP close-lag at the high cycle rate, not body reads), reverted to keep the change minimal and reviewable. The in-flight semaphore + pool=0 is the whole fix.
+- 2026-07-17 Default ceiling 128 validated safe at depth-3 *through safe-scan.sh* (peak 356 established, ping green). The raw-binary-no-throttle depth-3 case is the remaining validation and the knee-tuning point — it belongs with PR-B (subfinder speed + wrapper relax), exactly where the throttle is removed. `safe-scan.sh` stays unchanged in PR-A as the belt.
+
 ## Task 2026-07-16 — Launch-readiness round 1: practitioner trust surface + safety/CI closure + Phase B verdicts
 
 **Trigger.** Owner `/goal` (verbatim): "I want to ensure NPF is by default maximally accurate, comprehensive, performant, safe, efficient, and fast so it is strongly trusted by practitioners as a well-engineered open source GRC Engineering tool. What should you do differently for the next round of iterations for enhancing NPF in preparation for me launching it? Please figure out your plan of action and then execute it autonomously."

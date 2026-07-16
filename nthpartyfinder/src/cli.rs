@@ -153,6 +153,16 @@ pub struct Cli {
     #[arg(long, value_name = "QPS")]
     pub dns_rate_limit: Option<u32>,
 
+    /// Maximum network connections in flight at once across the whole scan.
+    ///
+    /// Bounds the peak count of simultaneously-open sockets — the quantity that exhausts a
+    /// consumer router's NAT/conntrack table on a deep fan-out — without throttling request rate.
+    /// Lower it if a deep scan still stresses a constrained network; raise it for more parallelism
+    /// on a robust one. Takes precedence over the `NTHPARTYFINDER_MAX_CONNECTIONS` env var; omit
+    /// both to use the built-in safe default.
+    #[arg(long, value_name = "N")]
+    pub max_connections: Option<usize>,
+
     /// Maximum HTTP requests per second per domain (0 = unlimited, overrides config)
     #[arg(long, value_name = "RPS")]
     pub http_rate_limit: Option<u32>,
@@ -338,6 +348,7 @@ pub struct Args {
     pub disable_web_org: bool,
     pub no_color: bool,
     pub dns_rate_limit: Option<u32>,
+    pub max_connections: Option<usize>,
     pub http_rate_limit: Option<u32>,
     pub backoff_strategy: Option<String>,
     pub max_retries: Option<u32>,
@@ -387,6 +398,7 @@ impl From<&Cli> for Args {
             disable_web_org: cli.disable_web_org,
             no_color: cli.no_color,
             dns_rate_limit: cli.dns_rate_limit,
+            max_connections: cli.max_connections,
             http_rate_limit: cli.http_rate_limit,
             backoff_strategy: cli.backoff_strategy.clone(),
             max_retries: cli.max_retries,
@@ -558,6 +570,7 @@ mod tests {
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,
+            max_connections: None,
             http_rate_limit: None,
             backoff_strategy: None,
             max_retries: None,

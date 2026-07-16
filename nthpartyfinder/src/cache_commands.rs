@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::http_client::GatedSend;
 use crate::subprocessor::{SubprocessorCache, SubprocessorUrlCacheEntry};
 
 /// Cache directory relative to current working directory
@@ -384,7 +385,7 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
     for (domain, url) in urls_to_validate {
         let start = std::time::Instant::now();
 
-        let result = match client.get(&url).send().await {
+        let result = match client.get(&url).send_gated().await {
             Ok(response) => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 let status = response.status();
