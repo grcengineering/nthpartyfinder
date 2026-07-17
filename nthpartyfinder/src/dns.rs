@@ -1153,6 +1153,11 @@ pub async fn get_txt_records_with_rate_limit(
     // Spawn traditional DNS lookup (UDP). DNS-only/DoH-only configs are legal —
     // an empty traditional pool just means this race arm yields nothing.
     let dns_fut = async {
+        // hickory's IDNA parser rejects mid-label underscores (e.g. `spf_s2.oraclecloud.com`),
+        // so this UDP arm can only fail for such names — skip it and let the DoH arm answer.
+        if !hickory_resolvable(domain) {
+            return None;
+        }
         let dns_server = dns_pool.next_dns_server_opt()?;
         let resolver = match dns_pool.create_dns_resolver(dns_server, false) {
             Ok(r) => r,
@@ -1220,6 +1225,19 @@ pub async fn get_txt_records_with_rate_limit(
             .remember_answer(RecordKind::Txt, domain, &records)
             .await;
         return Ok(records);
+    }
+
+    // Names hickory cannot parse (mid-label underscore, e.g. `spf_s2.oraclecloud.com`)
+    // would fail the system resolver with a misleading "Label contains invalid characters"
+    // error that surfaces as the headline failure. The DoH arm — which has no such
+    // limitation — already had its turn in the race above, so skip the doomed hickory
+    // fallback and its scary warning rather than attempt a lookup guaranteed to fail.
+    if !hickory_resolvable(domain) {
+        debug!(
+            "Skipping hickory system-resolver fallback for {} (label not IDNA-parseable); DoH arm already attempted",
+            domain
+        );
+        return Ok(vec![]);
     }
 
     // Final fallback: system resolver (only if both racing attempts failed)
@@ -2193,10 +2211,54 @@ pub(crate) fn is_valid_domain(domain: &str) -> bool {
         && domain.len() >= 4
 }
 
+/// Returns `true` iff every dot-separated label of `domain` is one hickory-resolver's
+/// name parser will accept.
+///
+/// hickory parses a label beginning with `_` via `from_ascii` (bypassing IDNA), so
+/// leading-underscore service labels — `_spf`, `_dmarc`, `_domainkey` — are accepted.
+/// Any other label goes through IDNA (UTS-46 + STD3 ASCII), which **rejects** an
+/// underscore anywhere in it: `spf_s2.oraclecloud.com` fails with
+/// "Label contains invalid characters". A name like that is still a legitimate SPF
+/// `include:` target and the DoH JSON arm (a plain URL query param, no hickory parse)
+/// resolves it fine — so callers use this guard to skip only the doomed hickory
+/// arms for such names, never the DoH lookup, and to avoid surfacing the misleading
+/// IDNA error as the headline failure. `is_valid_domain` (which permits underscores
+/// for the DoH/SPF path) is intentionally left untouched.
+pub(crate) fn hickory_resolvable(domain: &str) -> bool {
+    domain
+        .split('.')
+        .all(|label| label.starts_with('_') || !label.contains('_'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[rstest]
+    // leading-underscore service labels stay resolvable (hickory's from_ascii path)
+    #[case("_spf.google.com", true)]
+    #[case("_dmarc.vanta.com", true)]
+    #[case("selector1._domainkey.example.com", true)]
+    #[case("_spf1.canva.com", true)]
+    // plain names with no underscore stay resolvable
+    #[case("google.com", true)]
+    #[case("mail.oraclecloud.com", true)]
+    // mid-label underscore is rejected by hickory's IDNA path — the failing class
+    #[case("spf_s2.oraclecloud.com", false)]
+    #[case("spf_c.oraclecloud.com", false)]
+    #[case("a_b.example.com", false)]
+    // a leading-underscore label with a *further* underscore is still fine (from_ascii)
+    #[case("_x_y.example.com", true)]
+    // any single bad label taints the whole name
+    #[case("ok.bad_label.example.com", false)]
+    fn test_hickory_resolvable(#[case] domain: &str, #[case] expected: bool) {
+        assert_eq!(
+            hickory_resolvable(domain),
+            expected,
+            "hickory_resolvable({domain:?}) should be {expected}"
+        );
+    }
 
     #[test]
     fn test_extract_spf_records() {

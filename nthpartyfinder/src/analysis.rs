@@ -523,6 +523,53 @@ pub async fn subprocessor_analysis_with_logging(
 // is byte-for-byte the same as the old sequential code (same inputs, same outputs), so
 // recall is unchanged; only the orchestration is parallel.
 
+/// Decide whether to skip the (expensive, browser-rendered) subprocessor phase for a
+/// domain because another domain of the same organization has already been analyzed.
+///
+/// `org` is the domain's resolved organization (from `discovered_vendors`); `None` means
+/// we don't know it yet. In order:
+/// - unknown org, or an implausible one (a placeholder / privacy redaction / domain echo,
+///   per `is_plausible_org_name`) → never skip (fail toward recall; this also prevents a
+///   shared placeholder like "Redacted for Privacy" from mass-colliding real vendors).
+/// - first time this normalized org is seen → claim it (insert) and run.
+/// - already claimed, and this is not a depth-1 direct vendor → skip.
+/// - already claimed but `current_depth == 1` → still run (direct vendors always get full
+///   recall; the root layer is never skipped).
+///
+/// The reported waste (slack.design/slack.dev/… discovered *below* slack.com) is caught
+/// because the primary is processed at a shallower depth and claims the org first.
+fn subprocessor_skip_decision(
+    org: Option<&str>,
+    current_depth: u32,
+    attempted_orgs: &mut HashSet<String>,
+) -> bool {
+    let Some(org) = org else {
+        return false;
+    };
+    if !org_normalizer::is_plausible_org_name(org) {
+        return false;
+    }
+    // Lowercase the normalized name so case-variants (PostHog / Posthog) share one key,
+    // independent of whether the org normalizer singleton is initialized.
+    let key = org_normalizer::normalize(org).trim().to_lowercase();
+    // Never dedup on an empty key or a generic placeholder — those are shared by many
+    // unrelated domains and would mass-collide real vendors into a single skip.
+    if key.is_empty()
+        || matches!(
+            key.as_str(),
+            "unknown" | "n/a" | "none" | "private" | "redacted" | "redacted for privacy"
+        )
+    {
+        return false;
+    }
+    if attempted_orgs.contains(&key) {
+        current_depth > 1
+    } else {
+        attempted_orgs.insert(key);
+        false
+    }
+}
+
 // coverage(off): live subprocessor-page I/O — orchestration only.
 #[cfg_attr(coverage_nightly, coverage(off))]
 async fn run_subprocessor_phase(
@@ -571,19 +618,26 @@ async fn run_subfinder_phase(
     let Some(subfinder) = subdomain_discovery else {
         return Vec::new();
     };
-    logger.info("Running subdomain discovery via subfinder...");
+    logger.info(&format!(
+        "Running subdomain discovery via subfinder for {}...",
+        domain
+    ));
     let subdomains = match subfinder.discover(domain).await {
         Ok(s) => s,
         Err(e) => {
-            logger.warn(&format!("Subdomain discovery failed: {}", e));
+            logger.warn(&format!("Subdomain discovery failed for {}: {}", domain, e));
             return Vec::new();
         }
     };
     if subdomains.is_empty() {
-        logger.debug("Subfinder found no subdomains");
+        logger.debug(&format!("Subfinder found no subdomains for {}", domain));
         return Vec::new();
     }
-    logger.info(&format!("Subfinder found {} subdomains", subdomains.len()));
+    logger.info(&format!(
+        "Subfinder found {} subdomains for {}",
+        subdomains.len(),
+        domain
+    ));
 
     use futures::{stream, StreamExt};
     let subdomain_concurrency = 50;
@@ -620,8 +674,8 @@ async fn run_subfinder_phase(
         filter_subfinder_results(subdomain_results, &domain_base);
     if txt_found > 0 || cname_found > 0 {
         logger.info(&format!(
-            "Found {} vendors from subdomain TXT records, {} from CNAME infrastructure",
-            txt_found, cname_found
+            "Found {} vendors from subdomain TXT records, {} from CNAME infrastructure for {}",
+            txt_found, cname_found, domain
         ));
     }
     new_vendor_domains
@@ -637,20 +691,24 @@ async fn run_saas_phase(
     let Some(tenant_disc) = saas_tenant_discovery else {
         return Vec::new();
     };
-    logger.info("Running SaaS tenant discovery...");
+    logger.info(&format!("Running SaaS tenant discovery for {}...", domain));
     match tenant_disc.probe_with_logger(domain, Some(logger)).await {
         Ok(tenants) => {
             let tenant_vendors = filter_confirmed_tenants(&tenants);
             if !tenant_vendors.is_empty() {
                 logger.info(&format!(
-                    "Found {} likely/confirmed SaaS tenants",
-                    tenant_vendors.len()
+                    "Found {} likely/confirmed SaaS tenants for {}",
+                    tenant_vendors.len(),
+                    domain
                 ));
             }
             tenant_vendors
         }
         Err(e) => {
-            logger.warn(&format!("SaaS tenant discovery failed: {}", e));
+            logger.warn(&format!(
+                "SaaS tenant discovery failed for {}: {}",
+                domain, e
+            ));
             Vec::new()
         }
     }
@@ -666,15 +724,22 @@ async fn run_ct_phase(
     let Some(ct_disc) = ct_discovery else {
         return Vec::new();
     };
-    logger.info("Running Certificate Transparency log discovery...");
+    logger.info(&format!(
+        "Running Certificate Transparency log discovery for {}...",
+        domain
+    ));
     match ct_disc.discover(domain).await {
         Ok(ct_results) if !ct_results.is_empty() => {
-            logger.info(&format!("Found {} vendors from CT logs", ct_results.len()));
+            logger.info(&format!(
+                "Found {} vendors from CT logs for {}",
+                ct_results.len(),
+                domain
+            ));
             convert_ct_results(ct_results)
         }
         Ok(_) => Vec::new(),
         Err(e) => {
-            logger.warn(&format!("CT log discovery failed: {}", e));
+            logger.warn(&format!("CT log discovery failed for {}: {}", domain, e));
             Vec::new()
         }
     }
@@ -690,15 +755,22 @@ async fn run_webtraffic_phase(
     let Some(web_traffic_disc) = web_traffic_discovery else {
         return Vec::new();
     };
-    logger.info("Running webpage source & network request discovery...");
+    logger.info(&format!(
+        "Running webpage source & network request discovery for {}...",
+        domain
+    ));
     let web_traffic_results = web_traffic_disc.analyze_domain(domain).await;
     if web_traffic_results.is_empty() {
-        logger.debug("No vendors discovered from webpage analysis");
+        logger.debug(&format!(
+            "No vendors discovered from webpage analysis for {}",
+            domain
+        ));
         return Vec::new();
     }
     logger.info(&format!(
-        "Found {} vendors from webpage analysis",
-        web_traffic_results.len()
+        "Found {} vendors from webpage analysis for {}",
+        web_traffic_results.len(),
+        domain
     ));
     convert_web_traffic_results(web_traffic_results)
 }
@@ -716,6 +788,10 @@ pub async fn discover_nth_parties(
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
     processed_domains: Arc<Mutex<HashSet<String>>>,
+    // Normalized org names whose subprocessor page has already been sought, so we don't
+    // re-run the expensive browser-rendered subprocessor lookup on secondary/tertiary
+    // domains of an org we already analyzed (slack.com then slack.design/slack.dev/…).
+    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
     semaphore: Arc<Semaphore>,
     current_depth: u32,
     root_customer_domain: &str,
@@ -864,6 +940,33 @@ pub async fn discover_nth_parties(
             domain,
         );
 
+        // DMARC records live at `_dmarc.<domain>`, not the apex, so the apex TXT query
+        // above never sees them — which is why the "Email Security (DMARC)" source was
+        // effectively dead. Probe `_dmarc.<domain>` explicitly and run it through the same
+        // extractor: its rua=/ruf= reporting addresses point to report-processing vendors
+        // (dmarcian, Agari, Proofpoint, …) that are typically absent from SPF, so this is
+        // additive, non-redundant recall. Only the DMARC extractor matches a v=DMARC1
+        // record; the SPF/DKIM/verification extractors no-op on it.
+        let dmarc_host = format!("_dmarc.{}", domain);
+        let dmarc_records =
+            dns::get_txt_records_with_pool_tracked(&dmarc_host, &dns_pool, dns_counter)
+                .await
+                .unwrap_or_default();
+        let dmarc_vendor_domains = if dmarc_records.is_empty() {
+            Vec::new()
+        } else {
+            logger.debug(&format!(
+                "Found {} _dmarc TXT record(s) for {}",
+                dmarc_records.len(),
+                domain
+            ));
+            dns::extract_vendor_domains_with_source_and_logger(
+                &dmarc_records,
+                Some(verification_logger),
+                domain,
+            )
+        };
+
         let spf_recursive_domains =
             dns::resolve_spf_includes_recursive(&txt_records, &dns_pool, domain).await;
         if !spf_recursive_domains.is_empty() {
@@ -876,6 +979,7 @@ pub async fn discover_nth_parties(
 
         let current_base_domain = domain_utils::extract_base_domain(domain);
         let mut all_vendor_domains = vendor_domains_with_source;
+        all_vendor_domains.extend(dmarc_vendor_domains);
         all_vendor_domains.extend(spf_recursive_domains);
         if let Some(base_vd) = add_base_domain_if_subdomain(domain, &current_base_domain) {
             logger.debug(&format!(
@@ -906,6 +1010,26 @@ pub async fn discover_nth_parties(
         // discovery wall time — the join costs roughly its slowest arm, and the point of the
         // per-phase counters is to name which arm that is. The whole join is timed into the
         // depth bucket, which is the term that actually adds up across the recursion.
+        // Per-organization subprocessor dedup: skip the browser-rendered subprocessor
+        // lookup for a domain whose org another domain already claimed (see
+        // subprocessor_skip_decision). Only gates the subprocessor arm — the other four
+        // phases genuinely differ per domain and stay enabled.
+        let subprocessor_enabled = subprocessor_enabled
+            && {
+                let base = domain_utils::extract_base_domain(domain);
+                let org = discovered_vendors.lock().await.get(&base).cloned();
+                let mut attempted = subprocessor_attempted_orgs.lock().await;
+                let skip =
+                    subprocessor_skip_decision(org.as_deref(), current_depth, &mut attempted);
+                if skip {
+                    logger.debug(&format!(
+                    "Skipping subprocessor lookup for {} — org already analyzed at a shallower layer",
+                    domain
+                ));
+                }
+                !skip
+            };
+
         let discovery_started = std::time::Instant::now();
         let (sp, sf, st, ct_v, wt) = tokio::join!(
             crate::perf::timed_async(
@@ -1039,6 +1163,7 @@ pub async fn discover_nth_parties(
             let vendor_stream = stream::iter(all_vendor_domains.into_iter().enumerate().map(|(index, vendor_domain_info)| {
                     let discovered_vendors = discovered_vendors.clone();
                     let processed_domains = processed_domains.clone();
+                    let subprocessor_attempted_orgs = subprocessor_attempted_orgs.clone();
                     let semaphore = semaphore.clone();
                     let recursive_semaphore = recursive_semaphore.clone();
                     let domain = domain.to_string();
@@ -1089,6 +1214,7 @@ pub async fn discover_nth_parties(
                             max_depth,
                             discovered_vendors,
                             processed_domains,
+                            subprocessor_attempted_orgs,
                             semaphore.clone(),
                             root_customer_domain,
                             root_customer_organization,
@@ -1229,8 +1355,15 @@ pub async fn discover_nth_parties(
             logger.log_parallel_processing_complete(total_relationships_found);
 
             if current_depth == 1 {
+                // Report the actual number of relationships written to the sink (the
+                // flattened count, == app.rs's raw_count), NOT `total_relationships_found`:
+                // that per-level accumulator re-counts every descendant edge at each
+                // recursion level and over-reports the headline by ~25x on a deep scan
+                // (718412 vs the true 28216 fed to dedup). By this point the depth-1
+                // buffer has awaited all descendants, so every edge is already in the sink.
+                let written = result_sink.lock().await.count();
                 logger.finish_progress(&format!("Vendor analysis completed — {} raw relationships from {} vendors (deduplicating...)",
-                        total_relationships_found, vendor_count)).await;
+                        written, vendor_count)).await;
             }
         }
     }
@@ -1253,6 +1386,7 @@ pub async fn process_vendor_domain(
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
     processed_domains: Arc<Mutex<HashSet<String>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
     semaphore: Arc<Semaphore>,
     root_customer_domain: String,
     root_customer_organization: String,
@@ -1422,6 +1556,7 @@ pub async fn process_vendor_domain(
         max_depth,
         discovered_vendors.clone(),
         processed_domains.clone(),
+        subprocessor_attempted_orgs.clone(),
         semaphore.clone(),
         current_depth + 1,
         &root_customer_domain,
@@ -1678,6 +1813,58 @@ mod tests {
         assert!(is_likely_inferred_org("myklpages.com", "Myklpages Inc."));
         assert!(is_likely_inferred_org("example.com", "example"));
         assert!(is_likely_inferred_org("test.com", "test.com"));
+    }
+
+    #[test]
+    fn test_subprocessor_skip_decision() {
+        use std::collections::HashSet;
+        let mut attempted = HashSet::new();
+
+        // Unknown org → never skip (fail toward recall), nothing claimed.
+        assert!(!subprocessor_skip_decision(None, 3, &mut attempted));
+        assert!(attempted.is_empty());
+
+        // Implausible org (a tagline / redaction) → never skip.
+        assert!(!subprocessor_skip_decision(
+            Some("Redacted for Privacy"),
+            3,
+            &mut attempted
+        ));
+        assert!(attempted.is_empty());
+
+        // Generic placeholder → never skip (would mass-collide unrelated domains).
+        assert!(!subprocessor_skip_decision(
+            Some("Unknown"),
+            3,
+            &mut attempted
+        ));
+        assert!(attempted.is_empty());
+
+        // First real org (slack.com's "Slack") → claim it and run.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            1,
+            &mut attempted
+        ));
+        // A secondary domain of the same org below the root → skip (the reported waste).
+        assert!(subprocessor_skip_decision(Some("Slack"), 2, &mut attempted));
+        assert!(subprocessor_skip_decision(Some("Slack"), 3, &mut attempted));
+        // Case-variant of the same org still dedups to the same key.
+        assert!(subprocessor_skip_decision(Some("SLACK"), 2, &mut attempted));
+
+        // Same org at depth 1 (a direct vendor) always runs — the root layer is never skipped.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            1,
+            &mut attempted
+        ));
+
+        // A different real org → claimed independently and runs.
+        assert!(!subprocessor_skip_decision(
+            Some("Stripe"),
+            2,
+            &mut attempted
+        ));
     }
 
     #[test]

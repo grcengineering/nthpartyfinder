@@ -991,6 +991,20 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             "headless_chrome=off"
                 .parse()
                 .expect("static tracing directive is valid"),
+        )
+        // rustls-platform-verifier logs "failed to verify TLS certificate: invalid peer
+        // certificate: NotValidForName" at ERROR from inside the TLS handshake, and by
+        // design strips the server name (it "doesn't leak anything sensitive"), so the
+        // line can never say *which* target failed. It fires overwhelmingly on SaaS-tenant
+        // blind probes (https://<guessed-tenant>.<vendor> resolves via wildcard DNS to a
+        // cert that doesn't cover the guess) — an expected, benign outcome our own probe
+        // handlers already record *with* the URL at DEBUG. `=off` (not `=warn`, which would
+        // still pass an ERROR) silences the context-free dependency line; run with `-v` to
+        // see the target-tagged probe failures from our handlers instead.
+        .add_directive(
+            "rustls_platform_verifier=off"
+                .parse()
+                .expect("static tracing directive is valid"),
         );
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -1790,6 +1804,9 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
     let processed_domains = Arc::new(Mutex::new(processed_domains_set));
+    // Scan-scoped set of orgs whose subprocessor page has already been sought, so
+    // secondary domains of an already-analyzed org skip the expensive lookup.
+    let subprocessor_attempted_orgs = Arc::new(Mutex::new(std::collections::HashSet::new()));
     // `--parallel-jobs 0` means "no operator cap", so the semaphore falls back to the
     // depth-1 configured concurrency. A zero-permit semaphore would deadlock any future
     // caller that acquires it.
@@ -2183,6 +2200,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         args.depth,
         discovered_vendors.clone(),
         processed_domains.clone(),
+        subprocessor_attempted_orgs.clone(),
         semaphore.clone(),
         1,
         &root_customer_domain,

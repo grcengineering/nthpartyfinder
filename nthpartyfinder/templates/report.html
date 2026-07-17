@@ -541,8 +541,11 @@
         .evidence-modal-overlay.active { opacity: 1; visibility: visible; }
         .evidence-modal { background: var(--surface-card); border: var(--border-w) solid var(--border-default); border-radius: var(--radius-xl); box-shadow: var(--shadow-xl); max-width: 800px; width: 90%; max-height: 85vh; display: flex; flex-direction: column; transform: scale(0.96) translateY(16px); transition: transform 0.25s ease; }
         .evidence-modal-overlay.active .evidence-modal { transform: scale(1) translateY(0); }
-        .evidence-modal-header { display: flex; align-items: center; justify-content: space-between; padding: var(--space-5) var(--space-6); border-bottom: var(--border-w) solid var(--border-subtle); border-radius: var(--radius-xl) var(--radius-xl) 0 0; position: relative; }
-        .evidence-modal-header::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--gradient-fusion); border-radius: var(--radius-xl) 0 0 0; }
+        .evidence-modal-header { display: flex; align-items: center; justify-content: space-between; padding: var(--space-5) var(--space-6); border-bottom: var(--border-w) solid var(--border-subtle); border-radius: var(--radius-xl) var(--radius-xl) 0 0; position: relative; overflow: hidden; }
+        /* Left gradient accent. `overflow: hidden` on the header clips this straight 3px bar
+           to the header's rounded top-left corner, so it follows the curve instead of the
+           old radius-xl-on-a-3px-bar arc that diverged from the modal corner and left a seam. */
+        .evidence-modal-header::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--gradient-fusion); }
         .evidence-modal-title { font-family: var(--font-display); font-size: var(--text-lg); font-weight: var(--fw-semibold); color: var(--text-strong); display: flex; align-items: center; gap: var(--space-2); }
         .evidence-modal-close { background: var(--surface-sunken); border: var(--border-w) solid var(--border-default); color: var(--text-body); width: 36px; height: 36px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: var(--text-lg); transition: all 0.2s ease; }
         .evidence-modal-close:hover { background: var(--surface-inset); color: var(--text-strong); }
@@ -678,16 +681,19 @@
                     </div>
                 </div>
                 <div class="legend">
+                    <!-- Layer swatches kept in sync with VendorGraph.svelte's --npf-lN-solid
+                         ramp (2026-07-17): bright-azure -> deep-navy -> gold -> dark-orange,
+                         each adjacent pair clearly separated. -->
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--gradient-ocean);"></div>
                         Root Domain
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: var(--eng-blue-500);"></div>
+                        <div class="legend-color" style="background: var(--eng-blue-400);"></div>
                         3rd Party Vendor
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: var(--eng-blue-300);"></div>
+                        <div class="legend-color" style="background: var(--eng-blue-800);"></div>
                         4th Party Vendor
                     </div>
                     <div class="legend-item">
@@ -695,7 +701,7 @@
                         5th Party Vendor
                     </div>
                     <div class="legend-item">
-                        <div class="legend-color" style="background: var(--grc-orange-400);"></div>
+                        <div class="legend-color" style="background: var(--grc-orange-700);"></div>
                         6th+ Party Vendor
                     </div>
                 </div>

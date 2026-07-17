@@ -601,26 +601,30 @@
   .vendor-graph-container {
     width: 100%; height: 100%; position: relative;
 
-    --npf-l0-fill: var(--gradient-ocean, linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%));
-    --npf-l0-solid: var(--eng-blue-500, #6366f1);
+    /* Layer palette (2026-07-17): every adjacent layer alternates lightness AND/OR hue so
+       neighbours never collide — bright-azure -> deep-navy -> gold -> dark-orange ->
+       bright-orange -> deep-brown. All values are GRC design-system brand tokens (theme-
+       invariant), with the resolved literal as the standalone (vite-dev) fallback. */
+    --npf-l0-fill: var(--gradient-ocean, linear-gradient(135deg, #FFA84F 0%, #1B95C1 100%));
+    --npf-l0-solid: var(--eng-blue-500, #1B95C1);
 
-    --npf-l1-solid: var(--eng-blue-500, #3b82f6);
-    --npf-l1-fill: linear-gradient(135deg, var(--eng-blue-400, #3b82f6) 0%, var(--eng-blue-600, #2563eb) 100%);
+    --npf-l1-solid: var(--eng-blue-400, #2FA6CF);
+    --npf-l1-fill: linear-gradient(135deg, var(--eng-blue-300, #63BEDC) 0%, var(--eng-blue-500, #1B95C1) 100%);
 
-    --npf-l2-solid: var(--eng-blue-700, #10b981);
-    --npf-l2-fill: linear-gradient(135deg, var(--eng-blue-600, #10b981) 0%, var(--eng-blue-800, #059669) 100%);
+    --npf-l2-solid: var(--eng-blue-800, #114E67);
+    --npf-l2-fill: linear-gradient(135deg, var(--eng-blue-700, #126181) 0%, var(--eng-blue-800, #114E67) 100%);
 
-    --npf-l3-solid: var(--amber-500, #f59e0b);
-    --npf-l3-fill: linear-gradient(135deg, var(--amber-500, #f59e0b) 0%, var(--amber-600, #d97706) 100%);
+    --npf-l3-solid: var(--amber-500, #E8A317);
+    --npf-l3-fill: linear-gradient(135deg, var(--amber-500, #E8A317) 0%, var(--amber-600, #C9890C) 100%);
 
-    --npf-l4-solid: var(--grc-orange-500, #ef4444);
-    --npf-l4-fill: linear-gradient(135deg, var(--grc-orange-400, #ef4444) 0%, var(--grc-orange-600, #dc2626) 100%);
+    --npf-l4-solid: var(--grc-orange-700, #B5610F);
+    --npf-l4-fill: linear-gradient(135deg, var(--grc-orange-600, #E07C18) 0%, var(--grc-orange-800, #8A490C) 100%);
 
-    --npf-l5-solid: var(--grc-orange-700, #c026d3);
-    --npf-l5-fill: linear-gradient(135deg, var(--grc-orange-600, #c026d3) 0%, var(--grc-orange-800, #a21caf) 100%);
+    --npf-l5-solid: var(--grc-orange-400, #FFA84F);
+    --npf-l5-fill: linear-gradient(135deg, var(--grc-orange-400, #FFA84F) 0%, var(--grc-orange-500, #F8932F) 100%);
 
-    --npf-l6-solid: var(--grc-orange-800, #e11d48);
-    --npf-l6-fill: linear-gradient(135deg, var(--grc-orange-700, #e11d48) 0%, var(--grc-orange-900, #be123c) 100%);
+    --npf-l6-solid: var(--grc-orange-900, #5E320A);
+    --npf-l6-fill: linear-gradient(135deg, var(--grc-orange-800, #8A490C) 0%, var(--grc-orange-900, #5E320A) 100%);
 
     /* Chrome — these DO follow light/dark. */
     --npf-edge: var(--border-strong, #b0bec5);

@@ -1,17 +1,28 @@
 //! Certificate Transparency (CT) log discovery for finding third-party vendors.
 //!
-//! Queries crt.sh to find certificates associated with a domain and extracts
-//! third-party domains from certificate Subject Alternative Names (SANs).
+//! Queries Certificate Transparency aggregators (crt.sh and SSLMate Cert Spotter) to
+//! find certificates associated with a domain and extracts third-party domains from
+//! certificate Subject Alternative Names (SANs). Providers are round-robined on a
+//! process-shared cursor so no single aggregator is overloaded — crt.sh returns HTTP 429
+//! under a wide fan-out — and a provider failure fails over to the next rather than
+//! collapsing into a silent empty answer.
 
 use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::domain_utils;
 use crate::http_client::GatedSend;
+
+/// Base URL for the SSLMate Cert Spotter API (`/v1/issuances`).
+const CERTSPOTTER_BASE_URL: &str = "https://api.certspotter.com";
+/// Optional env var carrying a Cert Spotter API token; without it the anonymous
+/// (rate-limited) tier is used, and a throttle simply fails over to crt.sh.
+const CERTSPOTTER_TOKEN_ENV: &str = "NTHPARTYFINDER_CERTSPOTTER_TOKEN";
 
 /// Response from crt.sh API
 #[derive(Debug, Deserialize)]
@@ -34,6 +45,50 @@ pub struct CrtShEntry {
     pub not_after: Option<String>,
 }
 
+/// One issuance record from the SSLMate Cert Spotter API (`GET /v1/issuances`).
+#[derive(Debug, Deserialize)]
+struct CertSpotterIssuance {
+    #[serde(default)]
+    id: Option<String>,
+    /// Clean array of certificate DNS names (Cert Spotter's equivalent of crt.sh's
+    /// newline-separated `name_value`).
+    #[serde(default)]
+    dns_names: Option<Vec<String>>,
+    #[serde(default)]
+    issuer: Option<CertSpotterIssuer>,
+    #[serde(default)]
+    not_before: Option<String>,
+    #[serde(default)]
+    not_after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CertSpotterIssuer {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl CertSpotterIssuance {
+    /// Normalize a Cert Spotter issuance into the crt.sh entry shape so the shared
+    /// SAN/CN extraction loop in `discover` works over both providers unchanged.
+    fn into_crtsh_entry(self) -> CrtShEntry {
+        let name_value = self.dns_names.map(|names| names.join("\n"));
+        CrtShEntry {
+            issuer_ca_id: None,
+            issuer_name: self.issuer.and_then(|i| i.name),
+            common_name: None,
+            name_value,
+            id: self
+                .id
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or_default(),
+            entry_timestamp: None,
+            not_before: self.not_before,
+            not_after: self.not_after,
+        }
+    }
+}
+
 /// Result of CT log discovery
 #[derive(Debug, Clone)]
 pub struct CtDiscoveryResult {
@@ -45,19 +100,80 @@ pub struct CtDiscoveryResult {
     pub certificate_info: String,
 }
 
-/// Certificate Transparency log discovery
+/// A failure fetching from one CT provider, classified so the round-robin can decide
+/// whether to fail over silently or surface a hard error.
+enum CtFetchError {
+    /// Provider responded but not usefully (non-2xx status, or an unparseable body).
+    /// Recoverable: fail over to the next provider; degrade to an empty answer if none
+    /// remain (a reachable-but-unhelpful provider is not a scan-fatal condition).
+    Soft(String),
+    /// Provider could not be reached at all (transport / connection / timeout). If every
+    /// provider is unreachable this propagates as a hard error so the phase logs it.
+    Transport(anyhow::Error),
+}
+
+/// One CT log source in the round-robin rotation.
+enum CtProvider {
+    CrtSh {
+        base_url: String,
+    },
+    CertSpotter {
+        base_url: String,
+        token: Option<String>,
+    },
+}
+
+impl CtProvider {
+    fn name(&self) -> &'static str {
+        match self {
+            CtProvider::CrtSh { .. } => "crt.sh",
+            CtProvider::CertSpotter { .. } => "certspotter",
+        }
+    }
+}
+
+/// Certificate Transparency log discovery.
+///
+/// Round-robins across the configured providers on `cursor` so successive domains hit
+/// different aggregators, and fails over on any provider error. A single-provider
+/// instance (`with_base_url`, used by the wiremock test-suite) behaves exactly as before.
 pub struct CtLogDiscovery {
     client: Client,
     timeout: Duration,
+    /// crt.sh base URL (kept as a named field for the public API + back-compat tests).
     base_url: String,
+    /// Cert Spotter base URL; `None` => crt.sh-only (single-provider) instance.
+    certspotter_base_url: Option<String>,
+    /// Optional Cert Spotter API token (raises the anonymous rate limit).
+    certspotter_token: Option<String>,
+    /// Process-shared round-robin cursor across providers.
+    cursor: AtomicUsize,
 }
 
 impl CtLogDiscovery {
     pub fn new(timeout: Duration) -> Self {
-        Self::with_base_url(timeout, "https://crt.sh".to_string())
+        Self::with_providers(
+            timeout,
+            "https://crt.sh".to_string(),
+            Some(CERTSPOTTER_BASE_URL.to_string()),
+            std::env::var(CERTSPOTTER_TOKEN_ENV)
+                .ok()
+                .filter(|t| !t.is_empty()),
+        )
     }
 
+    /// crt.sh-only instance. Used by the wiremock test-suite to point crt.sh at a mock
+    /// server; production uses `new` (multi-provider round-robin).
     pub fn with_base_url(timeout: Duration, base_url: String) -> Self {
+        Self::with_providers(timeout, base_url, None, None)
+    }
+
+    fn with_providers(
+        timeout: Duration,
+        base_url: String,
+        certspotter_base_url: Option<String>,
+        certspotter_token: Option<String>,
+    ) -> Self {
         let client = crate::http_client::hardened_builder()
             .timeout(timeout)
             .user_agent("nthpartyfinder/1.0")
@@ -68,7 +184,25 @@ impl CtLogDiscovery {
             client,
             timeout,
             base_url,
+            certspotter_base_url,
+            certspotter_token,
+            cursor: AtomicUsize::new(0),
         }
+    }
+
+    /// The provider rotation for this instance: always crt.sh, plus Cert Spotter when
+    /// configured (production). A `with_base_url` instance yields crt.sh only.
+    fn providers(&self) -> Vec<CtProvider> {
+        let mut providers = vec![CtProvider::CrtSh {
+            base_url: self.base_url.clone(),
+        }];
+        if let Some(cs) = &self.certspotter_base_url {
+            providers.push(CtProvider::CertSpotter {
+                base_url: cs.clone(),
+                token: self.certspotter_token.clone(),
+            });
+        }
+        providers
     }
 
     /// Discover vendors from CT logs for a domain
@@ -82,8 +216,8 @@ impl CtLogDiscovery {
         let base_domain = domain_utils::extract_base_domain(domain);
         seen_domains.insert(base_domain.clone());
 
-        // Query crt.sh for certificates
-        let entries = self.query_crt_sh(domain).await?;
+        // Query CT providers (round-robin + failover) for certificates.
+        let entries = self.fetch_entries_round_robin(domain).await?;
         debug!("Found {} certificate entries for {}", entries.len(), domain);
 
         for entry in entries {
@@ -163,16 +297,79 @@ impl CtLogDiscovery {
         Ok(results)
     }
 
-    /// Query crt.sh for certificates related to a domain
+    /// Fetch certificate entries by round-robining the configured providers, failing
+    /// over on any provider error. Returns the first provider's authoritative (2xx)
+    /// entries — possibly empty. If every provider fails, a reachable-but-unhelpful
+    /// response degrades to an empty answer while a total transport failure propagates
+    /// as a hard error (so the phase logs it with the real error kind).
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
-        // Query for wildcard certificates (%.domain.com)
+    async fn fetch_entries_round_robin(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
+        let providers = self.providers();
+        let n = providers.len();
+        // Advance the shared cursor so successive domains start at a different provider,
+        // spreading load off any single aggregator.
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
+        let mut transport_err = None;
+
+        for offset in 0..n {
+            let provider = &providers[(start + offset) % n];
+            match self.fetch_provider(provider, domain).await {
+                Ok(entries) => return Ok(entries),
+                Err(CtFetchError::Soft(msg)) => {
+                    debug!(
+                        "CT provider {} unavailable for {} (failing over): {}",
+                        provider.name(),
+                        domain,
+                        msg
+                    );
+                }
+                Err(CtFetchError::Transport(e)) => {
+                    debug!(
+                        "CT provider {} unreachable for {} (failing over): {}",
+                        provider.name(),
+                        domain,
+                        e
+                    );
+                    transport_err = Some(e);
+                }
+            }
+        }
+
+        match transport_err {
+            // Nothing was reachable — surface the real error kind rather than a silent empty.
+            Some(e) => Err(e),
+            // Every provider responded but unhelpfully (429/5xx/parse) — treat as "no certs".
+            None => Ok(Vec::new()),
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fetch_provider(
+        &self,
+        provider: &CtProvider,
+        domain: &str,
+    ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
+        match provider {
+            CtProvider::CrtSh { base_url } => self.fetch_crtsh(base_url, domain).await,
+            CtProvider::CertSpotter { base_url, token } => {
+                self.fetch_certspotter(base_url, token.as_deref(), domain)
+                    .await
+            }
+        }
+    }
+
+    /// Query crt.sh (`/?q=%.domain&output=json`). Wildcard prefix `%.` = all subdomains.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fetch_crtsh(
+        &self,
+        base_url: &str,
+        domain: &str,
+    ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
         let url = format!(
             "{}/?q=%.{}&output=json",
-            self.base_url,
+            base_url,
             urlencoding::encode(domain)
         );
-
         debug!("Querying crt.sh: {}", url);
 
         let response = self
@@ -180,31 +377,104 @@ impl CtLogDiscovery {
             .get(&url)
             .timeout(self.timeout)
             .send_gated()
-            .await?;
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
 
         if !response.status().is_success() {
-            warn!(
+            return Err(CtFetchError::Soft(format!(
                 "crt.sh returned status {} for {}",
                 response.status(),
                 domain
-            );
-            return Ok(Vec::new());
+            )));
         }
 
-        let text = response.text().await?;
+        let text = response
+            .text()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
 
         // crt.sh returns empty array as "[]" or sometimes just empty
         if text.is_empty() || text == "[]" {
             return Ok(Vec::new());
         }
 
-        // Parse JSON response
         match serde_json::from_str::<Vec<CrtShEntry>>(&text) {
             Ok(entries) => Ok(entries),
-            Err(e) => {
-                warn!("Failed to parse crt.sh response: {}", e);
+            Err(e) => Err(CtFetchError::Soft(format!(
+                "Failed to parse crt.sh response: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Query SSLMate Cert Spotter (`/v1/issuances`), normalizing its clean `dns_names[]`
+    /// array into the crt.sh entry shape.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fetch_certspotter(
+        &self,
+        base_url: &str,
+        token: Option<&str>,
+        domain: &str,
+    ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
+        let url = format!(
+            "{}/v1/issuances?domain={}&include_subdomains=true&match_wildcards=true&expand=dns_names&expand=issuer",
+            base_url,
+            urlencoding::encode(domain)
+        );
+        debug!("Querying Cert Spotter: {}", url);
+
+        let mut request = self.client.get(&url).timeout(self.timeout);
+        if let Some(t) = token {
+            request = request.bearer_auth(t);
+        }
+
+        let response = request
+            .send_gated()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        if !response.status().is_success() {
+            return Err(CtFetchError::Soft(format!(
+                "Cert Spotter returned status {} for {}",
+                response.status(),
+                domain
+            )));
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        if text.is_empty() || text == "[]" {
+            return Ok(Vec::new());
+        }
+
+        match serde_json::from_str::<Vec<CertSpotterIssuance>>(&text) {
+            Ok(issuances) => Ok(issuances
+                .into_iter()
+                .map(CertSpotterIssuance::into_crtsh_entry)
+                .collect()),
+            Err(e) => Err(CtFetchError::Soft(format!(
+                "Failed to parse Cert Spotter response: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Test-scoped crt.sh query preserving the historical contract (a reachable-but-
+    /// unhelpful response degrades to empty with a warning; only a transport failure
+    /// propagates) so the crt.sh HTTP behavior stays directly covered by the wiremock
+    /// suite. Production goes through `fetch_entries_round_robin`.
+    #[cfg(test)]
+    pub(crate) async fn query_crt_sh(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
+        match self.fetch_crtsh(&self.base_url, domain).await {
+            Ok(entries) => Ok(entries),
+            Err(CtFetchError::Soft(msg)) => {
+                tracing::warn!("{}", msg);
                 Ok(Vec::new())
             }
+            Err(CtFetchError::Transport(e)) => Err(e),
         }
     }
 
@@ -1204,6 +1474,91 @@ mod tests {
             .await;
 
         let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    // --- Cert Spotter mapping + multi-provider round-robin/failover ---
+
+    #[test]
+    fn test_certspotter_issuance_maps_to_crtsh_entry() {
+        let json = r#"[{"id":"12345","dns_names":["example.com","api.vendor.io"],"issuer":{"name":"Let's Encrypt"},"not_before":"2024-01-01","not_after":"2024-04-01"}]"#;
+        let issuances: Vec<CertSpotterIssuance> = serde_json::from_str(json).unwrap();
+        assert_eq!(issuances.len(), 1);
+        let entry = issuances.into_iter().next().unwrap().into_crtsh_entry();
+        // dns_names[] is normalized into crt.sh's newline-joined name_value.
+        assert_eq!(entry.id, 12345);
+        assert_eq!(
+            entry.name_value.as_deref(),
+            Some("example.com\napi.vendor.io")
+        );
+        assert_eq!(entry.issuer_name.as_deref(), Some("Let's Encrypt"));
+        assert!(entry.common_name.is_none());
+    }
+
+    #[test]
+    fn test_certspotter_issuance_non_numeric_id_defaults_zero() {
+        let json = r#"[{"id":"not-a-number","dns_names":["x.com"]}]"#;
+        let issuances: Vec<CertSpotterIssuance> = serde_json::from_str(json).unwrap();
+        let entry = issuances.into_iter().next().unwrap().into_crtsh_entry();
+        assert_eq!(entry.id, 0);
+        assert!(entry.issuer_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_discover_round_robin_fails_over_to_certspotter() {
+        // crt.sh is over its rate limit (429); the round-robin must fail over to the
+        // Cert Spotter provider and still surface the vendor from its certificates.
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .mount(&crtsh)
+            .await;
+
+        let certspotter = MockServer::start().await;
+        let cs_body = serde_json::json!([
+            {"id": "9001", "dns_names": ["example.com", "vendor-x.io"], "issuer": {"name": "Let's Encrypt"}}
+        ]);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&cs_body))
+            .mount(&certspotter)
+            .await;
+
+        let disc = CtLogDiscovery::with_providers(
+            Duration::from_secs(5),
+            crtsh.uri(),
+            Some(certspotter.uri()),
+            None,
+        );
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(
+            results.iter().any(|r| r.domain == "vendor-x.io"),
+            "expected failover to Cert Spotter to surface vendor-x.io, got {:?}",
+            results.iter().map(|r| &r.domain).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_all_providers_soft_fail_returns_empty() {
+        // Both providers respond with a server error — every provider soft-fails, so the
+        // result degrades to empty (no vendors) rather than erroring the scan.
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&crtsh)
+            .await;
+        let certspotter = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&certspotter)
+            .await;
+
+        let disc = CtLogDiscovery::with_providers(
+            Duration::from_secs(5),
+            crtsh.uri(),
+            Some(certspotter.uri()),
+            None,
+        );
         let results = disc.discover("example.com").await.unwrap();
         assert!(results.is_empty());
     }
