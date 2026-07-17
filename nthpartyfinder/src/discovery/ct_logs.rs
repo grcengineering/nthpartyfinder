@@ -1,11 +1,17 @@
 //! Certificate Transparency (CT) log discovery for finding third-party vendors.
 //!
-//! Queries Certificate Transparency aggregators (crt.sh and SSLMate Cert Spotter) to
-//! find certificates associated with a domain and extracts third-party domains from
-//! certificate Subject Alternative Names (SANs). Providers are round-robined on a
-//! process-shared cursor so no single aggregator is overloaded — crt.sh returns HTTP 429
-//! under a wide fan-out — and a provider failure fails over to the next rather than
-//! collapsing into a silent empty answer.
+//! Queries Certificate Transparency aggregators to find certificates associated with a
+//! domain and extracts third-party domains from certificate Subject Alternative Names
+//! (SANs). Providers are round-robined on a process-shared cursor so no single aggregator
+//! is overloaded — crt.sh returns HTTP 429 under a wide fan-out — and a provider failure
+//! fails over to the next rather than collapsing into a silent empty answer.
+//!
+//! Providers: **crt.sh** (anonymous, always on) and **SSLMate Cert Spotter** (anonymous,
+//! always on; optional token) are the defaults. **MerkleMap** and **Censys** — the two
+//! remaining well-regarded CT query APIs (every once-anonymous alternative, incl. Google's,
+//! Entrust's, and Meta's, is now discontinued) — join the rotation only when their API
+//! credentials are configured via env (`NTHPARTYFINDER_MERKLEMAP_TOKEN`;
+//! `NTHPARTYFINDER_CENSYS_PAT` + `NTHPARTYFINDER_CENSYS_ORG_ID`).
 
 use anyhow::Result;
 use reqwest::Client;
@@ -23,6 +29,28 @@ const CERTSPOTTER_BASE_URL: &str = "https://api.certspotter.com";
 /// Optional env var carrying a Cert Spotter API token; without it the anonymous
 /// (rate-limited) tier is used, and a throttle simply fails over to crt.sh.
 const CERTSPOTTER_TOKEN_ENV: &str = "NTHPARTYFINDER_CERTSPOTTER_TOKEN";
+
+// Two further well-regarded CT-log query providers. Verified 2026-07-17: every other
+// CT query API that was once anonymous (Google Transparency Report, Entrust CT Search,
+// Meta/Facebook CT Graph) is now dead, so both of these require a (free) API credential
+// and only join the rotation when it is configured — crt.sh + anonymous Cert Spotter
+// remain the always-on defaults.
+
+/// MerkleMap CT search API (`/v1/search`). Genuinely CT-log-backed, returns clean JSON.
+const MERKLEMAP_BASE_URL: &str = "https://api.merklemap.com";
+/// Env var carrying a MerkleMap API token (Bearer). MerkleMap has no anonymous tier, so
+/// the provider is added to the rotation only when this is set.
+const MERKLEMAP_TOKEN_ENV: &str = "NTHPARTYFINDER_MERKLEMAP_TOKEN";
+
+/// Censys Platform API (`/v3/global/search/query`). The most authoritative CT-backed
+/// certificate dataset; requires a Personal Access Token AND an Organization ID (its
+/// free tier for certificate search is limited/metered — see docs).
+const CENSYS_BASE_URL: &str = "https://api.platform.censys.io";
+/// Env var carrying the Censys Personal Access Token (`Authorization: Bearer …`).
+const CENSYS_PAT_ENV: &str = "NTHPARTYFINDER_CENSYS_PAT";
+/// Env var carrying the Censys Organization ID (`X-Organization-ID` header). Both this
+/// and the PAT must be set for the Censys provider to join the rotation.
+const CENSYS_ORG_ENV: &str = "NTHPARTYFINDER_CENSYS_ORG_ID";
 
 /// Response from crt.sh API
 #[derive(Debug, Deserialize)]
@@ -89,6 +117,102 @@ impl CertSpotterIssuance {
     }
 }
 
+/// Build a synthetic crt.sh-shaped entry from a flat list of certificate DNS names, so
+/// providers that return already-flattened hostnames (MerkleMap) or per-cert name arrays
+/// (Censys) flow through the shared SAN-extraction loop in `discover` unchanged.
+fn crtsh_entry_from_names(names: Vec<String>, issuer: &str) -> CrtShEntry {
+    CrtShEntry {
+        issuer_ca_id: None,
+        issuer_name: Some(issuer.to_string()),
+        common_name: None,
+        name_value: Some(names.join("\n")),
+        id: 0,
+        entry_timestamp: None,
+        not_before: None,
+        not_after: None,
+    }
+}
+
+/// Response from the MerkleMap search API (`/v1/search`). Each result is one hostname
+/// (MerkleMap has already flattened certificate SANs into distinct subdomains).
+#[derive(Debug, Deserialize)]
+struct MerkleMapResponse {
+    #[serde(default)]
+    results: Vec<MerkleMapResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MerkleMapResult {
+    #[serde(default)]
+    hostname: Option<String>,
+}
+
+/// Response envelope from the Censys Platform API (`/v3/global/search/query`).
+#[derive(Debug, Deserialize)]
+struct CensysResponse {
+    #[serde(default)]
+    result: Option<CensysResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensysResult {
+    #[serde(default)]
+    hits: Vec<CensysHit>,
+}
+
+/// One certificate hit. The DNS names may appear at the hit's top-level `names`, under
+/// `cert.names`, or under `cert.parsed.subject_alt_name.dns_names` depending on the
+/// requested fields, so all three are checked (robust to Censys's field layout).
+#[derive(Debug, Deserialize)]
+struct CensysHit {
+    #[serde(default)]
+    names: Option<Vec<String>>,
+    #[serde(default)]
+    cert: Option<CensysCert>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensysCert {
+    #[serde(default)]
+    names: Option<Vec<String>>,
+    #[serde(default)]
+    parsed: Option<CensysParsed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensysParsed {
+    #[serde(default)]
+    subject_alt_name: Option<CensysSan>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CensysSan {
+    #[serde(default)]
+    dns_names: Option<Vec<String>>,
+}
+
+impl CensysHit {
+    /// Pull the certificate's DNS names from whichever field Censys populated.
+    fn dns_names(self) -> Vec<String> {
+        if let Some(names) = self.names {
+            return names;
+        }
+        if let Some(cert) = self.cert {
+            if let Some(names) = cert.names {
+                return names;
+            }
+            if let Some(dns) = cert
+                .parsed
+                .and_then(|p| p.subject_alt_name)
+                .and_then(|s| s.dns_names)
+            {
+                return dns;
+            }
+        }
+        Vec::new()
+    }
+}
+
 /// Result of CT log discovery
 #[derive(Debug, Clone)]
 pub struct CtDiscoveryResult {
@@ -113,6 +237,7 @@ enum CtFetchError {
 }
 
 /// One CT log source in the round-robin rotation.
+#[derive(Clone)]
 enum CtProvider {
     CrtSh {
         base_url: String,
@@ -121,6 +246,15 @@ enum CtProvider {
         base_url: String,
         token: Option<String>,
     },
+    MerkleMap {
+        base_url: String,
+        token: String,
+    },
+    Censys {
+        base_url: String,
+        pat: String,
+        org_id: String,
+    },
 }
 
 impl CtProvider {
@@ -128,6 +262,8 @@ impl CtProvider {
         match self {
             CtProvider::CrtSh { .. } => "crt.sh",
             CtProvider::CertSpotter { .. } => "certspotter",
+            CtProvider::MerkleMap { .. } => "merklemap",
+            CtProvider::Censys { .. } => "censys",
         }
     }
 }
@@ -142,37 +278,52 @@ pub struct CtLogDiscovery {
     timeout: Duration,
     /// crt.sh base URL (kept as a named field for the public API + back-compat tests).
     base_url: String,
-    /// Cert Spotter base URL; `None` => crt.sh-only (single-provider) instance.
-    certspotter_base_url: Option<String>,
-    /// Optional Cert Spotter API token (raises the anonymous rate limit).
-    certspotter_token: Option<String>,
+    /// Non-crt.sh providers in the rotation (Cert Spotter, plus MerkleMap/Censys when
+    /// their credentials are configured), built once at construction.
+    extra_providers: Vec<CtProvider>,
     /// Process-shared round-robin cursor across providers.
     cursor: AtomicUsize,
 }
 
 impl CtLogDiscovery {
     pub fn new(timeout: Duration) -> Self {
-        Self::with_providers(
-            timeout,
-            "https://crt.sh".to_string(),
-            Some(CERTSPOTTER_BASE_URL.to_string()),
-            std::env::var(CERTSPOTTER_TOKEN_ENV)
-                .ok()
-                .filter(|t| !t.is_empty()),
-        )
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let mut extra = Vec::new();
+
+        // Cert Spotter — always in the rotation (works anonymously; optional token).
+        extra.push(CtProvider::CertSpotter {
+            base_url: CERTSPOTTER_BASE_URL.to_string(),
+            token: env(CERTSPOTTER_TOKEN_ENV),
+        });
+        // MerkleMap — only when a token is configured (no anonymous tier).
+        if let Some(token) = env(MERKLEMAP_TOKEN_ENV) {
+            extra.push(CtProvider::MerkleMap {
+                base_url: MERKLEMAP_BASE_URL.to_string(),
+                token,
+            });
+        }
+        // Censys — only when BOTH the PAT and the Organization ID are configured.
+        if let (Some(pat), Some(org_id)) = (env(CENSYS_PAT_ENV), env(CENSYS_ORG_ENV)) {
+            extra.push(CtProvider::Censys {
+                base_url: CENSYS_BASE_URL.to_string(),
+                pat,
+                org_id,
+            });
+        }
+
+        Self::with_providers(timeout, "https://crt.sh".to_string(), extra)
     }
 
     /// crt.sh-only instance. Used by the wiremock test-suite to point crt.sh at a mock
     /// server; production uses `new` (multi-provider round-robin).
     pub fn with_base_url(timeout: Duration, base_url: String) -> Self {
-        Self::with_providers(timeout, base_url, None, None)
+        Self::with_providers(timeout, base_url, Vec::new())
     }
 
     fn with_providers(
         timeout: Duration,
         base_url: String,
-        certspotter_base_url: Option<String>,
-        certspotter_token: Option<String>,
+        extra_providers: Vec<CtProvider>,
     ) -> Self {
         let client = crate::http_client::hardened_builder()
             .timeout(timeout)
@@ -184,24 +335,18 @@ impl CtLogDiscovery {
             client,
             timeout,
             base_url,
-            certspotter_base_url,
-            certspotter_token,
+            extra_providers,
             cursor: AtomicUsize::new(0),
         }
     }
 
-    /// The provider rotation for this instance: always crt.sh, plus Cert Spotter when
-    /// configured (production). A `with_base_url` instance yields crt.sh only.
+    /// The provider rotation for this instance: always crt.sh first, then the configured
+    /// extra providers. A `with_base_url` instance yields crt.sh only.
     fn providers(&self) -> Vec<CtProvider> {
         let mut providers = vec![CtProvider::CrtSh {
             base_url: self.base_url.clone(),
         }];
-        if let Some(cs) = &self.certspotter_base_url {
-            providers.push(CtProvider::CertSpotter {
-                base_url: cs.clone(),
-                token: self.certspotter_token.clone(),
-            });
-        }
+        providers.extend(self.extra_providers.iter().cloned());
         providers
     }
 
@@ -355,6 +500,14 @@ impl CtLogDiscovery {
                 self.fetch_certspotter(base_url, token.as_deref(), domain)
                     .await
             }
+            CtProvider::MerkleMap { base_url, token } => {
+                self.fetch_merklemap(base_url, token, domain).await
+            }
+            CtProvider::Censys {
+                base_url,
+                pat,
+                org_id,
+            } => self.fetch_censys(base_url, pat, org_id, domain).await,
         }
     }
 
@@ -457,6 +610,129 @@ impl CtLogDiscovery {
                 .collect()),
             Err(e) => Err(CtFetchError::Soft(format!(
                 "Failed to parse Cert Spotter response: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Query the MerkleMap search API (`/v1/search`, Bearer-authed). MerkleMap returns
+    /// already-flattened hostnames, collected into one synthetic crt.sh entry.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fetch_merklemap(
+        &self,
+        base_url: &str,
+        token: &str,
+        domain: &str,
+    ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
+        let url = format!(
+            "{}/v1/search?query={}&type=wildcard&page=0",
+            base_url,
+            urlencoding::encode(domain)
+        );
+        debug!("Querying MerkleMap: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .timeout(self.timeout)
+            .bearer_auth(token)
+            .send_gated()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        if !response.status().is_success() {
+            return Err(CtFetchError::Soft(format!(
+                "MerkleMap returned status {} for {}",
+                response.status(),
+                domain
+            )));
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        match serde_json::from_str::<MerkleMapResponse>(&text) {
+            Ok(parsed) => {
+                let hostnames: Vec<String> = parsed
+                    .results
+                    .into_iter()
+                    .filter_map(|r| r.hostname)
+                    .collect();
+                if hostnames.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![crtsh_entry_from_names(hostnames, "MerkleMap CT")])
+                }
+            }
+            Err(e) => Err(CtFetchError::Soft(format!(
+                "Failed to parse MerkleMap response: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Query the Censys Platform certificate dataset (`POST /v3/global/search/query`).
+    /// Auth = `Authorization: Bearer <PAT>` + `X-Organization-ID: <org>`; the CenQL query
+    /// `cert.names: "<domain>"` matches the domain and its subdomains via Censys's
+    /// hierarchical domain tokenization. Each hit → one crt.sh-shaped entry.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn fetch_censys(
+        &self,
+        base_url: &str,
+        pat: &str,
+        org_id: &str,
+        domain: &str,
+    ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
+        let url = format!("{}/v3/global/search/query", base_url);
+        debug!("Querying Censys: {}", url);
+
+        let body = serde_json::json!({
+            "query": format!("cert.names: \"{}\"", domain),
+            "page_size": 100,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .timeout(self.timeout)
+            .bearer_auth(pat)
+            .header("X-Organization-ID", org_id)
+            .json(&body)
+            .send_gated()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        if !response.status().is_success() {
+            return Err(CtFetchError::Soft(format!(
+                "Censys returned status {} for {}",
+                response.status(),
+                domain
+            )));
+        }
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| CtFetchError::Transport(e.into()))?;
+
+        match serde_json::from_str::<CensysResponse>(&text) {
+            Ok(parsed) => Ok(parsed
+                .result
+                .map(|r| r.hits)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|hit| crtsh_entry_from_names(hit.dns_names(), "Censys CT"))
+                .filter(|e| {
+                    e.name_value
+                        .as_deref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                })
+                .collect()),
+            Err(e) => Err(CtFetchError::Soft(format!(
+                "Failed to parse Censys response: {}",
                 e
             ))),
         }
@@ -1527,8 +1803,10 @@ mod tests {
         let disc = CtLogDiscovery::with_providers(
             Duration::from_secs(5),
             crtsh.uri(),
-            Some(certspotter.uri()),
-            None,
+            vec![CtProvider::CertSpotter {
+                base_url: certspotter.uri(),
+                token: None,
+            }],
         );
         let results = disc.discover("example.com").await.unwrap();
         assert!(
@@ -1556,10 +1834,116 @@ mod tests {
         let disc = CtLogDiscovery::with_providers(
             Duration::from_secs(5),
             crtsh.uri(),
-            Some(certspotter.uri()),
-            None,
+            vec![CtProvider::CertSpotter {
+                base_url: certspotter.uri(),
+                token: None,
+            }],
         );
         let results = disc.discover("example.com").await.unwrap();
         assert!(results.is_empty());
+    }
+
+    // --- MerkleMap + Censys providers ---
+
+    #[test]
+    fn test_crtsh_entry_from_names() {
+        let e = crtsh_entry_from_names(vec!["a.com".to_string(), "b.io".to_string()], "Src CT");
+        assert_eq!(e.name_value.as_deref(), Some("a.com\nb.io"));
+        assert_eq!(e.issuer_name.as_deref(), Some("Src CT"));
+        assert!(e.common_name.is_none());
+    }
+
+    #[test]
+    fn test_merklemap_response_parse() {
+        let r: MerkleMapResponse = serde_json::from_str(
+            r#"{"count":2,"results":[{"hostname":"x.com"},{"hostname":"y.io"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.results.len(), 2);
+        assert_eq!(r.results[0].hostname.as_deref(), Some("x.com"));
+    }
+
+    #[test]
+    fn test_censys_hit_dns_names_from_all_field_positions() {
+        // top-level `names`
+        let h: CensysHit = serde_json::from_str(r#"{"names":["a.com"]}"#).unwrap();
+        assert_eq!(h.dns_names(), vec!["a.com".to_string()]);
+        // nested `cert.names`
+        let h: CensysHit = serde_json::from_str(r#"{"cert":{"names":["b.com"]}}"#).unwrap();
+        assert_eq!(h.dns_names(), vec!["b.com".to_string()]);
+        // deeply-nested `cert.parsed.subject_alt_name.dns_names`
+        let h: CensysHit = serde_json::from_str(
+            r#"{"cert":{"parsed":{"subject_alt_name":{"dns_names":["c.com"]}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(h.dns_names(), vec!["c.com".to_string()]);
+        // nothing populated
+        let h: CensysHit = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(h.dns_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_discover_fails_over_to_merklemap() {
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&crtsh)
+            .await;
+
+        let merklemap = MockServer::start().await;
+        let mm_body = serde_json::json!({"count": 2, "results": [{"hostname": "example.com"}, {"hostname": "vendor-y.io"}]});
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&mm_body))
+            .mount(&merklemap)
+            .await;
+
+        let disc = CtLogDiscovery::with_providers(
+            Duration::from_secs(5),
+            crtsh.uri(),
+            vec![CtProvider::MerkleMap {
+                base_url: merklemap.uri(),
+                token: "test-token".to_string(),
+            }],
+        );
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(
+            results.iter().any(|r| r.domain == "vendor-y.io"),
+            "expected failover to MerkleMap to surface vendor-y.io, got {:?}",
+            results.iter().map(|r| &r.domain).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_fails_over_to_censys() {
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&crtsh)
+            .await;
+
+        let censys = MockServer::start().await;
+        // Censys is queried with POST; hits carry a top-level `names` array.
+        let cx_body =
+            serde_json::json!({"result": {"hits": [{"names": ["example.com", "vendor-z.io"]}]}});
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&cx_body))
+            .mount(&censys)
+            .await;
+
+        let disc = CtLogDiscovery::with_providers(
+            Duration::from_secs(5),
+            crtsh.uri(),
+            vec![CtProvider::Censys {
+                base_url: censys.uri(),
+                pat: "pat".to_string(),
+                org_id: "org".to_string(),
+            }],
+        );
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(
+            results.iter().any(|r| r.domain == "vendor-z.io"),
+            "expected failover to Censys to surface vendor-z.io, got {:?}",
+            results.iter().map(|r| &r.domain).collect::<Vec<_>>()
+        );
     }
 }

@@ -26,9 +26,22 @@ Every relationship carries the **evidence** it was inferred from — the raw DNS
 | **Web Traffic** | Third-party SDKs in page source + runtime network requests (headless Chrome) | Config/flag |
 | **SaaS Tenant** | Tenant subdomains (e.g. `company.slack.com`) | Config/flag |
 | **Subfinder** | Subdomain enumeration via CNAME discovery | Config/flag |
-| **CT Logs** | Certificate Transparency log analysis | Config/flag |
+| **CT Logs** | Certificate Transparency logs — round-robined across multiple providers | Config/flag |
 
 Organization names are resolved through WHOIS/RDAP, a curated known-vendor dataset, and an optional offline GLiNER NER model — never a paid API, and no configuration required for a default scan.
+
+### Certificate Transparency providers
+
+CT-log discovery **round-robins across multiple providers** on a shared cursor (spreading load so no single aggregator is overloaded — crt.sh returns HTTP 429 under a wide fan-out) and **fails over** to the next provider on any error, so a throttle or outage becomes a recovered lookup rather than a silent gap.
+
+| Provider | Default | Credential (optional) |
+|----------|---------|----------------------|
+| [crt.sh](https://crt.sh) | Always on (anonymous) | — |
+| [SSLMate Cert Spotter](https://sslmate.com/ct_search_api/) | Always on (anonymous) | `NTHPARTYFINDER_CERTSPOTTER_TOKEN` raises the rate limit |
+| [MerkleMap](https://www.merklemap.com) | Joins when configured | `NTHPARTYFINDER_MERKLEMAP_TOKEN` (free API key) |
+| [Censys](https://censys.com) | Joins when configured | `NTHPARTYFINDER_CENSYS_PAT` + `NTHPARTYFINDER_CENSYS_ORG_ID` |
+
+crt.sh and Cert Spotter are anonymous and always in the rotation. MerkleMap and Censys — the two remaining well-regarded CT query APIs (every once-anonymous alternative, including Google's, Entrust's, and Meta's, has been discontinued) — have no anonymous tier, so they join the rotation only when their API credentials are set in the environment. Set any subset; the round-robin adapts to whichever providers are configured.
 
 ## Install
 
