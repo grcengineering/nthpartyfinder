@@ -25,6 +25,38 @@ prior_tasks:
 
 # ISA — nthpartyfinder
 
+## Task 2026-07-17 — Remediate all open code-scanning findings (8) + cargo-fuzz harness
+
+**Trigger.** Owner: "Please remediate all open security findings in NPF: .../security/code-scanning". 8 open alerts. Owner decisions (AskUserQuestion): (1) dismiss the 4 accept-risk findings with documented rationale; (2) add required status checks to the master ruleset (not human review — that would deadlock solo self-merge); (3) find a well-established Rust-native fuzzer and incorporate it for FuzzingID.
+
+**Triage.** None of the 8 is a code-level true-positive in our own code. Verified: `cargo update -p gline-rs` locks 0 packages — gline-rs 1.0.1 (latest 1.x) hard-pins tokenizers 0.21.4, which transitively pulls `paste` (macro_rules_attribute) and `number_prefix` (hf-hub→indicatif 0.17). No in-constraint bump drops either; removal means replacing the GLiNER NER subsystem — disproportionate to two *unmaintained* (not exploitable) advisories. This is the constitutional "scanner fundamentally cannot model" carve-out.
+
+### Criteria (ISC-462+)
+
+- [x] ISC-462: The 2 RUSTSEC unmaintained advisories (#103 paste, #104 number_prefix), the Vulnerabilities meta-finding (#1904, derives 1:1 from them), and the slsa mandatory-tag-pin Pinned-Dependencies (#1890) are dismissed as accepted-risk with documented, evidence-based rationale (≤280 chars each). Probe: `gh api` state==dismissed.
+- [x] ISC-463: Master ruleset gains a `required_status_checks` rule (12 PR-triggered contexts) while preserving deletion/non_fast_forward/creation/pull_request rules and `required_approving_review_count:0` — green CI now gates merges; solo self-merge still works. Only PR-triggered checks are required (Scorecard/release do NOT run on PR → would deadlock). Probe: ruleset GET.
+- [x] ISC-464: A `cargo-fuzz` (libFuzzer) harness lives in `nthpartyfinder/fuzz/` — a detached crate (own `[workspace]`, `[package.metadata] cargo-fuzz=true`, `default-features=false` to skip ONNX/NER) with 5 targets over the highest-exposure untrusted-input parsers. Probe: `cargo +nightly fuzz build` exit 0.
+- [x] ISC-465: All 5 targets execute without crashing on a smoke run. Probe: `cargo +nightly fuzz run <t> -- -max_total_time=20` exit 0, 0 crash markers.
+- [x] ISC-466: A `Fuzz` CI workflow builds + smoke-runs the targets on parser changes, SHA-pinned to the repo's existing action pins. SECURITY.md updated (Fuzzing now integrated; Branch-Protection now has required checks). Probe: workflow file + diff.
+- [x] ISC-467: Anti: the fuzz crate is fully isolated — main-crate `fmt`/`clippy --all-targets --all-features`/coverage never see it (nested separate workspace). Probe: `cargo metadata --no-deps` lists only `nthpartyfinder`; fmt+clippy exit 0.
+- [x] ISC-468: Anti: prior-session untracked `Plans/` + `config/` never staged. Probe: `git show --stat`.
+- [ ] ISC-469: Shipped: PR to master, all required checks green, merged; post-merge master CI green. Probe: `gh pr checks` + run watch.
+- [ ] ISC-470: Owner-scoped follow-ups logged, not falsely closed: CII-Best-Practices (#1903, external badge registration at bestpractices.dev) and Code-Review (#1902, inherent to solo maintainer) remain open by design.
+
+### Verification (ISC-462+)
+
+**ISC-462 (dismissals):** `gh api PATCH .../code-scanning/alerts/{103,104,1904,1890}` → all `state: dismissed (won't fix)` with per-alert rationale citing the locked NER stack / SLSA TUF tag-pin requirement. (Earlier 422 was a 280-char comment limit, not a policy block.)
+**ISC-463 (ruleset):** `PUT .../rulesets/14165131` → rules `[deletion, non_fast_forward, creation, pull_request, required_status_checks]`; 12 required contexts (Lint, Unit/Integration Tests, Coverage 95% gate, Cargo Deny, SAST Opengrep, Secret Scan, Analyze rust, 4× Build). Confirmed PR-triggered via workflow `on:` inspection (Scorecard/release excluded).
+**ISC-464/465 (fuzz build + smoke):** cargo-fuzz 0.13.2; `cargo +nightly fuzz build` exit 0 (all 5). Smoke 20s each: domain_base 67761 execs / dns_txt_spf 109237 / html_org 65566 / web_traffic_html 111485 / finalize_host 66450 — all exit 0, 0 crash markers (parsers robust; no bug surfaced).
+**ISC-467 (isolation):** `cargo metadata --no-deps` → packages `['nthpartyfinder']` only; main-crate `fmt -- --check` exit 0, `clippy --locked --all-targets --all-features -D warnings` exit 0; fuzz files rustfmt-clean.
+**ISC-469 (shipped):** pending — PR + CI + merge next.
+
+### Decisions (security round)
+
+- 2026-07-17 The 2 RUSTSEC advisories are the constitutional no-fix carve-out (unmaintained, not exploitable, transitively locked by the NER stack with no in-constraint bump). Dismissed with documented rationale rather than replacing the whole GLiNER subsystem for an informational advisory. `deny.toml`/`SECURITY.md` already record them.
+- 2026-07-17 Branch-Protection hardened via *required status checks*, not required reviews: requiring a second human approver would deadlock the sole maintainer's self-merge (the workflow used all session). Code-Review (#1902) and CII (#1903) are therefore accepted/deferred as owner-scoped, not code-fixable.
+- 2026-07-17 Chose `cargo-fuzz` + `libfuzzer-sys` (the de-facto Rust-native fuzzing standard, and exactly what Scorecard's fuzzing detector recognizes) targeting pure network-exposed parsers. Fuzz crate detached (`[workspace]`) + `default-features=false` so it never touches the main gates or pulls ONNX. Fuzz CI job is advisory (nightly + slower), not a required check.
+
 ## Task 2026-07-17 — Launch-readiness round 2 (PR-A): global connection ceiling — depth-3+ safe by default without throttling
 
 **Trigger.** Owner `/goal` (verbatim): "I want to ensure NPF is by default maximally accurate, comprehensive, performant, safe, efficient, and fast so it is strongly trusted by practitioners as a well-engineered open source GRC Engineering tool. I don't want this recent issue related to network congestion to result in an overcorrection of NPF's ability to accurately AND speedily AND safely perform depth 3+ scans. What should you do differently for the next round of iterations for enhancing NPF in preparation for me launching it? Please figure out your plan of action and then execute it autonomously." Owner chose (AskUserQuestion) "Root-cause, staged" → PR-A safety ceiling first, PR-B subfinder speed + wrapper relax.
