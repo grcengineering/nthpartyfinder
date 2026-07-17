@@ -458,6 +458,12 @@ async fn probe_url_with_baseline(
             }
         }
         Err(e) => {
+            // Blind tenant probes routinely fail here with a TLS NotValidForName or connect
+            // error when the guessed subdomain resolves via wildcard DNS to a cert that
+            // doesn't cover it. The context-free rustls-platform-verifier ERROR for this is
+            // silenced (see the EnvFilter in app.rs); name the actual target at DEBUG so
+            // `-v` shows which probe failed and why, instead of an anonymous cert error.
+            debug!("Tenant probe request failed for {}: {}", url, e);
             let evidence = format!("Request failed: {}", e);
             if e.is_timeout() {
                 (TenantStatus::Unknown, evidence)
