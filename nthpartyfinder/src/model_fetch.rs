@@ -20,6 +20,7 @@
 
 #![cfg(feature = "runtime-ner")]
 
+use crate::http_client::GatedSend;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -277,14 +278,15 @@ async fn stream_files_into(
         let final_path = dest_dir.join(file.name);
         let tmp_path = dest_dir.join(format!("{}.part", file.name));
 
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|source| ModelFetchError::Network {
-                name: file.name,
-                source,
-            })?;
+        let resp =
+            client
+                .get(&url)
+                .send_gated()
+                .await
+                .map_err(|source| ModelFetchError::Network {
+                    name: file.name,
+                    source,
+                })?;
 
         if !resp.status().is_success() {
             return Err(ModelFetchError::HttpStatus {

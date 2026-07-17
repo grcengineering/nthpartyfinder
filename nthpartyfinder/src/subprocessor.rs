@@ -1,4 +1,5 @@
 use crate::dns::LogFailure;
+use crate::http_client::GatedSend;
 use crate::rate_limit::RateLimitContext;
 use crate::vendor::RecordType;
 use anyhow::Result;
@@ -1245,7 +1246,7 @@ impl SubprocessorAnalyzer {
             )
             .header("Accept-Language", "en-US,en;q=0.5")
             .header("Upgrade-Insecure-Requests", "1")
-            .send()
+            .send_gated()
             .await
         {
             Ok(resp) => resp,
@@ -1291,7 +1292,7 @@ impl SubprocessorAnalyzer {
         // HTTP-dependent portion: fetches manifest and GraphQL from Vanta's live API
         #[cfg(all(not(test), not(coverage)))]
         {
-            let manifest_resp = match self.client.get(&manifest_url).send().await {
+            let manifest_resp = match self.client.get(&manifest_url).send_gated().await {
                 Ok(resp) => resp,
                 Err(e) => {
                     debug!("Vanta: manifest fetch error: {}", e);
@@ -1342,7 +1343,7 @@ impl SubprocessorAnalyzer {
                 .client
                 .post("https://app.vanta.com/graphql")
                 .json(&gql_body)
-                .send()
+                .send_gated()
                 .await
                 .ok()?;
 
@@ -2498,7 +2499,7 @@ impl SubprocessorAnalyzer {
                 .header("Sec-Fetch-Mode", "navigate")
                 .header("Sec-Fetch-Site", "none")
                 .header("Upgrade-Insecure-Requests", "1")
-                .send().await {
+                .send_gated().await {
                 Ok(resp) => {
                     response = Some(resp);
                     break;

@@ -18,6 +18,7 @@ use tracing::debug;
 use url::Url;
 
 use crate::domain_utils;
+use crate::http_client::GatedSend;
 
 /// Result of web traffic analysis for a single domain.
 #[derive(Debug, Clone)]
@@ -153,7 +154,7 @@ impl WebTrafficDiscovery {
         url: &str,
         target_base_domain: &str,
     ) -> Result<Vec<WebTrafficResult>> {
-        let response = self.client.get(url).send().await?;
+        let response = self.client.get(url).send_gated().await?;
         let html = response.text().await?;
         Ok(extract_external_domains_from_html(
             &html,

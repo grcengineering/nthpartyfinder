@@ -11,6 +11,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::domain_utils;
+use crate::http_client::GatedSend;
 
 /// Response from crt.sh API
 #[derive(Debug, Deserialize)]
@@ -174,7 +175,12 @@ impl CtLogDiscovery {
 
         debug!("Querying crt.sh: {}", url);
 
-        let response = self.client.get(&url).timeout(self.timeout).send().await?;
+        let response = self
+            .client
+            .get(&url)
+            .timeout(self.timeout)
+            .send_gated()
+            .await?;
 
         if !response.status().is_success() {
             warn!(

@@ -21,6 +21,10 @@ use tracing::debug;
 #[cfg(not(coverage))]
 use tracing::{debug, info};
 
+// Both send_gated() sites here live in #[cfg(not(coverage))] probe paths,
+// so the trait import is only referenced outside the coverage build.
+#[cfg(not(coverage))]
+use crate::http_client::GatedSend;
 use crate::logger::AnalysisLogger;
 #[cfg(not(coverage))]
 use crate::vendor_registry;
@@ -376,7 +380,7 @@ async fn probe_url_with_baseline(
     vendor_domain: &str,
     baseline: Option<&BaselineResponse>,
 ) -> (TenantStatus, String) {
-    match client.get(url).send().await {
+    match client.get(url).send_gated().await {
         Ok(response) => {
             let status_code = response.status().as_u16();
             let final_url = response.url().to_string();
@@ -672,7 +676,7 @@ async fn probe_baseline(client: &Client, pattern: &str) -> Option<BaselineRespon
     let canary_name = "nthparty-canary-8f3a2b";
     let url = construct_probe_url(pattern, canary_name);
 
-    match client.get(&url).send().await {
+    match client.get(&url).send_gated().await {
         Ok(response) => {
             let status_code = response.status().as_u16();
             let final_url = response.url().to_string();
