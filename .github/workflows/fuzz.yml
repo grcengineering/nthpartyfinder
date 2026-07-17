@@ -1,0 +1,53 @@
+name: Fuzz
+
+# Builds the cargo-fuzz harness and smoke-runs every target for a short window.
+# A target that finds a crash exits non-zero, failing the job — which is the
+# intended signal. This is an advisory check (not in the branch-ruleset required
+# set) because it needs a nightly toolchain and is slower than the core gates.
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'nthpartyfinder/src/**'
+      - 'nthpartyfinder/fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'nthpartyfinder/src/**'
+      - 'nthpartyfinder/fuzz/**'
+      - '.github/workflows/fuzz.yml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: nthpartyfinder
+
+jobs:
+  fuzz:
+    name: Fuzz Build & Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: nthpartyfinder/fuzz -> target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz build
+      - name: Smoke-run each target (30s)
+        run: |
+          for t in domain_base dns_txt_spf html_org web_traffic_html finalize_host; do
+            echo "::group::fuzz $t"
+            cargo +nightly fuzz run "$t" -- -max_total_time=30 -print_final_stats=1
+            echo "::endgroup::"
+          done

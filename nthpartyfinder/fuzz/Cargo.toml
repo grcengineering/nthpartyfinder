@@ -1,0 +1,66 @@
+# cargo-fuzz harness for nthpartyfinder.
+#
+# This is a DETACHED crate (its own `[workspace]`) so the main crate's
+# `cargo build/test/clippy/fmt` and the coverage gate never see it — fuzz
+# targets require a nightly toolchain and sanitizer flags that the main gates
+# must not carry. The `[package.metadata] cargo-fuzz = true` marker is what
+# `cargo fuzz` and OpenSSF Scorecard's fuzzing detector key on.
+#
+# The dependency on the parent crate is `default-features = false` so fuzz
+# builds skip the ONNX/GLiNER NER stack (none of the targeted parsers need it),
+# keeping fuzz builds fast and free of heavyweight native deps.
+
+[package]
+name = "nthpartyfinder-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.nthpartyfinder]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "domain_base"
+path = "fuzz_targets/domain_base.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_txt_spf"
+path = "fuzz_targets/dns_txt_spf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html_org"
+path = "fuzz_targets/html_org.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_traffic_html"
+path = "fuzz_targets/web_traffic_html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "finalize_host"
+path = "fuzz_targets/finalize_host.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent crate: the main-crate gates must never build fuzz.
+[workspace]
+members = ["."]

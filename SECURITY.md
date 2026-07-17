@@ -64,16 +64,21 @@ no reachable security impact. Revisit if a maintained replacement appears.
   `slsa-framework/slsa-github-generator`, which **must** be referenced by a version tag —
   its TUF trust model rejects commit-SHA pins. Sanctioned exception.
 - **Branch-Protection** — the default branch is governed by a repository ruleset that
-  blocks force-pushes (`non_fast_forward`), blocks deletion, and restricts direct updates
-  to bypass actors (org admins) — so all changes flow through pull requests. Adding
-  *required status checks* to the ruleset is a recommended further hardening, deferred to
-  the repository owner as a deliberate settings change (it is enforced today by the
-  maintainer's discipline of merging only CI-green PRs).
+  blocks force-pushes (`non_fast_forward`), blocks deletion, restricts direct updates to
+  bypass actors (org admins), and **requires the core CI checks to pass before a pull
+  request can merge** (Lint, Unit/Integration Tests, the 95% Coverage gate, Cargo Deny,
+  SAST/Opengrep, Secret Scan, CodeQL, and the four cross-platform Builds). Required *human*
+  review is intentionally not enforced — see Code-Review.
 - **Code-Review** — every change lands through a pull request with the full CI gate suite,
   but this is a single-maintainer project, so a second human approver is not always
-  available. Accepted for the current maintainer model.
-- **Fuzzing** — not yet integrated. Mitigated today by 4,000+ unit/integration tests
-  (including wiremock-backed network-failure and malformed-input cases). A `cargo-fuzz`
-  harness for the DNS/WHOIS/HTML parsers is a tracked future enhancement.
+  available. Accepted for the current maintainer model (requiring a second reviewer would
+  deadlock the sole maintainer's ability to merge).
+- **Fuzzing** — a `cargo-fuzz` (libFuzzer) harness lives in `nthpartyfinder/fuzz/` with
+  targets over the highest-exposure untrusted-input parsers: PSL domain normalization
+  (`domain_base`), DNS TXT/SPF/DKIM/DMARC record parsing (`dns_txt_spf`), third-party HTML
+  and JSON-LD organization extraction (`html_org`), resource-URL extraction from HTML
+  (`web_traffic_html`), and the PSL pseudo-host classifier (`finalize_host`). The `Fuzz` CI
+  workflow builds all targets and smoke-runs each on every change to the parsers; run
+  locally with `cargo +nightly fuzz run <target>`.
 - **CII-Best-Practices** — the OpenSSF Best Practices badge has not been applied for; this
   is an external self-certification process tracked as a follow-up, not a code change.
