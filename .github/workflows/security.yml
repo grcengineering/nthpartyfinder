@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check all
           manifest-path: nthpartyfinder/Cargo.toml
@@ -66,7 +66,7 @@ jobs:
             --output=nthpartyfinder/osv.sarif
       - name: Upload OSV SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: nthpartyfinder/osv.sarif
           category: osv-scanner
@@ -129,7 +129,7 @@ jobs:
         run: python3 scripts/filter-opengrep-sarif.py opengrep.sarif
       - name: Upload Opengrep SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: nthpartyfinder/opengrep.sarif
           category: opengrep
