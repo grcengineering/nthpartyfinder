@@ -89,6 +89,24 @@ name = "Google DoH (IP)"
 url = "https://8.8.8.8/resolve"
 timeout_secs = 3
 
+# dns.sb — a third independent operator so a deep scan's DNS load is spread across
+# THREE providers instead of two, cutting the per-provider query rate (and the
+# server-side 429/throttle risk that surfaces as DNS_THROTTLE failures) by a third.
+# Verified live before adding (per the JSON-API rule): it serves the JSON GET API
+# and returns byte-identical TXT answer counts to Cloudflare for google.com (15=15),
+# stripe.com (31=31) and vanta.com (39=39) — no filtering, no truncation, so recall
+# is unaffected. Unfiltered by design (a filtering resolver like Quad9/AdGuard would
+# BLOCK the ad/tracker/subprocessor domains this tool exists to discover).
+[[dns.doh_servers]]
+name = "dns.sb DoH"
+url = "https://doh.sb/dns-query"
+timeout_secs = 3
+
+[[dns.doh_servers]]
+name = "dns.sb DoH (IP)"
+url = "https://185.222.222.222/dns-query"
+timeout_secs = 3
+
 # -----------------------------------------------------------------------------
 # Traditional DNS Servers (Fallback)
 # -----------------------------------------------------------------------------

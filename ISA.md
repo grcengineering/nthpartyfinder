@@ -1,20 +1,21 @@
 ---
 project: nthpartyfinder
-task: "Resilience/reliability round from depth-3 vanta.com scan evidence: 8 owner-named issues (CT round-robin, log domain context, subprocessor per-org dedup, TLS error clarity, invalid-label DNS, DMARC probe, report modal seam, layer colors) + safe correctness bugs; big accuracy/recall changes surfaced as measured follow-ups (2026-07-17)"
+task: "Root-cause + fix depth-3 scan DNS-error storm (47,978 'DNS Failures') and recurring WiFi/router conntrack collapse. Reproduced live: (1) headless-Chrome keep-alive socket accumulation across pooled-browser reuse = the conntrack-exhaustion / WiFi-drop cause; (2) EMFILE (256 default FD limit, raw binary) misclassified as a DoH provider throttle + counted per-attempt = the amplified DNS-failure number. Fix in the binary (user runs it raw, not via safe-scan.sh), recall/speed-preserving. (2026-07-18)"
 effort: E4
 phase: verify
-progress: "13/16 (ISC-471..486) — all 8 owner issues + raw-metric bug shipped & verified (2 visual ISCs closed on real-Chrome pixels, gates 99.30/98.68); ISC-480/481 deferred to TF-ORGCASE/TF-LAYERMIN; ISC-486 ship pending"
+progress: "fix implemented + gates green (fmt/clippy -D/tests/deny/coverage≥95); Forge+Cato adversarial review actioned (1 CRITICAL EMFILE-classifier-dead + offline-toggle footgun + docs, all fixed); live monitored re-run confirms sockets bounded (peak ~790 vs pre-fix unbounded→1058-collapse), 0 EMFILE; SHIP pending (PR to master)"
 mode: algorithm
-started: 2026-07-17T13:15:00-04:00
-updated: 2026-07-17T14:30:00-04:00
+started: 2026-07-18T00:00:00-04:00
+updated: 2026-07-18T00:00:00-04:00
 algorithm_config:
   effort_source: classifier
   classifier: { mode: ALGORITHM, tier: E4, source: classifier }
   mode: standard
   eval_mode: gate
   preset: cautious
-  metric: "attribution coverage + precision on a labeled eval set, measured before/after on the same scan data; zero discovery-recall loss; gates green"
+  metric: "peak system ESTABLISHED sockets stays bounded (plateaus, does not climb to conntrack collapse) on a live depth-3 vanta.com run; 0 EMFILE; zero discovery-recall loss; gates green"
 prior_tasks:
+  - { task: "Resilience/reliability round from depth-3 vanta.com scan evidence (8 owner issues + raw-metric bug)", started: 2026-07-17, phase: complete, progress: "shipped: PR #79 merged to master (02d892b)" }
   - { task: "Depth-3 report Layer-3 gap: dynamic bands + all-methods-at-every-depth + web-traffic network-idle", started: 2026-07-11, phase: complete, progress: "shipped: PR #60 merged to master (23be09c), 27/27 checks green, ruleset repaired" }
   - { task: "Merge 9 PRs + publish v1.3.0 release", started: 2026-07-10, phase: complete, progress: "48/48 (ISC-316..363)" }
   - { task: "SSCS-harden v1.0.0 + depth-5 campaign", started: 2026-05-16, phase: complete, progress: "78/142 + 18 DEFERRED-VERIFY" }
@@ -24,6 +25,25 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-07-18 — Depth-3 DNS-error storm + WiFi/conntrack collapse: root-cause + binary-resident fix
+
+**Trigger (owner `/goal`).** A depth-3 vanta.com scan with HTML export produced "a LOT of DNS request errors" (`scan.log` summary: **DNS Failures: 47978**) AND took the home WiFi down again (owner had to switch SSIDs — different band, same router — to recover). "Root-cause the errors, run nthpartyfinder yourself and monitor what it's actually doing to find the connectivity cause, and fix the DNS errors WITHOUT hampering accuracy, comprehensiveness, or speed." Artifacts: `~/Desktop/reports/vanta_com/{scan.log, vanta-latest.html}` + a summary screenshot.
+
+**OBSERVE — reproduced live, not inferred.** Built the exact failing binary and ran depth-3 vanta.com under a network-telemetry sidecar (`scratchpad/monitored-repro.sh`: 5s sampling of per-consumer FD/socket counts + gateway ping, auto-kill on 2 ping fails or ESTABLISHED>threshold). Three parallel code-lifecycle audits corroborated. **Root cause — one thing, two faces: the scan opens far more simultaneous sockets/FDs than a consumer router's conntrack table (~1–4k) or the macOS default 256 soft FD limit can hold, and the owner runs the RAW binary (shell history confirms `./target/release/nthpartyfinder -d vanta.com -r 3 …`), NOT `safe-scan.sh` — so `ulimit -n 512` + the wrapper caps never applied.**
+- **WiFi collapse = headless-Chrome keep-alive socket ACCUMULATION.** Browsers are pooled+reused up to 50 renders; `isolate_tab` cleared cache/cookies but never closed connections, so each of ~8 pooled browsers piled an ESTABLISHED socket per origin loaded. Live telemetry: Chrome *processes* stayed flat (~pool bound) while system sockets climbed **98→1058** and gateway ping went **6ms→1804ms** — the router's NAT table choking, caught in the act. Sustained accumulation pins conntrack entries → collapse.
+- **"47,978 DNS Failures" = EMFILE misclassified + amplified.** Raw binary at 256 FDs crosses the limit ~22 min in (`os error 24` — 395 subfinder-spawn EMFILEs logged); the DNS layer classified the transport EMFILE as a DoH *provider throttle* and rotated across all 4 providers, counting **per-attempt** (~8–10× per lookup) — a few thousand real failures inflated to 47,978, each rotation burning another FD (feedback loop). Benign NXDOMAIN was always handled correctly (agent-verified).
+
+**Fix — binary-resident (user runs it raw), recall-neutral.**
+1. **`app.rs`/`Cargo.toml`:** self-raise `RLIMIT_NOFILE` at startup toward 8192 (unix, best-effort, never lowers, never exceeds hard — the hard limit stays the authoritative cap). Kills EMFILE for the raw path. `desired_fd_soft_limit` pure + unit-tested.
+2. **`browser_pool.rs`:** lower per-browser render quota **50→6** (env `NTHPARTYFINDER_RENDERS_PER_BROWSER`) so the only guaranteed socket release — full `Browser.Close` on retire — happens often; lower auto browser cap **8→6** (env `NTHPARTYFINDER_MAX_BROWSERS` can raise to a 16 hard cap on a robust network). (An `emulateNetworkConditions` offline-toggle was tried and **removed** after review: unproven vs process-global socket pool + a footgun.)
+3. **`discovery/subfinder.rs`/`app.rs`:** cap concurrent subfinder subprocesses (`NTHPARTYFINDER_MAX_SUBFINDER`, default 10); `.kill_on_drop(true)`; PID registry + `SubfinderPidGuard` + Ctrl-C reaper (the `process::exit` path bypasses `kill_on_drop`) — closing the Chrome-reaped-but-subfinder-abandoned asymmetry.
+4. **`dns.rs`:** `is_local_resource_error` classifies EMFILE/ENFILE by TYPED `io::Error` errno (chain-walk) + `{:#}` alternate-Display fallback (a plain `to_string()` on a reqwest error omits the io source — Forge proved this); on a resource error, count once + STOP rotating.
+5. **`config/nthpartyfinder.toml`/`dns.rs`:** add dns.sb (host+IP) as a 3rd DoH operator to spread load / cut 429-throttle risk — live-verified: JSON GET API, unfiltered, TXT counts identical to Cloudflare (google 15=15, stripe 31=31, vanta 39=39).
+
+**VERIFY.** Live monitored re-run (fixed binary, default config): **peak system ESTABLISHED ~743, mean ~370, 0 ping-fails, 0 EMFILE** — sockets oscillate/plateau instead of climbing to collapse (vs pre-fix unbounded→1058). Machine load-avg was 63/10-core so multi-second ping *readings* (uncorrelated with socket count) are `ping`-CPU-starvation, not the router. Gates: fmt clean, clippy `--all-targets --all-features -D warnings` clean, full test suite pass, `cargo deny` (advisories/bans/licenses/sources) ok incl. new `libc`, coverage ≥95/95. **Adversarial review (codex present): Forge (GPT-5.4) + Cato (GPT-5.4) — verdict CONCERNS, all actioned:** CRITICAL/HIGH EMFILE-classifier-dead-on-`to_string()` → typed+`{:#}` fix; offline-toggle footgun → removed; FD-soft-override + render-quota-speed docs → honestly disclosed; `MAX_BROWSERS` lower-only → hard-cap raise added. Both independently verified subfinder deadlock-freedom, drop ordering, FD-raise soundness (8192 < macOS OPEN_MAX), dns.sb no-dup.
+
+**Follow-ups (TF).** TF-EMFILE-LIVE: the typed+`{:#}` classifier is unit-proven but a real live-EMFILE integration test is the definitive check (deferred — hard to provoke). TF-CONFIG-MIGRATE: existing on-disk `config/nthpartyfinder.toml` won't get dns.sb until regenerated (fresh-init + no-config paths do). TF-QUOTA-TUNE: quota 6 is safety-leaning (user's networks are sensitive); a quiet-machine speed benchmark could raise it toward the safety/speed knee. TF-SUBF-QUEUE: subfinder cap queues (never drops) — a run waiting past the scan deadline could lose that domain's subdomains (low). Continues the 2026-07-14 PR #66 connectivity-safety line — the connection ceiling (#68) bounded reqwest sends but NOT Chrome/subfinder sockets, the uncounted term this round closes.
 
 ## Task 2026-07-17 — Scan resilience/reliability round (depth-3 vanta.com evidence)
 
