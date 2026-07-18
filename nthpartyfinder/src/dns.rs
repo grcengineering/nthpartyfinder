@@ -258,6 +258,20 @@ impl DnsServerPool {
                 name: "Google DoH (IP)".to_string(),
                 timeout_secs: 3,
             },
+            // dns.sb: a third independent operator so a deep scan's DNS load spreads
+            // across three providers, not two — cutting per-provider throttle risk by a
+            // third. Live-verified to serve the JSON GET API with TXT answer counts
+            // identical to Cloudflare (unfiltered, no truncation; recall unaffected).
+            DohServerConfig {
+                url: "https://doh.sb/dns-query".to_string(),
+                name: "dns.sb DoH".to_string(),
+                timeout_secs: 3,
+            },
+            DohServerConfig {
+                url: "https://185.222.222.222/dns-query".to_string(),
+                name: "dns.sb DoH (IP)".to_string(),
+                timeout_secs: 3,
+            },
         ];
 
         let dns_servers = vec![
@@ -714,9 +728,20 @@ impl DnsServerPool {
                 Ok(records) => return Ok(records),
                 Err(e) => {
                     let msg = e.to_string();
+                    self.log_doh_failure(&server.name, &msg);
+                    if Self::is_local_resource_error(&e) {
+                        // EMFILE / local FD exhaustion is not a provider fault: the next provider,
+                        // opened from this same exhausted process, would fail identically, and each
+                        // rotation burns another descriptor against the same wall — the feedback
+                        // loop that turned a depth-3 scan's FD exhaustion into tens of thousands of
+                        // counted "DNS failures". Count it once (so the exit-3 guard still sees a
+                        // failure) and stop rotating.
+                        self.note_throttle();
+                        last_err = Some(e);
+                        break;
+                    }
                     let throttled = msg.contains("DNS_THROTTLE");
                     let endpoint_broken = msg.contains("DNS_ENDPOINT");
-                    self.log_doh_failure(&server.name, &msg);
                     if !throttled && !endpoint_broken {
                         // Transport/parse failures (connect refused, TLS error,
                         // 200-with-HTML body) are provider failures too — count
@@ -747,6 +772,34 @@ impl DnsServerPool {
         Ok(vec![])
     }
 
+    /// True when a DoH send failed because *this process* ran out of a local resource — chiefly
+    /// file descriptors (EMFILE, per-process errno 24; or ENFILE, system-wide errno 23) — not
+    /// because a DoH provider misbehaved. Rotating to the next provider on such a failure is futile
+    /// (it opens another socket against the same exhausted process) and counts one logical lookup
+    /// as several failures, so the resilient loops stop rotating on it.
+    ///
+    /// Classifies on the *typed* error first — walking the chain for an `io::Error` and matching its
+    /// raw OS errno — so it is robust to how reqwest/hyper render the message (errno 23/24 are the
+    /// same on Linux and macOS). Falls back to a text match for wrappers that stringify the OS error
+    /// instead of preserving a downcastable `io::Error`. Takes the error (not a pre-rendered string)
+    /// precisely so the typed path is available; unit-testable by constructing an `io::Error`.
+    fn is_local_resource_error(err: &anyhow::Error) -> bool {
+        for cause in err.chain() {
+            if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+                if matches!(io.raw_os_error(), Some(23) | Some(24)) {
+                    return true;
+                }
+            }
+        }
+        // Fallback for wrappers that stringify the OS error instead of preserving a downcastable
+        // `io::Error`. MUST use the alternate `{:#}` form: a reqwest error's plain `Display`
+        // (== `to_string()`) prints only "error sending request for url (…)" and omits its io
+        // source — where the "os error 24" text actually lives — so a plain-Display match would
+        // silently miss every real EMFILE (verified against reqwest 0.13.4). `{:#}` walks the chain.
+        let msg = format!("{err:#}");
+        msg.contains("Too many open files") || msg.contains("os error 24")
+    }
+
     /// GRC-367 (fix 2): DoH CNAME lookup with throttle-aware retry + provider rotation,
     /// mirroring `doh_txt_lookup_resilient`. On a throttle (429/5xx) it backs off (using the
     /// same short, overflow-safe `in_race_backoff`) and rotates to the next DoH provider,
@@ -773,9 +826,16 @@ impl DnsServerPool {
                 Ok(records) => return Ok(records),
                 Err(e) => {
                     let msg = e.to_string();
+                    self.log_doh_failure(&server.name, &msg);
+                    if Self::is_local_resource_error(&e) {
+                        // Local FD exhaustion, not a provider fault — count once, stop rotating
+                        // (see the TXT path for the full rationale).
+                        self.note_throttle();
+                        last_err = Some(e);
+                        break;
+                    }
                     let throttled = msg.contains("DNS_THROTTLE");
                     let endpoint_broken = msg.contains("DNS_ENDPOINT");
-                    self.log_doh_failure(&server.name, &msg);
                     if !throttled && !endpoint_broken {
                         // Count transport/parse provider failures (see TXT path).
                         self.note_throttle();
@@ -2234,6 +2294,46 @@ pub(crate) fn hickory_resolvable(domain: &str) -> bool {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn test_is_local_resource_error_typed_and_text() {
+        use std::io;
+        // Typed path: an io::Error carrying EMFILE(24)/ENFILE(23) anywhere in the chain is caught
+        // even if the rendered text does NOT contain the "too many open files" bytes — the robust
+        // case a pure string match would miss.
+        let emfile = anyhow::Error::new(io::Error::from_raw_os_error(24))
+            .context("error trying to connect: tcp connect error");
+        assert!(DnsServerPool::is_local_resource_error(&emfile));
+        let enfile = anyhow::Error::new(io::Error::from_raw_os_error(23));
+        assert!(DnsServerPool::is_local_resource_error(&enfile));
+
+        // Text fallback: a wrapper that only stringified the OS error still classifies.
+        assert!(DnsServerPool::is_local_resource_error(&anyhow::anyhow!(
+            "error sending request: Too many open files (os error 24)"
+        )));
+
+        // The critical case the plain-Display match missed: a reqwest-shaped error whose TOP-LEVEL
+        // Display omits the errno (it lives only in the source chain) and carries no downcastable
+        // io::Error. `to_string()` must NOT see it, but `is_local_resource_error` (via `{:#}`) must.
+        let reqwest_shaped = anyhow::anyhow!("inner: Too many open files (os error 24)")
+            .context("error sending request for url (https://doh.sb/dns-query)");
+        assert!(
+            !reqwest_shaped.to_string().contains("os error 24"),
+            "top-level Display should hide the errno — the trap a plain match falls into"
+        );
+        assert!(
+            DnsServerPool::is_local_resource_error(&reqwest_shaped),
+            "must classify via the alternate-Display fallback even when to_string() hides the errno"
+        );
+
+        // Provider-side failures are NOT local resource errors — they must still rotate/count.
+        assert!(!DnsServerPool::is_local_resource_error(&anyhow::anyhow!(
+            "DNS_THROTTLE: DoH provider Cloudflare returned HTTP 429 for example.com"
+        )));
+        // A different OS error (connection refused, errno 61) is not FD exhaustion.
+        let refused = anyhow::Error::new(io::Error::from_raw_os_error(61));
+        assert!(!DnsServerPool::is_local_resource_error(&refused));
+    }
 
     #[rstest]
     // leading-underscore service labels stay resolvable (hickory's from_ascii path)

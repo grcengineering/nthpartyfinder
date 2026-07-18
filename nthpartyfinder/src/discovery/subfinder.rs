@@ -3,16 +3,130 @@
 #[cfg(not(test))]
 use crate::http_client::GatedSend;
 use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 #[cfg(test)]
 use tracing::warn;
 #[cfg(not(test))]
 use tracing::{debug, info, warn};
+
+// ── Subfinder subprocess resource bounds ─────────────────────────────────────
+//
+// Each passive subfinder run opens sockets to 30+ external sources. The analysis fan-out would
+// otherwise start one subfinder per vendor (up to ~50 concurrently at depth 1), a socket storm the
+// in-process connection ceiling does not cover (a subprocess opens its own sockets) and a measured
+// contributor to the consumer-router conntrack exhaustion that takes local WiFi down on deep scans.
+// These bounds cap the subprocess count and guarantee every subfinder is killed and reaped on every
+// exit path, including the Ctrl-C path that ends in `process::exit` (which runs no destructors, so
+// `kill_on_drop` cannot fire) — closing the asymmetry where Chrome was reaped on interrupt but
+// subfinder was abandoned to keep holding its sockets.
+
+/// Default ceiling on concurrent subfinder subprocesses. Override with `NTHPARTYFINDER_MAX_SUBFINDER`.
+const DEFAULT_MAX_SUBFINDER_PROCS: usize = 10;
+
+/// Resolve the concurrent-subfinder ceiling from the environment, falling back to the default.
+fn resolve_max_subfinder_procs() -> usize {
+    std::env::var("NTHPARTYFINDER_MAX_SUBFINDER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_SUBFINDER_PROCS)
+}
+
+/// Bounds concurrent subfinder subprocesses so their combined outbound sockets cannot overrun the
+/// router's conntrack table. A permit is held only across one subfinder run — never across
+/// recursion — so it cannot deadlock the analysis fan-out.
+static SUBFINDER_SEMAPHORE: Lazy<Semaphore> =
+    Lazy::new(|| Semaphore::new(resolve_max_subfinder_procs()));
+
+/// Live subfinder subprocess PIDs, so the Ctrl-C reaper can SIGKILL any still running when the scan
+/// is interrupted (that path ends in `process::exit`, bypassing `kill_on_drop`).
+static SUBFINDER_PIDS: Lazy<Mutex<HashSet<u32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+fn register_subfinder_pid(pid: u32) {
+    if let Ok(mut set) = SUBFINDER_PIDS.lock() {
+        set.insert(pid);
+    }
+}
+
+fn deregister_subfinder_pid(pid: u32) {
+    if let Ok(mut set) = SUBFINDER_PIDS.lock() {
+        set.remove(&pid);
+    }
+}
+
+/// RAII guard: registers a subfinder PID for the interrupt reaper on creation and deregisters it on
+/// drop, so the registry holds only subprocesses actually in flight — a cleanly finished or
+/// `kill_on_drop`-reaped child is never targeted by a later reap that could hit a recycled PID.
+struct SubfinderPidGuard(u32);
+
+impl SubfinderPidGuard {
+    fn register(pid: u32) -> Self {
+        register_subfinder_pid(pid);
+        Self(pid)
+    }
+}
+
+impl Drop for SubfinderPidGuard {
+    fn drop(&mut self) {
+        deregister_subfinder_pid(self.0);
+    }
+}
+
+/// Drain the registry, returning every PID it held. Draining regardless of kill outcome makes a
+/// second call a no-op.
+fn drain_subfinder_pids() -> Vec<u32> {
+    match SUBFINDER_PIDS.lock() {
+        Ok(mut set) => set.drain().collect(),
+        Err(poisoned) => poisoned.into_inner().drain().collect(),
+    }
+}
+
+/// A name guard against the OS having recycled a registered PID onto an unrelated process before we
+/// reap it — mirrors `browser_pool::looks_like_chrome`.
+fn looks_like_subfinder(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("subfinder")
+}
+
+// coverage(off): queries and kills real OS processes; the decision logic (drain, name guard) is
+// unit-tested. Mirrors browser_pool::kill_chrome_pids.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn kill_subfinder_pids(pids: Vec<u32>) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    if pids.is_empty() {
+        return;
+    }
+    let targets: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&targets),
+        false,
+        ProcessRefreshKind::everything(),
+    );
+    for pid in targets {
+        if let Some(process) = system.process(pid) {
+            if looks_like_subfinder(&process.name().to_string_lossy()) {
+                process.kill();
+            }
+        }
+    }
+}
+
+/// SIGKILL any subfinder subprocess still registered as in-flight. Called from the Ctrl-C handler
+/// (which ends in `process::exit`, so no Drop — hence no `kill_on_drop` — runs) so an interrupted
+/// scan does not orphan subfinder subprocesses still holding sockets to their passive sources.
+pub fn shutdown() {
+    kill_subfinder_pids(drain_subfinder_pids());
+}
 
 /// Latest subfinder version to download
 const SUBFINDER_VERSION: &str = "2.11.0";
@@ -559,15 +673,30 @@ impl SubfinderDiscovery {
             domain
         );
 
+        // Bound concurrent subfinder subprocesses (see SUBFINDER_SEMAPHORE): extra runs queue
+        // rather than opening their sockets all at once. Held only across this one run.
+        let _permit = SUBFINDER_SEMAPHORE
+            .acquire()
+            .await
+            .expect("subfinder semaphore is never closed");
+
         let mut child = match Command::new(&binary_path)
             .args(["-d", domain, "-silent", "-json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // Guarantee SIGKILL + reap on EVERY drop path — task cancellation mid-recursion, a
+            // stdout I/O error, a missing pipe — not only the explicit timeout branch below.
+            // Without this an abandoned subfinder keeps running and holds its sockets.
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(c) => c,
             Err(e) => return Err(anyhow!("Failed to spawn subfinder: {}", e)),
         };
+
+        // Register the PID so the Ctrl-C handler (which ends in process::exit, bypassing every Drop
+        // — so kill_on_drop cannot fire) can reap this subprocess. Deregistered on drop.
+        let _pid_guard = child.id().map(SubfinderPidGuard::register);
 
         let stdout = child
             .stdout
@@ -633,6 +762,56 @@ pub fn parse_subfinder_output(output: &str) -> Vec<SubdomainResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ──────────────────────────────────────────────────────────────────
+    // Subprocess resource-bound tests (concurrency cap + interrupt reaper)
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_max_subfinder_procs_default() {
+        // With the env var unset the compiled default applies; guard against a stray override.
+        if std::env::var("NTHPARTYFINDER_MAX_SUBFINDER").is_err() {
+            assert_eq!(resolve_max_subfinder_procs(), DEFAULT_MAX_SUBFINDER_PROCS);
+        }
+    }
+
+    #[test]
+    fn test_looks_like_subfinder_name_guard() {
+        // Guards the PID reaper against killing whatever the OS recycled a stale PID onto.
+        assert!(looks_like_subfinder("subfinder"));
+        assert!(looks_like_subfinder("Subfinder"));
+        assert!(looks_like_subfinder("subfinder.exe"));
+        assert!(!looks_like_subfinder("chrome"));
+        assert!(!looks_like_subfinder("nthpartyfinder"));
+        assert!(!looks_like_subfinder(""));
+    }
+
+    #[test]
+    fn test_subfinder_pid_registry_lifecycle() {
+        // One test owns all registry mutation so the process-global set has no cross-test race.
+        let a = 424242_u32;
+        let b = 525252_u32;
+
+        // register then deregister a single pid (independent of any other pid's membership)
+        register_subfinder_pid(a);
+        assert!(SUBFINDER_PIDS.lock().unwrap().contains(&a));
+        deregister_subfinder_pid(a);
+        assert!(!SUBFINDER_PIDS.lock().unwrap().contains(&a));
+
+        // the RAII guard registers on creation and deregisters on drop
+        {
+            let _g = SubfinderPidGuard::register(b);
+            assert!(SUBFINDER_PIDS.lock().unwrap().contains(&b));
+        }
+        assert!(!SUBFINDER_PIDS.lock().unwrap().contains(&b));
+
+        // drain returns everything registered and empties the set (so a second reap is a no-op)
+        register_subfinder_pid(a);
+        register_subfinder_pid(b);
+        let drained = drain_subfinder_pids();
+        assert!(drained.contains(&a) && drained.contains(&b));
+        assert!(SUBFINDER_PIDS.lock().unwrap().is_empty());
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // parse_subfinder_output tests (existing + new)

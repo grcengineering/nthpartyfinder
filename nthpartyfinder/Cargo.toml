@@ -64,6 +64,10 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 zstd = "0.13"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.39"
+# Raise the process open-file-descriptor soft limit at startup (used only under cfg(unix), in
+# app::raise_open_file_limit) so a deep scan run as the raw binary — outside scripts/safe-scan.sh,
+# which sets `ulimit -n 512` — does not inherit the OS default (256 on macOS) and hit EMFILE.
+libc = "0.2"
 # Integrity verification for the runtime-fetched NER model
 sha2 = "0.11"
 hex = "0.4"

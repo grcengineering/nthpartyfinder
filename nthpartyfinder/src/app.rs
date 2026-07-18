@@ -903,6 +903,85 @@ async fn run_review(action: &ReviewCommands) -> Result<()> {
     }
 }
 
+/// The open-file-descriptor soft limit this process raises itself to at startup.
+///
+/// A deep scan's main process holds many descriptors at once — up to the connection ceiling of
+/// in-flight gated HTTP sends, one CDP socket per pooled browser, a stdout pipe per in-flight
+/// subfinder, plus result/log/cache files and DoH sockets. Run outside `scripts/safe-scan.sh`
+/// (which sets `ulimit -n 512`), the process inherits the OS default soft limit — 256 on macOS —
+/// and a deep recursion crosses it mid-scan, after which every new socket fails with EMFILE ("too
+/// many open files"): subfinder can't spawn and DNS can't open a DoH connection (whose failure is
+/// then miscounted as a provider throttle, inflating the "DNS Failures" total). Conntrack safety
+/// is provided separately (the connection ceiling + browser/subfinder concurrency caps), so this
+/// limit is not itself a safety bound — it only needs to be high enough that a legitimate deep
+/// scan never starves.
+///
+/// `cfg(any(unix, test))`: consumed only by the Unix `raise_open_file_limit` and by unit tests, so
+/// it is excluded from a non-Unix production build (where `RUSTFLAGS=-D warnings` would otherwise
+/// reject it as dead code).
+#[cfg(any(unix, test))]
+const FD_SOFT_LIMIT_TARGET: u64 = 8_192;
+
+/// Compute the soft `RLIMIT_NOFILE` this process should request, or `None` if no raise is needed.
+///
+/// Raises the *soft* limit toward the target but never past the *hard* limit, and never lowers a
+/// soft limit that is already higher. The authoritative cap is therefore the **hard** limit: an
+/// operator who wants to bound this process's descriptors sets a lower hard limit (`ulimit -Hn N`),
+/// which is respected. Note the deliberate consequence — a low *soft*-only limit (`ulimit -n 300`,
+/// hard left high) is treated as the default-too-low case and IS raised, because that soft value is
+/// what causes the EMFILE this exists to prevent; conntrack safety is enforced separately (the
+/// connection ceiling + browser/subfinder caps), so raising the soft FD limit does not re-open the
+/// network-collapse risk. Pure, so it is unit-tested without touching the real process rlimit.
+#[cfg(any(unix, test))]
+fn desired_fd_soft_limit(current_soft: u64, hard: u64) -> Option<u64> {
+    let target = FD_SOFT_LIMIT_TARGET.min(hard);
+    (target > current_soft).then_some(target)
+}
+
+/// Best-effort raise of the process open-file-descriptor soft limit at startup (Unix only).
+///
+/// On any failure the process simply keeps its inherited limit — the EMFILE-classification in the
+/// DNS layer and the connection/browser/subfinder caps remain as backstops.
+#[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))] // coverage: wraps getrlimit/setrlimit syscalls; the pure decision lives in desired_fd_soft_limit, tested directly
+fn raise_open_file_limit() {
+    // SAFETY: getrlimit/setrlimit called with a valid, fully-initialized rlimit for this process.
+    unsafe {
+        let mut lim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, lim.as_mut_ptr()) != 0 {
+            return;
+        }
+        let lim = lim.assume_init();
+        // `libc::rlim_t` is a `u64` alias on every target this builds for (Linux + macOS), so these
+        // pass/assign directly without a cast; the helper is defined over `u64`.
+        let Some(target) = desired_fd_soft_limit(lim.rlim_cur, lim.rlim_max) else {
+            return;
+        };
+        let new = libc::rlimit {
+            rlim_cur: target,
+            rlim_max: lim.rlim_max,
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &new) == 0 {
+            tracing::info!(
+                "Raised open-file limit {} -> {} (hard {}) so a deep scan cannot exhaust file descriptors",
+                lim.rlim_cur,
+                target,
+                lim.rlim_max
+            );
+        } else {
+            tracing::debug!(
+                "Could not raise open-file soft limit from {} (hard {})",
+                lim.rlim_cur,
+                lim.rlim_max
+            );
+        }
+    }
+}
+
+/// Non-Unix platforms manage descriptor limits differently and default far higher; nothing to do.
+#[cfg(not(unix))]
+fn raise_open_file_limit() {}
+
 // coverage(off): integration orchestrator — sequences I/O operations (filesystem, network,
 // stdin/stdout, system binaries, signal handlers, ONNX runtime, sysinfo). All branching/decision
 // logic extracted into individually-tested phase functions: process_config_result,
@@ -913,6 +992,10 @@ async fn run_review(action: &ReviewCommands) -> Result<()> {
 // collect_unverified_orgs.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
+    // Raise the open-file-descriptor soft limit before any socket is opened, so a deep scan run as
+    // the raw binary (no safe-scan.sh wrapper) cannot hit macOS's default 256 cap and EMFILE.
+    raise_open_file_limit();
+
     // Install the global connection ceiling before any discovery opens a socket, so the whole scan
     // — every method, at every depth — shares one bound on the peak number of simultaneously-open
     // connections. That peak, not the request *rate*, is what exhausts a consumer router's
@@ -1310,6 +1393,10 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         // Not unit-tested: this path ends in `process::exit`. Verified empirically instead —
         // SIGINT a live depth-3 scan and assert zero surviving Chrome processes.
         crate::browser_pool::shutdown();
+        // Same reasoning for subfinder: process::exit runs no Drop, so kill_on_drop cannot fire.
+        // Reap any in-flight subfinder subprocess by PID so it does not outlive the scanner holding
+        // sockets to its passive sources (the interrupt-path symmetry with the Chrome reap above).
+        crate::discovery::subfinder::shutdown();
         eprintln!("⚠️  Force exiting (checkpoint may be incomplete).");
         std::process::exit(130);
     }).unwrap_or_else(|e| {
@@ -2888,6 +2975,40 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_CONFIG;
     use crate::vendor::RecordType;
+
+    #[test]
+    fn test_desired_fd_soft_limit_raises_from_low_default() {
+        // macOS ships a 256 soft cap; with an unlimited/large hard cap we target FD_SOFT_LIMIT_TARGET.
+        assert_eq!(
+            desired_fd_soft_limit(256, u64::MAX),
+            Some(FD_SOFT_LIMIT_TARGET)
+        );
+        assert_eq!(
+            desired_fd_soft_limit(256, 1_048_576),
+            Some(FD_SOFT_LIMIT_TARGET)
+        );
+    }
+
+    #[test]
+    fn test_desired_fd_soft_limit_never_exceeds_hard() {
+        // A deliberately low hard cap (e.g. an operator's `ulimit -Hn 512`) stays authoritative:
+        // we raise the soft limit only up to the hard limit, never past it.
+        assert_eq!(desired_fd_soft_limit(256, 512), Some(512));
+        assert_eq!(desired_fd_soft_limit(400, 512), Some(512));
+    }
+
+    #[test]
+    fn test_desired_fd_soft_limit_no_raise_when_already_adequate() {
+        // At/above the target, hard-capped at the current soft, or an operator-set higher limit:
+        // never lower it, never churn.
+        assert_eq!(desired_fd_soft_limit(FD_SOFT_LIMIT_TARGET, u64::MAX), None);
+        assert_eq!(
+            desired_fd_soft_limit(FD_SOFT_LIMIT_TARGET + 1, u64::MAX),
+            None
+        );
+        assert_eq!(desired_fd_soft_limit(512, 512), None);
+        assert_eq!(desired_fd_soft_limit(100_000, u64::MAX), None);
+    }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn unwrap_config_exit(outcome: ConfigOutcome) -> (String, i32) {

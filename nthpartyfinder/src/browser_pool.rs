@@ -34,20 +34,62 @@ const MIN_RENDER_PERMITS: usize = 4;
 /// depth-3 vanta.com scan *slower* (515s vs 434s): the render queue emptied, but the extra
 /// concurrency inflated every other latency (mean DNS query 0.164s → 0.860s, mean page fetch
 /// 2.77s → 4.42s) and starved more vendors of their subprocessor budget (175 vs 165). Render
-/// parallelism is not the scan's throughput limit; it was only ever the launch cost.
-const MAX_RENDER_PERMITS: usize = 8;
+/// parallelism is not the scan's throughput limit; it was only ever the launch cost — so lowering
+/// the ceiling costs little throughput.
+///
+/// Lowered 8 → 6: each concurrent browser is the dominant open-socket consumer (a page render
+/// opens a connection to every resource origin), so the ceiling directly bounds the scan's peak
+/// socket footprint. A guarded depth-3 measurement put the system's peak ESTABLISHED sockets near
+/// ~950 at 8 browsers vs ~790 at 6 — the latter leaves comfortable headroom under a consumer
+/// router's NAT/conntrack table on the sensitive networks this fix targets, at little throughput
+/// cost. This is the *auto-sized* ceiling; an operator can override in EITHER direction with
+/// `NTHPARTYFINDER_MAX_BROWSERS` (raising it on a robust network to recover render parallelism, up
+/// to [`HARD_MAX_RENDER_PERMITS`]).
+const MAX_RENDER_PERMITS: usize = 6;
+
+/// Absolute ceiling on an explicit `NTHPARTYFINDER_MAX_BROWSERS` override — so a robust-network
+/// operator can raise concurrency above the auto-sized default, but never past a sane cap (raising
+/// it from 8 to 16 was measured to make the scan slower, so 16 is a hard upper bound).
+const HARD_MAX_RENDER_PERMITS: usize = 16;
 
 /// Gigabytes of headroom assumed per concurrent Chrome. Deliberately conservative: Chrome's
 /// renderer processes live outside this process's RSS, so we cannot measure them from here.
 const GB_PER_BROWSER: u64 = 3;
 
-/// Renders one Chrome process serves before it is retired and relaunched.
+/// Renders one Chrome process serves before it is retired and relaunched — and, crucially, before
+/// its accumulated network sockets are released.
 ///
-/// A long-lived headless Chrome accumulates memory and eventually degrades: operators running
-/// this at scale recycle every ~100 renders. 50 is half that, chosen because a depth-3 scan
-/// does only ~270 renders in total, so the launch cost is still amortised ~50× while the
-/// process never gets near the degradation regime.
-const MAX_RENDERS_PER_BROWSER: usize = 50;
+/// This is the load-bearing bound on the scan's peak socket footprint. A pooled browser keeps an
+/// idle keep-alive socket open to every origin its renders contacted, and clearing cache/cookies
+/// between renders does NOT close them — they live in Chrome's process-global connection pool, out
+/// of reach of any per-session CDP call. The only guaranteed release is the graceful `Browser.Close`
+/// that runs when the browser is retired (it tears down the whole Chrome process tree and every
+/// socket). A guarded depth-3 measurement showed pooled browsers left at the old quota of 50
+/// accumulate ESTABLISHED sockets until the system count reaches a consumer router's NAT/conntrack
+/// ceiling and local WiFi drops; at 6 the socket count instead oscillates and plateaus (peak ~790,
+/// leaving headroom under the table).
+///
+/// The cost is real, not free: a depth-3 scan does a few hundred renders, so a quota of 6 relaunches
+/// Chrome several times more than 50 did — on the order of tens of extra ~2s launches (partly
+/// overlapped across browsers, so the wall-clock hit is a fraction of the naive sum, but it is not
+/// negligible). Recall is unaffected (every render still runs to completion). The default is chosen
+/// to protect the sensitive networks this fix targets; raising it trades that socket headroom back
+/// for launch speed and is safe only on a network with a large conntrack table. Override with
+/// `NTHPARTYFINDER_RENDERS_PER_BROWSER`.
+const DEFAULT_MAX_RENDERS_PER_BROWSER: usize = 6;
+
+/// Resolve the per-browser render quota from the environment, falling back to the default.
+fn resolve_max_renders_per_browser() -> usize {
+    std::env::var("NTHPARTYFINDER_RENDERS_PER_BROWSER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_RENDERS_PER_BROWSER)
+}
+
+/// Cached render quota (read once; consulted on the hot `TabGuard::drop` path per render).
+static MAX_RENDERS_PER_BROWSER: once_cell::sync::Lazy<usize> =
+    once_cell::sync::Lazy::new(resolve_max_renders_per_browser);
 
 fn total_memory_gb() -> u64 {
     use sysinfo::System;
@@ -70,7 +112,7 @@ fn resolve_max_browser_instances() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
     {
-        return n.min(MAX_RENDER_PERMITS);
+        return n.min(HARD_MAX_RENDER_PERMITS);
     }
     let by_memory =
         usize::try_from(total_memory_gb() / GB_PER_BROWSER).unwrap_or(MIN_RENDER_PERMITS);
@@ -399,7 +441,7 @@ impl Drop for TabGuard {
 
         if let Some(browser) = self.browser.take() {
             let served = self.served;
-            if tab_closed && served < MAX_RENDERS_PER_BROWSER {
+            if tab_closed && served < *MAX_RENDERS_PER_BROWSER {
                 lock_idle().push(PooledBrowser { browser, served });
             }
             // else: dropping the `TrackedBrowser` deregisters its PID, then the inner `Browser`
@@ -655,6 +697,10 @@ fn isolate_tab(tab: &Arc<headless_chrome::Tab>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Network.clearBrowserCache failed: {e}"))?;
     tab.call_method(Network::ClearBrowserCookies(None))
         .map_err(|e| anyhow::anyhow!("Network.clearBrowserCookies failed: {e}"))?;
+    // NB: this does NOT close Chrome's accumulated idle keep-alive sockets — those live in Chrome's
+    // process-global connection pool, out of reach of a per-session CDP call. Bounding that
+    // accumulation is the job of the low per-browser render quota (MAX_RENDERS_PER_BROWSER), whose
+    // full-teardown retirement is the only guaranteed socket release.
     Ok(())
 }
 
@@ -832,15 +878,28 @@ mod tests {
         assert_eq!(MIN_RENDER_PERMITS, 4);
     }
 
-    /// Recycling is what bounds the memory a long-lived Chrome accumulates. A depth-3 scan does
-    /// ~270 renders, so this must be well under that or the launch cost is not amortised.
+    /// Recycling bounds BOTH the memory a long-lived Chrome accumulates and (the reason the quota
+    /// is now low) its accumulated ESTABLISHED sockets: a full retire is the only guaranteed socket
+    /// release. The quota must stay low enough to bound the socket high-water mark yet high enough
+    /// that a ~2s launch is still amortised across several renders.
     #[test]
-    fn test_renders_per_browser_amortises_launch_but_bounds_leak() {
+    fn test_renders_per_browser_bounds_sockets_yet_amortises_launch() {
         assert!(
-            (10..=100).contains(&MAX_RENDERS_PER_BROWSER),
-            "recycle quota {MAX_RENDERS_PER_BROWSER} should amortise a ~2.2s launch across many \
-             renders while staying under the ~100-render degradation regime"
+            (2..=20).contains(&DEFAULT_MAX_RENDERS_PER_BROWSER),
+            "recycle quota {DEFAULT_MAX_RENDERS_PER_BROWSER} should be low enough to bound socket \
+             accumulation while still amortising the launch across several renders"
         );
+    }
+
+    #[test]
+    fn test_resolve_max_renders_per_browser_default() {
+        if std::env::var("NTHPARTYFINDER_RENDERS_PER_BROWSER").is_err() {
+            assert_eq!(
+                resolve_max_renders_per_browser(),
+                DEFAULT_MAX_RENDERS_PER_BROWSER
+            );
+        }
+        assert!(resolve_max_renders_per_browser() >= 1);
     }
 
     /// `shutdown()` is the only thing that reaps pooled Chrome processes, because the pool is a
