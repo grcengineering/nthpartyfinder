@@ -11,6 +11,7 @@ use hickory_resolver::config::{
     LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts,
 };
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::NetError;
 use hickory_resolver::TokioResolver;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -149,11 +150,33 @@ pub struct DnsServerPool {
     /// that don't opt in. This is the authoritative source of truth for throttle visibility;
     /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
     failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
-    /// DoH availability tracker — flips this pool to direct-DNS-primary when DoH looks blocked or
-    /// unavailable, and re-probes DoH periodically to resume it on recovery. Shared across TXT and
-    /// CNAME lookups so one detection covers the whole scan.
+    /// Per-transport availability trackers (circuit breakers), shared across TXT and CNAME so one
+    /// detection covers the whole scan. The lookup ladder tries them in network-footprint order —
+    /// DoH (443) → DoT (853) → direct UDP/53 — skipping any transport whose breaker is down and
+    /// re-probing it periodically.
     #[cfg_attr(coverage, allow(dead_code))]
-    doh_health: DohHealth,
+    doh_health: TransportHealth,
+    /// DNS-over-TLS (853) availability — an encrypted, TCP-pooled fallback tried BEFORE raw UDP/53,
+    /// so a DoH-blocked network degrades to a low-conntrack-footprint transport, not the flood-prone
+    /// one.
+    #[cfg_attr(coverage, allow(dead_code))]
+    dot_health: TransportHealth,
+    /// Direct UDP/53 availability — the flood-prone tier, health-gated so a router that
+    /// rate-limits/blocks port 53 (the DNS-flood-protection collapse) is skipped after
+    /// `TRANSPORT_DOWN_THRESHOLD` consecutive timeouts instead of being hammered into a worse outage.
+    #[cfg_attr(coverage, allow(dead_code))]
+    do53_health: TransportHealth,
+    /// Whether the DoT (853) tier is attempted at all. Real DoT queries hit hardcoded public 853
+    /// resolvers (`DOT_SERVERS`), so hermetic tests (mock-DoH pools from `with_test_urls`) disable
+    /// it while production constructors enable it. DoT still only runs when DoH is unavailable.
+    #[cfg_attr(coverage, allow(dead_code))]
+    dot_enabled: bool,
+    /// Lazily-built-then-reused DoT (853) resolver, so hickory actually POOLS its TLS connections
+    /// across lookups instead of opening a fresh handshake per lookup — which, during a DoH outage
+    /// (when the DoT tier carries the scan), would storm :853 with short-lived connections, the very
+    /// conntrack churn this ladder exists to avoid. Built once on first DoT use; `None` if it fails.
+    #[cfg_attr(coverage, allow(dead_code))]
+    dot_resolver: tokio::sync::OnceCell<Option<TokioResolver>>,
     /// Per-provider failure-log counts backing `log_doh_failure`'s warn-once-then-debug
     /// behavior. Mutex (not atomics) because failures are rare and the critical section
     /// is a HashMap bump with no await inside.
@@ -185,14 +208,26 @@ pub(crate) enum RecordKind {
     Cname,
 }
 
-/// Consecutive DoH failures before DoH is treated as unavailable (a DoH-blocking network, or a
-/// provider outage). High enough that a transient throttle/timeout won't trip it; low enough that a
-/// genuinely DoH-blocked network stops paying a per-lookup DoH timeout quickly.
+/// Consecutive failures on a single DNS transport before it is treated as unavailable (a blocked
+/// network, a rate-limiting router, or a provider outage). High enough that a transient
+/// throttle/timeout won't trip it; low enough that a genuinely blocked transport stops paying a
+/// per-lookup timeout — or hammering a rate-limited port — quickly.
 #[cfg_attr(coverage, allow(dead_code))]
-const DOH_DOWN_THRESHOLD: u32 = 8;
-/// While DoH is marked down, permit one re-probe this often to detect recovery.
+const TRANSPORT_DOWN_THRESHOLD: u32 = 8;
+/// While a transport is marked down, permit one re-probe this often to detect recovery.
 #[cfg_attr(coverage, allow(dead_code))]
-const DOH_REPROBE_INTERVAL_MS: u64 = 30_000;
+const TRANSPORT_REPROBE_INTERVAL_MS: u64 = 30_000;
+
+/// Well-known DNS-over-TLS (853) resolvers, as `(ip, tls_server_name)`. One DoT resolver is built
+/// over all of them so hickory gets resolver-level provider diversity (Cloudflare + Quad9 + Google)
+/// and connection pooling for free. IP literals avoid a DNS-bootstrap dependency when UDP/53 — the
+/// path DoT is stepping in for — is the very thing that's blocked.
+#[cfg_attr(coverage, allow(dead_code))]
+const DOT_SERVERS: &[(&str, &str)] = &[
+    ("1.1.1.1", "cloudflare-dns.com"),
+    ("9.9.9.9", "dns.quad9.net"),
+    ("8.8.8.8", "dns.google"),
+];
 
 /// Milliseconds since the Unix epoch (best-effort; 0 if the clock is before the epoch).
 #[cfg_attr(coverage, allow(dead_code))]
@@ -203,30 +238,32 @@ fn now_epoch_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Tracks whether DoH looks usable so a DoH-blocked network (or provider outage) doesn't cost a
-/// full DoH timeout on EVERY lookup before falling back to direct DNS.
+/// Tracks whether a single DNS transport (DoH, DoT, or direct UDP/53) looks usable, so a blocked or
+/// rate-limited transport doesn't cost a full timeout — or keep hammering a router's DNS-flood
+/// protection — on EVERY lookup before the ladder moves on.
 ///
-/// When DoH is healthy this is two atomic loads and changes nothing. After `DOH_DOWN_THRESHOLD`
-/// consecutive DoH failures it flips to "skip DoH, go straight to the rate-limited direct-DNS
-/// fallback"; a single re-probe every `DOH_REPROBE_INTERVAL_MS` resumes DoH the instant it
-/// recovers. This is the "compensate when DoH is unavailable" half of keeping direct DNS as a
-/// fallback: the direct path stays available for DoH-blocking networks, but a blocked network no
-/// longer wastes a 3s DoH round-trip on every one of thousands of lookups.
+/// When the transport is healthy this is two atomic loads and changes nothing. After
+/// `TRANSPORT_DOWN_THRESHOLD` consecutive failures it flips to "skip this transport"; a single
+/// re-probe every `TRANSPORT_REPROBE_INTERVAL_MS` (single-flight via CAS) resumes it the instant it
+/// recovers, and any success resets the streak (a flaky-but-working transport keeps being used). One
+/// instance per transport lets the lookup ladder degrade from network-kind transports (DoH/DoT,
+/// pooled + encrypted) toward the flood-prone raw UDP/53 path only as each higher tier proves
+/// unavailable — and stop firing UDP/53 entirely once it, too, is being dropped.
 #[cfg_attr(coverage, allow(dead_code))]
 #[derive(Debug, Default)]
-struct DohHealth {
+struct TransportHealth {
     consecutive_failures: AtomicU32,
-    /// Unix-epoch millis after which one DoH re-probe is permitted while DoH is marked down.
+    /// Unix-epoch millis after which one re-probe is permitted while the transport is marked down.
     reprobe_after_ms: AtomicU64,
 }
 
 #[cfg_attr(coverage, allow(dead_code))]
-impl DohHealth {
-    /// Attempt DoH for this lookup? True when DoH is healthy, or — when marked down — for the single
-    /// lookup that wins the periodic re-probe (the CAS ensures exactly one concurrent probe; the
-    /// rest go straight to direct DNS).
-    fn should_attempt_doh(&self) -> bool {
-        if self.consecutive_failures.load(Ordering::Relaxed) < DOH_DOWN_THRESHOLD {
+impl TransportHealth {
+    /// Attempt this transport for the current lookup? True when healthy, or — when marked down — for
+    /// the single lookup that wins the periodic re-probe (the CAS ensures exactly one concurrent
+    /// probe; the rest skip straight to the next tier).
+    fn should_attempt(&self) -> bool {
+        if self.consecutive_failures.load(Ordering::Relaxed) < TRANSPORT_DOWN_THRESHOLD {
             return true;
         }
         let now = now_epoch_millis();
@@ -236,25 +273,27 @@ impl DohHealth {
                 .reprobe_after_ms
                 .compare_exchange(
                     due,
-                    now + DOH_REPROBE_INTERVAL_MS,
+                    now + TRANSPORT_REPROBE_INTERVAL_MS,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 )
                 .is_ok()
     }
 
-    /// DoH answered (any authoritative result, including empty) — it works. Clear the failure streak.
+    /// The transport answered (any authoritative result, including an empty one) — it works. Clear
+    /// the failure streak.
     fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
     }
 
-    /// DoH failed (throttle/endpoint/timeout). Advance the streak; returns true exactly once, on the
-    /// transition into "down", so the caller warns a single time per outage.
+    /// The transport failed at the transport layer (timeout / connection / sustained throttle).
+    /// Advance the streak; returns true exactly once, on the transition into "down", so the caller
+    /// warns a single time per outage.
     fn record_failure(&self) -> bool {
         let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if n == DOH_DOWN_THRESHOLD {
+        if n == TRANSPORT_DOWN_THRESHOLD {
             self.reprobe_after_ms.store(
-                now_epoch_millis() + DOH_REPROBE_INTERVAL_MS,
+                now_epoch_millis() + TRANSPORT_REPROBE_INTERVAL_MS,
                 Ordering::Relaxed,
             );
             true
@@ -264,16 +303,172 @@ impl DohHealth {
     }
 }
 
-/// One-line, once-per-outage notice that DoH is unavailable and direct DNS is carrying the scan.
+/// Outcome of one direct (hickory) lookup, classified so the shared per-transport breaker counts
+/// only genuine transport failures — never an authoritative empty answer (which is the NORM for
+/// CNAME and must not disable the transport for TXT).
 #[cfg_attr(coverage, allow(dead_code))]
-fn warn_doh_unavailable() {
+enum DirectOutcome {
+    /// The resolver returned one or more records.
+    Answered(Vec<String>),
+    /// The resolver responded, authoritatively, with no records of this type (NXDOMAIN / NODATA).
+    /// The transport works; this is a fact about the zone, not a failure.
+    Empty,
+    /// No usable response within the budget — a timeout, connection error, or "no nameserver
+    /// responded". This is what a blocked/rate-limited transport looks like; it trips the breaker.
+    TransportFailed,
+}
+
+/// Does a resolver error represent an *authoritative DNS answer* (the server spoke DNS: NoRecordsFound
+/// / NXDOMAIN / NODATA / a response code / an NSEC proof) rather than a transport-level failure?
+///
+/// Classified on the TYPED error, deliberately NOT on its `Display`: hickory renders a no-records
+/// error as `no records found for Query { name: Name("mtls.example.com."), .. }`, so a string match
+/// would false-classify any queried name containing a substring like "tls"/"connection"/"timeout"
+/// (exactly the subdomains a fan-out enumerates) as a transport failure — false-tripping the shared
+/// per-transport breaker on an authoritative empty. `NetError::Dns(_)` means the transport delivered
+/// a DNS-level response (it works); every other variant (`Timeout`, `NoConnections`, `Io`,
+/// `RustlsError`, `Proto`, …) is a genuine transport failure.
+#[cfg_attr(coverage, allow(dead_code))]
+fn net_error_is_authoritative_negative(err: &NetError) -> bool {
+    matches!(err, NetError::Dns(_))
+}
+
+/// One-line, once-per-outage notice that a DNS transport is unavailable and the ladder has moved on.
+/// `transport` names the tier that went down; `fallback` says what carries the load now.
+#[cfg_attr(coverage, allow(dead_code))]
+fn warn_transport_unavailable(transport: &str, fallback: &str) {
     tracing::warn!(
-        "DoH appears blocked or unavailable after {} consecutive failures — falling back to direct \
-         DNS (UDP/53, rate-limited). Results are unaffected; deep scans may be slower. DoH is \
-         re-probed every {}s and resumes automatically when it recovers.",
-        DOH_DOWN_THRESHOLD,
-        DOH_REPROBE_INTERVAL_MS / 1000
+        "{} appears blocked or unavailable after {} consecutive failures — {}. Results are \
+         unaffected; deep scans may be slower. It is re-probed every {}s and resumes automatically \
+         when it recovers.",
+        transport,
+        TRANSPORT_DOWN_THRESHOLD,
+        fallback,
+        TRANSPORT_REPROBE_INTERVAL_MS / 1000
     );
+}
+
+/// Build a single DNS-over-TLS (853) resolver spanning every well-known DoT endpoint in
+/// `DOT_SERVERS`, so hickory load-balances across Cloudflare/Quad9/Google and pools connections.
+/// No network I/O happens here (connections are lazy); returns `None` only if the static table is
+/// somehow unparseable.
+#[cfg_attr(coverage, allow(dead_code))]
+fn build_dot_resolver() -> Option<TokioResolver> {
+    let servers: Vec<NameServerConfig> = DOT_SERVERS
+        .iter()
+        .filter_map(|(ip, name)| {
+            ip.parse::<std::net::IpAddr>()
+                .ok()
+                .map(|addr| NameServerConfig::tls(addr, std::sync::Arc::from(*name)))
+        })
+        .collect();
+    if servers.is_empty() {
+        return None;
+    }
+    let config = ResolverConfig::from_parts(None, vec![], servers);
+    let mut opts = ResolverOpts::default();
+    // A generous inner timeout; each caller also bounds the lookup with an outer
+    // `tokio::time::timeout`. Whichever fires, the result is typed as a transport failure
+    // (NetError::Timeout or tokio Elapsed), never a false empty — see `direct_txt_outcome`.
+    opts.timeout = std::time::Duration::from_secs(6);
+    opts.attempts = 1;
+    opts.edns0 = true;
+    opts.use_hosts_file = ResolveHosts::Never;
+    opts.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .ok()
+}
+
+/// Run one TXT lookup and classify it for the shared per-transport breaker. `TransportFailed` means
+/// "no response within the outer budget" (a blocked/rate-limited transport); an authoritative empty
+/// is `Empty`, not a failure. Works for any transport's resolver (DoT or direct UDP/53).
+#[cfg(not(coverage))]
+async fn direct_txt_outcome(
+    resolver: &TokioResolver,
+    domain: &str,
+    outer_ms: u64,
+) -> DirectOutcome {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(outer_ms),
+        crate::http_client::with_connection_permit(resolver.txt_lookup(domain)),
+    )
+    .await
+    {
+        // Outer budget exceeded: no response — the blocked/rate-limited-transport symptom.
+        Err(_) => DirectOutcome::TransportFailed,
+        Ok(Ok(lookup)) => {
+            let records: Vec<String> = lookup
+                .answers()
+                .iter()
+                .map(|r| r.data.to_string())
+                .collect();
+            if records.is_empty() {
+                DirectOutcome::Empty
+            } else {
+                DirectOutcome::Answered(records)
+            }
+        }
+        Ok(Err(e)) => {
+            // Typed classification (NOT the error's Display): a DNS-level response proves the
+            // transport works → authoritative Empty; anything else is a real transport failure. See
+            // net_error_is_authoritative_negative for why Display-matching would be a bug here.
+            if net_error_is_authoritative_negative(&e) {
+                DirectOutcome::Empty
+            } else {
+                DirectOutcome::TransportFailed
+            }
+        }
+    }
+}
+
+/// CNAME analogue of `direct_txt_outcome`. An authoritative "no CNAME" (the common case) is `Empty`,
+/// never a transport failure — critical because `do53_health` is shared with TXT lookups.
+#[cfg(not(coverage))]
+async fn direct_cname_outcome(
+    resolver: &TokioResolver,
+    domain: &str,
+    outer_ms: u64,
+) -> DirectOutcome {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(outer_ms),
+        crate::http_client::with_connection_permit(
+            resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
+        ),
+    )
+    .await
+    {
+        Err(_) => DirectOutcome::TransportFailed,
+        Ok(Ok(lookup)) => {
+            use hickory_resolver::proto::rr::RData;
+            let records: Vec<String> = lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::CNAME(ref cname) => {
+                        Some(cname.to_string().trim_end_matches('.').to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if records.is_empty() {
+                DirectOutcome::Empty
+            } else {
+                DirectOutcome::Answered(records)
+            }
+        }
+        Ok(Err(e)) => {
+            // Typed classification (NOT the error's Display): a DNS-level response proves the
+            // transport works → authoritative Empty; anything else is a real transport failure. See
+            // net_error_is_authoritative_negative for why Display-matching would be a bug here.
+            if net_error_is_authoritative_negative(&e) {
+                DirectOutcome::Empty
+            } else {
+                DirectOutcome::TransportFailed
+            }
+        }
+    }
 }
 
 impl DnsServerPool {
@@ -316,10 +511,14 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(config.rate_limits.dns_queries_per_second),
+            dot_enabled: true,
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
-            doh_health: DohHealth::default(),
+            doh_health: TransportHealth::default(),
+            dot_health: TransportHealth::default(),
+            do53_health: TransportHealth::default(),
+            dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -407,10 +606,14 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(50), // matches config default_dns_queries_per_second
+            dot_enabled: true,
             max_dns_retries: 3,
             backoff_base_ms: 500,
             failure_counter: None,
-            doh_health: DohHealth::default(),
+            doh_health: TransportHealth::default(),
+            dot_health: TransportHealth::default(),
+            do53_health: TransportHealth::default(),
+            dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -515,10 +718,14 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(1000), // effectively unthrottled for tests
+            dot_enabled: false, // hermetic tests must not hit real DoT (853) servers
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
-            doh_health: DohHealth::default(),
+            doh_health: TransportHealth::default(),
+            dot_health: TransportHealth::default(),
+            do53_health: TransportHealth::default(),
+            dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -1081,11 +1288,11 @@ impl DnsServerPool {
         // letting a single 429 collapse into a false-negative empty. A surviving throttle
         // propagates as a DNS_THROTTLE error so the caller can count it.
         //
-        // DoH-availability gate: on a network that blocks DoH (or during a provider outage),
-        // `should_attempt_doh` returns false after DOH_DOWN_THRESHOLD consecutive DoH failures, so
-        // we skip the 3s DoH round-trip entirely and go straight to the rate-limited direct-DNS
-        // fallback — with a periodic re-probe that resumes DoH the moment it recovers.
-        if self.doh_health.should_attempt_doh() {
+        // Tier 1 — DoH (443): network-kind, multiplexed. Health-gated — on a DoH-blocking network (or
+        // provider outage) `should_attempt` returns false after TRANSPORT_DOWN_THRESHOLD consecutive
+        // failures, so we skip the 3s DoH round-trip and descend the encrypted-then-plain ladder
+        // below, re-probing DoH periodically to resume it the moment it recovers.
+        if self.doh_health.should_attempt() {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 self.doh_txt_lookup_resilient(domain),
@@ -1093,63 +1300,125 @@ impl DnsServerPool {
             .await
             {
                 // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
-                // no records) — is final: skip the traditional-DNS fallback entirely. On the
-                // high-volume subdomain fan-out this saves a UDP lookup per recordless name.
+                // no records) — is final: skip the fallback ladder entirely. On the high-volume
+                // subdomain fan-out this saves a lookup per recordless name.
                 Ok(Ok(records)) => {
                     self.doh_health.record_success();
                     return Ok(records);
                 }
-                // All providers failed (throttled or broken endpoint) — try DNS fallback, but if
-                // that also yields nothing, surface the failure rather than a silent empty.
+                // All providers failed (throttled or broken endpoint) — descend the ladder, but if
+                // it yields no authoritative result either, surface the failure rather than a silent
+                // empty. The throttle was already counted at `note_throttle`, so returning an
+                // authoritative empty a lower transport found does not undercount it.
                 Ok(Err(e))
                     if e.to_string().contains("DNS_THROTTLE")
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
                     if self.doh_health.record_failure() {
-                        warn_doh_unavailable();
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
                     }
-                    if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+                    if let Some(records) = self.laddered_direct(domain, RecordKind::Txt).await {
                         return Ok(records);
                     }
                     return Err(e);
                 }
                 _ => {
                     if self.doh_health.record_failure() {
-                        warn_doh_unavailable();
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
                     }
                 }
             }
         }
 
-        // Fallback to traditional DNS (single attempt, UDP only; rate-limited + connection-capped).
-        if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+        // Tiers 2 (DoT/853) then 3 (direct UDP/53), each health-gated — see `laddered_direct`.
+        if let Some(records) = self.laddered_direct(domain, RecordKind::Txt).await {
             return Ok(records);
         }
 
         Ok(vec![])
     }
 
-    // cfg(not(coverage)): performs live DNS lookup — requires network
+    // cfg(not(coverage)): performs live DNS lookups (DoT/853 then UDP/53) — requires network.
+    /// Tiers 2 (DoT) and 3 (direct UDP/53) of the resolution ladder, reached only when DoH has not
+    /// answered. Each transport is health-gated: a down transport is skipped; a transport failure
+    /// (never an authoritative empty) advances its breaker so a blocked/rate-limited path is
+    /// abandoned rather than hammered. Returns `Some` only for a non-empty answer; an authoritative
+    /// empty resets the transport's breaker but returns `None` so a DoH throttle still surfaces and
+    /// lower tiers still get a chance (mirrors the pre-ladder direct-fallback contract).
     #[cfg(not(coverage))]
-    async fn fast_dns_txt_fallback(&self, domain: &str) -> Option<Vec<String>> {
-        let dns_server = self.next_dns_server_opt()?;
-        if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
-            if let Ok(Ok(txt_lookup)) = tokio::time::timeout(
-                std::time::Duration::from_millis(2000),
-                crate::http_client::with_connection_permit(resolver.txt_lookup(domain)),
-            )
-            .await
+    async fn laddered_direct(&self, domain: &str, kind: RecordKind) -> Option<Vec<String>> {
+        // Tier 2 — DoT (853): encrypted, TCP-pooled. Tried before raw UDP/53 so a DoH-blocked
+        // network resolves over a low-conntrack-footprint transport.
+        if self.dot_enabled && self.dot_health.should_attempt() {
+            // Build the DoT resolver ONCE and reuse it, so hickory pools its :853 TLS connections
+            // across the whole outage instead of handshaking per lookup.
+            if let Some(resolver) = self
+                .dot_resolver
+                .get_or_init(|| async { build_dot_resolver() })
+                .await
             {
-                // 0.26: Lookup no longer exposes .iter() over RData — iterate the
-                // answer Records and render each record's RData (record.data()) to
-                // preserve the previous per-RData string output.
-                let records: Vec<String> = txt_lookup
-                    .answers()
-                    .iter()
-                    .map(|r| r.data.to_string())
-                    .collect();
-                if !records.is_empty() {
-                    return Some(records);
+                let outcome = match kind {
+                    RecordKind::Txt => direct_txt_outcome(resolver, domain, 4000).await,
+                    RecordKind::Cname => direct_cname_outcome(resolver, domain, 4000).await,
+                };
+                match outcome {
+                    DirectOutcome::Answered(records) => {
+                        self.dot_health.record_success();
+                        return Some(records);
+                    }
+                    DirectOutcome::Empty => {
+                        // Transport works (authoritative no-records) — reset the breaker but keep
+                        // descending: a lower transport can still report records, and a DoH throttle
+                        // keeps surfacing rather than being masked by an empty fallback.
+                        self.dot_health.record_success();
+                    }
+                    DirectOutcome::TransportFailed => {
+                        if self.dot_health.record_failure() {
+                            warn_transport_unavailable(
+                                "DoT (DNS-over-TLS, 853)",
+                                "falling back to direct DNS (UDP/53, rate-limited)",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Tier 3 — direct UDP/53: the flood-prone tier, health-gated so a router that blocks or
+        // rate-limits port 53 is skipped after TRANSPORT_DOWN_THRESHOLD consecutive timeouts instead
+        // of being hammered into a worse outage (the DNS-flood-protection collapse).
+        if self.do53_health.should_attempt() {
+            if let Some(server) = self.next_dns_server_opt() {
+                if let Ok(resolver) = self.create_dns_resolver(server, false) {
+                    let outcome = match kind {
+                        RecordKind::Txt => direct_txt_outcome(&resolver, domain, 2000).await,
+                        RecordKind::Cname => direct_cname_outcome(&resolver, domain, 2000).await,
+                    };
+                    match outcome {
+                        DirectOutcome::Answered(records) => {
+                            self.do53_health.record_success();
+                            return Some(records);
+                        }
+                        DirectOutcome::Empty => {
+                            // Authoritative no-records: reset the breaker, but return None (no
+                            // non-empty answer) so a DoH throttle still surfaces — matching the
+                            // pre-ladder direct-fallback contract.
+                            self.do53_health.record_success();
+                        }
+                        DirectOutcome::TransportFailed => {
+                            if self.do53_health.record_failure() {
+                                warn_transport_unavailable(
+                                    "Direct DNS (UDP/53)",
+                                    "no DNS transport currently reachable — some lookups may be unresolved",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1165,16 +1434,17 @@ impl DnsServerPool {
     #[cfg(not(coverage))]
     async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
         // fix 1: resilient CNAME lookup (rotate + backoff) instead of a single direct call.
-        // DoH-availability gate (shared with TXT via self.doh_health): skip DoH and use direct DNS
-        // when DoH is blocked/unavailable, re-probing periodically. See fast_txt_lookup.
-        if self.doh_health.should_attempt_doh() {
+        // Tier 1 — DoH (443), health-gated and shared with TXT via self.doh_health: skip DoH and
+        // descend the DoT→UDP/53 ladder when DoH is blocked/unavailable, re-probing periodically.
+        // See fast_txt_lookup.
+        if self.doh_health.should_attempt() {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 self.doh_cname_lookup_resilient(domain),
             )
             .await
             {
-                // Authoritative answer (including genuine no-CNAME) is final — skip fallback.
+                // Authoritative answer (including genuine no-CNAME) is final — skip the ladder.
                 Ok(Ok(records)) => {
                     self.doh_health.record_success();
                     return Ok(records);
@@ -1184,61 +1454,33 @@ impl DnsServerPool {
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
                     if self.doh_health.record_failure() {
-                        warn_doh_unavailable();
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
                     }
-                    if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+                    if let Some(records) = self.laddered_direct(domain, RecordKind::Cname).await {
                         return Ok(records);
                     }
                     return Err(e);
                 }
                 _ => {
                     if self.doh_health.record_failure() {
-                        warn_doh_unavailable();
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
                     }
                 }
             }
         }
 
-        // Fallback to traditional DNS (rate-limited + connection-capped).
-        if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+        // Tiers 2 (DoT/853) then 3 (direct UDP/53), each health-gated — see `laddered_direct`.
+        if let Some(records) = self.laddered_direct(domain, RecordKind::Cname).await {
             return Ok(records);
         }
 
         Ok(vec![])
-    }
-
-    // cfg(not(coverage)): performs live DNS lookup — requires network
-    #[cfg(not(coverage))]
-    async fn fast_dns_cname_fallback(&self, domain: &str) -> Option<Vec<String>> {
-        let dns_server = self.next_dns_server_opt()?;
-        if let Ok(resolver) = self.create_dns_resolver(dns_server, false) {
-            if let Ok(Ok(lookup)) = tokio::time::timeout(
-                std::time::Duration::from_millis(2000),
-                crate::http_client::with_connection_permit(
-                    resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
-                ),
-            )
-            .await
-            {
-                use hickory_resolver::proto::rr::RData;
-                // 0.26: Lookup::record_iter() is gone — iterate answers() (&[Record])
-                // and match on each record's RData via record.data().
-                let records: Vec<String> = lookup
-                    .answers()
-                    .iter()
-                    .filter_map(|r| match &r.data {
-                        RData::CNAME(ref cname) => {
-                            Some(cname.to_string().trim_end_matches('.').to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if !records.is_empty() {
-                    return Some(records);
-                }
-            }
-        }
-        None
     }
 
     #[cfg(coverage)]
@@ -2425,24 +2667,24 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    // ── DoH-availability gate (DohHealth) ──────────────────────────────────────
+    // ── Per-transport circuit breaker (TransportHealth) + transport ladder ───────────
 
     #[test]
     fn doh_health_attempts_doh_while_healthy() {
-        let h = DohHealth::default();
-        assert!(h.should_attempt_doh(), "fresh state attempts DoH");
+        let h = TransportHealth::default();
+        assert!(h.should_attempt(), "fresh state attempts DoH");
         // A few failures below the threshold do NOT flip it, and none returns the warn-once true.
-        for _ in 0..(DOH_DOWN_THRESHOLD - 1) {
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD - 1) {
             assert!(!h.record_failure(), "no warn before the threshold");
-            assert!(h.should_attempt_doh(), "still healthy below threshold");
+            assert!(h.should_attempt(), "still healthy below threshold");
         }
     }
 
     #[test]
     fn doh_health_marks_down_at_threshold_and_warns_once() {
-        let h = DohHealth::default();
+        let h = TransportHealth::default();
         let mut warned = 0;
-        for _ in 0..DOH_DOWN_THRESHOLD {
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
             if h.record_failure() {
                 warned += 1;
             }
@@ -2451,34 +2693,110 @@ mod tests {
         // Now down: further failures never re-warn, and DoH is skipped (reprobe is in the future).
         assert!(!h.record_failure(), "no repeat warn once down");
         assert!(
-            !h.should_attempt_doh(),
+            !h.should_attempt(),
             "DoH skipped while down and not yet re-probe time"
         );
     }
 
     #[test]
     fn doh_health_success_resets_to_healthy() {
-        let h = DohHealth::default();
-        for _ in 0..DOH_DOWN_THRESHOLD {
+        let h = TransportHealth::default();
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
             h.record_failure();
         }
-        assert!(!h.should_attempt_doh(), "down before success");
+        assert!(!h.should_attempt(), "down before success");
         h.record_success();
-        assert!(h.should_attempt_doh(), "success clears the streak → DoH resumes");
+        assert!(
+            h.should_attempt(),
+            "success clears the streak -> DoH resumes"
+        );
     }
 
     #[test]
     fn doh_health_reprobe_admits_exactly_one() {
-        let h = DohHealth::default();
-        for _ in 0..DOH_DOWN_THRESHOLD {
+        let h = TransportHealth::default();
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
             h.record_failure();
         }
         // Force the re-probe clock into the past: one lookup may probe DoH, the next may not.
         h.reprobe_after_ms.store(0, Ordering::Relaxed);
-        assert!(h.should_attempt_doh(), "one re-probe is admitted when due");
+        assert!(h.should_attempt(), "one re-probe is admitted when due");
         assert!(
-            !h.should_attempt_doh(),
+            !h.should_attempt(),
             "the next lookup is denied until the interval elapses again"
+        );
+    }
+
+    #[test]
+    fn transport_health_empty_answers_never_trip_the_breaker() {
+        // The ladder calls record_success() on an authoritative Empty (the NORM for CNAME) and
+        // record_failure() ONLY on a real transport failure. So any number of consecutive empties
+        // must leave the transport healthy — otherwise the shared do53_health would false-trip on
+        // empty-CNAME scanning and wrongly disable direct DNS for TXT too.
+        let h = TransportHealth::default();
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD * 3) {
+            h.record_success();
+            assert!(
+                h.should_attempt(),
+                "an authoritative empty keeps the transport healthy"
+            );
+        }
+    }
+
+    #[test]
+    fn net_error_classifier_separates_authoritative_negatives_from_transport_failures() {
+        use hickory_resolver::proto::op::ResponseCode;
+        // A DNS-level response (the server spoke DNS) is an authoritative negative — the transport
+        // WORKS → Empty. This is the exact case a Display-string classifier gets WRONG: hickory
+        // renders the error with the queried name embedded, so `mtls.example.com` (or
+        // `connection.foo.com`, `certificate.bar.com`) would false-match a substring and be counted
+        // as a transport failure, false-tripping the shared breaker on an authoritative empty.
+        assert!(net_error_is_authoritative_negative(&NetError::Dns(
+            hickory_resolver::net::DnsError::ResponseCode(ResponseCode::NXDomain)
+        )));
+        // Genuine transport-level failures → NOT authoritative negatives; these advance the breaker.
+        assert!(!net_error_is_authoritative_negative(&NetError::Timeout));
+        assert!(!net_error_is_authoritative_negative(
+            &NetError::NoConnections
+        ));
+        assert!(!net_error_is_authoritative_negative(&NetError::Busy));
+    }
+
+    #[test]
+    fn dot_server_table_is_the_well_known_trio() {
+        assert_eq!(DOT_SERVERS.len(), 3, "Cloudflare + Quad9 + Google");
+        for (ip, name) in DOT_SERVERS {
+            assert!(
+                ip.parse::<std::net::IpAddr>().is_ok(),
+                "{ip} parses as an IP"
+            );
+            assert!(name.contains('.'), "{name} is a TLS server name");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_dot_resolver_is_constructible() {
+        // No network I/O at build time — asserts only that the DoT resolver constructs over the
+        // static 853 endpoints (feature `tls-ring` present, addresses parse, TLS names attach).
+        assert!(
+            build_dot_resolver().is_some(),
+            "DoT resolver builds over DOT_SERVERS"
+        );
+    }
+
+    // Live DoT (853) probe — real network; excluded from CI (no network) and from coverage (the
+    // outcome helper is cfg(not(coverage))). Run locally with `--ignored` to prove the transport
+    // actually resolves end-to-end.
+    #[cfg(not(coverage))]
+    #[tokio::test]
+    #[ignore = "live network: requires outbound DNS-over-TLS on 853"]
+    async fn dot_resolver_resolves_a_known_txt_live() {
+        let resolver = build_dot_resolver().expect("DoT resolver builds");
+        // cloudflare.com reliably publishes TXT records; resolve them over DoT and require >=1.
+        let outcome = direct_txt_outcome(&resolver, "cloudflare.com", 6000).await;
+        assert!(
+            matches!(outcome, DirectOutcome::Answered(ref r) if !r.is_empty()),
+            "DoT (853) should resolve cloudflare.com TXT to at least one record"
         );
     }
 

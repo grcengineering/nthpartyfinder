@@ -40,8 +40,10 @@ indicatif = { version = "0.18", features = ["tokio"] }
 urlencoding = "2.1"
 ctrlc = "3.4"
 colored = "3"
-# DNS over HTTPS support
-hickory-resolver = { version = "0.26", features = ["https-ring"] }
+# DNS over HTTPS + DNS over TLS support. `tls-ring` (DoT/853) reuses the exact rustls/ring/webpki
+# stack `https-ring` already pulls in — zero additional crates — and lets the fallback ladder degrade
+# to an encrypted, connection-pooled transport before raw UDP/53 (network-footprint-first ordering).
+hickory-resolver = { version = "0.26", features = ["https-ring", "tls-ring", "webpki-roots"] }
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis
