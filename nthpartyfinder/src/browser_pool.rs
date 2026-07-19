@@ -227,6 +227,76 @@ fn looks_like_chrome(process_name: &str) -> bool {
     name.contains("chrom") || name.contains("headless")
 }
 
+/// The prefix `headless_chrome` gives every temp profile directory it creates (baked into Chrome's
+/// own `--user-data-dir=` argument by the crate — `tempfile::Builder::new().prefix(..)` in
+/// `headless_chrome::browser::process`). This, not the process name alone, is what safely
+/// identifies a Chrome process as ours: `looks_like_chrome` matches "chrome"/"headless" far too
+/// broadly to system-sweep on (it would equally match the user's own real browser, or any other
+/// automation tool's headless Chrome).
+const CHROME_PROFILE_SIGNATURE: &str = "rust-headless-chrome-profile";
+
+/// True when a system process's command line marks it as a Chrome instance this scanner's crate
+/// launched (carries our profile-dir signature) AND it has no living parent — i.e. it was orphaned
+/// by a scanner process that exited without cleanly killing it (a hard `kill -9`, a crash that
+/// bypassed the panic hook, or any exit this codebase cannot itself intercept). Pure predicate over
+/// already-fetched process facts, so it is unit-testable without touching the real process table.
+fn is_orphaned_chrome_of_ours(cmd_joined: &str, has_live_parent: bool) -> bool {
+    !has_live_parent && cmd_joined.contains(CHROME_PROFILE_SIGNATURE)
+}
+
+/// Sweep the WHOLE system process table (not just this run's own registry) for Chrome instances
+/// orphaned by a *previous* nthpartyfinder invocation that exited hard enough to skip every
+/// in-process reap path (`shutdown()`, the Ctrl-C handler, the panic hook — all of which only know
+/// about PIDs *this* run itself launched). A `kill -9` of a prior scan, or a crash before any of
+/// those handlers could run, leaves such an orphan reparented to PID 1 (macOS/Linux) forever
+/// holding its sockets — exactly the failure mode `scripts/safe-scan.sh`'s pre-scan sweep used to
+/// close from outside the binary. Call once at startup, before any new Chrome is launched, so a
+/// prior hard-killed run's leftovers cannot compound with this run's own footprint.
+///
+/// Unix only (PID-1 reparenting is a POSIX process-model concept); a no-op elsewhere. Returns the
+/// number of orphans killed, purely so the caller can log it — never treated as an error.
+#[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))] // coverage: scans and kills real OS processes; the decision logic is unit-tested via is_orphaned_chrome_of_ours
+pub fn sweep_orphaned_chrome() -> usize {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        false,
+        ProcessRefreshKind::everything(),
+    );
+
+    let init = Pid::from_u32(1);
+    let mut killed = 0usize;
+    for process in system.processes().values() {
+        if !looks_like_chrome(&process.name().to_string_lossy()) {
+            continue;
+        }
+        let cmd_joined = process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // A dead/absent parent is also an orphan (the more common signal on Linux containers,
+        // where a reparented child may land on PID 1 OR simply have no resolvable parent).
+        let has_live_parent = process
+            .parent()
+            .is_some_and(|ppid| ppid != init && system.process(ppid).is_some());
+        if is_orphaned_chrome_of_ours(&cmd_joined, has_live_parent) {
+            process.kill();
+            killed += 1;
+        }
+    }
+    killed
+}
+
+#[cfg(not(unix))]
+pub fn sweep_orphaned_chrome() -> usize {
+    0
+}
+
 /// Take and clear the set of registered Chrome PIDs. Pure so the drain semantics are testable
 /// without touching the process table.
 fn drain_pids(pids: &mut std::collections::HashSet<u32>) -> Vec<u32> {
@@ -240,8 +310,8 @@ fn drain_pids(pids: &mut std::collections::HashSet<u32>) -> Vec<u32> {
 ///
 /// Only the *main* browser process PID is tracked (that is all `headless_chrome` exposes). Killing
 /// it severs the CDP/IPC pipe its renderer and GPU helpers depend on, so they exit on their own
-/// shortly after; `scripts/safe-scan.sh` sweeps any straggler that outlives its parent as a
-/// backstop.
+/// shortly after; [`sweep_orphaned_chrome`] (run at the start of every new scan) sweeps any
+/// straggler that outlives its parent as a backstop.
 // coverage(off): queries and kills real OS processes; the decision logic is tested via
 // looks_like_chrome and drain_pids.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -281,8 +351,9 @@ fn reap_registered_chrome() {
 /// launched PID, idle *and* in-flight, is in the registry, so a PID-only reap covers them all —
 /// and it takes the registry lock with `try_lock`: if that lock were somehow held (a future edit
 /// that panics inside a `lock_pids()` section), it skips rather than hangs. A poisoned-but-free
-/// lock is still drained. Temp profile dirs are left for `scripts/safe-scan.sh` to sweep; a hung
-/// network beats a clean `/tmp`.
+/// lock is still drained. A `kill -9` never runs the killed process's own destructors either, so
+/// its temp profile dir is left on disk regardless of which reap path fires — nothing sweeps
+/// directory contents, only processes; a hung network beats a clean `/tmp`.
 // coverage(off): only invoked from the panic hook under `panic = "abort"`; unreachable from a unit
 // test without aborting the process. Verified empirically.
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -944,6 +1015,35 @@ mod tests {
                 "{name} must not be mistaken for Chrome"
             );
         }
+    }
+
+    /// The startup orphan sweep must ONLY ever match a process that both (a) carries our exact
+    /// profile-dir signature — never just "looks like Chrome" by name, which would equally match
+    /// the operator's own real browser or another tool's headless Chrome — AND (b) has no living
+    /// parent. Either condition failing must refuse the match.
+    #[test]
+    fn test_is_orphaned_chrome_of_ours_requires_signature_and_no_parent() {
+        let our_cmdline = "/usr/bin/chrome --headless --user-data-dir=/tmp/rust-headless-chrome-profileAB12cd --remote-debugging-port=9222";
+        assert!(
+            is_orphaned_chrome_of_ours(our_cmdline, false),
+            "our signature + no living parent = a genuine orphan to reap"
+        );
+        assert!(
+            !is_orphaned_chrome_of_ours(our_cmdline, true),
+            "our signature but a LIVE parent means a concurrent scan (or this run itself) still owns it — must not kill"
+        );
+        let real_browser_cmdline =
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --profile-directory=Default";
+        assert!(
+            !is_orphaned_chrome_of_ours(real_browser_cmdline, false),
+            "the operator's own real Chrome must never match, even if it happens to have no living parent"
+        );
+        let other_tool_cmdline =
+            "/usr/bin/chrome --headless --user-data-dir=/tmp/puppeteer_dev_chrome_profile-xyz";
+        assert!(
+            !is_orphaned_chrome_of_ours(other_tool_cmdline, false),
+            "another automation tool's headless Chrome (different profile-dir convention) must not match"
+        );
     }
 
     /// Draining takes every PID and leaves the set empty, so a second reap is a no-op and no PID

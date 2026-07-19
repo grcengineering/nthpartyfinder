@@ -907,10 +907,10 @@ async fn run_review(action: &ReviewCommands) -> Result<()> {
 ///
 /// A deep scan's main process holds many descriptors at once — up to the connection ceiling of
 /// in-flight gated HTTP sends, one CDP socket per pooled browser, a stdout pipe per in-flight
-/// subfinder, plus result/log/cache files and DoH sockets. Run outside `scripts/safe-scan.sh`
-/// (which sets `ulimit -n 512`), the process inherits the OS default soft limit — 256 on macOS —
-/// and a deep recursion crosses it mid-scan, after which every new socket fails with EMFILE ("too
-/// many open files"): subfinder can't spawn and DNS can't open a DoH connection (whose failure is
+/// subfinder, plus result/log/cache files and DoH sockets. Without this raise the process inherits
+/// the OS default soft limit — 256 on macOS — and a deep recursion crosses it mid-scan, after which
+/// every new socket fails with EMFILE ("too many open files"): subfinder can't spawn and DNS can't
+/// open a DoH connection (whose failure is
 /// then miscounted as a provider throttle, inflating the "DNS Failures" total). Conntrack safety
 /// is provided separately (the connection ceiling + browser/subfinder concurrency caps), so this
 /// limit is not itself a safety bound — it only needs to be high enough that a legitimate deep
@@ -993,8 +993,26 @@ fn raise_open_file_limit() {}
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // Raise the open-file-descriptor soft limit before any socket is opened, so a deep scan run as
-    // the raw binary (no safe-scan.sh wrapper) cannot hit macOS's default 256 cap and EMFILE.
+    // the raw binary cannot hit macOS's default 256 cap and EMFILE.
     raise_open_file_limit();
+
+    // Sweep orphans left by a PRIOR nthpartyfinder invocation that exited hard enough to bypass
+    // every in-process reap path this run's own shutdown/Ctrl-C/panic handlers provide (a `kill -9`
+    // of that earlier process, or a crash before it could run them) — those handlers only ever know
+    // about PIDs *that* run itself launched, never a predecessor's leftovers. Run before any new
+    // Chrome/subfinder is spawned so a hard-killed prior run's footprint cannot compound with this
+    // scan's own. This is the one safety mechanism the retired `scripts/safe-scan.sh` wrapper
+    // provided that nothing else in the binary replaced; it now lives here instead.
+    let swept_chrome = crate::browser_pool::sweep_orphaned_chrome();
+    let swept_subfinder = crate::discovery::subfinder::sweep_orphaned_subfinder();
+    if swept_chrome > 0 || swept_subfinder > 0 {
+        // The `AnalysisLogger` is not constructed yet at this point in startup (it needs resolved
+        // args this function has not parsed), so this uses `tracing` directly — the same reason
+        // `raise_open_file_limit` above does.
+        tracing::info!(
+            "Startup sweep: cleared {swept_chrome} orphaned Chrome + {swept_subfinder} orphaned subfinder process(es) left by a previous run"
+        );
+    }
 
     // Install the global connection ceiling before any discovery opens a socket, so the whole scan
     // — every method, at every depth — shares one bound on the peak number of simultaneously-open
