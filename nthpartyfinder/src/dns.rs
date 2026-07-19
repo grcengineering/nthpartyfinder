@@ -17,7 +17,7 @@ use regex::Regex;
 #[cfg(not(coverage))]
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 #[cfg(not(coverage))]
 use tracing::{debug, info, warn};
 
@@ -149,6 +149,11 @@ pub struct DnsServerPool {
     /// that don't opt in. This is the authoritative source of truth for throttle visibility;
     /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
     failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// DoH availability tracker — flips this pool to direct-DNS-primary when DoH looks blocked or
+    /// unavailable, and re-probes DoH periodically to resume it on recovery. Shared across TXT and
+    /// CNAME lookups so one detection covers the whole scan.
+    #[cfg_attr(coverage, allow(dead_code))]
+    doh_health: DohHealth,
     /// Per-provider failure-log counts backing `log_doh_failure`'s warn-once-then-debug
     /// behavior. Mutex (not atomics) because failures are rare and the critical section
     /// is a HashMap bump with no await inside.
@@ -178,6 +183,97 @@ pub struct DnsServerPool {
 pub(crate) enum RecordKind {
     Txt,
     Cname,
+}
+
+/// Consecutive DoH failures before DoH is treated as unavailable (a DoH-blocking network, or a
+/// provider outage). High enough that a transient throttle/timeout won't trip it; low enough that a
+/// genuinely DoH-blocked network stops paying a per-lookup DoH timeout quickly.
+#[cfg_attr(coverage, allow(dead_code))]
+const DOH_DOWN_THRESHOLD: u32 = 8;
+/// While DoH is marked down, permit one re-probe this often to detect recovery.
+#[cfg_attr(coverage, allow(dead_code))]
+const DOH_REPROBE_INTERVAL_MS: u64 = 30_000;
+
+/// Milliseconds since the Unix epoch (best-effort; 0 if the clock is before the epoch).
+#[cfg_attr(coverage, allow(dead_code))]
+fn now_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Tracks whether DoH looks usable so a DoH-blocked network (or provider outage) doesn't cost a
+/// full DoH timeout on EVERY lookup before falling back to direct DNS.
+///
+/// When DoH is healthy this is two atomic loads and changes nothing. After `DOH_DOWN_THRESHOLD`
+/// consecutive DoH failures it flips to "skip DoH, go straight to the rate-limited direct-DNS
+/// fallback"; a single re-probe every `DOH_REPROBE_INTERVAL_MS` resumes DoH the instant it
+/// recovers. This is the "compensate when DoH is unavailable" half of keeping direct DNS as a
+/// fallback: the direct path stays available for DoH-blocking networks, but a blocked network no
+/// longer wastes a 3s DoH round-trip on every one of thousands of lookups.
+#[cfg_attr(coverage, allow(dead_code))]
+#[derive(Debug, Default)]
+struct DohHealth {
+    consecutive_failures: AtomicU32,
+    /// Unix-epoch millis after which one DoH re-probe is permitted while DoH is marked down.
+    reprobe_after_ms: AtomicU64,
+}
+
+#[cfg_attr(coverage, allow(dead_code))]
+impl DohHealth {
+    /// Attempt DoH for this lookup? True when DoH is healthy, or — when marked down — for the single
+    /// lookup that wins the periodic re-probe (the CAS ensures exactly one concurrent probe; the
+    /// rest go straight to direct DNS).
+    fn should_attempt_doh(&self) -> bool {
+        if self.consecutive_failures.load(Ordering::Relaxed) < DOH_DOWN_THRESHOLD {
+            return true;
+        }
+        let now = now_epoch_millis();
+        let due = self.reprobe_after_ms.load(Ordering::Relaxed);
+        now >= due
+            && self
+                .reprobe_after_ms
+                .compare_exchange(
+                    due,
+                    now + DOH_REPROBE_INTERVAL_MS,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+    }
+
+    /// DoH answered (any authoritative result, including empty) — it works. Clear the failure streak.
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+    }
+
+    /// DoH failed (throttle/endpoint/timeout). Advance the streak; returns true exactly once, on the
+    /// transition into "down", so the caller warns a single time per outage.
+    fn record_failure(&self) -> bool {
+        let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == DOH_DOWN_THRESHOLD {
+            self.reprobe_after_ms.store(
+                now_epoch_millis() + DOH_REPROBE_INTERVAL_MS,
+                Ordering::Relaxed,
+            );
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// One-line, once-per-outage notice that DoH is unavailable and direct DNS is carrying the scan.
+#[cfg_attr(coverage, allow(dead_code))]
+fn warn_doh_unavailable() {
+    tracing::warn!(
+        "DoH appears blocked or unavailable after {} consecutive failures — falling back to direct \
+         DNS (UDP/53, rate-limited). Results are unaffected; deep scans may be slower. DoH is \
+         re-probed every {}s and resumes automatically when it recovers.",
+        DOH_DOWN_THRESHOLD,
+        DOH_REPROBE_INTERVAL_MS / 1000
+    );
 }
 
 impl DnsServerPool {
@@ -223,6 +319,7 @@ impl DnsServerPool {
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
+            doh_health: DohHealth::default(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -313,6 +410,7 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 500,
             failure_counter: None,
+            doh_health: DohHealth::default(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -420,6 +518,7 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
+            doh_health: DohHealth::default(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -981,31 +1080,48 @@ impl DnsServerPool {
         // fix 1: resilient lookup rotates/backs off past a throttling provider instead of
         // letting a single 429 collapse into a false-negative empty. A surviving throttle
         // propagates as a DNS_THROTTLE error so the caller can count it.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            self.doh_txt_lookup_resilient(domain),
-        )
-        .await
-        {
-            // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
-            // no records) — is final: skip the traditional-DNS fallback entirely. On the
-            // high-volume subdomain fan-out this saves a UDP lookup per recordless name.
-            Ok(Ok(records)) => return Ok(records),
-            // All providers failed (throttled or broken endpoint) — try DNS fallback, but if
-            // that also yields nothing, surface the failure rather than a silent empty.
-            Ok(Err(e))
-                if e.to_string().contains("DNS_THROTTLE")
-                    || e.to_string().contains("DNS_ENDPOINT") =>
+        //
+        // DoH-availability gate: on a network that blocks DoH (or during a provider outage),
+        // `should_attempt_doh` returns false after DOH_DOWN_THRESHOLD consecutive DoH failures, so
+        // we skip the 3s DoH round-trip entirely and go straight to the rate-limited direct-DNS
+        // fallback — with a periodic re-probe that resumes DoH the moment it recovers.
+        if self.doh_health.should_attempt_doh() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.doh_txt_lookup_resilient(domain),
+            )
+            .await
             {
-                if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+                // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
+                // no records) — is final: skip the traditional-DNS fallback entirely. On the
+                // high-volume subdomain fan-out this saves a UDP lookup per recordless name.
+                Ok(Ok(records)) => {
+                    self.doh_health.record_success();
                     return Ok(records);
                 }
-                return Err(e);
+                // All providers failed (throttled or broken endpoint) — try DNS fallback, but if
+                // that also yields nothing, surface the failure rather than a silent empty.
+                Ok(Err(e))
+                    if e.to_string().contains("DNS_THROTTLE")
+                        || e.to_string().contains("DNS_ENDPOINT") =>
+                {
+                    if self.doh_health.record_failure() {
+                        warn_doh_unavailable();
+                    }
+                    if let Some(records) = self.fast_dns_txt_fallback(domain).await {
+                        return Ok(records);
+                    }
+                    return Err(e);
+                }
+                _ => {
+                    if self.doh_health.record_failure() {
+                        warn_doh_unavailable();
+                    }
+                }
             }
-            _ => {}
         }
 
-        // Fallback to traditional DNS (single attempt, UDP only)
+        // Fallback to traditional DNS (single attempt, UDP only; rate-limited + connection-capped).
         if let Some(records) = self.fast_dns_txt_fallback(domain).await {
             return Ok(records);
         }
@@ -1049,27 +1165,41 @@ impl DnsServerPool {
     #[cfg(not(coverage))]
     async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
         // fix 1: resilient CNAME lookup (rotate + backoff) instead of a single direct call.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            self.doh_cname_lookup_resilient(domain),
-        )
-        .await
-        {
-            // Authoritative answer (including genuine no-CNAME) is final — skip fallback.
-            Ok(Ok(records)) => return Ok(records),
-            Ok(Err(e))
-                if e.to_string().contains("DNS_THROTTLE")
-                    || e.to_string().contains("DNS_ENDPOINT") =>
+        // DoH-availability gate (shared with TXT via self.doh_health): skip DoH and use direct DNS
+        // when DoH is blocked/unavailable, re-probing periodically. See fast_txt_lookup.
+        if self.doh_health.should_attempt_doh() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.doh_cname_lookup_resilient(domain),
+            )
+            .await
             {
-                if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+                // Authoritative answer (including genuine no-CNAME) is final — skip fallback.
+                Ok(Ok(records)) => {
+                    self.doh_health.record_success();
                     return Ok(records);
                 }
-                return Err(e);
+                Ok(Err(e))
+                    if e.to_string().contains("DNS_THROTTLE")
+                        || e.to_string().contains("DNS_ENDPOINT") =>
+                {
+                    if self.doh_health.record_failure() {
+                        warn_doh_unavailable();
+                    }
+                    if let Some(records) = self.fast_dns_cname_fallback(domain).await {
+                        return Ok(records);
+                    }
+                    return Err(e);
+                }
+                _ => {
+                    if self.doh_health.record_failure() {
+                        warn_doh_unavailable();
+                    }
+                }
             }
-            _ => {}
         }
 
-        // Fallback to traditional DNS
+        // Fallback to traditional DNS (rate-limited + connection-capped).
         if let Some(records) = self.fast_dns_cname_fallback(domain).await {
             return Ok(records);
         }
@@ -2294,6 +2424,63 @@ pub(crate) fn hickory_resolvable(domain: &str) -> bool {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    // ── DoH-availability gate (DohHealth) ──────────────────────────────────────
+
+    #[test]
+    fn doh_health_attempts_doh_while_healthy() {
+        let h = DohHealth::default();
+        assert!(h.should_attempt_doh(), "fresh state attempts DoH");
+        // A few failures below the threshold do NOT flip it, and none returns the warn-once true.
+        for _ in 0..(DOH_DOWN_THRESHOLD - 1) {
+            assert!(!h.record_failure(), "no warn before the threshold");
+            assert!(h.should_attempt_doh(), "still healthy below threshold");
+        }
+    }
+
+    #[test]
+    fn doh_health_marks_down_at_threshold_and_warns_once() {
+        let h = DohHealth::default();
+        let mut warned = 0;
+        for _ in 0..DOH_DOWN_THRESHOLD {
+            if h.record_failure() {
+                warned += 1;
+            }
+        }
+        assert_eq!(warned, 1, "warns exactly once, on the transition into down");
+        // Now down: further failures never re-warn, and DoH is skipped (reprobe is in the future).
+        assert!(!h.record_failure(), "no repeat warn once down");
+        assert!(
+            !h.should_attempt_doh(),
+            "DoH skipped while down and not yet re-probe time"
+        );
+    }
+
+    #[test]
+    fn doh_health_success_resets_to_healthy() {
+        let h = DohHealth::default();
+        for _ in 0..DOH_DOWN_THRESHOLD {
+            h.record_failure();
+        }
+        assert!(!h.should_attempt_doh(), "down before success");
+        h.record_success();
+        assert!(h.should_attempt_doh(), "success clears the streak → DoH resumes");
+    }
+
+    #[test]
+    fn doh_health_reprobe_admits_exactly_one() {
+        let h = DohHealth::default();
+        for _ in 0..DOH_DOWN_THRESHOLD {
+            h.record_failure();
+        }
+        // Force the re-probe clock into the past: one lookup may probe DoH, the next may not.
+        h.reprobe_after_ms.store(0, Ordering::Relaxed);
+        assert!(h.should_attempt_doh(), "one re-probe is admitted when due");
+        assert!(
+            !h.should_attempt_doh(),
+            "the next lookup is denied until the interval elapses again"
+        );
+    }
 
     #[test]
     fn test_is_local_resource_error_typed_and_text() {
