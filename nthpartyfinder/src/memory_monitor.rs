@@ -9,15 +9,33 @@ use std::sync::Arc;
 use sysinfo::System;
 
 /// Memory pressure levels with corresponding throttle actions.
+///
+/// Keyed on *available* memory as a fraction of total — NOT machine-wide used/total. A box whose
+/// baseline sits ~80% used from unrelated workloads (e.g. this 64 GB Mac, which idled at 51/64 GB
+/// with 41 GB still available) stays Normal, while genuine exhaustion drives the available
+/// fraction toward zero and trips Warning then Critical. `available_memory` is the true exhaustion
+/// signal on both macOS (Apple's AVAILABLE_NON_COMPRESSED) and Windows (ullAvailPhys), so this
+/// still protects the original Windows-BSOD scenario. Asymmetric enter/exit thresholds (a Schmitt
+/// trigger) debounce the level so it cannot chatter warn→relieve→warn while hovering at a boundary.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PressureLevel {
-    /// < 80% used: no throttling
+    /// Available memory ample (≥ ~17% of total): no pacing.
     Normal,
-    /// 80-92% used: reduce concurrency by half
+    /// Available memory low (< ~15% of total): pace new admissions.
     Warning,
-    /// > 92% used: reduce concurrency to 1
+    /// Available memory critically low (< ~8% of total): pace hard.
     Critical,
 }
+
+// Enter thresholds are stricter (lower) than exit thresholds so a level latches until memory has
+// clearly recovered — this hysteresis is what kills the warn/relieve chatter. Percentage-only (no
+// absolute-byte floor): an absolute floor like "< 4 GB" would false-fire on small machines where
+// a few GB free is a healthy majority of RAM, whereas the fraction is correct at every machine
+// size and still reaches zero under genuine exhaustion.
+const WARN_ENTER_PCT: f64 = 15.0;
+const WARN_EXIT_PCT: f64 = 17.0;
+const CRIT_ENTER_PCT: f64 = 8.0;
+const CRIT_EXIT_PCT: f64 = 10.0;
 
 /// Monitors system memory and provides throttled concurrency values.
 pub struct MemoryMonitor {
@@ -26,9 +44,8 @@ pub struct MemoryMonitor {
     base_concurrency: usize,
     /// Current effective concurrency after throttling
     effective_concurrency: Arc<AtomicUsize>,
-    /// Threshold percentages
-    warning_threshold: f64,
-    critical_threshold: f64,
+    /// Last reported level, threaded through `next_level` so de-escalation is hysteretic.
+    current_level: PressureLevel,
 }
 
 impl MemoryMonitor {
@@ -42,8 +59,7 @@ impl MemoryMonitor {
             system,
             base_concurrency,
             effective_concurrency: effective,
-            warning_threshold: 80.0,
-            critical_threshold: 92.0,
+            current_level: PressureLevel::Normal,
         }
     }
 
@@ -53,48 +69,71 @@ impl MemoryMonitor {
         self.system.refresh_memory();
 
         let total = self.system.total_memory();
-        let used = self.system.used_memory();
+        let available = self.system.available_memory();
 
-        let (level, new_concurrency) = Self::compute_pressure(
-            total,
-            used,
-            self.base_concurrency,
-            self.warning_threshold,
-            self.critical_threshold,
-        );
+        let level = Self::next_level(self.current_level, total, available);
+        self.current_level = level;
+        let new_concurrency = Self::throttle_for(level, self.base_concurrency);
 
         self.effective_concurrency
             .store(new_concurrency, Ordering::Relaxed);
         (level, new_concurrency)
     }
 
-    fn compute_pressure(
-        total: u64,
-        used: u64,
-        base_concurrency: usize,
-        warning_threshold: f64,
-        critical_threshold: f64,
-    ) -> (PressureLevel, usize) {
+    /// Pure pressure-level transition from the current level and the latest memory reading.
+    /// Available-fraction based, with asymmetric enter/exit bands for hysteresis: escalation is
+    /// immediate; de-escalation waits until the available fraction has clearly recovered.
+    fn next_level(current: PressureLevel, total: u64, available: u64) -> PressureLevel {
         if total == 0 {
-            return (PressureLevel::Normal, base_concurrency);
+            return PressureLevel::Normal;
         }
 
-        let usage_pct = (used as f64 / total as f64) * 100.0;
-        let level = if usage_pct >= critical_threshold {
-            PressureLevel::Critical
-        } else if usage_pct >= warning_threshold {
-            PressureLevel::Warning
-        } else {
-            PressureLevel::Normal
-        };
+        let available_pct = (available as f64 / total as f64) * 100.0;
+        let crit_enter = available_pct < CRIT_ENTER_PCT;
+        let warn_enter = available_pct < WARN_ENTER_PCT;
+        let above_crit_exit = available_pct >= CRIT_EXIT_PCT;
+        let above_warn_exit = available_pct >= WARN_EXIT_PCT;
 
-        let new_concurrency = match level {
+        match current {
+            PressureLevel::Normal => {
+                if crit_enter {
+                    PressureLevel::Critical
+                } else if warn_enter {
+                    PressureLevel::Warning
+                } else {
+                    PressureLevel::Normal
+                }
+            }
+            PressureLevel::Warning => {
+                if crit_enter {
+                    PressureLevel::Critical
+                } else if above_warn_exit {
+                    PressureLevel::Normal
+                } else {
+                    // Latched: don't drop back to Normal until clearly above the exit band.
+                    PressureLevel::Warning
+                }
+            }
+            PressureLevel::Critical => {
+                if !above_crit_exit {
+                    PressureLevel::Critical
+                } else if above_warn_exit {
+                    PressureLevel::Normal
+                } else {
+                    // Recovered past the critical band but still in the warning band: step down.
+                    PressureLevel::Warning
+                }
+            }
+        }
+    }
+
+    /// Pure mapping from a pressure level to the throttled concurrency value.
+    fn throttle_for(level: PressureLevel, base_concurrency: usize) -> usize {
+        match level {
             PressureLevel::Normal => base_concurrency,
             PressureLevel::Warning => (base_concurrency / 2).max(1),
             PressureLevel::Critical => 1,
-        };
-
-        (level, new_concurrency)
+        }
     }
 
     /// Get the current effective concurrency without refreshing memory stats.
@@ -283,39 +322,89 @@ mod tests {
         assert_eq!(monitor.effective_concurrency(), 1000);
     }
 
+    // ── next_level: available-fraction based, with hysteresis ──
+
     #[test]
-    fn test_compute_pressure_normal() {
-        let (level, conc) = MemoryMonitor::compute_pressure(100, 50, 10, 80.0, 92.0);
+    fn test_next_level_ample_available_is_normal() {
+        // 41 GB available on a 64 GB box (64%): Normal, even though used/total would read ~80%.
+        // This is the exact false positive the old used/total signal produced 12× in one scan.
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let level = MemoryMonitor::next_level(PressureLevel::Normal, 64 * GIB, 41 * GIB);
         assert_eq!(level, PressureLevel::Normal);
-        assert_eq!(conc, 10);
-    }
-
-    #[test]
-    fn test_compute_pressure_warning() {
-        let (level, conc) = MemoryMonitor::compute_pressure(100, 85, 10, 80.0, 92.0);
-        assert_eq!(level, PressureLevel::Warning);
-        assert_eq!(conc, 5);
-    }
-
-    #[test]
-    fn test_compute_pressure_critical() {
-        let (level, conc) = MemoryMonitor::compute_pressure(100, 95, 10, 80.0, 92.0);
-        assert_eq!(level, PressureLevel::Critical);
-        assert_eq!(conc, 1);
-    }
-
-    #[test]
-    fn test_compute_pressure_zero_total() {
-        let (level, conc) = MemoryMonitor::compute_pressure(0, 0, 10, 80.0, 92.0);
+        // And it recovers to Normal even from a previously-alarmed level.
+        let level = MemoryMonitor::next_level(PressureLevel::Critical, 64 * GIB, 41 * GIB);
         assert_eq!(level, PressureLevel::Normal);
-        assert_eq!(conc, 10);
     }
 
     #[test]
-    fn test_compute_pressure_warning_small_base() {
-        let (level, conc) = MemoryMonitor::compute_pressure(100, 85, 1, 80.0, 92.0);
-        assert_eq!(level, PressureLevel::Warning);
-        assert_eq!(conc, 1); // (1/2).max(1) = 1
+    fn test_next_level_warning_on_low_available() {
+        // 14% available (< 15 enter) → Warning.
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Normal, 100, 14),
+            PressureLevel::Warning
+        );
+    }
+
+    #[test]
+    fn test_next_level_critical_on_very_low_available() {
+        // 7% available (< 8 enter) → Critical.
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Normal, 100, 7),
+            PressureLevel::Critical
+        );
+    }
+
+    #[test]
+    fn test_next_level_zero_total_is_normal() {
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Warning, 0, 0),
+            PressureLevel::Normal
+        );
+    }
+
+    #[test]
+    fn test_next_level_hysteresis_latches_warning() {
+        // 16% available sits in the dead band (≥15 enter, <17 exit): a monitor already in Warning
+        // stays Warning (no chatter); a monitor in Normal does not enter.
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Warning, 100, 16),
+            PressureLevel::Warning
+        );
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Normal, 100, 16),
+            PressureLevel::Normal
+        );
+        // Clearly recovered (18% ≥ 17 exit) → back to Normal.
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Warning, 100, 18),
+            PressureLevel::Normal
+        );
+    }
+
+    #[test]
+    fn test_next_level_critical_steps_down_through_warning() {
+        // From Critical: 9% (dead band 8..10) latches Critical; 11% steps to Warning; 20% → Normal.
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Critical, 100, 9),
+            PressureLevel::Critical
+        );
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Critical, 100, 11),
+            PressureLevel::Warning
+        );
+        assert_eq!(
+            MemoryMonitor::next_level(PressureLevel::Critical, 100, 20),
+            PressureLevel::Normal
+        );
+    }
+
+    #[test]
+    fn test_throttle_for_levels() {
+        assert_eq!(MemoryMonitor::throttle_for(PressureLevel::Normal, 10), 10);
+        assert_eq!(MemoryMonitor::throttle_for(PressureLevel::Warning, 10), 5);
+        assert_eq!(MemoryMonitor::throttle_for(PressureLevel::Critical, 10), 1);
+        // Warning floors at 1 for a tiny base.
+        assert_eq!(MemoryMonitor::throttle_for(PressureLevel::Warning, 1), 1);
     }
 
     #[test]

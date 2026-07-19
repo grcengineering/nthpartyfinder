@@ -403,6 +403,23 @@ mod tests {
     }
 
     #[test]
+    fn scan_emitted_non_domains_are_blocked_at_input() {
+        // The exact non-domain shapes a real depth-3 scan fed into network lookups. The same
+        // predicate now guards the discovery→recursion INPUT boundary (analysis::process_vendor_domain),
+        // so these never reach WHOIS/DNS/CT/subfinder or recurse — not merely dropped at output.
+        for host in [
+            "anysphere, inc.",                            // an org name (comma + space)
+            "hostmaster@slack.com",                       // a registrant email ('@')
+            "org/web/20250601085143/https://cursor.com/", // a wayback-wrapped URL
+        ] {
+            assert!(
+                is_non_registrable_host(host),
+                "{host} is a non-domain and must be blocked at input"
+            );
+        }
+    }
+
+    #[test]
     fn reject_non_registrable_drops_only_the_garbage() {
         let results = vec![
             rel("stripe.com", "Stripe", "vanta.com"),

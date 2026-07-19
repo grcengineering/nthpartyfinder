@@ -1421,6 +1421,23 @@ pub async fn process_vendor_domain(
         return;
     }
 
+    // Input guard (mirrors the output-time gate in finalize::finalize_report). A non-registrable
+    // host — an org name, an email, a wayback-wrapped URL, an IP fragment — must never enter the
+    // per-vendor WHOIS/org lookups or the recursive discovery fan-out. Discovery occasionally emits
+    // these ("anysphere, inc.", "hostmaster@slack.com", "org/web/20250601085143/https://cursor.com/");
+    // left unguarded they burn WHOIS/DNS/CT/subfinder budget and recurse. `is_non_registrable_host`
+    // is the exact PSL-based predicate finalize already uses to drop them at output, so applying it
+    // earlier can only remove work that would have been discarded anyway — recall is unchanged and
+    // speed strictly improves. Platform-tenancy vendors (github.io, s3.amazonaws.com) are PSL
+    // PRIVATE entries and are correctly NOT matched.
+    if crate::finalize::is_non_registrable_host(&vendor_domain) {
+        logger.debug(&format!(
+            "Skipping non-registrable vendor input: {}",
+            vendor_domain
+        ));
+        return;
+    }
+
     let base_domain = domain_utils::extract_base_domain(&vendor_domain);
     let customer_base_domain = domain_utils::extract_base_domain(&customer_domain);
 

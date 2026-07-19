@@ -1,20 +1,21 @@
 ---
 project: nthpartyfinder
-task: "Root-cause + fix depth-3 scan DNS-error storm (47,978 'DNS Failures') and recurring WiFi/router conntrack collapse. Reproduced live: (1) headless-Chrome keep-alive socket accumulation across pooled-browser reuse = the conntrack-exhaustion / WiFi-drop cause; (2) EMFILE (256 default FD limit, raw binary) misclassified as a DoH provider throttle + counted per-attempt = the amplified DNS-failure number. Fix in the binary (user runs it raw, not via safe-scan.sh), recall/speed-preserving. (2026-07-18)"
+task: "Categorical RCA of the depth-3 vanta.com scan log + tiered remediation of the 7 confirmed issue classes (DNS-failure opacity, CT-log transport collapse, malformed inputs into lookups, org-extraction garbage, domain-inference .com default, whois process-wedge, memory-pressure false alarm). Run + monitor NPF throughout to validate fixes live and RCA any newly-emergent issues. (2026-07-19)"
 effort: E4
-phase: verify
-progress: "fix implemented + gates green (fmt/clippy -D/tests/deny/coverage≥95); Forge+Cato adversarial review actioned (1 CRITICAL EMFILE-classifier-dead + offline-toggle footgun + docs, all fixed); live monitored re-run confirms sockets bounded (peak ~790 vs pre-fix unbounded→1058-collapse), 0 EMFILE; SHIP pending (PR to master)"
+phase: build
+progress: "Tier A implemented (whois #6 process-wedge → tokio::process+kill_on_drop+real 4s timeout; memory #7 false alarm → available-fraction signal + hysteresis + honest log wording; input-guard #3 → is_non_registrable_host at process_vendor_domain input boundary); fmt+clippy(-D)+touched-module tests green; live validation scan pending; Tiers B/C/D open"
 mode: algorithm
-started: 2026-07-18T00:00:00-04:00
-updated: 2026-07-18T00:00:00-04:00
+started: 2026-07-19T00:00:00-04:00
+updated: 2026-07-19T00:00:00-04:00
 algorithm_config:
   effort_source: classifier
   classifier: { mode: ALGORITHM, tier: E4, source: classifier }
   mode: standard
   eval_mode: gate
   preset: cautious
-  metric: "peak system ESTABLISHED sockets stays bounded (plateaus, does not climb to conntrack collapse) on a live depth-3 vanta.com run; 0 EMFILE; zero discovery-recall loss; gates green"
+  metric: "each remediated issue class is validated by a live monitored NPF run (scan.log grep + report inspection + clean exit + no orphaned processes) against the pre-fix baseline; gates green (fmt/clippy -D/tests/deny/coverage≥95); zero discovery-recall loss"
 prior_tasks:
+  - { task: "Depth-3 DNS-error storm + WiFi/conntrack collapse: binary-resident FD/socket/reap fixes", started: 2026-07-18, phase: verify, progress: "PR #80 merged + PR #81 (safe-scan retirement) open/green" }
   - { task: "Resilience/reliability round from depth-3 vanta.com scan evidence (8 owner issues + raw-metric bug)", started: 2026-07-17, phase: complete, progress: "shipped: PR #79 merged to master (02d892b)" }
   - { task: "Depth-3 report Layer-3 gap: dynamic bands + all-methods-at-every-depth + web-traffic network-idle", started: 2026-07-11, phase: complete, progress: "shipped: PR #60 merged to master (23be09c), 27/27 checks green, ruleset repaired" }
   - { task: "Merge 9 PRs + publish v1.3.0 release", started: 2026-07-10, phase: complete, progress: "48/48 (ISC-316..363)" }
@@ -25,6 +26,32 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-07-19 — Scan-log categorical RCA + tiered remediation (run + monitor throughout)
+
+**Trigger (owner, verbatim).** "Analyze the latest NPF scan log for Vanta.com to identify a unique list of categorical issues/problems made evident by errors and warnings in the scan log. Then devise a plan for how best to root cause analyze and then remediate those issues." → then: "Proceed with the plan. Also … run nthpartyfinder yourself and monitor its activity and output all throughout your work here to ensure you're explicitly validating fixes and also looking for new issues that emerge that you should also RCA and remediate." Source scan: `~/Desktop/reports/vanta_com/{scan.log, reports/vanta_com/vanta-latest.html}`.
+
+**OBSERVE / RCA.** A 7-agent parallel RCA traced every distinct error/warning class in the log to its emitting code path (file:line). Seven confirmed categories; full plan at `Plans/scan-log-rca-remediation-plan.md`. The scan was **not failing** — it completed; five of seven are noise/misplaced-guard/throttled-source, two degraded data, one (whois) can wedge the process. None were fixed by PR #80/#81. Sequenced into tiers by leverage÷cost: **A** (whois #6, input-guard #3, memory #7 — cheap, near-zero risk), **B** (CT rate-limit #2, domain-inference confidence #5), **C** (org-name validation #4 — medium risk, recall gate), **D** (DNS counting+logging #1 — observability).
+
+**Plan correction surfaced (memory #7).** The plan's "< 4 GB absolute" floor was dropped in favor of an available-fraction-only signal: an absolute floor false-fires on small machines (a 6 GB box with 3.5 GB free is healthy at 58% yet trips "< 4 GB"). Fraction is correct at every machine size and still reaches 0% under genuine exhaustion.
+
+### Criteria (ISC-500+)
+
+**Tier A — implemented, gates green, live-validation pending:**
+
+- [x] ISC-500: whois system-fallback (`whois.rs::try_system_whois`/`execute_whois_command`) can no longer wedge the process. Rewritten on the subfinder pattern: `tokio::process::Command` + `stdout(piped)`/`stderr(null)` + `.kill_on_drop(true)`, awaited under a single 4s `tokio::time::timeout`; on timeout the future drops and the in-flight child is SIGKILLed+reaped (vs the old `std::process::Command::output()` in `spawn_blocking`, which `timeout` could only detach — leaving a hung child + a blocking thread the runtime joins on shutdown = the multi-hour hang). Probe: code read + `cargo test whois::` green (5 exec tests converted sync→`#[tokio::test]`). Evidence: `cargo test --lib whois::` exit 0.
+- [x] ISC-501: the memory-pressure monitor no longer false-alarms on this 64 GB box. `MemoryMonitor` keys on `available_memory` fraction (not machine-wide used/total) with a Schmitt-trigger enter/exit band (15/17% warn, 8/10% crit) for hysteresis; 41 GB free (64%) → Normal, where the old used/total 80% threshold fired 12×. Probe: `memory_monitor::tests` incl. `test_next_level_ample_available_is_normal` (the exact regression) + hysteresis tests. Evidence: `cargo test --lib memory_monitor::` = 23 passed / 0 failed.
+- [x] ISC-502: the memory-pressure log wording matches reality — `app.rs` now says "pacing new vendor-task admissions" (the actual 25ms/250ms `compute_pressure_delay_ms` effect) rather than "reducing concurrency" (the `effective_concurrency` value is not wired to any live limiter). Probe: grep `app.rs`.
+- [x] ISC-503: non-registrable inputs (org names, emails, wayback URLs) are blocked at the discovery→recursion input boundary, not merely at output. `crate::finalize::is_non_registrable_host` guards the top of `analysis::process_vendor_domain` after the self-reference return, so garbage never reaches WHOIS/DNS/CT/subfinder/SaaS or recurses. Recall-neutral by construction (finalize already drops the same shapes at output via the identical predicate). Probe: `finalize::tests::scan_emitted_non_domains_are_blocked_at_input` + code read. Evidence: `cargo test --lib finalize::` = 21 passed / 0 failed.
+- [ ] ISC-504: Tier A validated LIVE — a monitored NPF run (raw binary, `--log-file`) shows: zero spurious memory-pressure events in scan.log (with ample free RAM), the input guard fires on real garbage (`-vv` "Skipping non-registrable vendor input"), clean process exit, and zero orphaned whois/Chrome/subfinder after exit. Probe: run + grep scan.log + `pgrep`.
+- [ ] ISC-505: full gate green on the Tier A branch — fmt, `clippy --all-targets --all-features -D warnings`, full `cargo test`, `cargo deny`, coverage ≥95/95. Probe: the commands.
+
+**Tier B/C/D — open (not yet built):**
+
+- [ ] ISC-510: CT-log discovery (#2) paces + retries — per-provider `SharedRateLimiter` + concurrency semaphore + jittered backoff on transport/429/5xx, and a CT-only keep-alive pool override, lifting success rate well above the observed ~1%. Probe: `cargo test discovery::ct_logs` + a live run's CT success ratio.
+- [ ] ISC-511: domain inference (#5) consults the embedded AdGuard companiesdb reverse index before the `.com` fallback; every generic guess carries low confidence and is reported-but-not-recursed until confirmed. Probe: unit tests + a live run showing no `{org}.com` guess recursed unconfirmed.
+- [ ] ISC-512: org-name validation (#4) rejects boilerplate/multi-entity concatenations with a proven recall gate (known-good `Slack/Meta/Shopify/Groq/Deepgram/FireCrawl` still extract). Probe: unit tests + recall assertion.
+- [ ] ISC-513: DNS failure counting (#1) is once-per-terminal-failure with per-provider/class stats, and lands in scan.log (wire the dead `log_dns_lookup_failed`). Probe: unit tests + a live scan.log showing a realistic count in-file.
 
 ## Task 2026-07-18 — Depth-3 DNS-error storm + WiFi/conntrack collapse: root-cause + binary-resident fix
 
