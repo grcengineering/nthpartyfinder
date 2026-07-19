@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
 use regex::Regex;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock as StdRwLock;
@@ -786,38 +786,49 @@ async fn try_native_whois(domain: &str) -> Result<String> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 async fn try_system_whois(domain: &str) -> Result<String> {
-    let domain_owned = domain.to_string();
-
-    match tokio::time::timeout(
-        Duration::from_secs(4),
-        tokio::task::spawn_blocking(move || execute_whois_command(&domain_owned)),
-    )
-    .await
-    {
-        Ok(Ok(Ok(result))) => Ok(result),
-        Ok(Ok(Err(e))) => Err(anyhow!("System whois failed: {}", e)),
-        Ok(Err(_)) => Err(anyhow!("System whois task panicked")),
+    // Single hard deadline for the whole fallback. `execute_whois_command` spawns a real child
+    // per candidate; if this timeout fires, its future is dropped and any in-flight child —
+    // spawned with `kill_on_drop(true)` — is SIGKILLed and reaped. This is the fix for the
+    // process-wedge bug: the previous `std::process::Command::output()` blocked in `waitpid`
+    // with no cancellation, so `tokio::time::timeout` only detached the `spawn_blocking` handle
+    // and left a hung whois child (plus the blocking thread the runtime joins on shutdown) alive
+    // forever — the observed multi-hour stuck scan. Bounded by 4s exactly as before.
+    match tokio::time::timeout(Duration::from_secs(4), execute_whois_command(domain)).await {
+        Ok(result) => result,
         Err(_) => Err(anyhow!("System whois timed out")),
     }
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn execute_whois_command(domain: &str) -> Result<String> {
-    // Try different whois command locations based on platform
-    let whois_commands = if cfg!(windows) {
-        vec!["whois.exe", "whois"]
+async fn execute_whois_command(domain: &str) -> Result<String> {
+    // Try different whois command locations based on platform; first that runs and succeeds wins.
+    let whois_commands: &[&str] = if cfg!(windows) {
+        &["whois.exe", "whois"]
     } else {
-        vec!["whois", "/usr/bin/whois", "/usr/local/bin/whois"]
+        &["whois", "/usr/bin/whois", "/usr/local/bin/whois"]
     };
 
     for cmd in whois_commands {
-        match Command::new(cmd).arg(domain).output() {
-            Ok(output) => {
-                if output.status.success() {
-                    return Ok(String::from_utf8_lossy(&output.stdout).to_string());
-                }
+        // tokio::process + kill_on_drop mirrors the subfinder subprocess pattern
+        // (discovery/subfinder.rs): kill_on_drop guarantees SIGKILL + reap on every drop path,
+        // including when the caller's 4s timeout drops this future mid-`wait_with_output`.
+        let child = match tokio::process::Command::new(cmd)
+            .arg(domain)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue, // binary not present at this path — try the next candidate
+        };
+
+        match child.wait_with_output().await {
+            Ok(output) if output.status.success() => {
+                return Ok(String::from_utf8_lossy(&output.stdout).to_string());
             }
-            Err(_) => continue,
+            Ok(_) => continue,  // ran but non-zero exit — try the next candidate
+            Err(_) => continue, // I/O error collecting output — try the next candidate
         }
     }
 
@@ -2015,11 +2026,11 @@ mod tests {
 
     // --- execute_whois_command ---
 
-    #[test]
-    fn test_execute_whois_command_compiles() {
+    #[tokio::test]
+    async fn test_execute_whois_command_compiles() {
         // This test just verifies the function exists and handles missing commands
         // gracefully without panicking
-        let result = execute_whois_command("nonexistent-domain-12345.com");
+        let result = execute_whois_command("nonexistent-domain-12345.com").await;
         // May succeed or fail depending on whether whois is installed
         let _ = result;
     }
@@ -2377,8 +2388,9 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[tokio::test]
     async fn test_try_system_whois_does_not_panic() {
-        // try_system_whois wraps execute_whois_command in spawn_blocking with a 15s timeout.
-        // The result varies by platform — we verify it handles all outcomes without panicking.
+        // try_system_whois wraps execute_whois_command (tokio::process children, kill_on_drop) in
+        // a single 4s timeout. The result varies by platform — we verify it handles all outcomes
+        // without panicking.
         let result = try_system_whois("example.com").await;
         assert!(
             result.is_ok() || result.is_err(),
@@ -2398,9 +2410,9 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn test_execute_whois_command_returns_result() {
-        let result = execute_whois_command("example.com");
+    #[tokio::test]
+    async fn test_execute_whois_command_returns_result() {
+        let result = execute_whois_command("example.com").await;
         match result {
             Ok(_data) => {
                 // Command found and executed — Ok is the expected success path.
@@ -2418,11 +2430,11 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn test_execute_whois_command_error_on_missing_binary() {
+    #[tokio::test]
+    async fn test_execute_whois_command_error_on_missing_binary() {
         // On any system, calling the function exercises the for-loop over command paths.
         // The function returns Err only if NO whois binary is found.
-        let result = execute_whois_command("zzz-definitely-not-a-real-domain.invalid");
+        let result = execute_whois_command("zzz-definitely-not-a-real-domain.invalid").await;
         assert!(
             result.is_ok() || result.is_err(),
             "Must return a valid Result regardless of domain"
@@ -2648,9 +2660,9 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn test_execute_whois_command_real_domain() {
-        let result = execute_whois_command("example.com");
+    #[tokio::test]
+    async fn test_execute_whois_command_real_domain() {
+        let result = execute_whois_command("example.com").await;
         match &result {
             Ok(data) => {
                 let _ = data.len();
@@ -2790,10 +2802,10 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    #[test]
-    fn test_execute_whois_command_various_domains() {
+    #[tokio::test]
+    async fn test_execute_whois_command_various_domains() {
         for domain in &["google.com", "example.net", "nonexistent.invalid"] {
-            let result = execute_whois_command(domain);
+            let result = execute_whois_command(domain).await;
             let _ = result;
         }
     }

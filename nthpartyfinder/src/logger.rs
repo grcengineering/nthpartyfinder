@@ -452,6 +452,21 @@ impl AnalysisLogger {
         self.print_message("SUCCESS", message);
     }
 
+    /// Append a line to the `--log-file` sink only (no console echo).
+    ///
+    /// The final human-readable summary block is written with raw `println!`, so it never enters
+    /// the log buffer: a `--log-file` run's scan.log ends at "Export completed" and shows nothing
+    /// about DNS failures or the run verdict. This mirrors those key facts into the file so a
+    /// reader of scan.log alone sees them. File-only, to avoid double-printing the summary on the
+    /// console (which already has the rich `println!` version).
+    fn log_summary_to_file(&self, level: &str, message: &str) {
+        if self.log_file_path.is_some() {
+            if let Ok(mut buffer) = self.log_buffer.lock() {
+                buffer.push(format!("[{}] {}: {}", self.get_timestamp(), level, message));
+            }
+        }
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn print_message(&self, level: &str, message: &str) {
         let timestamp = self.get_timestamp();
@@ -887,6 +902,31 @@ impl AnalysisLogger {
             } else {
                 println!("SUCCESS: Analysis completed. No vendor relationships found.");
             }
+
+            // Mirror the key summary facts into scan.log (the --log-file sink), which the raw
+            // println! summary above never reaches — a --log-file run's scan.log otherwise stops at
+            // "Export completed" with no failure count or verdict for a reader of the file alone.
+            self.log_summary_to_file(
+                "INFO",
+                &format!(
+                    "Analysis summary — {} domains processed, {} vendor relationships, {} unique vendors, max depth {}",
+                    metadata.total_domains_processed,
+                    metadata.total_vendor_relationships,
+                    metadata.unique_vendors,
+                    metadata.max_depth_reached
+                ),
+            );
+            if dns_fail_count > 0 {
+                let verdict = if metadata.total_vendor_relationships == 0 {
+                    "results may be unreliable — DNS queries likely blocked or failing; retry on a different network/DNS provider"
+                } else {
+                    "some vendors may be missing"
+                };
+                self.log_summary_to_file(
+                    "WARN",
+                    &format!("DNS resolution failures: {} ({})", dns_fail_count, verdict),
+                );
+            }
         }
     }
 
@@ -1183,6 +1223,40 @@ mod tests {
             log_path.to_str().unwrap().to_string(),
         );
         assert!(logger.is_log_export_enabled());
+    }
+
+    #[test]
+    fn dns_failure_summary_is_mirrored_to_log_file() {
+        // The final summary is println!-only, so a --log-file run's scan.log used to end at
+        // "Export completed" with no failure count or verdict. print_final_summary now mirrors
+        // those facts into the file sink.
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("scan.log");
+        let logger = AnalysisLogger::with_log_file(
+            VerbosityLevel::Summary,
+            log_path.to_str().unwrap().to_string(),
+        );
+        logger.record_dns_failure();
+        logger.record_dns_failure();
+        logger.record_vendor_relationships(5);
+        logger.record_unique_vendors(3);
+
+        logger.print_final_summary();
+        logger.export_logs().unwrap();
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            contents.contains("DNS resolution failures: 2"),
+            "scan.log must carry the DNS-failure count, not just stdout: {contents}"
+        );
+        assert!(
+            contents.contains("Analysis summary"),
+            "scan.log must carry the run summary line: {contents}"
+        );
+        assert!(
+            contents.contains("some vendors may be missing"),
+            "with relationships > 0 the verdict is the non-fatal one: {contents}"
+        );
     }
 
     #[test]

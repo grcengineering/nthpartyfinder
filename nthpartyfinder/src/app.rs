@@ -2224,17 +2224,21 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 let prev = pressure.swap(level_num, std::sync::atomic::Ordering::Relaxed);
                 if level_num != prev {
                     let status = monitor.status_string();
+                    // Wording matches what actually happens: the pressure level gates a per-
+                    // admission delay (compute_pressure_delay_ms: 250ms Critical / 25ms Warning),
+                    // not a concurrency-limit change — the effective_concurrency value is not wired
+                    // to any live limiter. Describe the pacing, not a concurrency reduction.
                     match level_num {
                         2 => logger_mem.warn(&format!(
-                            "Memory CRITICAL — throttling concurrency. {}",
+                            "Memory CRITICAL — pacing new vendor-task admissions. {}",
                             status
                         )),
                         1 => logger_mem.warn(&format!(
-                            "Memory WARNING — reducing concurrency. {}",
+                            "Memory WARNING — pacing new vendor-task admissions. {}",
                             status
                         )),
                         0 if prev > 0 => logger_mem.info(&format!(
-                            "Memory pressure relieved — resuming normal concurrency. {}",
+                            "Memory pressure relieved — resuming full-rate admissions. {}",
                             status
                         )),
                         _ => {}
