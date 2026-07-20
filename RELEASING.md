@@ -123,10 +123,13 @@ Before submitting for a new version:
   unchanged.
 - `cargo publish`/crates.io uses OIDC trusted publishing — no long-lived registry token exists in
   this repo's secrets.
-- Every release artifact (not just the primary `.tgz`) is now individually Sigstore-signed
-  (`cosign verify-blob`) in addition to the `.tgz`-scoped SLSA provenance attestation
-  (`slsa-verifier verify-artifact`) — these are two different, complementary guarantees; verify
-  whichever fits your threat model.
+- Every release artifact (not just the primary `.tgz`) is now individually Sigstore-signed — each
+  gets a `.bundle` file (the current Sigstore-recommended combined format: signature + certificate
+  + transparency-log entry). Verify with
+  `cosign verify-blob --bundle <file>.bundle --certificate-identity-regexp 'https://github.com/grcengineering/nthpartyfinder/.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com <file>`.
+  This is in addition to (not a replacement for) the `.tgz`-scoped SLSA provenance attestation
+  (`slsa-verifier verify-artifact`) — two different, complementary guarantees; verify whichever
+  fits your threat model.
 
 ## Known follow-ups (not blocking, tracked here so they aren't lost)
 

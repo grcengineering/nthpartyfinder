@@ -239,7 +239,7 @@ jobs:
         run: |
           cd dist
           for f in *; do
-            case "$f" in *.sha256|*.sbom.*|*.sig|*.pem) continue ;; esac
+            case "$f" in *.sha256|*.sbom.*|*.bundle) continue ;; esac
             syft "$f" -o cyclonedx-json="$f.sbom.cdx.json"
           done
 
@@ -249,8 +249,12 @@ jobs:
         run: |
           cd dist
           for f in *; do
-            case "$f" in *.sha256|*.sig|*.pem) continue ;; esac
-            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+            case "$f" in *.sha256|*.bundle) continue ;; esac
+            # Modern cosign (3.x, installed here) defaults use-signing-config=true, which
+            # requires --bundle: a single file combining the signature, certificate, and
+            # transparency-log entry (the current Sigstore-recommended format, superseding
+            # the older separate --output-signature/--output-certificate pair).
+            cosign sign-blob --yes --bundle "$f.bundle" "$f"
           done
 
       # Upload to the DRAFT (mutable) release — never publishes, so it never trips
