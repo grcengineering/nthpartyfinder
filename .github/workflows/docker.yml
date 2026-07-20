@@ -78,6 +78,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # SLSA provenance + SBOM attestation (buildx-native), matching the SLSA/SBOM
+          # coverage the binary release path already has (release.yml) — previously this
+          # workflow had neither. Gated the same as `push:`: attestations need an actual
+          # registry destination, so they're a no-op on PR builds anyway.
+          provenance: ${{ github.event_name != 'pull_request' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
 
       - name: Build and push (slim - without embedded NER)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -89,3 +95,5 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:slim
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: ${{ github.event_name != 'pull_request' }}
+          sbom: ${{ github.event_name != 'pull_request' }}

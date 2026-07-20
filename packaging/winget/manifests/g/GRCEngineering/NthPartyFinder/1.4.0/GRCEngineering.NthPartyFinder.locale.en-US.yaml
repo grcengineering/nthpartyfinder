@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: GRCEngineering.NthPartyFinder
+PackageVersion: 1.4.0
+PackageLocale: en-US
+Publisher: GRC Engineering
+PublisherUrl: https://grc.engineering
+PublisherSupportUrl: https://github.com/grcengineering/nthpartyfinder/security/advisories/new
+PackageName: Nth Party Finder
+PackageUrl: https://github.com/grcengineering/nthpartyfinder
+License: MIT
+LicenseUrl: https://github.com/grcengineering/nthpartyfinder/blob/master/LICENSE
+ShortDescription: Discover Nth-party vendor relationships via DNS analysis and optional extended discovery methods.
+Description: |-
+  nthpartyfinder is a fast, cross-platform CLI that discovers third-, fourth-,
+  and deeper-party vendor relationships for a domain -- the inherited
+  supply-chain risk that stops at "4th party" in most TPRM tooling -- using
+  DNS, certificate transparency, trust-center subprocessor pages, runtime web
+  traffic, SaaS-tenant probing, and subdomain enumeration. Every relationship
+  carries the evidence it was inferred from, so a finding is auditable, not
+  asserted.
+Moniker: nthpartyfinder
+Tags:
+- cli
+- command-line
+- dns
+- grc
+- security
+- supply-chain
+- third-party-risk
+- tprm
+- vendor-risk
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

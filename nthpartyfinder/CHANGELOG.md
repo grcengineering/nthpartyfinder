@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-20
+
+### Added
+- **Distribution: OS-specific installers.** Release artifacts now include `.deb` and `.rpm` packages (Linux), a `.msi` installer and `.zip` archive (Windows, alongside the existing `.tgz`), in addition to the existing tarballs for all 4 platform targets.
+- **Distribution: crates.io.** Publishable via `cargo install nthpartyfinder` — package metadata completed (`homepage`, `documentation`, bundled `LICENSE`), verified under crates.io's 10MB size limit (1.2MiB compressed). Publishing wired via crates.io Trusted Publishing (OIDC) — no long-lived registry token.
+- **Distribution: Homebrew.** `brew tap grcengineering/grcengineering && brew install nthpartyfinder` via a maintained shared tap, replacing the previously stale/placeholder formula.
+- **Distribution: WinGet.** Manifest set prepared for submission to the community `winget-pkgs` repository.
+- **Supply chain: SBOM.** Every release artifact and Docker image now ships a CycloneDX SBOM (Syft).
+- **Supply chain: artifact signing.** Every release artifact is signed keylessly via Sigstore/cosign, verifiable independently of the existing SLSA provenance attestation.
+- **Docs:** `RELEASING.md` documents the full release process across all 5 distribution channels for the first time.
+
+### Security
+- Docker images now carry `provenance`/SBOM attestation (previously the Docker build path had neither, unlike the binary release path's SLSA provenance).
+
 ## [1.3.0] - 2026-07-10
 
 ### Added

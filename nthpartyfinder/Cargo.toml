@@ -1,10 +1,18 @@
 [package]
 name = "nthpartyfinder"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
 description = "A cross-platform CLI tool for identifying Nth party vendor relationships through DNS analysis"
-authors = ["Security Community"]
+authors = ["GRC Engineering"]
 license = "MIT"
+# The crate's own code is MIT (LICENSE, copied in from the repo root so `cargo package`
+# includes it — Cargo won't package files outside the crate root). `data/companies.tsv`
+# is separately CC BY-SA 4.0 (see data/README.md + data/LICENSE.CC-BY-SA-4.0, which ship
+# alongside it in this same package) — a documented, git-tracked exception to the crate
+# license, not an oversight.
+homepage = "https://grc.engineering"
+documentation = "https://docs.rs/nthpartyfinder"
+readme = "README.md"
 repository = "https://github.com/grcengineering/nthpartyfinder"
 keywords = ["security", "dns", "vendor-risk", "grc", "third-party"]
 categories = ["command-line-utilities", "network-programming"]
@@ -117,6 +125,37 @@ path = "src/main.rs"
 pkg-url = "{ repo }/releases/download/v{ version }/nthpartyfinder-{ target }{ archive-suffix }"
 bin-dir = "nthpartyfinder{ binary-ext }"
 pkg-fmt = "tgz"
+
+# .deb packaging (`cargo deb --no-build`, release.yml). The binary is fully self-contained
+# (config/templates/static are compile-time include_str!'d; the one runtime-optional file,
+# config/saas_platforms.json, gracefully degrades when absent — same experience a
+# `cargo install`/binstall user already has), so only the binary + LICENSE ship.
+[package.metadata.deb]
+# No maintainer email is published anywhere in this repo (security reports route through
+# GitHub's private vulnerability reporting, not email — see SECURITY.md) — a fabricated
+# address in Debian's Name <email> field would be worse than an honest non-email string.
+maintainer = "GRC Engineering (https://github.com/grcengineering/nthpartyfinder)"
+copyright = "2026, GRC Engineering"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Discover Nth-party vendor relationships via DNS analysis and optional extended \
+discovery methods (subprocessor pages, CT logs, subdomain enumeration, SaaS-tenant \
+probing, runtime web traffic)."""
+depends = "whois"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/nthpartyfinder", "usr/bin/", "755"],
+    ["LICENSE", "usr/share/doc/nthpartyfinder/", "644"],
+]
+
+# .rpm packaging (`cargo generate-rpm`, release.yml). Same self-contained-binary rationale.
+[package.metadata.generate-rpm]
+license = "MIT"
+assets = [
+    { source = "target/release/nthpartyfinder", dest = "/usr/bin/nthpartyfinder", mode = "755" },
+    { source = "LICENSE", dest = "/usr/share/doc/nthpartyfinder/LICENSE", doc = true, mode = "644" },
+]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)', 'cfg(coverage)'] }
