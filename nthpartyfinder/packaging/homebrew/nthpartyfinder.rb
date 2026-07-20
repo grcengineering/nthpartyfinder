@@ -1,33 +1,38 @@
+# frozen_string_literal: true
+
+# Homebrew formula for nthpartyfinder: discover Nth-party vendor relationships via DNS
+# analysis. Installs the same signed, SLSA-provenance-tracked, embedded-NER release
+# artifact release.yml produces — not a from-source build. Checksums below are filled in
+# by scripts/sync-homebrew-formula.sh once a release with matching tarballs actually
+# exists (placeholders fail `brew install`/`brew audit` loudly, which is the correct
+# failure mode for a placeholder rather than silently installing garbage).
 class Nthpartyfinder < Formula
   desc "CLI tool for identifying Nth party vendor relationships through DNS analysis"
-  homepage "https://github.com/grcengineering/nthpartyfinder"
-  url "https://github.com/grcengineering/nthpartyfinder/archive/refs/tags/v1.0.0.tar.gz"
-  sha256 "PLACEHOLDER"
+  homepage "https://grc.engineering"
+  version "1.4.0"
   license "MIT"
 
-  depends_on "rust" => :build
   depends_on "whois"
 
-  def install
-    # Build with all default features including embedded NER
-    cd "nthpartyfinder" do
-      system "cargo", "build", "--release"
-      bin.install "target/release/nthpartyfinder"
+  if OS.mac?
+    if Hardware::CPU.arm?
+      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.4.0/nthpartyfinder-aarch64-apple-darwin.tgz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    else
+      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.4.0/nthpartyfinder-x86_64-apple-darwin.tgz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
+  elsif OS.linux?
+    url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.4.0/nthpartyfinder-x86_64-unknown-linux-gnu.tgz"
+    sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
-  def post_install
-    # Download ONNX Runtime for NER support
-    ohai "Setting up ONNX Runtime for NER organization extraction..."
-    system bin/"nthpartyfinder", "--version"
+  def install
+    bin.install "nthpartyfinder"
   end
 
   def caveats
     <<~EOS
-      ONNX Runtime is required for NER organization extraction.
-      On first run, nthpartyfinder will prompt to download it (~7-15 MB).
-      Or run: scripts/install.sh to set up ONNX Runtime in advance.
-
       Optional dependencies for full functionality:
 
       For web content analysis (--enable-web-org, --enable-web-traffic-discovery):

@@ -3,6 +3,15 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Manual-only: publishing to crates.io is a separate, deliberate action from cutting the
+  # GitHub release (irreversible — a published version can be yanked but never removed).
+  # The publish-crate job below only runs on this trigger, never on a tag push.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to publish to crates.io (e.g. v1.4.0)'
+        required: true
+        type: string
 
 # Least-privilege default; each job widens to exactly what it needs.
 permissions:
@@ -21,6 +30,7 @@ jobs:
   # race), have every downstream job push its assets to the still-mutable draft,
   # and publish exactly once at the very end (the `publish` job).
   create-draft:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -63,6 +73,12 @@ jobs:
           fi
 
   build-release:
+    # No explicit `if:` here — a bare `if:` REPLACES the implicit "needs succeeded" gate
+    # rather than ANDing with it (the same reason `if: always()` is a distinct, necessary
+    # idiom elsewhere). This job's `needs: create-draft` already carries the push-only
+    # gate transitively: create-draft is skipped on workflow_dispatch, so this job's
+    # implicit needs-success check skips it too — while a genuine create-draft FAILURE on
+    # a real tag push now correctly stops this job too, instead of running anyway.
     needs: create-draft
     strategy:
       fail-fast: false
@@ -79,6 +95,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      id-token: write # keyless cosign signing of every release artifact (Sigstore/Fulcio OIDC)
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -111,9 +128,11 @@ jobs:
       # include_bytes! (the download-model.sh step above provides the files).
       - run: cargo build --release --locked --target ${{ matrix.target }} --no-default-features --features embedded-ner
 
-      - name: Package
+      - name: Package (tarball)
         shell: bash
         run: |
+          DIST="$PWD/dist"
+          mkdir -p "$DIST"
           cd target/${{ matrix.target }}/release
           tar czf nthpartyfinder-${{ matrix.target }}.tgz nthpartyfinder*
           if command -v sha256sum &>/dev/null; then
@@ -121,22 +140,133 @@ jobs:
           else
             shasum -a 256 nthpartyfinder-${{ matrix.target }}.tgz > nthpartyfinder-${{ matrix.target }}.tgz.sha256
           fi
+          cp nthpartyfinder-${{ matrix.target }}.tgz nthpartyfinder-${{ matrix.target }}.tgz.sha256 "$DIST/"
+
+      # ── Linux: .deb + .rpm system packages, built from the ALREADY-built embedded-ner
+      # binary above (cargo-deb's --no-build; cargo-generate-rpm never rebuilds) — every
+      # distributed artifact for this release must carry the same offline model, not a
+      # second, differently-featured build.
+      - name: Install cargo-deb (Linux)
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deb
+      - name: Install cargo-generate-rpm (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Package (.deb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          DIST="$PWD/dist"
+          # rust-cache restores target/ across runs; clear this tool's own output dir
+          # first so a stale prior-version .deb can never get swept into dist/ below.
+          rm -rf "target/${{ matrix.target }}/debian"
+          cargo deb --no-build --target ${{ matrix.target }}
+          find "target/${{ matrix.target }}/debian" -name '*.deb' -exec cp {} "$DIST/" \;
+          # Fail loudly rather than silently shipping a release missing its .deb if
+          # cargo-deb's output path ever differs from this assumption.
+          ls "$DIST"/*.deb >/dev/null
+          cd "$DIST"
+          for f in *.deb; do
+            if command -v sha256sum &>/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+
+      - name: Package (.rpm)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          DIST="$PWD/dist"
+          rm -rf "target/${{ matrix.target }}/generate-rpm"
+          cargo generate-rpm --target ${{ matrix.target }}
+          find "target/${{ matrix.target }}/generate-rpm" -name '*.rpm' -exec cp {} "$DIST/" \;
+          ls "$DIST"/*.rpm >/dev/null
+          cd "$DIST"
+          for f in *.rpm; do
+            if command -v sha256sum &>/dev/null; then sha256sum "$f" > "$f.sha256"; else shasum -a 256 "$f" > "$f.sha256"; fi
+          done
+
+      # ── Windows: .zip (convenience archive) + .msi (WiX installer). The existing .tgz
+      # above already works on Windows (tar.exe ships with Windows 10+/Server 2019+); .zip
+      # is added because Windows users conventionally expect one.
+      - name: Package (.zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "$PWD/dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Compress-Archive -Path "target/${{ matrix.target }}/release/nthpartyfinder.exe" -DestinationPath "$dist/nthpartyfinder-${{ matrix.target }}.zip"
+          $hash = (Get-FileHash "$dist/nthpartyfinder-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  nthpartyfinder-${{ matrix.target }}.zip" | Out-File -Encoding ascii -NoNewline "$dist/nthpartyfinder-${{ matrix.target }}.zip.sha256"
+
+      # cargo-wix's own `cargo wix` build step invokes its own `cargo build --release` with
+      # DEFAULT features (runtime-ner: model fetched on first run), NOT the embedded-ner
+      # build used above — the exact flag for making it reuse an already-built binary isn't
+      # reliably documented, so rather than guess at CI's only Windows leg, the .msi
+      # intentionally matches the crates.io/`cargo install` experience instead (documented
+      # in RELEASING.md as a known asymmetry vs. the tgz/zip). continue-on-error: this is a
+      # first rollout of a WiX-based step that can't be tested locally (no Windows machine
+      # in this environment) — a failure here must never block the already-proven
+      # tgz/zip/provenance/publish path other users depend on.
+      - name: Install cargo-wix (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: cargo install cargo-wix --locked
+      - name: Package (.msi)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo wix init
+          cargo wix
+          $dist = "$PWD/dist"
+          Get-ChildItem -Path target -Recurse -Filter *.msi | ForEach-Object {
+            Copy-Item $_.FullName -Destination $dist
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($_.Name)" | Out-File -Encoding ascii -NoNewline "$dist/$($_.Name).sha256"
+          }
+
+      # ── SBOM (Syft, CycloneDX) + keyless Sigstore signing for every artifact staged so
+      # far, on every platform leg. Both operate generically over dist/ so they need no
+      # per-OS branching of their own.
+      - name: Install syft
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: syft
+      - name: Generate SBOM for every artifact
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            case "$f" in *.sha256|*.sbom.*|*.sig|*.pem) continue ;; esac
+            syft "$f" -o cyclonedx-json="$f.sbom.cdx.json"
+          done
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign every artifact (keyless Sigstore)
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            case "$f" in *.sha256|*.sig|*.pem) continue ;; esac
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+          done
 
       # Upload to the DRAFT (mutable) release — never publishes, so it never trips
       # the immutable-release asset lock even when four matrix jobs run in parallel.
-      - name: Upload binary to draft release
+      - name: Upload all artifacts to draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_REF: ${{ github.ref }}
         run: |
           TAG="${TAG_REF#refs/tags/}"
-          gh release upload "$TAG" \
-            "target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz" \
-            "target/${{ matrix.target }}/release/nthpartyfinder-${{ matrix.target }}.tgz.sha256" \
-            --clobber
+          gh release upload "$TAG" dist/* --clobber
 
-      # Per-target digest for SLSA provenance aggregation (B5).
+      # Per-target digest for SLSA provenance aggregation (B5). Scoped to the primary
+      # tarball, not every new artifact — each artifact is independently cosign-signed
+      # above, so this deliberately doesn't widen the SLSA aggregation surface.
       - name: Export artifact digest
         id: digest
         shell: bash
@@ -155,6 +285,9 @@ jobs:
   # ── SLSA provenance (B5 — SLSA v1.2 Build L3 via slsa-github-generator) ────
   # Aggregate every matrix artifact digest, then emit signed provenance.
   combine-digests:
+    # No explicit `if:` — see build-release's comment above. The needs-chain back to
+    # create-draft already isolates this from workflow_dispatch and from any upstream
+    # failure (including a single failed build-release matrix leg).
     name: Combine digests
     needs: build-release
     runs-on: ubuntu-latest
@@ -222,3 +355,46 @@ jobs:
           TAG="${TAG_REF#refs/tags/}"
           gh release upload "$TAG" provenance/* --clobber
           gh release edit "$TAG" --draft=false --latest
+
+  # Publishing to crates.io is deliberately NOT part of the tag-push pipeline above: it is
+  # irreversible (a version can be yanked, never removed) and is a genuinely separate
+  # decision from cutting a GitHub release. Trigger explicitly:
+  #   gh workflow run release.yml --ref <tag> -f tag=<tag>
+  # Uses crates.io Trusted Publishing (OIDC) — no CARGO_REGISTRY_TOKEN secret exists or is
+  # needed; the token is minted per-run and expires in ~30 minutes (rust-lang/crates-io-
+  # auth-action). Configure the trusted-publishing entry once at
+  # https://crates.io/crates/nthpartyfinder/settings (or on first publish, per crates.io's
+  # docs) naming this repo + workflow + the `release` environment before first use.
+  publish-crate:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Verify dispatched ref matches the requested tag
+        shell: bash
+        run: |
+          if [ "${{ github.ref_name }}" != "${{ inputs.tag }}" ] && [ "$(git describe --tags --exact-match 2>/dev/null)" != "${{ inputs.tag }}" ]; then
+            echo "::error::Dispatched ref (${{ github.ref_name }}) does not resolve to the requested tag (${{ inputs.tag }}). Re-run with: gh workflow run release.yml --ref ${{ inputs.tag }} -f tag=${{ inputs.tag }}"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Dry-run (sanity gate before the irreversible publish)
+        run: cargo publish --locked --dry-run
+
+      - name: Authenticate with crates.io (Trusted Publishing / OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
