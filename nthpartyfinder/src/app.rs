@@ -2627,6 +2627,69 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         ));
     }
 
+    // ── discovery-coverage manifest ──
+    // Print which discovery methods ran (and WHY each is on/off) plus how each fared, so an
+    // intended flag-driven difference (e.g. CT off by default) is instantly distinguishable from
+    // an unintended degradation (e.g. subprocessor starved). The enabled/why derivation mirrors
+    // compute_feature_flags exactly; per-phase found/failed counts come from the scan-coverage
+    // report the discovery phases populate.
+    {
+        let d = &_app_config.discovery;
+        let features = [
+            crate::coverage::feature_status(
+                "subprocessor",
+                args.dns_only,
+                args.enable_subprocessor_analysis,
+                args.disable_subprocessor_analysis,
+                d.subprocessor_enabled,
+                "--enable-subprocessor-analysis",
+            ),
+            crate::coverage::feature_status(
+                "subdomain",
+                args.dns_only,
+                args.enable_subdomain_discovery,
+                args.disable_subdomain_discovery,
+                d.subdomain_enabled,
+                "--enable-subdomain-discovery",
+            ),
+            crate::coverage::feature_status(
+                "saas-tenant",
+                args.dns_only,
+                args.enable_saas_tenant_discovery,
+                args.disable_saas_tenant_discovery,
+                d.saas_tenant_enabled,
+                "--enable-saas-tenant-discovery",
+            ),
+            crate::coverage::feature_status(
+                "ct-logs",
+                args.dns_only,
+                args.enable_ct_discovery,
+                args.disable_ct_discovery,
+                d.ct_discovery_enabled,
+                "--enable-ct-discovery",
+            ),
+            crate::coverage::feature_status(
+                "web-traffic",
+                args.dns_only,
+                args.enable_web_traffic_discovery,
+                args.disable_web_traffic_discovery,
+                d.web_traffic_enabled,
+                "--enable-web-traffic-discovery",
+            ),
+            crate::coverage::feature_status(
+                "web-org",
+                args.dns_only,
+                args.enable_web_org,
+                args.disable_web_org,
+                d.web_org_enabled,
+                "--enable-web-org",
+            ),
+        ];
+        let cov = crate::coverage::SCAN_COVERAGE.snapshot();
+        print!("\n{}", crate::coverage::render_manifest(&features, &cov));
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
     logger.print_final_summary();
 
     if logger.is_log_export_enabled() {

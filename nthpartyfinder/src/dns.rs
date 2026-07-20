@@ -1320,10 +1320,12 @@ impl DnsServerPool {
                             "trying DNS-over-TLS (853), then direct DNS",
                         );
                     }
-                    if let Some(records) = self.laddered_direct(domain, RecordKind::Txt).await {
-                        return Ok(records);
+                    match self.laddered_direct(domain, RecordKind::Txt).await {
+                        DirectOutcome::Answered(records) => return Ok(records),
+                        // Empty or TransportFailed: surface the DoH throttle `e` (already classified
+                        // and counted) instead of masking it with a fallback empty.
+                        _ => return Err(e),
                     }
-                    return Err(e);
                 }
                 _ => {
                     if self.doh_health.record_failure() {
@@ -1337,22 +1339,39 @@ impl DnsServerPool {
         }
 
         // Tiers 2 (DoT/853) then 3 (direct UDP/53), each health-gated — see `laddered_direct`.
-        if let Some(records) = self.laddered_direct(domain, RecordKind::Txt).await {
-            return Ok(records);
+        // Reached when DoH was skipped (breaker tripped) or failed non-throttle. If NO transport
+        // could resolve the name, surface a classified failure so the caller counts it — otherwise a
+        // tripped breaker turns every unresolved lookup into a silent, uncounted empty (RC-3).
+        match self.laddered_direct(domain, RecordKind::Txt).await {
+            DirectOutcome::Answered(records) => Ok(records),
+            DirectOutcome::Empty => Ok(vec![]),
+            DirectOutcome::TransportFailed => Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: no DNS transport could resolve TXT for {}",
+                domain
+            )),
         }
-
-        Ok(vec![])
     }
 
     // cfg(not(coverage)): performs live DNS lookups (DoT/853 then UDP/53) — requires network.
     /// Tiers 2 (DoT) and 3 (direct UDP/53) of the resolution ladder, reached only when DoH has not
     /// answered. Each transport is health-gated: a down transport is skipped; a transport failure
     /// (never an authoritative empty) advances its breaker so a blocked/rate-limited path is
-    /// abandoned rather than hammered. Returns `Some` only for a non-empty answer; an authoritative
-    /// empty resets the transport's breaker but returns `None` so a DoH throttle still surfaces and
-    /// lower tiers still get a chance (mirrors the pre-ladder direct-fallback contract).
+    /// abandoned rather than hammered.
+    ///
+    /// Returns a `DirectOutcome`: `Answered` for a non-empty answer; `Empty` when some tier
+    /// authoritatively resolved the name to no records (the transport worked — not a failure); and
+    /// `TransportFailed` when NO tier could resolve it (every tier failed or was skipped). The
+    /// caller uses that distinction to count a genuinely-unresolvable lookup as a classified DNS
+    /// failure instead of returning it as a silent, uncounted empty — the hole that let a tripped
+    /// DoH breaker collapse recall invisibly (RC-3). An authoritative `Empty` still descends (a
+    /// lower transport may hold records) and never advances a breaker.
     #[cfg(not(coverage))]
-    async fn laddered_direct(&self, domain: &str, kind: RecordKind) -> Option<Vec<String>> {
+    async fn laddered_direct(&self, domain: &str, kind: RecordKind) -> DirectOutcome {
+        // Did any lower tier authoritatively answer "no records"? That is a working transport, not a
+        // failure — so if every tier is empty-or-skipped we return `Empty`, and only a true "no
+        // transport could resolve this" returns `TransportFailed` (which the caller counts).
+        let mut saw_empty = false;
+
         // Tier 2 — DoT (853): encrypted, TCP-pooled. Tried before raw UDP/53 so a DoH-blocked
         // network resolves over a low-conntrack-footprint transport.
         if self.dot_enabled && self.dot_health.should_attempt() {
@@ -1370,13 +1389,13 @@ impl DnsServerPool {
                 match outcome {
                     DirectOutcome::Answered(records) => {
                         self.dot_health.record_success();
-                        return Some(records);
+                        return DirectOutcome::Answered(records);
                     }
                     DirectOutcome::Empty => {
                         // Transport works (authoritative no-records) — reset the breaker but keep
-                        // descending: a lower transport can still report records, and a DoH throttle
-                        // keeps surfacing rather than being masked by an empty fallback.
+                        // descending: a lower transport can still report records.
                         self.dot_health.record_success();
+                        saw_empty = true;
                     }
                     DirectOutcome::TransportFailed => {
                         if self.dot_health.record_failure() {
@@ -1402,13 +1421,13 @@ impl DnsServerPool {
                     match outcome {
                         DirectOutcome::Answered(records) => {
                             self.do53_health.record_success();
-                            return Some(records);
+                            return DirectOutcome::Answered(records);
                         }
                         DirectOutcome::Empty => {
-                            // Authoritative no-records: reset the breaker, but return None (no
-                            // non-empty answer) so a DoH throttle still surfaces — matching the
-                            // pre-ladder direct-fallback contract.
+                            // Authoritative no-records: reset the breaker and note it; a DoH throttle
+                            // (if any) still surfaces at the caller.
                             self.do53_health.record_success();
+                            saw_empty = true;
                         }
                         DirectOutcome::TransportFailed => {
                             if self.do53_health.record_failure() {
@@ -1422,7 +1441,13 @@ impl DnsServerPool {
                 }
             }
         }
-        None
+        // No tier returned records. If a tier authoritatively said "empty" the name genuinely has no
+        // records; otherwise no transport could resolve it at all — a countable failure.
+        if saw_empty {
+            DirectOutcome::Empty
+        } else {
+            DirectOutcome::TransportFailed
+        }
     }
 
     #[cfg(coverage)]
@@ -1459,10 +1484,12 @@ impl DnsServerPool {
                             "trying DNS-over-TLS (853), then direct DNS",
                         );
                     }
-                    if let Some(records) = self.laddered_direct(domain, RecordKind::Cname).await {
-                        return Ok(records);
+                    match self.laddered_direct(domain, RecordKind::Cname).await {
+                        DirectOutcome::Answered(records) => return Ok(records),
+                        // Empty or TransportFailed: surface the DoH throttle `e` (already classified
+                        // and counted) instead of masking it with a fallback empty.
+                        _ => return Err(e),
                     }
-                    return Err(e);
                 }
                 _ => {
                     if self.doh_health.record_failure() {
@@ -1476,11 +1503,17 @@ impl DnsServerPool {
         }
 
         // Tiers 2 (DoT/853) then 3 (direct UDP/53), each health-gated — see `laddered_direct`.
-        if let Some(records) = self.laddered_direct(domain, RecordKind::Cname).await {
-            return Ok(records);
+        // Reached when DoH was skipped (breaker tripped) or failed non-throttle. If NO transport
+        // could resolve the name, surface a classified failure so the caller counts it — otherwise a
+        // tripped breaker turns every unresolved lookup into a silent, uncounted empty (RC-3).
+        match self.laddered_direct(domain, RecordKind::Cname).await {
+            DirectOutcome::Answered(records) => Ok(records),
+            DirectOutcome::Empty => Ok(vec![]),
+            DirectOutcome::TransportFailed => Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: no DNS transport could resolve CNAME for {}",
+                domain
+            )),
         }
-
-        Ok(vec![])
     }
 
     #[cfg(coverage)]

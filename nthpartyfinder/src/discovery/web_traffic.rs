@@ -142,6 +142,10 @@ impl WebTrafficDiscovery {
             }
             Err(e) => {
                 debug!("Web traffic: network analysis failed for {}: {}", domain, e);
+                // Phase-2 render/capture failed → only static Phase-1 domains are returned. Record
+                // the degradation so a browser/network hiccup that thins web-traffic recall shows up
+                // in the scan-health summary instead of silently under-counting (RC-2).
+                crate::coverage::SCAN_COVERAGE.webtraffic.record_failure();
             }
         }
 

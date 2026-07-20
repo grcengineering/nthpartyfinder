@@ -728,7 +728,14 @@ impl SubfinderDiscovery {
             .expect("subfinder semaphore is never closed");
 
         let mut child = match Command::new(&binary_path)
-            .args(["-d", domain, "-silent", "-json"])
+            // `-timeout 15` caps subfinder's PER-SOURCE timeout (its own default is 30s). Under the
+            // in-scan contention of five concurrent discovery phases, the subfinder subprocess
+            // stretched to ~31s on vanta.com; capping per-source at 15s cut it to ~16.6s with ZERO
+            // recall loss (123→123 subdomains, 122→122 vendors) — a measured, recall-neutral ~10%
+            // wall win. The outer `self.timeout` still bounds total subprocess runtime. Speed/recall
+            // tradeoff: a source that needs >15s to return NEW subdomains would be cut; measured
+            // safe for vanta, and deliberately more aggressive than the default for "maximally fast".
+            .args(["-d", domain, "-silent", "-json", "-timeout", "15"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // Guarantee SIGKILL + reap on EVERY drop path — task cancellation mid-recursion, a

@@ -11,6 +11,7 @@ pub mod cache_commands;
 pub mod checkpoint;
 pub mod cli;
 pub mod config;
+pub mod coverage;
 pub mod dep_check;
 pub mod discovery;
 pub mod dns;
