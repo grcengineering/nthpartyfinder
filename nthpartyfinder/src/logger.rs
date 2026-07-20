@@ -820,6 +820,10 @@ impl AnalysisLogger {
 
             println!("{}\n", "========================".bold().cyan());
 
+            let cov = crate::coverage::SCAN_COVERAGE.snapshot();
+            let subproc_starved = crate::perf::METRICS.subproc_budget_exhausted.snapshot().0;
+            let degradation =
+                crate::coverage::degradation_summary(&cov, subproc_starved, dns_fail_count as u64);
             if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
                 println!(
                     "{} Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
@@ -829,12 +833,15 @@ impl AnalysisLogger {
                 println!(
                     "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
                 );
-            } else if dns_fail_count > 0 {
+            } else if let Some(detail) = &degradation {
+                // Any phase failed/was starved OR DNS degraded → say so, instead of a bare SUCCESS.
+                // This is what makes an unintended run-to-run difference announce itself, rather
+                // than the subprocessor-collapse-still-prints-SUCCESS pathology.
                 println!(
-                    "{} Analysis completed with {} vendor relationships, but {} DNS resolution failure(s) occurred. Some vendors may be missing.",
-                    "SUCCESS:".bright_green().bold(),
-                    metadata.total_vendor_relationships.to_string().bright_green().bold(),
-                    dns_fail_count
+                    "{} Completed with {} vendor relationships, but coverage was DEGRADED — {}. Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall.",
+                    "DEGRADED:".bright_yellow().bold(),
+                    metadata.total_vendor_relationships.to_string().bright_yellow().bold(),
+                    detail
                 );
             } else if metadata.total_vendor_relationships > 0 {
                 println!(
@@ -881,6 +888,10 @@ impl AnalysisLogger {
 
             println!("========================\n");
 
+            let cov = crate::coverage::SCAN_COVERAGE.snapshot();
+            let subproc_starved = crate::perf::METRICS.subproc_budget_exhausted.snapshot().0;
+            let degradation =
+                crate::coverage::degradation_summary(&cov, subproc_starved, dns_fail_count as u64);
             if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
                 println!(
                     "WARNING: Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
@@ -889,10 +900,10 @@ impl AnalysisLogger {
                 println!(
                     "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
                 );
-            } else if dns_fail_count > 0 {
+            } else if let Some(detail) = &degradation {
                 println!(
-                    "SUCCESS: Analysis completed with {} vendor relationships, but {} DNS resolution failure(s) occurred. Some vendors may be missing.",
-                    metadata.total_vendor_relationships, dns_fail_count
+                    "DEGRADED: Completed with {} vendor relationships, but coverage was DEGRADED — {}. Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall.",
+                    metadata.total_vendor_relationships, detail
                 );
             } else if metadata.total_vendor_relationships > 0 {
                 println!(
@@ -926,6 +937,11 @@ impl AnalysisLogger {
                     "WARN",
                     &format!("DNS resolution failures: {} ({})", dns_fail_count, verdict),
                 );
+            }
+            // Mirror any discovery-coverage degradation into scan.log too, so a --log-file reader
+            // sees a starved/failed phase — not just DNS failures — instead of a silent undercount.
+            if let Some(detail) = &degradation {
+                self.log_summary_to_file("WARN", &format!("Coverage degraded — {}", detail));
             }
         }
     }
@@ -2092,6 +2108,25 @@ mod tests {
         let logger = AnalysisLogger::new_forced_color(VerbosityLevel::Debug);
         logger.record_vendor_relationships(3);
         logger.print_final_summary();
+    }
+
+    #[test]
+    fn print_final_summary_degraded_coverage_both_color_modes() {
+        // A failed/starved discovery phase must flip the verdict to DEGRADED instead of a bare
+        // SUCCESS — in both the colored and plain summary branches (the scan-health visibility fix
+        // for the "subprocessor collapsed but the summary still said SUCCESS" pathology).
+        crate::coverage::SCAN_COVERAGE.reset();
+        crate::coverage::SCAN_COVERAGE.subfinder.record_failure();
+
+        let colored = AnalysisLogger::new_forced_color(VerbosityLevel::Debug);
+        colored.record_vendor_relationships(5);
+        colored.print_final_summary();
+
+        let plain = AnalysisLogger::new_with_color_setting(VerbosityLevel::Debug, true);
+        plain.record_vendor_relationships(5);
+        plain.print_final_summary();
+
+        crate::coverage::SCAN_COVERAGE.reset();
     }
 
     #[test]

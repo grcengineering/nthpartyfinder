@@ -1659,6 +1659,10 @@ impl SubprocessorAnalyzer {
                 // and the aggregate row count hides it — vanta's peer `chargify.com` once lost
                 // all 28 of its rows while the scan-wide total went UP.
                 crate::perf::METRICS.subproc_budget_exhausted.hit();
+                // Mark the subprocessor phase degraded for the scan-health summary: this vendor's
+                // recall was cut short by the time budget, not because it had nothing. Without this
+                // the aggregate vendor count silently absorbs the loss (the RC-1 collapse).
+                crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
                 let queued = Duration::from_nanos(
                     browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
                 );

@@ -510,6 +510,11 @@ pub async fn subprocessor_analysis_with_logging(
                 elapsed.as_secs_f64(),
                 e
             ));
+            // Record the failure so the scan summary can tell "ran but errored" apart from "ran and
+            // found nothing" — the analyzer's Err would otherwise be laundered into an empty Vec and
+            // vanish (the RC-5 silent-failure hole). The Vec stays empty (nothing to merge); the
+            // degradation now lives in SCAN_COVERAGE instead of being lost.
+            crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
             Ok(Vec::new())
         }
     }
@@ -591,6 +596,9 @@ async fn run_subprocessor_phase(
     {
         Ok(subprocessor_domains) if !subprocessor_domains.is_empty() => {
             logger.log_subprocessor_analysis(domain, subprocessor_domains.len());
+            crate::coverage::SCAN_COVERAGE
+                .subprocessor
+                .record_found(subprocessor_domains.len());
             convert_subprocessor_domains(subprocessor_domains)
         }
         Ok(_) => {
@@ -602,6 +610,7 @@ async fn run_subprocessor_phase(
                 "Subprocessor analysis failed for {}: {}",
                 domain, e
             ));
+            crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
             Vec::new()
         }
     }
@@ -622,13 +631,16 @@ async fn run_subfinder_phase(
         "Running subdomain discovery via subfinder for {}...",
         domain
     ));
+    let sf_start = std::time::Instant::now();
     let subdomains = match subfinder.discover(domain).await {
         Ok(s) => s,
         Err(e) => {
             logger.warn(&format!("Subdomain discovery failed for {}: {}", domain, e));
+            crate::coverage::SCAN_COVERAGE.subfinder.record_failure();
             return Vec::new();
         }
     };
+    let sf_subprocess_elapsed = sf_start.elapsed();
     if subdomains.is_empty() {
         logger.debug(&format!("Subfinder found no subdomains for {}", domain));
         return Vec::new();
@@ -641,6 +653,7 @@ async fn run_subfinder_phase(
 
     use futures::{stream, StreamExt};
     let subdomain_concurrency = 50;
+    let dns_fanout_start = std::time::Instant::now();
     let domain_base = domain_utils::extract_base_domain(domain);
     let subdomain_results: Vec<_> = stream::iter(subdomains.iter().map(|sub| {
         let subdomain = sub.subdomain.clone();
@@ -669,6 +682,16 @@ async fn run_subfinder_phase(
     .buffer_unordered(subdomain_concurrency)
     .collect()
     .await;
+    // PERF: decompose the subfinder phase into its two sequential halves so the bottleneck is
+    // legible — the subfinder subprocess vs the per-subdomain DNS fan-out (both candidates for
+    // pipelining if each is large). INFO-level, so only `-v` surfaces it.
+    tracing::info!(
+        "subfinder phase split for {}: subprocess {:.1}s, subdomain-DNS fan-out {:.1}s ({} subdomains)",
+        domain,
+        sf_subprocess_elapsed.as_secs_f64(),
+        dns_fanout_start.elapsed().as_secs_f64(),
+        subdomains.len()
+    );
 
     let (new_vendor_domains, txt_found, cname_found) =
         filter_subfinder_results(subdomain_results, &domain_base);
@@ -678,6 +701,9 @@ async fn run_subfinder_phase(
             txt_found, cname_found, domain
         ));
     }
+    crate::coverage::SCAN_COVERAGE
+        .subfinder
+        .record_found(new_vendor_domains.len());
     new_vendor_domains
 }
 
@@ -702,6 +728,9 @@ async fn run_saas_phase(
                     domain
                 ));
             }
+            crate::coverage::SCAN_COVERAGE
+                .saas
+                .record_found(tenant_vendors.len());
             tenant_vendors
         }
         Err(e) => {
@@ -709,6 +738,7 @@ async fn run_saas_phase(
                 "SaaS tenant discovery failed for {}: {}",
                 domain, e
             ));
+            crate::coverage::SCAN_COVERAGE.saas.record_failure();
             Vec::new()
         }
     }
@@ -735,11 +765,15 @@ async fn run_ct_phase(
                 ct_results.len(),
                 domain
             ));
+            crate::coverage::SCAN_COVERAGE
+                .ct
+                .record_found(ct_results.len());
             convert_ct_results(ct_results)
         }
         Ok(_) => Vec::new(),
         Err(e) => {
             logger.warn(&format!("CT log discovery failed for {}: {}", domain, e));
+            crate::coverage::SCAN_COVERAGE.ct.record_failure();
             Vec::new()
         }
     }
@@ -772,6 +806,9 @@ async fn run_webtraffic_phase(
         web_traffic_results.len(),
         domain
     ));
+    crate::coverage::SCAN_COVERAGE
+        .webtraffic
+        .record_found(web_traffic_results.len());
     convert_web_traffic_results(web_traffic_results)
 }
 
