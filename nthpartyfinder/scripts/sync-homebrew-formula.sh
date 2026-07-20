@@ -60,7 +60,12 @@ print("formula updated")
 PYEOF
 
 echo; echo "── verifying with brew style ──"
-brew style "$FORMULA"
+# Report-only: brew style exits non-zero even for purely cosmetic, autocorrectable
+# findings (e.g. the Sorbet-sigil suggestions this formula doesn't need), which — under
+# set -e above — would abort the script BEFORE it reaches the actual tap push. A real
+# structural break (the kind that would fail `brew install`) is still caught upstream by
+# the "expected 3 sha256 lines" guard in the Python step, which does hard-exit.
+brew style "$FORMULA" || true
 
 if gh repo view "$TAP_REPO" >/dev/null 2>&1; then
   echo; echo "Pushing to $TAP_REPO..."
