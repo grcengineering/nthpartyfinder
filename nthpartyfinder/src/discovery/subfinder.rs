@@ -121,6 +121,53 @@ fn kill_subfinder_pids(pids: Vec<u32>) {
     }
 }
 
+/// True when a system process's name marks it as a subfinder instance AND it has no living
+/// parent — orphaned by a *previous* nthpartyfinder invocation that exited hard enough to bypass
+/// every in-process reap path (a `kill -9`, or a crash before `kill_on_drop`/the Ctrl-C reaper
+/// could run — both require this run's own Rust destructors or signal handler to fire, neither of
+/// which happens to a process that is itself SIGKILL'd). Pure predicate, unit-testable without
+/// touching the real process table.
+fn is_orphaned_subfinder_of_ours(process_name: &str, has_live_parent: bool) -> bool {
+    !has_live_parent && looks_like_subfinder(process_name)
+}
+
+/// Sweep the WHOLE system process table for subfinder instances orphaned by a prior hard-killed
+/// nthpartyfinder run — the same failure mode [`browser_pool::sweep_orphaned_chrome`] closes for
+/// Chrome, extended to subfinder for full parity (this run's own PID registry only ever knows
+/// about processes *it* launched, never a predecessor's leftovers). Call once at startup, before
+/// any new subfinder is spawned. Unix only; a no-op elsewhere. Returns the count killed, purely
+/// for logging.
+#[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))] // coverage: scans and kills real OS processes; the decision logic is unit-tested via is_orphaned_subfinder_of_ours
+pub fn sweep_orphaned_subfinder() -> usize {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        false,
+        ProcessRefreshKind::everything(),
+    );
+
+    let init = Pid::from_u32(1);
+    let mut killed = 0usize;
+    for process in system.processes().values() {
+        let has_live_parent = process
+            .parent()
+            .is_some_and(|ppid| ppid != init && system.process(ppid).is_some());
+        if is_orphaned_subfinder_of_ours(&process.name().to_string_lossy(), has_live_parent) {
+            process.kill();
+            killed += 1;
+        }
+    }
+    killed
+}
+
+#[cfg(not(unix))]
+pub fn sweep_orphaned_subfinder() -> usize {
+    0
+}
+
 /// SIGKILL any subfinder subprocess still registered as in-flight. Called from the Ctrl-C handler
 /// (which ends in `process::exit`, so no Drop — hence no `kill_on_drop` — runs) so an interrupted
 /// scan does not orphan subfinder subprocesses still holding sockets to their passive sources.
@@ -784,6 +831,25 @@ mod tests {
         assert!(!looks_like_subfinder("chrome"));
         assert!(!looks_like_subfinder("nthpartyfinder"));
         assert!(!looks_like_subfinder(""));
+    }
+
+    /// The startup orphan sweep must require BOTH the subfinder name match AND no living parent —
+    /// a live parent means this (or a concurrent) run still owns the process, and must never be
+    /// killed out from under it.
+    #[test]
+    fn test_is_orphaned_subfinder_of_ours_requires_name_and_no_parent() {
+        assert!(
+            is_orphaned_subfinder_of_ours("subfinder", false),
+            "subfinder name + no living parent = a genuine orphan to reap"
+        );
+        assert!(
+            !is_orphaned_subfinder_of_ours("subfinder", true),
+            "a live parent means a concurrent scan (or this run itself) still owns it — must not kill"
+        );
+        assert!(
+            !is_orphaned_subfinder_of_ours("nthpartyfinder", false),
+            "a non-subfinder process must never match, even with no living parent"
+        );
     }
 
     #[test]

@@ -67,8 +67,9 @@ zstd = "0.13"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.39"
 # Raise the process open-file-descriptor soft limit at startup (used only under cfg(unix), in
-# app::raise_open_file_limit) so a deep scan run as the raw binary — outside scripts/safe-scan.sh,
-# which sets `ulimit -n 512` — does not inherit the OS default (256 on macOS) and hit EMFILE.
+# app::raise_open_file_limit) so the binary does not inherit the OS default (256 on macOS) and hit
+# EMFILE; also backs the startup orphan-process sweep in browser_pool/discovery::subfinder (all
+# scan safety mechanisms are binary-native — no external wrapper script is used or required).
 libc = "0.2"
 # Integrity verification for the runtime-fetched NER model
 sha2 = "0.11"

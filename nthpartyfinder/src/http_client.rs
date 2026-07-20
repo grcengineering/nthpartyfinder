@@ -15,9 +15,9 @@
 //! * `pool_idle_timeout` + `pool_max_idle_per_host` bound the keep-alive sockets left idle after a
 //!   request, so they return to the OS promptly instead of pinning conntrack slots.
 //!
-//! This is the code-level complement to the hard OS ceiling (`ulimit -n`) that `scripts/safe-scan.sh`
-//! imposes: the wrapper guarantees the process can never hold more than N sockets; these bounds
-//! keep the steady-state footprint far under that on every code path.
+//! This is the code-level complement to `app::raise_open_file_limit`'s own hard OS ceiling on open
+//! file descriptors: these bounds keep the steady-state socket footprint far under that ceiling on
+//! every code path, no external wrapper script required — all scan safety is binary-native.
 
 use std::sync::OnceLock;
 use std::time::Duration;
