@@ -22,6 +22,12 @@ use tracing::{debug, info, warn};
 /// Path to the base known vendors database relative to working directory
 pub const KNOWN_VENDORS_PATH: &str = "./config/known_vendors.json";
 
+/// The base known-vendors database, embedded at build time so a binary installed with no
+/// `config/` directory (Homebrew / crates.io / Docker / raw tarball) still ships the curated
+/// vendor list instead of falling back to WHOIS/domain inference. An on-disk
+/// `config/known_vendors.json` still takes precedence (see [`KnownVendors::load`]).
+const EMBEDDED_KNOWN_VENDORS: &str = include_str!("../config/known_vendors.json");
+
 /// Path to local user overrides
 pub const LOCAL_OVERRIDES_PATH: &str = "./config/known_vendors_local.json";
 
@@ -264,7 +270,19 @@ impl KnownVendors {
         info!("Loading known vendors from: {:?}", base_path);
         info!("Local overrides path: {:?}", overrides_path);
 
-        Self::load_from_paths(&base_path, &overrides_path)
+        if base_path.exists() {
+            Self::load_from_paths(&base_path, &overrides_path)
+        } else {
+            // No on-disk base database (e.g. installed with no `config/` directory) — parse the
+            // embedded default as the base, still honoring on-disk local overrides if present.
+            debug!(
+                "No on-disk known_vendors.json at {:?}; using embedded default database",
+                base_path
+            );
+            let base: KnownVendorsDatabase = serde_json::from_str(EMBEDDED_KNOWN_VENDORS)
+                .context("Failed to parse embedded known_vendors.json")?;
+            Self::assemble(base, &overrides_path)
+        }
     }
 
     /// Load known vendors from specific paths
@@ -272,11 +290,7 @@ impl KnownVendors {
         let base_path = base_path
             .canonicalize()
             .unwrap_or_else(|_| base_path.to_path_buf());
-        let overrides_path = overrides_path
-            .canonicalize()
-            .unwrap_or_else(|_| overrides_path.to_path_buf());
         let base_path = base_path.as_path();
-        let overrides_path = overrides_path.as_path();
         // Load base database (required)
         let base = if base_path.exists() {
             let content = fs::read_to_string(base_path)
@@ -290,6 +304,19 @@ impl KnownVendors {
             );
             KnownVendorsDatabase::default()
         };
+
+        Self::assemble(base, overrides_path)
+    }
+
+    /// Attach on-disk local overrides (if any) to an already-parsed base database and build the
+    /// final [`KnownVendors`]. Shared by [`load_from_paths`](Self::load_from_paths) (on-disk base)
+    /// and [`load`](Self::load) (embedded base) so both honor `config/known_vendors_local.json`
+    /// identically.
+    fn assemble(base: KnownVendorsDatabase, overrides_path: &Path) -> Result<Self> {
+        let overrides_path = overrides_path
+            .canonicalize()
+            .unwrap_or_else(|_| overrides_path.to_path_buf());
+        let overrides_path = overrides_path.as_path();
 
         info!(
             "Loaded known vendors database: {} vendors (version {}, updated {})",
@@ -759,6 +786,24 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use tempfile::tempdir;
+
+    // ── embedded known-vendors base (self-contained binary) ───────────
+
+    #[test]
+    fn embedded_known_vendors_assemble_into_a_populated_database() {
+        // A binary installed with no config/ dir must ship the curated known-vendors list rather
+        // than falling back to WHOIS/domain inference. The embedded base is parsed and assembled the
+        // same way an on-disk base is, honoring on-disk overrides if any (here: none).
+        let base: KnownVendorsDatabase = serde_json::from_str(EMBEDDED_KNOWN_VENDORS)
+            .expect("embedded known_vendors.json parses");
+        let n = base.vendors.len();
+        assert!(n > 0, "embedded known-vendors base must be non-empty");
+
+        let missing =
+            std::path::Path::new("/nthpartyfinder/does/not/exist/known_vendors_local.json");
+        let kv = KnownVendors::assemble(base, missing).unwrap();
+        assert_eq!(kv.stats().base_count, n);
+    }
 
     // ── extract_base_domain ───────────────────────────────────────────
 

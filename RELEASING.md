@@ -86,6 +86,14 @@ brew tap grcengineering/grcengineering
 brew install nthpartyfinder
 ```
 
+The formula declares `subfinder`, `whois`, and (on macOS) the `google-chrome` cask as **hard
+dependencies**, so a plain `brew install` produces a fully working tool — no manual dependency
+installation and no mid-scan install prompts. The binary embeds all of its own data (vendor
+registry, known-vendors, SaaS platforms) so no `config/` directory is shipped or needed. On Linux,
+Chrome is left to the distro (Homebrew has no cask support there); the formula's caveats say so.
+The first `brew install` from a fresh machine prints a one-time trust prompt — `brew tap` above runs
+`brew trust` for you on current Homebrew, or run `brew trust grcengineering/grcengineering` manually.
+
 After a release's `build-release` matrix has finished (the tarballs must exist to hash):
 
 ```sh

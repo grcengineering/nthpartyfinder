@@ -565,6 +565,42 @@ fn next_debug_port() -> u16 {
     port
 }
 
+/// Latch recording whether Chrome has proven UNavailable during this run. `0` = not yet determined,
+/// `2` = a real launch attempt timed out (a present-but-wedged install, or absent-and-slow). Set
+/// ONLY by an actual failed launch ([`note_chrome_unavailable`]), never by a heuristic path probe —
+/// so a Chrome the launcher can find (via `PATH`, a snap, a WSL mount, `~/Applications`, or any path
+/// `headless_chrome`'s own detection reaches) is never wrongly disabled. Once latched, [`acquire_tab`]
+/// fails fast so the rest of the scan doesn't each re-pay the launch timeout. A genuinely absent
+/// Chrome fails the launch quickly on its own (no executable to auto-detect), so the common
+/// not-installed case degrades without ever waiting the full timeout.
+static CHROME_AVAILABILITY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Record that a real Chrome launch attempt timed out, so subsequent [`acquire_tab`] calls fail fast
+/// instead of each re-paying [`BROWSER_LAUNCH_TIMEOUT`]. Idempotent.
+fn note_chrome_unavailable() {
+    CHROME_AVAILABILITY.store(2, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a prior launch this run proved Chrome unavailable. A container is never treated as
+/// unavailable — headless Chrome may find a binary at a path outside our view. Decision logic split
+/// out so it is unit-testable.
+fn chrome_known_unavailable() -> bool {
+    chrome_unavailable_decision(
+        CHROME_AVAILABILITY.load(std::sync::atomic::Ordering::Relaxed),
+        is_container_env(),
+    )
+}
+
+fn chrome_unavailable_decision(availability: u8, is_container: bool) -> bool {
+    availability == 2 && !is_container
+}
+
+/// Hard ceiling on a single Chrome launch. Bounds a *present-but-wedged* Chrome (partial install,
+/// missing shared library) so a launch can never hang the scan forever; the first launch that hits
+/// this latches [`chrome_known_unavailable`] so the rest of the scan fails fast rather than each
+/// waiting the full timeout. A genuinely absent Chrome fails the launch quickly on its own.
+const BROWSER_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Build Chrome launch options from the resolved parameters.
 fn build_launch_options(
     is_container: bool,
@@ -610,21 +646,46 @@ fn launch_browser() -> anyhow::Result<TrackedBrowser> {
     let debug_port = next_debug_port();
 
     let launch_started = std::time::Instant::now();
-    let browser = if is_container || chrome_path.is_some() {
-        let options = build_launch_options(is_container, chrome_path.as_deref(), debug_port)?;
-        headless_chrome::Browser::new(options)
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
-    } else {
-        headless_chrome::Browser::default()
-            .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+    // Bound the launch with a hard timeout: build the options and construct the Browser on a helper
+    // thread so a present-but-wedged Chrome can never block the scan forever. On timeout the thread
+    // is left to finish on its own; if it eventually produces a Browser the receiver is gone, so the
+    // Browser is dropped — and `Browser::drop` kills the Chrome process — leaving nothing leaked.
+    // A panic in the thread drops `tx`, which surfaces here as a disconnect → a normal launch error.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> anyhow::Result<TrackedBrowser> {
+            let browser = if is_container || chrome_path.is_some() {
+                let options =
+                    build_launch_options(is_container, chrome_path.as_deref(), debug_port)?;
+                headless_chrome::Browser::new(options)
+                    .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+            } else {
+                headless_chrome::Browser::default()
+                    .map_err(|e| anyhow::anyhow!("Failed to launch headless Chrome: {}", e))?
+            };
+            // Wrap so the PID is registered for reaping now (so every exit path can kill this Chrome
+            // by PID even if its `Drop` never runs — timeout `process::exit`, Ctrl-C, or a
+            // `panic = "abort"` build) and deregistered when the browser is cleanly dropped.
+            Ok(TrackedBrowser::new(browser))
+        })();
+        let _ = tx.send(result);
+    });
+    let browser = match rx.recv_timeout(BROWSER_LAUNCH_TIMEOUT) {
+        Ok(result) => result?,
+        Err(_) => {
+            // A launch that hits the hard timeout is a wedged (or absent-and-slow) Chrome. Latch it
+            // so the rest of the scan fails fast instead of each render waiting the full timeout.
+            note_chrome_unavailable();
+            anyhow::bail!(
+                "Chrome launch timed out after {:?} — treating it as unavailable for this render",
+                BROWSER_LAUNCH_TIMEOUT
+            )
+        }
     };
     crate::perf::METRICS
         .browser_launch
         .record(launch_started.elapsed());
-    // Wrap so the PID is registered for reaping now (so every exit path can kill this Chrome by PID
-    // even if its `Drop` never runs — timeout `process::exit`, Ctrl-C, or a `panic = "abort"` build)
-    // and deregistered when the browser is cleanly dropped.
-    Ok(TrackedBrowser::new(browser))
+    Ok(browser)
 }
 
 /// Acquire a render permit and a fresh Chrome tab, reusing a pooled Chrome process when one is
@@ -653,6 +714,15 @@ fn take_pooled(force_fresh: bool) -> Option<PooledBrowser> {
 // coverage(off): drives real Chrome processes.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn acquire_tab() -> anyhow::Result<TabGuard> {
+    // Fail fast when the startup pre-flight found no Chrome: never attempt a launch that would fail
+    // slowly or hang. Callers (subprocessor → static HTML, web-org → HTTP-only, web-traffic →
+    // skipped) already degrade gracefully on this `Err`. Runs before acquiring a render permit so a
+    // Chrome-less scan does not serialize on the semaphore.
+    if chrome_known_unavailable() {
+        return Err(anyhow::anyhow!(
+            "Chrome/Chromium not installed — skipping browser-based rendering for this target"
+        ));
+    }
     let (permit, permit_wait) = BROWSER_SEMAPHORE.acquire();
     crate::perf::METRICS.browser_permit_wait.record(permit_wait);
 
@@ -1211,6 +1281,56 @@ mod tests {
         // On a dev machine, should be false; in CI/Docker, true.
         // Either way, should not panic.
         let _result = is_container_env();
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // chrome_unavailable_decision — fail-fast gate for a missing Chrome
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn chrome_unavailable_decision_truth_table() {
+        // availability: 0 = unprobed, 1 = available, 2 = unavailable.
+        // Only a positive "unavailable" probe (2) outside a container fails fast; everything else
+        // still attempts a launch (unprobed and available never fail fast; a container never does).
+        assert!(
+            chrome_unavailable_decision(2, false),
+            "probed-absent, no container → fail fast"
+        );
+        assert!(
+            !chrome_unavailable_decision(2, true),
+            "container is never treated as unavailable"
+        );
+        assert!(
+            !chrome_unavailable_decision(1, false),
+            "probed-present → attempt"
+        );
+        assert!(
+            !chrome_unavailable_decision(0, false),
+            "unprobed → attempt (never over-block)"
+        );
+        assert!(
+            !chrome_unavailable_decision(0, true),
+            "unprobed in container → attempt"
+        );
+    }
+
+    #[test]
+    fn note_chrome_unavailable_latches_fast_fail() {
+        // A real launch timeout latches so subsequent acquire_tab calls fail fast instead of each
+        // re-paying the launch timeout. The latch is driven ONLY by an actual failed launch — never
+        // a heuristic probe — so a launchable Chrome is never wrongly disabled.
+        CHROME_AVAILABILITY.store(0, std::sync::atomic::Ordering::Relaxed); // unprobed
+        assert!(!chrome_known_unavailable(), "unprobed → still attempt");
+        note_chrome_unavailable();
+        // Only meaningful off a container host; is_container_env() is false on the test box.
+        if !is_container_env() {
+            assert!(
+                chrome_known_unavailable(),
+                "after a launch timeout → fail fast"
+            );
+        }
+        // Restore the unprobed default so test ordering can't leak this state.
+        CHROME_AVAILABILITY.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ──────────────────────────────────────────────────────────────────

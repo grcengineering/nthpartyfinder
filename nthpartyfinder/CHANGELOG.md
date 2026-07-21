@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-20
+
+### Added
+- **Self-contained binary — no `config/` directory required.** The vendor registry (218 curated vendors), the known-vendors database, and the SaaS-platforms list are now embedded in the binary at build time. Previously they were loaded from a `config/` directory relative to the working directory, so a Homebrew / crates.io / Docker / raw-tarball install (which ships no such directory) silently degraded to an empty registry — `"No config/vendors directory found, using empty registry"` and `"Failed to load SaaS platforms: No such file or directory"` — falling back to WHOIS/domain inference and disabling SaaS discovery. A user-provided `config/` still overrides the embedded defaults.
+
+### Changed
+- **Homebrew installs all runtime dependencies by default.** The formula now declares `subfinder`, `whois`, and (on macOS) the `google-chrome` cask as hard dependencies, so `brew install nthpartyfinder` yields a fully working tool — no manual dependency installation, no mid-scan install prompts.
+- **First run just works.** Creating the default config on first run no longer exits and asks you to re-run; the scan proceeds with the freshly-created defaults in one invocation. `--init` remains the explicit create-only path.
+
+### Fixed
+- **Missing Chrome no longer hangs the scan.** The dependency check now detects a missing Chrome/Chromium on a *default* run (previously it only checked when the explicit `--enable-web-*` flags were passed, so a default run never noticed). When Chrome is absent the browser pool fails fast instead of attempting a launch that could hang at "Starting vendor discovery": web-traffic discovery is disabled, subprocessor falls back to static HTML, and web-content extraction to HTTP-only — all with a clear "reduced coverage" message. A hard launch timeout bounds any residual present-but-wedged Chrome so a scan can never hang on it.
+
 ## [1.4.0] - 2026-07-20
 
 ### Added

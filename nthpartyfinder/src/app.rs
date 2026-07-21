@@ -1137,8 +1137,23 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 "✅ Created default configuration file at: {}",
                 path.display()
             );
-            println!("   Edit this file to customize settings, then run nthpartyfinder again.");
-            return Ok(());
+            println!(
+                "   Using default settings for this run — edit that file to customize future runs."
+            );
+            // Proceed with the freshly-created defaults instead of exiting and forcing a re-run:
+            // a first run should just work. `--init` remains the explicit create-only path.
+            match AppConfig::load() {
+                Ok(cfg) => cfg,
+                // The file was just written; if it somehow can't be read back, fall back to the
+                // embedded defaults so the run still proceeds rather than dead-ending.
+                Err(_) => match AppConfig::load_default() {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        eprintln!("❌ Failed to load configuration: {}", e);
+                        bail!(AppExitCode(1));
+                    }
+                },
+            }
         }
         ConfigOutcome::Exit { message, code } => {
             eprintln!("❌ {}", message);
@@ -1220,12 +1235,18 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
+    // Effective discovery flags (respecting --enable/--disable and --dns-only), computed once and
+    // reused below. Passed into the Chrome dependency check so it keys on what will ACTUALLY run:
+    // a default run enables web-org/web-traffic by config default, which the old flag-only check
+    // silently skipped — so a missing Chrome went undetected and the scan later hung on a render.
+    let flags = compute_feature_flags(&args, &_app_config);
+
     match dep_check::check_dependencies(
         args.enable_slm,
         args.disable_slm,
         args.enable_subdomain_discovery,
-        args.enable_web_org,
-        args.enable_web_traffic_discovery,
+        flags.web_org,
+        flags.web_traffic,
         _app_config.discovery.ner_enabled,
         _app_config.discovery.subdomain_enabled,
     ) {
@@ -1246,6 +1267,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             eprintln!("   Continuing with reduced functionality.");
         }
     }
+
+    // Missing Chrome is handled where the browser is actually launched, not by an up-front path
+    // probe: `check_dependencies` above already warns if Chrome isn't found (keyed on the effective
+    // web-org/web-traffic flags), and the browser pool bounds each launch with a hard timeout and
+    // fails fast after one proves unavailable — so a browser phase degrades gracefully (subprocessor
+    // → static HTML, web-org → HTTP-only, web-traffic → empty) instead of hanging, WITHOUT a
+    // narrow path probe wrongly disabling a Chrome the launcher could actually find.
 
     logger.start_init_progress(5).await;
 
@@ -1331,11 +1359,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             .await;
     }
 
-    let flags = compute_feature_flags(&args, &_app_config);
+    // `flags` was computed above (before the dependency checks); reuse it here.
     let web_org_will_be_enabled = flags.web_org;
     let subprocessor_will_be_enabled = flags.subprocessor;
     let subdomain_will_be_enabled = flags.subdomain;
     let saas_tenant_will_be_enabled = flags.saas_tenant;
+    // Web-traffic discovery needs a browser; when Chrome is unavailable its `acquire_tab` fails and
+    // the phase self-degrades to empty (reported in the coverage manifest), so it's gated only on the
+    // feature flag here — no up-front path-probe disable that could misfire on a launchable Chrome.
     let web_traffic_will_be_enabled = flags.web_traffic;
     let ct_will_be_enabled = flags.ct_discovery;
     if args.dns_only {
@@ -3060,6 +3091,57 @@ mod tests {
     use super::*;
     use crate::config::DEFAULT_CONFIG;
     use crate::vendor::RecordType;
+
+    #[test]
+    fn default_run_checks_chrome_via_effective_flags() {
+        // Regression: a default run (no --enable-web-* flags) still enables web-org and web-traffic
+        // by config default, so the Chrome dependency check MUST fire. The old code keyed the check
+        // on the explicit flags only, so a missing Chrome went undetected and the scan later hung on
+        // a browser render ("hang at Starting vendor discovery").
+        let args = default_args();
+        let config = AppConfig::load_default().unwrap();
+        let flags = compute_feature_flags(&args, &config);
+        assert!(
+            flags.web_org || flags.web_traffic,
+            "a default run should enable a browser-backed phase by config default"
+        );
+        let results = crate::dep_check::check_dependencies(
+            args.enable_slm,
+            args.disable_slm,
+            args.enable_subdomain_discovery,
+            flags.web_org,
+            flags.web_traffic,
+            config.discovery.ner_enabled,
+            config.discovery.subdomain_enabled,
+        )
+        .unwrap();
+        assert!(
+            results.iter().any(|r| r.name == "Chrome/Chromium"),
+            "Chrome must be checked on a default run"
+        );
+    }
+
+    #[test]
+    fn dns_only_run_does_not_check_chrome() {
+        // The other side of the same fix: --dns-only disables the browser phases, so keying on the
+        // effective flags means Chrome is NOT checked (no spurious "Chrome not found" warning).
+        let mut args = default_args();
+        args.dns_only = true;
+        let config = AppConfig::load_default().unwrap();
+        let flags = compute_feature_flags(&args, &config);
+        assert!(!flags.web_org && !flags.web_traffic);
+        let results = crate::dep_check::check_dependencies(
+            args.enable_slm,
+            args.disable_slm,
+            args.enable_subdomain_discovery,
+            flags.web_org,
+            flags.web_traffic,
+            config.discovery.ner_enabled,
+            config.discovery.subdomain_enabled,
+        )
+        .unwrap();
+        assert!(!results.iter().any(|r| r.name == "Chrome/Chromium"));
+    }
 
     #[test]
     fn test_desired_fd_soft_limit_raises_from_low_default() {

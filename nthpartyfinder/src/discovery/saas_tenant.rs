@@ -29,6 +29,12 @@ use crate::logger::AnalysisLogger;
 #[cfg(not(coverage))]
 use crate::vendor_registry;
 
+/// The legacy SaaS-platforms list, embedded at build time. Used as the ultimate fallback when the
+/// VendorRegistry yields no SaaS tenants AND no on-disk `config/saas_platforms.json` exists — e.g.
+/// a binary installed with no `config/` directory. Previously this fallback read a CWD-relative
+/// file, so such installs failed with "Failed to load SaaS platforms: No such file or directory".
+const EMBEDDED_SAAS_PLATFORMS: &str = include_str!("../../config/saas_platforms.json");
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SaasPlatform {
     pub name: String,
@@ -97,13 +103,19 @@ impl SaasTenantDiscovery {
         self.platforms.len()
     }
 
-    /// Load platforms from legacy saas_platforms.json file
+    /// Load platforms from a legacy saas_platforms.json file.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn load_platforms(&mut self, path: &Path) -> Result<()> {
         let content = std::fs::read_to_string(path)?;
-        let file: PlatformsFile = serde_json::from_str(&content)?;
+        self.load_platforms_from_str(&content)
+    }
+
+    /// Parse platform definitions from a JSON string. Shared by the file load and the embedded
+    /// fallback so both build identical platform sets.
+    pub fn load_platforms_from_str(&mut self, content: &str) -> Result<()> {
+        let file: PlatformsFile = serde_json::from_str(content)?;
         self.platforms = file.platforms;
-        debug!("Loaded {} SaaS platforms from file", self.platforms.len());
+        debug!("Loaded {} SaaS platforms", self.platforms.len());
         Ok(())
     }
 
@@ -164,8 +176,15 @@ impl SaasTenantDiscovery {
         self.load_from_vendor_registry();
 
         if self.platforms.is_empty() {
-            debug!("VendorRegistry empty, falling back to file");
-            self.load_platforms(fallback_path)?;
+            if fallback_path.exists() {
+                debug!("VendorRegistry empty, falling back to file");
+                self.load_platforms(fallback_path)?;
+            } else {
+                // No on-disk fallback file (e.g. installed with no `config/` directory) — use the
+                // platforms embedded in the binary rather than erroring out.
+                debug!("VendorRegistry empty and no fallback file; using embedded SaaS platforms");
+                self.load_platforms_from_str(EMBEDDED_SAAS_PLATFORMS)?;
+            }
         }
 
         Ok(())
@@ -173,7 +192,11 @@ impl SaasTenantDiscovery {
 
     #[cfg(coverage)]
     pub fn load_platforms_with_fallback(&mut self, fallback_path: &Path) -> Result<()> {
-        self.load_platforms(fallback_path)
+        if fallback_path.exists() {
+            self.load_platforms(fallback_path)
+        } else {
+            self.load_platforms_from_str(EMBEDDED_SAAS_PLATFORMS)
+        }
     }
 
     // cfg(not(coverage)): delegates to probe_with_logger which performs live HTTP requests
@@ -745,6 +768,21 @@ fn matches_baseline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_saas_platforms_parse_into_a_nonempty_set() {
+        // The embedded platform list is the ultimate fallback when neither the VendorRegistry nor an
+        // on-disk config/saas_platforms.json is available (e.g. installed with no config/ dir).
+        // Previously that fallback read a CWD file and errored with "No such file or directory".
+        let mut discovery = SaasTenantDiscovery::new(Duration::from_secs(5), 4);
+        discovery
+            .load_platforms_from_str(EMBEDDED_SAAS_PLATFORMS)
+            .expect("embedded saas_platforms.json must parse");
+        assert!(
+            discovery.platform_count() > 0,
+            "embedded SaaS platform set should be non-empty"
+        );
+    }
 
     #[test]
     fn test_generate_tenant_names() {

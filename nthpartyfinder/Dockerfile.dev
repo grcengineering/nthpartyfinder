@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
+# build.rs embeds config/vendors/*.json at build time; both it and config/ must be present before
+# `cargo build` (without build.rs cargo sets no OUT_DIR and the embedded-vendors `include!` fails).
+COPY build.rs ./
 COPY data/ data/
 COPY config/ config/
 COPY templates/ templates/
