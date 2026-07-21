@@ -25,8 +25,11 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && \
     cargo build --release 2>/dev/null || true
 
-# Copy actual source and assets
+# Copy actual source and assets. build.rs embeds config/vendors/*.json at build time, so both it
+# and config/ must be present before `cargo build` (without build.rs cargo sets no OUT_DIR and the
+# `include!` of the generated vendor list fails to compile).
 COPY src/ src/
+COPY build.rs ./
 COPY data/ data/
 COPY config/ config/
 COPY templates/ templates/
