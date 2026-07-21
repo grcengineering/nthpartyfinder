@@ -11,9 +11,7 @@ Installers:
   - RelativeFilePath: nthpartyfinder.exe
     PortableCommandAlias: nthpartyfinder
   InstallerUrl: https://github.com/grcengineering/nthpartyfinder/releases/download/v1.4.0/nthpartyfinder-x86_64-pc-windows-msvc.zip
-  # PENDING: fill in with the real sha256 of the published .zip before submitting —
-  # `(Get-FileHash nthpartyfinder-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash` on
-  # Windows, or `shasum -a 256` after downloading the release asset. See RELEASING.md.
-  InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  # Real sha256 of the published v1.4.0 .zip, per its own .sha256 asset on the release.
+  InstallerSha256: "250DFB7D4DE774C81E4A2501594B4DD7F390DE4529BBF69F817735EF10B78CDE"
 ManifestType: installer
 ManifestVersion: 1.12.0
