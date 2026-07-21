@@ -45,6 +45,27 @@ crt.sh and Cert Spotter are anonymous and always in the rotation. MerkleMap and 
 
 ## Install
 
+### Homebrew (macOS / Linux) — recommended
+
+```bash
+brew tap grcengineering/grcengineering
+brew install nthpartyfinder
+```
+
+This installs the signed release binary **and every runtime dependency automatically** —
+`subfinder` (subdomain discovery), `whois`, and, on macOS, the Google Chrome cask (web-content,
+web-traffic, and subprocessor-render discovery). Nothing else to install; the binary ships all of
+its own data embedded, so it works from any directory.
+
+> **First install shows a trust prompt.** Homebrew requires you to trust a third-party tap once
+> before it will load the formula. If `brew install` reports *"Refusing to load formula … from
+> untrusted tap"*, run `brew trust grcengineering/grcengineering` and install again (the `brew tap`
+> above already runs it for you on current Homebrew).
+>
+> On Linux, Homebrew cannot install Chrome (it is a macOS-only cask) — install Chromium or
+> Chrome from your distribution to enable the browser-based discovery methods; everything else is
+> installed for you.
+
 ### Docker
 
 ```bash
@@ -79,7 +100,12 @@ cargo build --release
 cargo build --release --no-default-features
 ```
 
-**Prerequisite:** a `whois` client on `PATH` (`apt install whois` / `brew install whois`; Windows via WSL or SysInternals).
+**Runtime dependencies** (the Homebrew install above pulls these automatically; the Docker image
+bundles them — you only need them for the pre-built binaries and source builds):
+
+- **`whois`** on `PATH` — `apt install whois` / `brew install whois`; Windows via WSL or SysInternals.
+- **`subfinder`** (optional) — for `--enable-subdomain-discovery`. `brew install subfinder`, or `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`. If missing, the tool offers to install it on first use.
+- **Google Chrome / Chromium** (optional) — for web-content, web-traffic, and subprocessor-render discovery. `brew install --cask google-chrome`, or your distro's package. If missing, those phases are skipped with reduced coverage — the scan still runs.
 
 ## Usage
 
