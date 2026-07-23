@@ -141,15 +141,18 @@ pub struct Cli {
     #[arg(long)]
     pub enable_web_org: bool,
 
-    /// Install a browser (Chrome/Chromium) without prompting if none is detected.
-    /// For non-interactive/CI use: when a browser-based discovery phase is enabled and no
-    /// Chrome/Chromium/Edge is found, nthpartyfinder installs one via the platform's package
-    /// manager (Homebrew cask on macOS, winget/choco on Windows, apt/dnf/pacman/zypper/snap on
-    /// Linux). Without this flag, an interactive terminal is prompted [Y/n]; a non-interactive
-    /// session skips browser-based discovery instead of hanging. On Linux the install needs
-    /// sudo — an unattended (non-terminal) run uses `sudo -n`, so it aborts fast rather than
-    /// blocking if passwordless sudo isn't configured; run it from a terminal, or pre-authorize
-    /// sudo, to install where a password is required.
+    /// Install ALL missing optional dependencies without prompting (subfinder, whois, a
+    /// browser). For non-interactive/CI use: equivalent to answering "yes to all" at the
+    /// consolidated dependency prompt. An interactive run without this flag shows one prompt
+    /// listing every missing dependency and what each unlocks. On Linux the install needs sudo
+    /// — an unattended (non-terminal) run uses `sudo -n`, so it aborts fast rather than blocking
+    /// if passwordless sudo isn't configured.
+    #[arg(long)]
+    pub install_deps: bool,
+
+    /// Install a browser (Chrome/Chromium) without prompting if none is detected — a subset of
+    /// `--install-deps` covering only the browser. Other missing dependencies still fall through
+    /// to the interactive prompt (or are skipped non-interactively).
     #[arg(long)]
     pub install_browser: bool,
 
@@ -357,6 +360,7 @@ pub struct Args {
     pub disable_slm: bool,
     pub download_ner_model: bool,
     pub enable_web_org: bool,
+    pub install_deps: bool,
     pub install_browser: bool,
     pub disable_web_org: bool,
     pub no_color: bool,
@@ -408,6 +412,7 @@ impl From<&Cli> for Args {
             disable_slm: cli.disable_slm,
             download_ner_model: cli.download_ner_model,
             enable_web_org: cli.enable_web_org,
+            install_deps: cli.install_deps,
             install_browser: cli.install_browser,
             disable_web_org: cli.disable_web_org,
             no_color: cli.no_color,
@@ -581,6 +586,7 @@ mod tests {
             disable_slm: false,
             download_ner_model: false,
             enable_web_org: false,
+            install_deps: false,
             install_browser: false,
             disable_web_org: false,
             no_color: false,

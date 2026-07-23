@@ -3,8 +3,11 @@
 #[cfg(not(test))]
 use crate::http_client::GatedSend;
 use anyhow::{anyhow, Result};
+// Only used by the coverage(off), cfg(not(test)) download-and-verify path below.
 use once_cell::sync::Lazy;
 use serde::Deserialize;
+#[cfg(not(test))]
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -306,6 +309,49 @@ impl SubfinderDiscovery {
         ))
     }
 
+    /// URL of the release's published SHA256 checksums file (goreleaser `*_checksums.txt`).
+    fn get_checksums_url() -> String {
+        format!(
+            "https://github.com/projectdiscovery/subfinder/releases/download/v{}/subfinder_{}_checksums.txt",
+            SUBFINDER_VERSION, SUBFINDER_VERSION
+        )
+    }
+
+    /// The release asset filename for this platform (the entry to look up in the checksums file).
+    /// Mirrors [`get_download_url_for_platform`]'s os/arch mapping exactly.
+    fn zip_filename_for_platform(os: &str, arch: &str) -> Option<String> {
+        let os_name = match os {
+            "windows" => "windows",
+            "macos" => "darwin",
+            "linux" => "linux",
+            _ => return None,
+        };
+        let arch_name = match arch {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "x86" => "386",
+            _ => return None,
+        };
+        Some(format!(
+            "subfinder_{}_{}_{}.zip",
+            SUBFINDER_VERSION, os_name, arch_name
+        ))
+    }
+
+    /// Find the published SHA256 (lowercase hex) for `filename` in a goreleaser-style checksums
+    /// file (`<sha256>  <filename>` lines). Pure + testable; returns `None` if absent/malformed.
+    fn expected_sha256_from_checksums(checksums: &str, filename: &str) -> Option<String> {
+        for line in checksums.lines() {
+            let mut parts = line.split_whitespace();
+            let sha = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("");
+            if name == filename && sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(sha.to_ascii_lowercase());
+            }
+        }
+        None
+    }
+
     /// Download and install subfinder to the bundled location
     #[cfg(not(test))] // real network I/O — downloads binary from GitHub releases and extracts zip
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -354,7 +400,54 @@ impl SubfinderDiscovery {
             .await
             .map_err(|e| anyhow!("Failed to read download response: {}", e))?;
 
-        info!("Downloaded {} bytes, extracting...", bytes.len());
+        info!("Downloaded {} bytes, verifying...", bytes.len());
+
+        // Bomb guard: subfinder archives are ~10–25 MB; refuse anything implausibly large before
+        // buffering it into the zip reader.
+        const MAX_ARCHIVE_BYTES: usize = 100 * 1024 * 1024;
+        if bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(anyhow!(
+                "subfinder archive is implausibly large ({} bytes) — refusing",
+                bytes.len()
+            ));
+        }
+
+        // Integrity gate (verify-before-execute): compute the SHA256 of the downloaded archive and
+        // compare it to the release's published checksums.txt BEFORE extracting, chmod-ing, or ever
+        // running the binary. A tampered artifact (upstream/CDN/release-account compromise) fails
+        // here instead of being made executable. This is the repo's SupplyChainSecurity baseline.
+        let zip_filename =
+            Self::zip_filename_for_platform(std::env::consts::OS, std::env::consts::ARCH)
+                .ok_or_else(|| anyhow!("unsupported platform for checksum verification"))?;
+        let checksums_text = client
+            .get(Self::get_checksums_url())
+            .send_gated()
+            .await
+            .map_err(|e| anyhow!("Failed to fetch subfinder checksums: {}", e))?
+            .error_for_status()
+            .map_err(|e| anyhow!("subfinder checksums fetch failed: {}", e))?
+            .text()
+            .await
+            .map_err(|e| anyhow!("Failed to read subfinder checksums: {}", e))?;
+        let expected_sha = Self::expected_sha256_from_checksums(&checksums_text, &zip_filename)
+            .ok_or_else(|| {
+                anyhow!(
+                    "no published SHA256 for {} in subfinder checksums — refusing to install",
+                    zip_filename
+                )
+            })?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual_sha = hex::encode(hasher.finalize());
+        if actual_sha != expected_sha {
+            return Err(anyhow!(
+                "subfinder archive SHA256 mismatch (expected {}, got {}) — refusing to install a \
+                 tampered binary",
+                expected_sha,
+                actual_sha
+            ));
+        }
+        info!("subfinder archive SHA256 verified, extracting...");
 
         // Extract the zip file
         let cursor = std::io::Cursor::new(bytes);
@@ -2047,6 +2140,63 @@ echo '{"host":"never-seen.com","source":"src"}'
     }
 
     // ──────────────────────────────────────────────────────────────────
+    // ──────────────────────────────────────────────────────────────────
+    // checksum-verification helpers (integrity gate)
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn checksums_url_points_at_the_release_checksums_file() {
+        let url = SubfinderDiscovery::get_checksums_url();
+        assert!(url.contains(SUBFINDER_VERSION));
+        assert!(url.ends_with("_checksums.txt"));
+        assert!(url.contains("projectdiscovery/subfinder/releases/download"));
+    }
+
+    #[test]
+    fn zip_filename_matches_the_download_url_asset() {
+        // The filename we look up in checksums.txt must be the exact tail of the download URL.
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("linux", "x86_64"),
+            ("windows", "x86_64"),
+        ] {
+            let fname = SubfinderDiscovery::zip_filename_for_platform(os, arch).unwrap();
+            let url = SubfinderDiscovery::get_download_url_for_platform(os, arch).unwrap();
+            assert!(url.ends_with(&fname), "{url} should end with {fname}");
+        }
+        assert!(SubfinderDiscovery::zip_filename_for_platform("plan9", "x86_64").is_none());
+    }
+
+    #[test]
+    fn expected_sha256_finds_the_matching_line_only() {
+        let good = "a".repeat(64);
+        let other = "b".repeat(64);
+        let checksums = format!(
+            "{other}  subfinder_9.9.9_linux_arm64.zip\n{good}  subfinder_9.9.9_darwin_arm64.zip\n"
+        );
+        assert_eq!(
+            SubfinderDiscovery::expected_sha256_from_checksums(
+                &checksums,
+                "subfinder_9.9.9_darwin_arm64.zip"
+            ),
+            Some(good)
+        );
+        // Absent filename → None (caller refuses to install without a published hash).
+        assert_eq!(
+            SubfinderDiscovery::expected_sha256_from_checksums(&checksums, "nope.zip"),
+            None
+        );
+        // Malformed sha (wrong length / non-hex) is ignored, not accepted.
+        assert_eq!(
+            SubfinderDiscovery::expected_sha256_from_checksums("xyz  f.zip", "f.zip"),
+            None
+        );
+        assert_eq!(
+            SubfinderDiscovery::expected_sha256_from_checksums("", "f.zip"),
+            None
+        );
+    }
+
     // get_download_url_for_platform — all platform/arch combinations
     // ──────────────────────────────────────────────────────────────────
 

@@ -25,6 +25,25 @@ pub struct Prefs {
     pub analysis_timeout_secs: Option<u64>,
     /// True once the user has seen the first-run prompts, so they never re-fire.
     pub onboarded: bool,
+    /// Stable ids of optional dependencies the user asked to never be reminded about
+    /// (e.g. `"subfinder"`, `"whois"`, `"browser"`). A dependency listed here is silently
+    /// omitted from the consolidated install prompt on every future run.
+    pub never_remind: Vec<String>,
+}
+
+impl Prefs {
+    /// Whether the user asked to never be reminded about the dependency with this id.
+    pub fn is_never_remind(&self, dependency_id: &str) -> bool {
+        self.never_remind.iter().any(|id| id == dependency_id)
+    }
+
+    /// Record that the user never wants to be reminded about this dependency again.
+    /// Idempotent — a duplicate id is not appended.
+    pub fn mark_never_remind(&mut self, dependency_id: &str) {
+        if !self.is_never_remind(dependency_id) {
+            self.never_remind.push(dependency_id.to_string());
+        }
+    }
 }
 
 impl Prefs {
@@ -89,6 +108,42 @@ mod tests {
         assert!(p.ort_dylib_path.is_none());
         assert!(p.analysis_timeout_secs.is_none());
         assert!(!p.onboarded);
+        assert!(p.never_remind.is_empty());
+    }
+
+    #[test]
+    fn never_remind_mark_and_query_is_idempotent() {
+        let mut p = Prefs::default();
+        assert!(!p.is_never_remind("subfinder"));
+        p.mark_never_remind("subfinder");
+        p.mark_never_remind("subfinder"); // duplicate must not double-append
+        assert!(p.is_never_remind("subfinder"));
+        assert!(!p.is_never_remind("whois"));
+        assert_eq!(p.never_remind, vec!["subfinder".to_string()]);
+    }
+
+    #[test]
+    fn never_remind_survives_save_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prefs.toml");
+        let mut p = Prefs::default();
+        p.mark_never_remind("whois");
+        p.mark_never_remind("browser");
+        p.save_to_path(&path).unwrap();
+        let loaded = Prefs::load_from_path(&path);
+        assert!(loaded.is_never_remind("whois"));
+        assert!(loaded.is_never_remind("browser"));
+        assert!(!loaded.is_never_remind("subfinder"));
+    }
+
+    #[test]
+    fn never_remind_defaults_when_absent_from_toml() {
+        // An older prefs.toml written before this field existed must still load.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("prefs.toml");
+        std::fs::write(&path, "onboarded = true\n").unwrap();
+        let loaded = Prefs::load_from_path(&path);
+        assert!(loaded.never_remind.is_empty());
     }
 
     #[test]
@@ -99,6 +154,7 @@ mod tests {
             ort_dylib_path: Some("/opt/onnx/libonnxruntime.dylib".to_string()),
             analysis_timeout_secs: Some(1800),
             onboarded: true,
+            never_remind: vec!["subfinder".to_string()],
         };
         prefs.save_to_path(&path).unwrap();
         assert!(path.exists(), "save must create the file (and parent dirs)");
@@ -129,6 +185,7 @@ mod tests {
             ort_dylib_path: Some("/x/lib.dylib".to_string()),
             analysis_timeout_secs: None,
             onboarded: true,
+            never_remind: vec![],
         };
         prefs.save_to_path(&path).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();

@@ -56,14 +56,18 @@ That's the whole install — one command, macOS and Linux. It installs the signe
 the `subfinder` (subdomain discovery) and `whois` dependencies automatically, and the binary ships
 all of its own data embedded, so it works from any directory with nothing else to configure.
 
-**A browser is handled at runtime, not at install time.** The web-content, web-traffic, and
-subprocessor-render discovery phases use Chrome, Chromium, or Edge. The first time you run a scan
-that needs one and none is found, nthpartyfinder detects your platform and offers to install one for
-you (Google Chrome via Homebrew on macOS / winget on Windows; Chromium via `apt`/`dnf`/`pacman`/
-`zypper` on Linux) — just answer the `[Y/n]` prompt. Prefer to skip it? Say no and those phases are
-skipped while the rest of the scan runs (it never hangs). For unattended/CI runs, pass
-`--install-browser` to install without prompting, or install a browser yourself beforehand — any
-existing Chrome/Chromium/Edge is detected and used, so Homebrew never needs to manage it.
+**Optional dependencies are handled at runtime — however you installed nthpartyfinder.** Beyond the
+core install, three optional tools unlock more analysis: a browser (Chrome/Chromium/Edge) for
+web-content/web-traffic/subprocessor-render discovery, `subfinder` for subdomain discovery, and
+`whois` for organization-name lookups. Whichever you're missing on a run that could use them,
+nthpartyfinder shows **one prompt** listing them all — each with exactly which capability is
+*disabled* or *degraded* without it — and installs them for your platform from a single keystroke
+(Homebrew on macOS, winget on Windows, `apt`/`dnf`/`pacman`/`zypper` on Linux; subfinder via a direct
+download that needs no package manager). Pick a subset by number, or decline — and for anything you
+decline, choose to be reminded next run or never again. This works the same whether you installed via
+Homebrew, WinGet, a direct package, or `cargo`. It never hangs: a non-interactive/CI run just warns
+and continues with reduced coverage; pass `--install-deps` to install everything unattended (or
+`--install-browser` for the browser only). Anything you already have installed is detected and used.
 
 > **First install shows a trust prompt.** Homebrew requires you to trust a third-party tap once
 > before it will load the formula. If `brew install` reports *"Refusing to load formula … from
@@ -107,9 +111,13 @@ cargo build --release --no-default-features
 **Runtime dependencies** (the Homebrew install above pulls these automatically; the Docker image
 bundles them — you only need them for the pre-built binaries and source builds):
 
-- **`whois`** on `PATH` — `apt install whois` / `brew install whois`; Windows via WSL or SysInternals.
-- **`subfinder`** (optional) — for `--enable-subdomain-discovery`. `brew install subfinder`, or `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`. If missing, the tool offers to install it on first use.
-- **A browser — Chrome, Chromium, or Edge** (optional) — for web-content, web-traffic, and subprocessor-render discovery. Any existing install is detected and used. If none is found on a scan that needs one, nthpartyfinder offers to install one for your platform (`[Y/n]`, or `--install-browser` to skip the prompt); decline and those phases are skipped while the scan still runs.
+Any of these that a run could use but is missing is offered by a single consolidated prompt (see
+above); each is also detected-and-used if already present, and installable non-interactively with
+`--install-deps`:
+
+- **`whois`** — organization-name lookups (else names degrade to domain inference). `brew install whois` / `apt install whois`; Windows via WSL or SysInternals.
+- **`subfinder`** — subdomain discovery (a major source of vendor relationships; else disabled). Installed via a direct download that needs no package manager, or `brew install subfinder` / `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`.
+- **A browser — Chrome, Chromium, or Edge** — web-content, web-traffic, and subprocessor-render discovery (else web-traffic is disabled and web-org/subprocessor degrade to non-browser coverage). Chrome via Homebrew/winget, Chromium via your Linux package manager.
 
 ## Usage
 

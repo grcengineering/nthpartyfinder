@@ -14,6 +14,7 @@ pub mod cli;
 pub mod config;
 pub mod coverage;
 pub mod dep_check;
+pub mod dependencies;
 pub mod discovery;
 pub mod dns;
 pub mod domain_utils;
