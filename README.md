@@ -52,19 +52,23 @@ brew tap grcengineering/grcengineering
 brew install nthpartyfinder
 ```
 
-This installs the signed release binary **and every runtime dependency automatically** —
-`subfinder` (subdomain discovery), `whois`, and, on macOS, the Google Chrome cask (web-content,
-web-traffic, and subprocessor-render discovery). Nothing else to install; the binary ships all of
-its own data embedded, so it works from any directory.
+That's the whole install — one command, macOS and Linux. It installs the signed release binary plus
+the `subfinder` (subdomain discovery) and `whois` dependencies automatically, and the binary ships
+all of its own data embedded, so it works from any directory with nothing else to configure.
+
+**A browser is handled at runtime, not at install time.** The web-content, web-traffic, and
+subprocessor-render discovery phases use Chrome, Chromium, or Edge. The first time you run a scan
+that needs one and none is found, nthpartyfinder detects your platform and offers to install one for
+you (Google Chrome via Homebrew on macOS / winget on Windows; Chromium via `apt`/`dnf`/`pacman`/
+`zypper` on Linux) — just answer the `[Y/n]` prompt. Prefer to skip it? Say no and those phases are
+skipped while the rest of the scan runs (it never hangs). For unattended/CI runs, pass
+`--install-browser` to install without prompting, or install a browser yourself beforehand — any
+existing Chrome/Chromium/Edge is detected and used, so Homebrew never needs to manage it.
 
 > **First install shows a trust prompt.** Homebrew requires you to trust a third-party tap once
 > before it will load the formula. If `brew install` reports *"Refusing to load formula … from
 > untrusted tap"*, run `brew trust grcengineering/grcengineering` and install again (the `brew tap`
 > above already runs it for you on current Homebrew).
->
-> On Linux, Homebrew cannot install Chrome (it is a macOS-only cask) — install Chromium or
-> Chrome from your distribution to enable the browser-based discovery methods; everything else is
-> installed for you.
 
 ### Docker
 
@@ -105,7 +109,7 @@ bundles them — you only need them for the pre-built binaries and source builds
 
 - **`whois`** on `PATH` — `apt install whois` / `brew install whois`; Windows via WSL or SysInternals.
 - **`subfinder`** (optional) — for `--enable-subdomain-discovery`. `brew install subfinder`, or `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`. If missing, the tool offers to install it on first use.
-- **Google Chrome / Chromium** (optional) — for web-content, web-traffic, and subprocessor-render discovery. `brew install --cask google-chrome`, or your distro's package. If missing, those phases are skipped with reduced coverage — the scan still runs.
+- **A browser — Chrome, Chromium, or Edge** (optional) — for web-content, web-traffic, and subprocessor-render discovery. Any existing install is detected and used. If none is found on a scan that needs one, nthpartyfinder offers to install one for your platform (`[Y/n]`, or `--install-browser` to skip the prompt); decline and those phases are skipped while the scan still runs.
 
 ## Usage
 

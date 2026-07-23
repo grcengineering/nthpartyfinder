@@ -1241,12 +1241,17 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // silently skipped — so a missing Chrome went undetected and the scan later hung on a render.
     let flags = compute_feature_flags(&args, &_app_config);
 
+    // Browser detection + guidance is owned entirely by `browser_install` below (it does the
+    // headless-Chrome-faithful probe and offers a runtime install), so we do NOT route the
+    // browser-phase flags into dep_check's Chrome check — that would print a second, now-stale
+    // "install Chrome" hint that contradicts the runtime offer. Passing false keeps dep_check
+    // focused on ONNX/subfinder/whois.
     match dep_check::check_dependencies(
         args.enable_slm,
         args.disable_slm,
         args.enable_subdomain_discovery,
-        flags.web_org,
-        flags.web_traffic,
+        false,
+        false,
         _app_config.discovery.ner_enabled,
         _app_config.discovery.subdomain_enabled,
     ) {
@@ -1268,12 +1273,16 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
-    // Missing Chrome is handled where the browser is actually launched, not by an up-front path
-    // probe: `check_dependencies` above already warns if Chrome isn't found (keyed on the effective
-    // web-org/web-traffic flags), and the browser pool bounds each launch with a hard timeout and
-    // fails fast after one proves unavailable — so a browser phase degrades gracefully (subprocessor
-    // → static HTML, web-org → HTTP-only, web-traffic → empty) instead of hanging, WITHOUT a
-    // narrow path probe wrongly disabling a Chrome the launcher could actually find.
+    // A browser (Chrome/Chromium/Edge) powers the web-org, web-traffic, and subprocessor-render
+    // phases. If any of those is enabled and none is detected, offer to install one — interactively
+    // via a [Y/n] prompt, or automatically with --install-browser — so `brew install nthpartyfinder`
+    // stays a single step with no cask and no separate browser install. This never hangs: a
+    // non-interactive session with no browser just warns and continues, and the browser pool still
+    // bounds each launch with a hard timeout and fails fast, so an un-installed browser degrades
+    // gracefully (subprocessor → static HTML, web-org → HTTP-only, web-traffic → empty).
+    if flags.web_org || flags.web_traffic || flags.subprocessor {
+        crate::browser_install::ensure_browser_available(input, &logger, args.install_browser);
+    }
 
     logger.start_init_progress(5).await;
 
@@ -3222,6 +3231,7 @@ mod tests {
             disable_slm: false,
             download_ner_model: false,
             enable_web_org: false,
+            install_browser: false,
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,

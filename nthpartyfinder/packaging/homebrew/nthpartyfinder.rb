@@ -7,24 +7,23 @@
 # exists (placeholders fail `brew install`/`brew audit` loudly, which is the correct
 # failure mode for a placeholder rather than silently installing garbage).
 #
-# All runtime dependencies install automatically. `whois` and `subfinder` are formulae
-# (both platforms); Google Chrome is a macOS cask (Homebrew on Linux has no cask support,
-# so Linux users install Chromium/Chrome from their distro — see caveats). The binary
-# ships every data file it needs embedded, so no config directory is required.
+# The formula dependencies `subfinder` and `whois` install automatically (both platforms), and the
+# binary ships every data file it needs embedded, so no config directory is required. A browser
+# (Chrome/Chromium/Edge) is NOT a formula dependency — Homebrew formulae cannot depend on a cask,
+# and a browser isn't needed for the default run. Instead the binary handles it at runtime: the
+# first scan that needs a browser and finds none offers to install one for the user's platform
+# (`--install-browser` skips the prompt), and any existing browser is detected and used. See
+# `caveats`.
 class Nthpartyfinder < Formula
   desc "CLI tool for identifying Nth party vendor relationships through DNS analysis"
   homepage "https://grc.engineering"
-  version "1.5.0"
+  # No explicit `version`: Homebrew scans it from the release URL's `/vX.Y.Z/` path, and an explicit
+  # `version` that matches is a `brew audit` error (redundant-with-URL). sync-homebrew-formula.sh
+  # bumps the version by rewriting the URL path, so the version tracks the URL automatically.
   license "MIT"
 
   depends_on "subfinder"
   depends_on "whois"
-
-  # Google Chrome powers web-content, web-traffic, and subprocessor-render discovery.
-  # It is a cask, which only exists on macOS; guard so the formula still resolves on Linux.
-  on_macos do
-    depends_on cask: "google-chrome"
-  end
 
   if OS.mac?
     if Hardware::CPU.arm?
@@ -45,18 +44,15 @@ class Nthpartyfinder < Formula
 
   def caveats
     <<~EOS
-      subfinder, whois, and (on macOS) Google Chrome install automatically; all data files are
-      embedded in the binary.
+      subfinder and whois were installed automatically, and all data files are embedded in the
+      binary — nthpartyfinder is ready to use.
 
-      macOS: if the install stops on an existing "Google Chrome" that Homebrew did not manage,
-      adopt it once, then re-run the install:
-        brew install --cask --adopt google-chrome
-
-      Linux: Homebrew cannot install Chrome (it is a macOS-only cask) — install Chrome or Chromium
-      from your distribution for web-content/web-traffic/subprocessor-render discovery, e.g.:
-        sudo apt-get install chromium   # or google-chrome-stable
-      Everything else still installs automatically; without a browser those phases are skipped and
-      the scan still runs.
+      The browser-based discovery methods (web-content, web-traffic, and subprocessor-render) use
+      Chrome, Chromium, or Edge. You do not need to install one now: the first scan that needs a
+      browser and finds none will offer to install one for you (Google Chrome via Homebrew here on
+      macOS; Chromium via your package manager on Linux). Pass --install-browser to install without
+      prompting in unattended runs, or decline the prompt and those phases run with reduced coverage
+      — the scan never hangs. Any browser you already have is detected and used automatically.
     EOS
   end
 

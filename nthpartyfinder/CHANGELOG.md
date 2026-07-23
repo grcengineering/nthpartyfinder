@@ -2,13 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+- **Runtime browser install — `brew install nthpartyfinder` is the whole install.** The browser-based discovery phases (web-org, web-traffic, subprocessor render) need Chrome/Chromium/Edge, but a browser is no longer an install-time concern. The first scan that needs a browser and finds none detects your platform and offers to install one — Google Chrome via Homebrew on macOS and winget/choco on Windows, Chromium via `apt`/`dnf`/`pacman`/`zypper` (snap fallback) on Linux — behind a `[Y/n]` prompt. Any existing Chrome/Chromium/Edge is detected and used, so nothing is installed when you already have one. New `--install-browser` flag installs without prompting (for unattended/CI runs). A non-interactive session with no browser and no flag warns and skips those phases instead of prompting — it never hangs.
+
 ## [1.5.0] - 2026-07-20
 
 ### Added
 - **Self-contained binary — no `config/` directory required.** The vendor registry (218 curated vendors), the known-vendors database, and the SaaS-platforms list are now embedded in the binary at build time. Previously they were loaded from a `config/` directory relative to the working directory, so a Homebrew / crates.io / Docker / raw-tarball install (which ships no such directory) silently degraded to an empty registry — `"No config/vendors directory found, using empty registry"` and `"Failed to load SaaS platforms: No such file or directory"` — falling back to WHOIS/domain inference and disabling SaaS discovery. A user-provided `config/` still overrides the embedded defaults.
 
 ### Changed
-- **Homebrew installs all runtime dependencies by default.** The formula now declares `subfinder`, `whois`, and (on macOS) the `google-chrome` cask as hard dependencies, so `brew install nthpartyfinder` yields a fully working tool — no manual dependency installation, no mid-scan install prompts.
+- **Homebrew installs the formula dependencies automatically.** The formula now declares `subfinder` and `whois` as dependencies, so `brew install nthpartyfinder` installs them with no manual steps and no mid-scan install prompts. Google Chrome is optional (browser-based discovery) and recommended via caveats rather than a dependency — Homebrew formulae cannot depend on a cask — and the binary degrades gracefully without it.
 - **First run just works.** Creating the default config on first run no longer exits and asks you to re-run; the scan proceeds with the freshly-created defaults in one invocation. `--init` remains the explicit create-only path.
 
 ### Fixed

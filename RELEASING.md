@@ -86,13 +86,18 @@ brew tap grcengineering/grcengineering
 brew install nthpartyfinder
 ```
 
-The formula declares `subfinder`, `whois`, and (on macOS) the `google-chrome` cask as **hard
-dependencies**, so a plain `brew install` produces a fully working tool — no manual dependency
-installation and no mid-scan install prompts. The binary embeds all of its own data (vendor
-registry, known-vendors, SaaS platforms) so no `config/` directory is shipped or needed. On Linux,
-Chrome is left to the distro (Homebrew has no cask support there); the formula's caveats say so.
-The first `brew install` from a fresh machine prints a one-time trust prompt — `brew tap` above runs
-`brew trust` for you on current Homebrew, or run `brew trust grcengineering/grcengineering` manually.
+The formula declares `subfinder` and `whois` as dependencies (installed automatically), so a plain
+`brew install` produces a working tool with no manual dependency installation. The binary embeds all
+of its own data (vendor registry, known-vendors, SaaS platforms) so no `config/` directory is
+shipped or needed. **A browser is NOT a formula dependency** — Homebrew formulae cannot depend on a
+cask (`depends_on cask:` is rejected by `brew audit`/`test-bot` as an invalid formula dependency),
+and there is no cask: shipping one would break `brew install --cask` on machines that already have
+Chrome and would not work on Linux at all. Instead the binary handles the browser at runtime — a
+scan that needs one and finds none offers to install it for the user's platform (`--install-browser`
+skips the prompt), and any existing browser is detected and used. So the tap ships **one formula**,
+installable on macOS and Linux with a single `brew install nthpartyfinder`. The first `brew install`
+from a fresh machine prints a one-time trust prompt — `brew tap` above runs `brew trust` for you on
+current Homebrew, or run `brew trust grcengineering/grcengineering` manually.
 
 After a release's `build-release` matrix has finished (the tarballs must exist to hash):
 
