@@ -141,6 +141,18 @@ pub struct Cli {
     #[arg(long)]
     pub enable_web_org: bool,
 
+    /// Install a browser (Chrome/Chromium) without prompting if none is detected.
+    /// For non-interactive/CI use: when a browser-based discovery phase is enabled and no
+    /// Chrome/Chromium/Edge is found, nthpartyfinder installs one via the platform's package
+    /// manager (Homebrew cask on macOS, winget/choco on Windows, apt/dnf/pacman/zypper/snap on
+    /// Linux). Without this flag, an interactive terminal is prompted [Y/n]; a non-interactive
+    /// session skips browser-based discovery instead of hanging. On Linux the install needs
+    /// sudo — an unattended (non-terminal) run uses `sudo -n`, so it aborts fast rather than
+    /// blocking if passwordless sudo isn't configured; run it from a terminal, or pre-authorize
+    /// sudo, to install where a password is required.
+    #[arg(long)]
+    pub install_browser: bool,
+
     /// Disable web page analysis for organization extraction (overrides config)
     #[arg(long)]
     pub disable_web_org: bool,
@@ -345,6 +357,7 @@ pub struct Args {
     pub disable_slm: bool,
     pub download_ner_model: bool,
     pub enable_web_org: bool,
+    pub install_browser: bool,
     pub disable_web_org: bool,
     pub no_color: bool,
     pub dns_rate_limit: Option<u32>,
@@ -395,6 +408,7 @@ impl From<&Cli> for Args {
             disable_slm: cli.disable_slm,
             download_ner_model: cli.download_ner_model,
             enable_web_org: cli.enable_web_org,
+            install_browser: cli.install_browser,
             disable_web_org: cli.disable_web_org,
             no_color: cli.no_color,
             dns_rate_limit: cli.dns_rate_limit,
@@ -567,6 +581,7 @@ mod tests {
             disable_slm: false,
             download_ner_model: false,
             enable_web_org: false,
+            install_browser: false,
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,

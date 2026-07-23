@@ -6,6 +6,7 @@
 pub mod analysis;
 pub mod app;
 pub mod batch;
+pub mod browser_install;
 pub mod browser_pool;
 pub mod cache_commands;
 pub mod checkpoint;
