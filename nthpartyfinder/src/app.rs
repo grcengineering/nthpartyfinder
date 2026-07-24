@@ -1124,24 +1124,29 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     logger.info("Parsing arguments...");
     logger.info("Loading configuration...");
     let load_result = AppConfig::load();
-    let prompt_result = match &load_result {
-        Err(ConfigError::FileNotFound(_)) => {
-            Some(AppConfig::prompt_create_config().map_err(|e| e.to_string()))
-        }
+    // Seamless first run: when there's no config file yet, silently create the default one
+    // (no prompt) and keep going in the SAME invocation. A creation failure (e.g. a read-only
+    // working directory) is NOT fatal — process_config_result falls back to the embedded
+    // defaults so the scan still runs. Only a genuinely-absent file triggers this: a malformed
+    // *existing* config still errors out loudly below, so we never overwrite a user's broken
+    // file with defaults.
+    let create_result = match &load_result {
+        Err(ConfigError::FileNotFound(_)) => Some(
+            AppConfig::create_default_config()
+                .map(Some)
+                .map_err(|e| e.to_string()),
+        ),
         _ => None,
     };
-    let mut _app_config = match process_config_result(load_result, prompt_result) {
+    let mut _app_config = match process_config_result(load_result, create_result) {
         ConfigOutcome::Ready(cfg) => *cfg,
         ConfigOutcome::CreatedNew(path) => {
-            println!(
-                "✅ Created default configuration file at: {}",
+            // One clean, timestamped line in the normal log stream — no prompt, no "run again"
+            // dead-end. `--init` remains the explicit create-only path.
+            logger.info(&format!(
+                "No configuration found — created default config at {} (using defaults for this run; edit it to customize future runs)",
                 path.display()
-            );
-            println!(
-                "   Using default settings for this run — edit that file to customize future runs."
-            );
-            // Proceed with the freshly-created defaults instead of exiting and forcing a re-run:
-            // a first run should just work. `--init` remains the explicit create-only path.
+            ));
             match AppConfig::load() {
                 Ok(cfg) => cfg,
                 // The file was just written; if it somehow can't be read back, fall back to the

@@ -595,33 +595,6 @@ impl AppConfig {
     pub fn is_interactive() -> bool {
         std::io::stdin().is_terminal()
     }
-
-    // cfg(not(coverage)): reads from stdin — requires interactive terminal
-    #[cfg(not(coverage))]
-    pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
-        if !Self::is_interactive() {
-            return Ok(None);
-        }
-
-        print!("Configuration file not found. Create default config? [Y/n] ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_lowercase();
-
-        if input.is_empty() || input == "y" || input == "yes" {
-            let path = Self::create_default_config()?;
-            Ok(Some(path))
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[cfg(coverage)]
-    pub fn prompt_create_config() -> Result<Option<PathBuf>, ConfigError> {
-        Ok(None)
-    }
 }
 
 #[cfg(test)]
@@ -1228,16 +1201,6 @@ similarity_threshold = 0.9
         let _ = result;
     }
 
-    // --- prompt_create_config: only testable for non-interactive path ---
-
-    #[test]
-    fn test_prompt_create_config_non_interactive() {
-        assert!(!AppConfig::is_interactive());
-        let result = AppConfig::prompt_create_config();
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
-    }
-
     // --- ConfigError conversions ---
 
     #[test]
@@ -1666,12 +1629,6 @@ backoff_max_delay_ms = 60000
         let second = AppConfig::is_interactive();
         // Must be deterministic within same process
         assert_eq!(first, second);
-    }
-
-    #[test]
-    fn test_prompt_create_config_non_interactive_returns_none() {
-        let result = AppConfig::prompt_create_config().unwrap();
-        assert!(result.is_none());
     }
 
     #[test]

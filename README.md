@@ -95,6 +95,20 @@ Download the archive for your platform from [Releases](https://github.com/grceng
 
 Each archive ships with a `.sha256` checksum, and every release publishes [SLSA build provenance](https://slsa.dev) (`multiple.intoto.jsonl`) so you can verify the binary was built by this repo's release workflow.
 
+> **macOS: "Apple could not verify … is free of malware".** A binary you download through a browser
+> gets macOS's `com.apple.quarantine` tag, so Gatekeeper blocks it on first run. (These binaries are
+> cosign- and SLSA-signed for supply-chain integrity, but not Apple-notarized — notarization requires
+> a paid Apple Developer account.) The simplest fix is to install a way that is never quarantined —
+> **`brew install nthpartyfinder`**, **`cargo install nthpartyfinder`**, or the **Docker** image all
+> run with no such prompt. If you'd rather keep the downloaded binary, clear the attribute once:
+>
+> ```bash
+> xattr -dr com.apple.quarantine ./nthpartyfinder
+> ```
+>
+> (Equivalently, after the first blocked launch, open **System Settings → Privacy & Security** and
+> click **Open Anyway**.)
+
 ### Build from source
 
 ```bash
