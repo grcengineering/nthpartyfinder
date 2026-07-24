@@ -3,6 +3,30 @@
 #![allow(dead_code)]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+/// Test-only support shared across modules.
+///
+/// `cargo test` runs tests in parallel threads within a single process, and environment variables
+/// are process-global — so a test that `set_var`/`remove_var`s a variable and then asserts on the
+/// resulting behavior races with any sibling that mutates the same variable. [`env_guard`] returns a
+/// process-wide lock: every test that touches a process-global env var acquires it for the test's
+/// duration, so no two such tests ever run concurrently. One global lock (not one per variable) also
+/// serializes the underlying non-thread-safe `setenv`/`getenv` calls against each other.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Acquire the process-wide environment lock for the duration of a test. Poison-tolerant: a
+    /// panic in one env-mutating test must not wedge every other env-mutating test. The returned
+    /// `MutexGuard` is itself `#[must_use]`, so a caller that forgets to bind it is warned.
+    pub(crate) fn env_guard() -> MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 pub mod analysis;
 pub mod app;
 pub mod batch;
