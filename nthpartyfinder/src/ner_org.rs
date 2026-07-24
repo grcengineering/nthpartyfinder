@@ -1427,6 +1427,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_with_env_var_already_set() {
+        let _env_guard = crate::test_support::env_guard();
         std::env::set_var("ORT_DYLIB_PATH", "/some/test/path");
         assert!(NerOrganizationExtractor::setup_onnx_runtime().is_ok());
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1436,6 +1437,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_search_paths() {
+        let _env_guard = crate::test_support::env_guard();
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
         let _ = NerOrganizationExtractor::setup_onnx_runtime();
@@ -1659,6 +1661,7 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     #[test]
     fn test_ner_setup_onnx_runtime_search_path_discovery() {
+        let _env_guard = crate::test_support::env_guard();
         let saved = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 

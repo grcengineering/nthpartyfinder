@@ -769,6 +769,7 @@ mod tests {
 
     #[test]
     fn test_check_chrome_with_env_var_nonexistent_path() {
+        let _env_guard = crate::test_support::env_guard();
         // Save and set a bogus CHROME_PATH
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/nonexistent/chrome/binary");
@@ -811,6 +812,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_message_has_install_instructions_when_missing() {
+        let _env_guard = crate::test_support::env_guard();
         // Temporarily unset ORT_DYLIB_PATH so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1043,6 +1045,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_with_valid_env_path() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join(ort_lib_name());
         std::fs::write(&fake_lib, b"fake ort lib").unwrap();
@@ -1059,6 +1062,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_with_invalid_env_path() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "/nonexistent/libonnxruntime.dylib");
 
@@ -1073,6 +1077,7 @@ mod tests {
 
     #[test]
     fn test_check_chrome_with_valid_env_path() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome");
         std::fs::write(&fake_chrome, b"fake chrome").unwrap();
@@ -1344,6 +1349,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_with_empty_env_var() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::set_var("ORT_DYLIB_PATH", "");
 
@@ -1388,6 +1394,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_env_var_existing_file_message() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
         let fake_lib = dir.path().join(ort_lib_name());
         std::fs::write(&fake_lib, b"fake").unwrap();
@@ -1409,6 +1416,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_system_path_not_found() {
+        let _env_guard = crate::test_support::env_guard();
         // Ensure ORT_DYLIB_PATH is unset so we exercise the search paths
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
@@ -1432,6 +1440,7 @@ mod tests {
 
     #[test]
     fn test_check_chrome_env_var_valid_path() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
         let fake_chrome = dir.path().join("chrome-binary");
         std::fs::write(&fake_chrome, b"fake chrome binary").unwrap();
@@ -1449,6 +1458,7 @@ mod tests {
 
     #[test]
     fn test_check_chrome_not_found_message() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("CHROME_PATH").ok();
         std::env::set_var("CHROME_PATH", "/definitely/not/a/real/path/chrome");
 
@@ -1483,6 +1493,7 @@ mod tests {
 
     #[test]
     fn test_check_dependencies_slm_enabled_error_aggregation() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
@@ -1626,6 +1637,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_env_var_points_to_directory() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
 
         let original = std::env::var("ORT_DYLIB_PATH").ok();
@@ -1645,6 +1657,7 @@ mod tests {
 
     #[test]
     fn test_check_dependencies_error_formatting() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
@@ -1720,6 +1733,7 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_not_found_message_has_install_script() {
+        let _env_guard = crate::test_support::env_guard();
         let original = std::env::var("ORT_DYLIB_PATH").ok();
         std::env::remove_var("ORT_DYLIB_PATH");
 
@@ -2306,6 +2320,7 @@ mod tests {
 
     #[test]
     fn test_restore_env_some_and_none_arms() {
+        let _env_guard = crate::test_support::env_guard();
         let key = "TEST_RESTORE_ENV_COV_2e8f";
         std::env::set_var(key, "before");
         restore_env(key, Some("restored_val".to_string()));

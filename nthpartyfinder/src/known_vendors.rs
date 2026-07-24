@@ -1321,6 +1321,7 @@ mod tests {
 
     #[test]
     fn test_find_config_dir_with_env_var() {
+        let _env_guard = crate::test_support::env_guard();
         let dir = tempdir().unwrap();
         let config_dir = dir.path().join("myconfig");
         fs::create_dir_all(&config_dir).unwrap();

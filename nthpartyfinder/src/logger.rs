@@ -1813,6 +1813,7 @@ mod tests {
 
     #[test]
     fn test_should_enable_colors_no_color_env() {
+        let _env_guard = crate::test_support::env_guard();
         std::env::set_var("NO_COLOR", "1");
         let result = AnalysisLogger::should_enable_colors(false);
         std::env::remove_var("NO_COLOR");
@@ -1821,6 +1822,7 @@ mod tests {
 
     #[test]
     fn test_should_enable_colors_non_terminal_returns_false() {
+        let _env_guard = crate::test_support::env_guard();
         std::env::remove_var("NO_COLOR");
         let result = AnalysisLogger::should_enable_colors(false);
         // In test environments stdout is typically not a terminal
@@ -2143,6 +2145,7 @@ mod tests {
 
     #[test]
     fn test_should_enable_colors_delegates_to_stdout_is_interactive() {
+        let _env_guard = crate::test_support::env_guard();
         std::env::remove_var("NO_COLOR");
         let result = AnalysisLogger::should_enable_colors(false);
         assert!(!result);
