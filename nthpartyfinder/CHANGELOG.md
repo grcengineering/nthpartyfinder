@@ -5,6 +5,12 @@
 ### Added
 - **Unified runtime dependency prompt — one prompt for all optional tools, however you installed nthpartyfinder.** The three optional dependencies (a browser for web-content/web-traffic/subprocessor-render discovery, `subfinder` for subdomain discovery, `whois` for organization-name lookups) are now offered by a SINGLE consolidated prompt instead of three separate flows. When a run could use tools it's missing, the prompt lists every one of them — each with exactly which capability is DISABLED or DEGRADED without it — and installs them for your platform from one keystroke (Homebrew/winget/`apt`/`dnf`/`pacman`/`zypper`; subfinder via a package-manager-free direct download). You can pick a subset by number, and for anything you decline you choose to be reminded next run or **never again** (persisted). This is install-method-agnostic (Homebrew, WinGet, direct package, `cargo` all reach it) and never hangs — a non-interactive/CI run warns and continues with reduced coverage. New `--install-deps` flag installs everything unattended; `--install-browser` (from the prior browser-install work) remains as the browser-only subset. Any already-installed dependency is detected and used.
 
+### Changed
+- **First run is now fully promptless.** A first run with no config file no longer asks *"Configuration file not found. Create default config? [Y/n]"* — nthpartyfinder silently creates the default `./config/nthpartyfinder.toml` and continues the scan in the same invocation, whether or not stdin is a terminal. If the config can't be written (e.g. a read-only working directory) the run falls back to the embedded defaults rather than failing. `--init` remains the explicit create-only path. (Completes the "first run just works" change in 1.5.0, which still showed the prompt.)
+
+### Documentation
+- **macOS Gatekeeper — "Apple could not verify … is free of malware".** The README now explains that a binary downloaded through a browser is quarantined by macOS, how to clear it (`xattr -dr com.apple.quarantine`, or System Settings → "Open Anyway"), and points to the install methods that are never quarantined (`brew install`, `cargo install`, Docker). The downloadable binaries are cosign/SLSA-signed for supply-chain integrity but not Apple-notarized (which would require a paid Apple Developer account).
+
 ## [1.5.0] - 2026-07-20
 
 ### Added
