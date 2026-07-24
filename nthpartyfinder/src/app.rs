@@ -14,7 +14,7 @@ use crate::cli::{Args, CacheCommands, Cli, Commands, ReviewCommands};
 use crate::config::{AppConfig, ConfigError};
 use crate::dep_check;
 use crate::discovery::{
-    CtLogDiscovery, InstallOption, SaasTenantDiscovery, SubfinderDiscovery, WebTrafficDiscovery,
+    CtLogDiscovery, SaasTenantDiscovery, SubfinderDiscovery, WebTrafficDiscovery,
 };
 use crate::dns;
 use crate::export;
@@ -1241,22 +1241,27 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // silently skipped — so a missing Chrome went undetected and the scan later hung on a render.
     let flags = compute_feature_flags(&args, &_app_config);
 
-    // Browser detection + guidance is owned entirely by `browser_install` below (it does the
-    // headless-Chrome-faithful probe and offers a runtime install), so we do NOT route the
-    // browser-phase flags into dep_check's Chrome check — that would print a second, now-stale
-    // "install Chrome" hint that contradicts the runtime offer. Passing false keeps dep_check
-    // focused on ONNX/subfinder/whois.
+    // The browser, subfinder, and whois dependencies are owned entirely by the consolidated
+    // `dependencies::ensure_dependencies` prompt below. dep_check must NOT also warn about them —
+    // that would print a second, contradictory "install X" hint right before the one prompt the
+    // user is supposed to see. So we pass `false` for the browser AND subfinder gates here, and
+    // filter any whois warning out below, leaving dep_check focused on ONNX Runtime (NER) only.
     match dep_check::check_dependencies(
         args.enable_slm,
         args.disable_slm,
-        args.enable_subdomain_discovery,
+        false,
         false,
         false,
         _app_config.discovery.ner_enabled,
-        _app_config.discovery.subdomain_enabled,
+        false,
     ) {
         Ok(results) => {
             for msg in format_dep_check_warnings(&results) {
+                // subfinder/whois are handled by the consolidated dependency prompt; don't
+                // double-warn (subfinder is already gated out above; whois is unconditional).
+                if msg.contains("whois") {
+                    continue;
+                }
                 eprintln!("⚠️  {}", msg);
             }
             let ort_unavailable = results
@@ -1273,16 +1278,31 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
-    // A browser (Chrome/Chromium/Edge) powers the web-org, web-traffic, and subprocessor-render
-    // phases. If any of those is enabled and none is detected, offer to install one — interactively
-    // via a [Y/n] prompt, or automatically with --install-browser — so `brew install nthpartyfinder`
-    // stays a single step with no cask and no separate browser install. This never hangs: a
-    // non-interactive session with no browser just warns and continues, and the browser pool still
-    // bounds each launch with a hard timeout and fails fast, so an un-installed browser degrades
-    // gracefully (subprocessor → static HTML, web-org → HTTP-only, web-traffic → empty).
-    if flags.web_org || flags.web_traffic || flags.subprocessor {
-        crate::browser_install::ensure_browser_available(input, &logger, args.install_browser);
-    }
+    // Optional dependencies (a browser, subfinder, whois) are handled by ONE consolidated
+    // runtime prompt — install-method-agnostic (works on Homebrew / WinGet / direct / cargo
+    // installs), listing every missing dependency and what each unlocks, installable from a
+    // single keystroke. Interactive by default; `--install-deps` installs all unattended and
+    // `--install-browser` the browser subset. This never hangs: a non-interactive session with
+    // missing deps and no flag warns and continues (each phase also degrades gracefully at its
+    // own launch), and declining a dependency records a per-dependency reminder preference.
+    let browser_phase = flags.web_org || flags.web_traffic || flags.subprocessor;
+    // Resolve the effective subfinder path (CLI override → config default) so the dependency
+    // prompt's "is subfinder present?" check matches exactly how the scan resolves it below.
+    let effective_subfinder_path = args
+        .subfinder_path
+        .as_deref()
+        .unwrap_or(_app_config.discovery.subfinder_path.as_str());
+    crate::dependencies::ensure_dependencies(
+        input,
+        &logger,
+        &mut prefs,
+        browser_phase,
+        flags.subdomain,
+        Some(effective_subfinder_path),
+        args.install_deps,
+        args.install_browser,
+    )
+    .await;
 
     logger.start_init_progress(5).await;
 
@@ -1985,200 +2005,22 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             .subfinder_path
             .clone()
             .unwrap_or_else(|| _app_config.discovery.subfinder_path.clone());
-        let mut discovery = SubfinderDiscovery::new(
+        let discovery = SubfinderDiscovery::new(
             PathBuf::from(path.clone()),
             std::time::Duration::from_secs(_app_config.discovery.subfinder_timeout_secs),
         );
         if discovery.is_available() {
             Some(discovery)
-        } else if !input.is_terminal() {
-            logger.warn("Subfinder binary not found — subdomain discovery disabled (non-interactive mode, cannot prompt for installation)");
-            None
         } else {
-            let options = SubfinderDiscovery::get_available_install_options();
-            let selected_option = logger.suspend_for_io(|| {
-                eprintln!();
-                eprintln!("╔══════════════════════════════════════════════════════════════════╗");
-                eprintln!("║           Subfinder Not Found                                    ║");
-                eprintln!("╚══════════════════════════════════════════════════════════════════╝");
-                eprintln!();
-                eprintln!("Subfinder is required for subdomain discovery.");
-                eprintln!("It's a subdomain enumeration tool by Project Discovery.");
-                eprintln!();
-                eprintln!("Would you like to install subfinder now?");
-                eprintln!();
-                for (i, option) in options.iter().enumerate() {
-                    eprintln!("  [{}] {}", i + 1, option.display_name());
-                }
-                eprintln!();
-                eprint!("Select option [1-{}]: ", options.len());
-
-                let mut line_buf = String::new();
-                if input.read_line(&mut line_buf).is_ok() {
-                    line_buf.trim().parse::<usize>().ok().and_then(|n| {
-                        if n >= 1 && n <= options.len() {
-                            Some(options[n - 1])
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
-                }
-            });
-
-            match selected_option {
-                Some(InstallOption::AutoDownload) => {
-                    eprintln!();
-                    eprintln!("Downloading subfinder...");
-                    match SubfinderDiscovery::download_and_install().await {
-                        Ok(install_path) => {
-                            logger.info(&format!(
-                                "Subfinder installed to: {}",
-                                install_path.display()
-                            ));
-                            discovery = SubfinderDiscovery::new(
-                                install_path,
-                                std::time::Duration::from_secs(
-                                    _app_config.discovery.subfinder_timeout_secs,
-                                ),
-                            );
-                            if discovery.is_available() {
-                                Some(discovery)
-                            } else {
-                                logger.warn("Subfinder was downloaded but failed verification");
-                                None
-                            }
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("Failed to download subfinder: {}", e));
-                            eprintln!("Download failed: {}", e);
-                            eprintln!("You can try one of the other installation methods.");
-                            None
-                        }
-                    }
-                }
-                Some(InstallOption::Skip) => None,
-                Some(InstallOption::ManualDownload) => {
-                    let url = SubfinderDiscovery::get_download_url();
-                    eprintln!();
-                    eprintln!("Opening download page: {}", url);
-                    #[cfg(target_os = "windows")]
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", url])
-                        .spawn();
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("open").arg(url).spawn();
-                    #[cfg(target_os = "linux")]
-                    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-
-                    eprintln!("After installing, run nthpartyfinder again.");
-                    None
-                }
-                Some(InstallOption::Go) => {
-                    eprintln!();
-                    eprintln!("Installing subfinder via 'go install'...");
-                    match SubfinderDiscovery::install_via_go().await {
-                        Ok(true) => {
-                            logger.info("Subfinder installed successfully!");
-                            let subfinder_name = if cfg!(windows) {
-                                "subfinder.exe"
-                            } else {
-                                "subfinder"
-                            };
-                            let go_bin = dirs::home_dir()
-                                .map(|h| h.join("go").join("bin").join(subfinder_name))
-                                .unwrap_or_else(|| PathBuf::from(subfinder_name));
-                            discovery = SubfinderDiscovery::new(
-                                go_bin,
-                                std::time::Duration::from_secs(
-                                    _app_config.discovery.subfinder_timeout_secs,
-                                ),
-                            );
-                            if discovery.is_available() {
-                                Some(discovery)
-                            } else {
-                                logger.warn("Subfinder was installed but not found in PATH. You may need to add ~/go/bin to your PATH.");
-                                None
-                            }
-                        }
-                        Ok(false) => {
-                            logger.warn("Failed to install subfinder");
-                            None
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("Failed to install subfinder: {}", e));
-                            None
-                        }
-                    }
-                }
-                Some(InstallOption::Docker) => {
-                    eprintln!();
-                    eprintln!("Pulling subfinder Docker image...");
-                    match SubfinderDiscovery::install_via_docker().await {
-                        Ok(true) => {
-                            eprintln!();
-                            eprintln!("Docker image pulled successfully!");
-                            eprintln!();
-                            eprintln!(
-                                "Note: Docker-based subfinder requires running via docker command."
-                            );
-                            eprintln!("nthpartyfinder cannot use Docker-based subfinder directly.");
-                            eprintln!();
-                            eprintln!("To use subfinder with Docker, run manually:");
-                            eprintln!(
-                                "  docker run -it projectdiscovery/subfinder:latest -d <domain>"
-                            );
-                            eprintln!();
-                            eprintln!("For native integration, install subfinder via Go or download the binary.");
-                            None
-                        }
-                        Ok(false) => {
-                            logger.warn("Failed to pull subfinder Docker image");
-                            None
-                        }
-                        Err(e) => {
-                            logger.warn(&format!("Failed to pull subfinder Docker image: {}", e));
-                            None
-                        }
-                    }
-                }
-                Some(InstallOption::Homebrew) => {
-                    eprintln!();
-                    eprintln!("Installing subfinder via Homebrew...");
-                    match SubfinderDiscovery::install_via_homebrew().await {
-                        Ok(true) => {
-                            logger.info("Subfinder installed successfully via Homebrew!");
-                            discovery = SubfinderDiscovery::new(
-                                PathBuf::from("subfinder"),
-                                std::time::Duration::from_secs(
-                                    _app_config.discovery.subfinder_timeout_secs,
-                                ),
-                            );
-                            if discovery.is_available() {
-                                Some(discovery)
-                            } else {
-                                logger.warn("Subfinder was installed but not found. You may need to restart your terminal.");
-                                None
-                            }
-                        }
-                        Ok(false) => {
-                            logger.warn("Failed to install subfinder via Homebrew");
-                            None
-                        }
-                        Err(e) => {
-                            logger
-                                .warn(&format!("Failed to install subfinder via Homebrew: {}", e));
-                            None
-                        }
-                    }
-                }
-                None => {
-                    eprintln!("Invalid selection. Continuing without subdomain discovery.");
-                    eprintln!("❌ DISABLED: Subdomain discovery (subfinder not installed)");
-                    None
-                }
-            }
+            // The consolidated dependency prompt earlier in the run already offered to install
+            // subfinder (unless the user declined, it is on their never-remind list, or this is a
+            // non-interactive session). It is not present now, so skip subdomain discovery with
+            // reduced coverage rather than prompting a second time.
+            logger.warn(
+                "subfinder not found — subdomain discovery will be skipped. Re-run and accept the \
+                 dependency prompt, or pass --install-deps, to enable it.",
+            );
+            None
         }
     } else {
         None
@@ -3231,6 +3073,7 @@ mod tests {
             disable_slm: false,
             download_ner_model: false,
             enable_web_org: false,
+            install_deps: false,
             install_browser: false,
             disable_web_org: false,
             no_color: false,
