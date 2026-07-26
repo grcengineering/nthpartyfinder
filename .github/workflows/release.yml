@@ -402,3 +402,127 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked
+
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
+  # Propagate the release to the package managers.
+  #
+  # A release is not shipped when its tarballs land on GitHub — it is shipped when the commands in
+  # the README hand a user that version. Those were separate manual steps, and the gap was silent:
+  # `brew install nthpartyfinder` succeeds while installing an old build. v1.5.0 shipped with the
+  # tap still on v1.4.0 and no cask published at all, and nothing failed to say so.
+  #
+  # These jobs run only on a tag push (never on the crates.io dispatch) and only after `publish`,
+  # because they hash the release tarballs and those must be downloadable first.
+  # ─────────────────────────────────────────────────────────────────────────────────────────────
+  publish-homebrew:
+    name: Update the Homebrew tap
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Job level, deliberately: a step's own `env:` block is not in scope for that step's `if:`,
+    # and the `secrets` context cannot be used in a step-level `if` at all. Lifting it here is
+    # what makes the "skip cleanly when unconfigured" branches below actually work.
+    env:
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The tap enforces required_signatures, so an ordinary `git push` of a workflow-authored
+      # commit is rejected. Commits created through the GitHub API are signed by GitHub's own
+      # key and land Verified, which satisfies the rule without putting a signing key in CI.
+      # TAP_TOKEN must be a fine-grained PAT (or GitHub App token) with Contents: read+write on
+      # the tap repo; the default GITHUB_TOKEN cannot write to another repository.
+      - name: Sync formula and cask into the tap
+        if: env.TAP_TOKEN != ''
+        env:
+          TAG_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          scripts/sync-homebrew-formula.sh "$TAG" --push
+
+      - name: Explain the skip when no tap token is configured
+        if: env.TAP_TOKEN == ''
+        shell: bash
+        run: |
+          {
+            echo "### Homebrew tap NOT updated"
+            echo
+            echo "No \`TAP_TOKEN\` secret is configured, so this release did not reach the tap."
+            echo "Users running \`brew install nthpartyfinder\` will get the PREVIOUS version."
+            echo
+            echo "Either add the secret (fine-grained PAT, Contents: read+write on the tap), or"
+            echo "run this locally now:"
+            echo
+            echo '```'
+            echo "nthpartyfinder/scripts/sync-homebrew-formula.sh ${GITHUB_REF#refs/tags/}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::Homebrew tap not updated — TAP_TOKEN is not configured."
+
+  publish-winget:
+    name: Submit the WinGet manifests
+    if: github.event_name == 'push'
+    needs: publish
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      # wingetcreate opens a PR against microsoft/winget-pkgs from a fork, so it needs a token
+      # with permission to fork and open pull requests. Merging is a third-party review process
+      # and is deliberately outside our control — this job's success means "PR submitted", not
+      # "published", which is why winget is an OPTIONAL channel in check-distribution-sync.sh.
+      - name: Submit to winget-pkgs
+        if: env.WINGET_TOKEN != ''
+        env:
+          TAG_REF: ${{ github.ref }}
+        shell: pwsh
+        run: |
+          $tag = "${env:TAG_REF}" -replace '^refs/tags/', ''
+          $version = $tag -replace '^v', ''
+          $url = "https://github.com/${{ github.repository }}/releases/download/$tag/nthpartyfinder-x86_64-pc-windows-msvc.zip"
+          curl.exe -fsSL -o wingetcreate.exe https://aka.ms/wingetcreate/latest
+          .\wingetcreate.exe update GRCEngineering.NthPartyFinder `
+            --version $version --urls $url --submit --token $env:WINGET_TOKEN
+
+      - name: Explain the skip when no winget token is configured
+        if: env.WINGET_TOKEN == ''
+        shell: bash
+        run: |
+          echo "### WinGet manifests NOT submitted" >> "$GITHUB_STEP_SUMMARY"
+          echo "No \`WINGET_TOKEN\` secret is configured. See RELEASING.md for the manual steps." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::WinGet not submitted — WINGET_TOKEN is not configured."
+
+  # The gate that makes the promise real. Independently re-reads what each channel actually serves
+  # and fails the release run when a required one lags — so a broken or skipped propagation step
+  # cannot pass silently. Runs even when the jobs above were skipped, which is exactly the case it
+  # most needs to catch.
+  verify-distribution:
+    name: Verify every channel serves this release
+    if: always() && github.event_name == 'push'
+    needs: [publish, publish-homebrew, publish-winget]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check distribution channels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          TAG="${TAG_REF#refs/tags/}"
+          # Package registries are eventually consistent; give the tap a moment to serve the push.
+          sleep 30
+          scripts/check-distribution-sync.sh --tag "$TAG" | tee report.txt
+          {
+            echo '## Distribution sync'
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

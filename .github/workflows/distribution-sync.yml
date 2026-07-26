@@ -1,0 +1,93 @@
+# Catch package-manager drift — the gap between "a release exists" and "the README's install
+# commands give you that release".
+#
+# That gap is silent by nature: `brew install nthpartyfinder` succeeds and reports success while
+# installing an old build, so nothing fails and nobody notices. It went unnoticed here for a full
+# release cycle. This workflow turns the drift into a loud, dated signal.
+#
+# Two triggers, because they catch different failures:
+#   * schedule — catches drift from ANY cause, including a release cut by hand, an automated tap
+#     update that silently failed, or an upstream (winget-pkgs) PR that was never merged.
+#   * workflow_dispatch — for checking on demand after fixing something.
+#
+# The post-release check lives in release.yml itself rather than here: publishing a release from
+# GITHUB_TOKEN does not trigger new workflow runs, so a `release: published` trigger would never
+# fire for our own pipeline.
+name: Distribution Sync
+
+on:
+  schedule:
+    # Mondays 13:00 UTC. Weekly is the right cadence: releases are infrequent, and a stale channel
+    # is a "fix this week" problem, not a page-someone-now problem.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: "Also fail when optional channels (crates.io, winget) lag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Every channel serves the latest release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed to file/refresh the drift issue below.
+      issues: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check distribution channels
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          nthpartyfinder/scripts/check-distribution-sync.sh \
+            ${{ inputs.strict && '--strict' || '' }} | tee sync-report.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the report to the run summary
+        shell: bash
+        run: |
+          {
+            echo '## Distribution sync'
+            echo
+            echo '```'
+            cat sync-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # An Actions failure nobody is subscribed to is not a signal. An issue is durable, assignable,
+      # and shows up where the rest of the work lives. Reuse one issue rather than opening a new one
+      # every Monday, so a long-lived drift does not become a wall of duplicates.
+      - name: Open or refresh the drift issue
+        if: steps.check.outputs.exit_code != '0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="Package managers are serving a stale release"
+          BODY="$(printf '%s\n\n```\n%s\n```\n\nRun: %s/%s/actions/runs/%s' \
+            "One or more install channels do not serve the latest GitHub release, so users following the README get a different version than the one that was shipped." \
+            "$(cat sync-report.txt)" \
+            "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
+
+          EXISTING="$(gh issue list --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+            echo "Refreshed issue #${EXISTING}"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "distribution" 2>/dev/null \
+              || gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Fail the run when a required channel is stale
+        if: steps.check.outputs.exit_code != '0'
+        run: exit 1
