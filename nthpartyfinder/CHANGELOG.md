@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] - 2026-07-25
 
 ### Fixed
 - **A deep scan can no longer take down the network it runs on.** Two independent causes, both fixed:
