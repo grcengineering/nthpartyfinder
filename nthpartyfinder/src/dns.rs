@@ -19,6 +19,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 #[cfg(not(coverage))]
 use tracing::{debug, info, warn};
 
@@ -138,6 +139,11 @@ pub struct DnsServerPool {
     /// the limiter was dead code (callers always passed `None`), letting sustained
     /// concurrency trip DoH-provider 429s that were then mis-read as empty answers.
     dns_limiter: SharedRateLimiter,
+    /// Adaptive concurrency governor. The rate limiter above paces *how often* we may start a
+    /// lookup; this bounds *how many* may be outstanding, and learns that bound from observed
+    /// latency and failures. A fixed rate cannot be safe on an unknown network — see
+    /// [`crate::dns_governor`] — so this is the control that actually protects the resolver path.
+    governor: Arc<crate::dns_governor::DnsGovernor>,
     /// Max DoH provider rotations on a throttle (429/5xx) before giving up.
     max_dns_retries: u32,
     /// Base backoff (ms) between throttled DoH retries.
@@ -286,6 +292,38 @@ impl TransportHealth {
         self.consecutive_failures.store(0, Ordering::Relaxed);
     }
 
+    /// The transport failed *while we were overloading the network ourselves*.
+    ///
+    /// This must NOT advance the down-streak. The breaker exists to route around a transport that
+    /// is genuinely blocked or broken; congestion is neither. Counting congestion here caused a
+    /// vicious cycle in the 2026-07-24 incident: our own load timed DoH out, eight timeouts marked
+    /// DoH "blocked", the ladder fell through DoT to raw UDP/53, and that pushed *more* traffic at
+    /// the consumer DNS forwarder that was already collapsing — while the user was told "Results
+    /// are unaffected". The adaptive governor is the right responder to congestion, and it is
+    /// already backing off; the breaker should simply stay out of the way.
+    ///
+    /// Returns false always: there is nothing to warn about, because nothing is broken.
+    fn record_congestion(&self) -> bool {
+        false
+    }
+
+    /// Record a transport failure, unless the adaptive governor says we are the ones causing it.
+    ///
+    /// "Backing off" is the discriminator: the governor drops its limit the moment lookups start
+    /// timing out or being rejected, so a limit below its ceiling is direct evidence that the
+    /// failures are self-inflicted load rather than a broken transport. Under those conditions the
+    /// streak is not advanced and the transport stays eligible — the governor throttles instead.
+    fn record_failure_unless_congested(
+        &self,
+        governor: &std::sync::Arc<crate::dns_governor::DnsGovernor>,
+    ) -> bool {
+        if governor.is_backing_off() {
+            self.record_congestion()
+        } else {
+            self.record_failure()
+        }
+    }
+
     /// The transport failed at the transport layer (timeout / connection / sustained throttle).
     /// Advance the streak; returns true exactly once, on the transition into "down", so the caller
     /// warns a single time per outage.
@@ -300,6 +338,39 @@ impl TransportHealth {
         } else {
             false
         }
+    }
+}
+
+/// Classify a paired TXT + CNAME lookup for the adaptive DNS controller.
+///
+/// The pair is a single unit of network work, so it yields a single verdict. Either arm answering
+/// proves the resolver path is alive, and CNAME absence is the norm — so only a failure of *both*
+/// is evidence of anything. Even then, a name the resolver could not parse is a property of the
+/// name, not of the network, and must never be allowed to throttle a healthy link.
+fn classify_pair<T, U, E: std::fmt::Display, F: std::fmt::Display>(
+    txt: &std::result::Result<T, E>,
+    cname: &std::result::Result<U, F>,
+) -> crate::dns_governor::DnsOutcome {
+    use crate::dns_governor::DnsOutcome;
+    if txt.is_ok() || cname.is_ok() {
+        return DnsOutcome::Answered;
+    }
+    let congested = [
+        txt.as_ref().err().map(|e| e.to_string()),
+        cname.as_ref().err().map(|e| e.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|m| {
+        m.contains("DNS_THROTTLE")
+            || m.contains("DNS_ENDPOINT")
+            || m.contains("timed out")
+            || m.contains("timeout")
+    });
+    if congested {
+        DnsOutcome::Rejected
+    } else {
+        DnsOutcome::Unrelated
     }
 }
 
@@ -337,10 +408,18 @@ fn net_error_is_authoritative_negative(err: &NetError) -> bool {
 /// `transport` names the tier that went down; `fallback` says what carries the load now.
 #[cfg_attr(coverage, allow(dead_code))]
 fn warn_transport_unavailable(transport: &str, fallback: &str) {
+    // Deliberately does NOT promise "results are unaffected". It used to, and that was wrong in
+    // the case that matters: when a transport goes down mid-scan, the lookups that failed on the
+    // way to the threshold have already returned empty, and empty is indistinguishable from
+    // "this name genuinely has no records". Recall really can drop, and the 2026-07-24 incident
+    // produced 76,293 failed lookups while the log calmly reported no impact. Failures are
+    // counted through `note_throttle` and surfaced in the end-of-scan coverage summary, so the
+    // honest thing here is to point at that rather than to reassure.
     tracing::warn!(
-        "{} appears blocked or unavailable after {} consecutive failures — {}. Results are \
-         unaffected; deep scans may be slower. It is re-probed every {}s and resumes automatically \
-         when it recovers.",
+        "{} appears blocked or unavailable after {} consecutive failures — {}. Lookups that \
+         failed before the fallback engaged may have returned empty, so recall for those names \
+         can be incomplete; see the discovery-coverage summary at the end of the scan. It is \
+         re-probed every {}s and resumes automatically when it recovers.",
         transport,
         TRANSPORT_DOWN_THRESHOLD,
         fallback,
@@ -511,6 +590,13 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(config.rate_limits.dns_queries_per_second),
+            governor: config
+                .rate_limits
+                .dns_max_concurrency
+                .map(crate::dns_governor::DnsGovernor::pinned)
+                .unwrap_or_else(|| {
+                    crate::dns_governor::DnsGovernor::new(crate::dns_governor::DEFAULT_MAX_LIMIT)
+                }),
             dot_enabled: true,
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
@@ -529,26 +615,36 @@ impl DnsServerPool {
     /// Create a new DNS server pool with embedded defaults (for backwards compatibility)
     pub fn new() -> Self {
         let doh_servers = vec![
-            DohServerConfig {
-                url: "https://cloudflare-dns.com/dns-query".to_string(),
-                name: "Cloudflare DoH".to_string(),
-                timeout_secs: 3,
-            },
-            // Google's JSON DoH API is at /resolve, NOT /dns-query (the latter is
-            // RFC-8484 wire-format and 400s for application/dns-json).
-            DohServerConfig {
-                url: "https://dns.google/resolve".to_string(),
-                name: "Google DoH".to_string(),
-                timeout_secs: 3,
-            },
-            // IP-literal endpoints avoid a DNS-bootstrap dependency when UDP/53 is
-            // blocked. Quad9 + OpenDNS were dropped: their DoH does not serve the
-            // JSON GET API, so they returned 0 records and caused false negatives.
+            // EVERY endpoint is an IP literal, deliberately, and this is load-bearing for
+            // network safety rather than a style choice.
+            //
+            // These clients run with `POOL_MAX_IDLE_PER_HOST == 0` (http_client.rs:62), so every
+            // DoH request opens a fresh TCP+TLS connection. reqwest is built without the
+            // `hickory-dns` feature and sets no custom resolver, so establishing that connection
+            // to a *hostname* goes through hyper's `GaiResolver` — plain `getaddrinfo`, which
+            // reads /etc/resolv.conf and asks the LAN router, and which hyper does not cache.
+            //
+            // The list used to alternate hostname and IP forms of the same three providers under
+            // strict round-robin, so roughly half of all DoH requests silently emitted an A+AAAA
+            // pair to the router *before* the encrypted query even left the machine. On a depth-3
+            // scan (45,398 subdomain lookups × 2 record types) that is order 10^5 unbudgeted
+            // UDP/53 queries aimed at exactly the consumer DNS forwarder we are trying to
+            // protect — the single largest contributor to the 2026-07-24 incident in which port
+            // 53 went dark to every destination while ICMP and TCP/443 stayed healthy.
+            //
+            // Each provider below is the same operator as the hostname form it replaces, so
+            // provider diversity is unchanged; only the bootstrap lookup is gone. These are
+            // long-lived anycast addresses whose TLS certificates carry the IP in a SAN, so
+            // certificate validation still succeeds. Quad9 + OpenDNS remain excluded: their DoH
+            // does not serve the JSON GET API, so they returned 0 records and caused false
+            // negatives.
             DohServerConfig {
                 url: "https://1.1.1.1/dns-query".to_string(),
                 name: "Cloudflare DoH (IP)".to_string(),
                 timeout_secs: 3,
             },
+            // Google's JSON DoH API is at /resolve, NOT /dns-query (the latter is
+            // RFC-8484 wire-format and 400s for application/dns-json).
             DohServerConfig {
                 url: "https://8.8.8.8/resolve".to_string(),
                 name: "Google DoH (IP)".to_string(),
@@ -558,11 +654,6 @@ impl DnsServerPool {
             // across three providers, not two — cutting per-provider throttle risk by a
             // third. Live-verified to serve the JSON GET API with TXT answer counts
             // identical to Cloudflare (unfiltered, no truncation; recall unaffected).
-            DohServerConfig {
-                url: "https://doh.sb/dns-query".to_string(),
-                name: "dns.sb DoH".to_string(),
-                timeout_secs: 3,
-            },
             DohServerConfig {
                 url: "https://185.222.222.222/dns-query".to_string(),
                 name: "dns.sb DoH (IP)".to_string(),
@@ -606,6 +697,7 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(50), // matches config default_dns_queries_per_second
+            governor: crate::dns_governor::DnsGovernor::new(crate::dns_governor::DEFAULT_MAX_LIMIT),
             dot_enabled: true,
             max_dns_retries: 3,
             backoff_base_ms: 500,
@@ -718,6 +810,8 @@ impl DnsServerPool {
             current_dns_index: AtomicUsize::new(0),
             client,
             dns_limiter: SharedRateLimiter::new(1000), // effectively unthrottled for tests
+            // Hermetic tests must not be paced by adaptation; pin wide open.
+            governor: crate::dns_governor::DnsGovernor::pinned(1000),
             dot_enabled: false, // hermetic tests must not hit real DoT (853) servers
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
@@ -1170,8 +1264,29 @@ impl DnsServerPool {
     /// GRC-367: acquire a permit from the pool's per-process DNS rate limiter. Called on the
     /// production hot path so `dns_queries_per_second` is enforced even when no explicit
     /// RateLimitContext is threaded through (the limiter was previously dead code).
-    pub async fn acquire_dns_permit(&self) {
+    ///
+    /// Also acquires an adaptive-concurrency permit from the governor, which is what actually
+    /// bounds simultaneous DNS egress. Report the lookup's fate with
+    /// [`crate::dns_governor::DnsPermit::complete`]; simply dropping the returned permit releases
+    /// the slot without recording a measurement, which is the right behavior for a cancelled task.
+    #[must_use = "the returned permit bounds one DNS lookup; dropping it immediately frees the slot"]
+    pub async fn acquire_dns_permit(&self) -> crate::dns_governor::DnsPermit {
+        // Rate first, then concurrency: pacing the *start* of a lookup before occupying a slot
+        // keeps the governor's in-flight count a true measure of network work, not of queueing
+        // behind our own token bucket.
         self.dns_limiter.acquire().await;
+        self.governor.acquire().await
+    }
+
+    /// Snapshot of the adaptive DNS controller, for the end-of-scan summary.
+    pub fn governor_stats(&self) -> crate::dns_governor::GovernorStats {
+        self.governor.stats()
+    }
+
+    /// Shared handle to the governor, so lookup paths that acquire their own permits can report
+    /// outcomes against the same controller.
+    pub fn governor(&self) -> &Arc<crate::dns_governor::DnsGovernor> {
+        &self.governor
     }
 
     /// Create a traditional DNS resolver for the given server config (C002 fix: returns Result)
@@ -1242,10 +1357,15 @@ impl DnsServerPool {
         dns_failure_counter: &AtomicUsize,
     ) -> (Vec<String>, Vec<String>) {
         // fix 1: enforce the per-process DNS limiter on this hot path (was bypassed entirely).
-        self.acquire_dns_permit().await;
+        let permit = self.acquire_dns_permit().await;
 
         let (txt_result, cname_result) =
             tokio::join!(self.fast_txt_lookup(domain), self.fast_cname_lookup(domain),);
+
+        // Feed the adaptive controller. Either arm answering means the resolver path is alive;
+        // only when BOTH fail do we have evidence of congestion, and even then a name the
+        // resolver simply cannot parse is not the network's fault.
+        permit.complete(classify_pair(&txt_result, &cname_result));
 
         // fix 1: a surviving throttle on EITHER record type increments the failure counter
         // so the exit-3 guard can distinguish "throttled into emptiness" from "genuinely empty".
@@ -1314,7 +1434,10 @@ impl DnsServerPool {
                     if e.to_string().contains("DNS_THROTTLE")
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
-                    if self.doh_health.record_failure() {
+                    if self
+                        .doh_health
+                        .record_failure_unless_congested(&self.governor)
+                    {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1328,7 +1451,10 @@ impl DnsServerPool {
                     }
                 }
                 _ => {
-                    if self.doh_health.record_failure() {
+                    if self
+                        .doh_health
+                        .record_failure_unless_congested(&self.governor)
+                    {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1398,7 +1524,10 @@ impl DnsServerPool {
                         saw_empty = true;
                     }
                     DirectOutcome::TransportFailed => {
-                        if self.dot_health.record_failure() {
+                        if self
+                            .dot_health
+                            .record_failure_unless_congested(&self.governor)
+                        {
                             warn_transport_unavailable(
                                 "DoT (DNS-over-TLS, 853)",
                                 "falling back to direct DNS (UDP/53, rate-limited)",
@@ -1430,7 +1559,10 @@ impl DnsServerPool {
                             saw_empty = true;
                         }
                         DirectOutcome::TransportFailed => {
-                            if self.do53_health.record_failure() {
+                            if self
+                                .do53_health
+                                .record_failure_unless_congested(&self.governor)
+                            {
                                 warn_transport_unavailable(
                                     "Direct DNS (UDP/53)",
                                     "no DNS transport currently reachable — some lookups may be unresolved",
@@ -1478,7 +1610,10 @@ impl DnsServerPool {
                     if e.to_string().contains("DNS_THROTTLE")
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
-                    if self.doh_health.record_failure() {
+                    if self
+                        .doh_health
+                        .record_failure_unless_congested(&self.governor)
+                    {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1492,7 +1627,10 @@ impl DnsServerPool {
                     }
                 }
                 _ => {
-                    if self.doh_health.record_failure() {
+                    if self
+                        .doh_health
+                        .record_failure_unless_congested(&self.governor)
+                    {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1591,13 +1729,16 @@ pub async fn get_txt_records_with_rate_limit(
     let _query_timer = crate::perf::scoped(&crate::perf::METRICS.dns_query);
 
     // Apply rate limiting if configured
-    if let Some(ctx) = rate_limit_ctx {
+    // Pace with whichever rate limiter applies, then take an adaptive-concurrency slot. Only one
+    // rate limiter is used so an explicit context does not double-throttle.
+    let permit = if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
+        dns_pool.governor().acquire().await
     } else {
         // GRC-367: no explicit context → use the pool's own per-process limiter so the
         // configured dns_queries_per_second is actually enforced on the production hot path.
-        dns_pool.acquire_dns_permit().await;
-    }
+        dns_pool.acquire_dns_permit().await
+    };
 
     debug!("Querying TXT records for domain: {}", domain);
 
@@ -1683,6 +1824,15 @@ pub async fn get_txt_records_with_rate_limit(
             }
         }
     ).await;
+
+    // Tell the adaptive controller how the network behaved. A resolver answering — even with an
+    // empty answer — is a healthy latency sample; the overall timeout firing is congestion
+    // evidence; both arms declining without a timeout is a resolver-level failure.
+    permit.complete(match &race_result {
+        Ok(Some(_)) => crate::dns_governor::DnsOutcome::Answered,
+        Ok(None) => crate::dns_governor::DnsOutcome::Rejected,
+        Err(_) => crate::dns_governor::DnsOutcome::TimedOut,
+    });
 
     if let Ok(Some(records)) = race_result {
         // A resolver answered. Empty counts: "this name has no TXT records" is an answer.
@@ -1814,12 +1964,14 @@ pub async fn get_cname_records_with_rate_limit(
     }
 
     // Apply rate limiting if configured
-    if let Some(ctx) = rate_limit_ctx {
+    // See the TXT path: one rate limiter, then an adaptive-concurrency slot.
+    let permit = if let Some(ctx) = rate_limit_ctx {
         ctx.dns_limiter.acquire().await;
+        dns_pool.governor().acquire().await
     } else {
         // GRC-367: enforce the pool's per-process DNS limiter on the production path.
-        dns_pool.acquire_dns_permit().await;
-    }
+        dns_pool.acquire_dns_permit().await
+    };
 
     debug!("Querying CNAME records for domain: {}", domain);
 
@@ -1827,12 +1979,27 @@ pub async fn get_cname_records_with_rate_limit(
     // throttling provider is rotated past instead of collapsing every failure into
     // `Ok(empty)`. The race is bounded by a 3s timeout — matching the TXT path — which the
     // short in-race backoff (fix 5) is sized to allow 2-3 rotations within.
-    match tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         dns_pool.doh_cname_lookup_resilient(domain),
     )
-    .await
-    {
+    .await;
+
+    // Report to the adaptive controller before interpreting the result. A throttle (429/5xx across
+    // every provider) is congestion; the overall timeout is congestion; a parse/transport error is
+    // a property of the *name*, not the network, so it must not throttle a healthy link.
+    permit.complete(match &outcome {
+        Ok(Ok(_)) => crate::dns_governor::DnsOutcome::Answered,
+        Ok(Err(e))
+            if e.to_string().contains("DNS_THROTTLE") || e.to_string().contains("DNS_ENDPOINT") =>
+        {
+            crate::dns_governor::DnsOutcome::Rejected
+        }
+        Ok(Err(_)) => crate::dns_governor::DnsOutcome::Unrelated,
+        Err(_) => crate::dns_governor::DnsOutcome::TimedOut,
+    });
+
+    match outcome {
         // Genuine answer: records present.
         Ok(Ok(records)) if !records.is_empty() => {
             debug!(
@@ -4665,6 +4832,7 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let rate_config = RateLimitConfig {
             dns_queries_per_second: 100,
+            dns_max_concurrency: None,
             http_requests_per_second: 10,
             whois_queries_per_second: 2,
             backoff_strategy: Default::default(),
@@ -4738,6 +4906,7 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let rate_config = RateLimitConfig {
             dns_queries_per_second: 100,
+            dns_max_concurrency: None,
             http_requests_per_second: 10,
             whois_queries_per_second: 2,
             backoff_strategy: Default::default(),

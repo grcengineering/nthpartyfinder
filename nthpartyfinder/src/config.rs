@@ -113,6 +113,12 @@ pub struct RateLimitConfig {
     /// Maximum DNS queries per second (0 = unlimited)
     #[serde(default = "default_dns_queries_per_second")]
     pub dns_queries_per_second: u32,
+    /// Hard ceiling on concurrent in-flight DNS lookups. `None` (the default) enables the
+    /// adaptive governor, which learns a safe concurrency from observed latency and failures.
+    /// Setting a value pins concurrency and disables adaptation — an escape hatch, not the
+    /// normal mode: a fixed number cannot be right for every network.
+    #[serde(default)]
+    pub dns_max_concurrency: Option<u32>,
     /// Maximum HTTP requests per second per domain (0 = unlimited)
     #[serde(default = "default_http_requests_per_second")]
     pub http_requests_per_second: u32,
@@ -161,6 +167,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
             dns_queries_per_second: default_dns_queries_per_second(),
+            dns_max_concurrency: None,
             http_requests_per_second: default_http_requests_per_second(),
             whois_queries_per_second: default_whois_queries_per_second(),
             backoff_strategy: BackoffStrategy::default(),

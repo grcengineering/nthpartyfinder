@@ -41,6 +41,7 @@ pub mod dep_check;
 pub mod dependencies;
 pub mod discovery;
 pub mod dns;
+pub mod dns_governor;
 pub mod domain_utils;
 pub mod export;
 pub mod finalize;
