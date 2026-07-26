@@ -1,8 +1,19 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] - 2026-07-25
+
+### Fixed
+- **A deep scan can no longer take down the network it runs on.** Two independent causes, both fixed:
+
+  **1. DoH endpoints no longer trigger a router lookup per query.** Half the default DoH endpoints were hostnames (`cloudflare-dns.com`, `dns.google`, `doh.sb`) alternating round-robin with their IP-literal twins. Because the HTTP clients run with no idle connection pooling and `reqwest` uses the system `getaddrinfo` resolver, *every* request to a hostname endpoint first emitted an A+AAAA pair to the LAN router — before the encrypted query even left the machine. On a depth-3 scan (45,398 subdomain lookups × 2 record types) that is order 10^5 unbudgeted UDP/53 queries aimed squarely at the consumer DNS forwarder. All default endpoints are now IP literals covering the same three providers, so provider diversity is unchanged and the bootstrap lookups are gone.
+
+  **2. DNS concurrency now adapts to the network instead of being a fixed guess.** A new controller (`src/dns_governor.rs`) bounds *how many* DNS lookups may be outstanding and learns that bound at runtime, modeled on TCP Vegas and Netflix's `Gradient2Limit`: it starts conservatively, probes upward while latency stays flat, brakes proportionally when latency inflates past a 25% tolerance, and applies an immediate multiplicative decrease on timeouts or rejections. Bounding concurrency rather than rate matters because by Little's Law the emitted rate then falls automatically as the network slows, whereas a fixed rate keeps pushing and lets outstanding queries pile up without bound — the state that exhausts a forwarder or NAT table. No configuration required.
+
+- **A congested network no longer disables a working DNS transport.** Congestion-induced timeouts were counted toward the per-transport circuit breaker, so eight of them marked DoH "blocked" and the ladder fell through DoT to raw UDP/53 — pushing *more* load at the resolver path that was already collapsing, while reporting "Results are unaffected". The breaker now ignores failures that occur while the adaptive controller is visibly backing off, since those are self-inflicted load rather than a broken transport.
 
 ### Added
+- **`--dns-max-concurrency <N>`** pins DNS concurrency instead of adapting, for fragile networks or reproducible benchmarks. Also settable as `dns_max_concurrency` under `[rate_limits]`. Adaptation is the default and needs no configuration; pinning disables it, so a value that is too high will not be corrected for you.
+- The end-of-scan summary reports what the controller did — the range it adapted across, where it ended, and how many times it backed off — so a constrained network is visible without enabling debug logging.
 - **Unified runtime dependency prompt — one prompt for all optional tools, however you installed nthpartyfinder.** The three optional dependencies (a browser for web-content/web-traffic/subprocessor-render discovery, `subfinder` for subdomain discovery, `whois` for organization-name lookups) are now offered by a SINGLE consolidated prompt instead of three separate flows. When a run could use tools it's missing, the prompt lists every one of them — each with exactly which capability is DISABLED or DEGRADED without it — and installs them for your platform from one keystroke (Homebrew/winget/`apt`/`dnf`/`pacman`/`zypper`; subfinder via a package-manager-free direct download). You can pick a subset by number, and for anything you decline you choose to be reminded next run or **never again** (persisted). This is install-method-agnostic (Homebrew, WinGet, direct package, `cargo` all reach it) and never hangs — a non-interactive/CI run warns and continues with reduced coverage. New `--install-deps` flag installs everything unattended; `--install-browser` (from the prior browser-install work) remains as the browser-only subset. Any already-installed dependency is detected and used.
 
 ### Changed

@@ -154,6 +154,7 @@ Discovery Options:
 
 Rate Limiting Options:
       --dns-rate-limit <QPS>            Maximum DNS queries per second
+      --dns-max-concurrency <N>         Pin DNS concurrency (default: adapt to the network)
       --http-rate-limit <RPS>           Maximum HTTP requests per second per domain
       --backoff-strategy <STRATEGY>     Backoff strategy: "linear" or "exponential"
       --max-retries <COUNT>             Maximum retry attempts
@@ -268,6 +269,31 @@ nthpartyfinder --init
 | `[analysis]` | Resource management (concurrency, strategies) |
 | `[discovery]` | Feature toggles (subprocessor, subdomain, NER) |
 | `[rate_limits]` | Request rate limiting and backoff |
+
+#### DNS load and your network
+
+Deep scans issue a lot of DNS. A depth-3 scan can resolve tens of thousands of subdomains, and on a
+home or small-office network the weakest link is usually the router's DNS forwarder rather than your
+bandwidth — overwhelm it and DNS stops working for every device on the LAN, even though the rest of
+the connection looks fine.
+
+nthpartyfinder handles this for you and needs no configuration. It bounds how many DNS lookups are
+outstanding at once and **adapts that bound to your network**: it starts conservatively, raises the
+limit while lookups stay fast, and lowers it as soon as latency climbs or queries start failing.
+Because the number in flight is capped, the query rate falls automatically when the network slows,
+instead of piling up. All DNS-over-HTTPS endpoints are also IP literals, so resolving them never
+costs an extra lookup against your router.
+
+The end-of-scan summary tells you what happened, for example:
+
+```
+DNS concurrency adapted between 6 and 64 (ended at 41); 2 backoff event(s) across 45398 queries
+```
+
+Backoff events mean the network pushed back and nthpartyfinder yielded — normally nothing to act on.
+If you want a hard ceiling instead (a network you know is fragile, or a reproducible benchmark), pass
+`--dns-max-concurrency <N>`. That **pins** concurrency and turns adaptation off, so a value that is
+too high will not be corrected for you.
 
 ### Example: Override Config via CLI
 

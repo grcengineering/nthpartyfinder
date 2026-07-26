@@ -1173,6 +1173,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         _app_config.rate_limits.dns_queries_per_second = rl;
     }
 
+    // Same reasoning for the concurrency ceiling: it must be in the config before any
+    // DnsServerPool is built, because that is where the governor is constructed. Setting it pins
+    // concurrency and turns adaptation off — deliberately an escape hatch, not the default.
+    if let Some(cap) = args.dns_max_concurrency {
+        _app_config.rate_limits.dns_max_concurrency = Some(cap);
+    }
+
     // Load user-level prefs (#3/#4). If a prior run persisted the ONNX Runtime path,
     // export it before the dependency check so NER works without re-download or manual
     // shell setup — unless the environment already provides one.
@@ -2577,6 +2584,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    // Report what the adaptive DNS controller did. A user who has just watched a deep scan run
+    // should be able to see whether the network constrained it, without turning on debug logging —
+    // a low final limit or a high backoff count is the visible symptom of a fragile link.
+    if let Some(line) = dns_pool.governor_stats().summary_line() {
+        println!("{line}");
+    }
+
     logger.print_final_summary();
 
     if logger.is_log_export_enabled() {
@@ -3083,6 +3097,7 @@ mod tests {
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,
+            dns_max_concurrency: None,
             max_connections: None,
             http_rate_limit: None,
             backoff_strategy: None,

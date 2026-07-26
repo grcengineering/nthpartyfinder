@@ -367,6 +367,7 @@ mod tests {
     fn test_backoff_calculation_linear() {
         let config = RateLimitConfig {
             dns_queries_per_second: 10,
+            dns_max_concurrency: None,
             http_requests_per_second: 5,
             whois_queries_per_second: 2,
             backoff_strategy: BackoffStrategy::Linear,
@@ -394,6 +395,7 @@ mod tests {
     fn test_backoff_calculation_exponential() {
         let config = RateLimitConfig {
             dns_queries_per_second: 10,
+            dns_max_concurrency: None,
             http_requests_per_second: 5,
             whois_queries_per_second: 2,
             backoff_strategy: BackoffStrategy::Exponential,
@@ -421,6 +423,7 @@ mod tests {
     fn test_backoff_max_cap() {
         let config = RateLimitConfig {
             dns_queries_per_second: 10,
+            dns_max_concurrency: None,
             http_requests_per_second: 5,
             whois_queries_per_second: 2,
             backoff_strategy: BackoffStrategy::Exponential,
@@ -587,6 +590,7 @@ mod tests {
     fn test_rate_limit_context_from_config() {
         let config = RateLimitConfig {
             dns_queries_per_second: 100,
+            dns_max_concurrency: None,
             http_requests_per_second: 50,
             whois_queries_per_second: 10,
             ..RateLimitConfig::default()
@@ -611,6 +615,7 @@ mod tests {
         // Also test with unlimited rates
         let config = RateLimitConfig {
             dns_queries_per_second: 0,
+            dns_max_concurrency: None,
             http_requests_per_second: 0,
             whois_queries_per_second: 0,
             ..RateLimitConfig::default()
@@ -656,6 +661,7 @@ mod tests {
         // Some limited, some unlimited
         let config = RateLimitConfig {
             dns_queries_per_second: 50,
+            dns_max_concurrency: None,
             http_requests_per_second: 0, // unlimited
             whois_queries_per_second: 2,
             ..RateLimitConfig::default()

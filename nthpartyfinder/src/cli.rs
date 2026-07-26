@@ -168,6 +168,17 @@ pub struct Cli {
     #[arg(long, value_name = "QPS")]
     pub dns_rate_limit: Option<u32>,
 
+    /// Pin the number of concurrent DNS lookups instead of adapting to the network.
+    ///
+    /// By default nthpartyfinder discovers a safe DNS concurrency on its own: it starts
+    /// conservatively, probes upward while latency stays flat, and backs off the moment lookups
+    /// slow down or fail. That is what keeps a deep scan from overwhelming a home router's DNS
+    /// forwarder, and it needs no configuration. Set this only when you want a hard ceiling — for
+    /// example on a network you know is fragile, or to make a benchmark reproducible. Pinning a
+    /// value DISABLES adaptation, so a number that is too high will not be corrected for you.
+    #[arg(long, value_name = "N")]
+    pub dns_max_concurrency: Option<u32>,
+
     /// Maximum network connections in flight at once across the whole scan.
     ///
     /// Bounds the peak count of simultaneously-open sockets — the quantity that exhausts a
@@ -365,6 +376,7 @@ pub struct Args {
     pub disable_web_org: bool,
     pub no_color: bool,
     pub dns_rate_limit: Option<u32>,
+    pub dns_max_concurrency: Option<u32>,
     pub max_connections: Option<usize>,
     pub http_rate_limit: Option<u32>,
     pub backoff_strategy: Option<String>,
@@ -417,6 +429,7 @@ impl From<&Cli> for Args {
             disable_web_org: cli.disable_web_org,
             no_color: cli.no_color,
             dns_rate_limit: cli.dns_rate_limit,
+            dns_max_concurrency: cli.dns_max_concurrency,
             max_connections: cli.max_connections,
             http_rate_limit: cli.http_rate_limit,
             backoff_strategy: cli.backoff_strategy.clone(),
@@ -591,6 +604,7 @@ mod tests {
             disable_web_org: false,
             no_color: false,
             dns_rate_limit: None,
+            dns_max_concurrency: None,
             max_connections: None,
             http_rate_limit: None,
             backoff_strategy: None,

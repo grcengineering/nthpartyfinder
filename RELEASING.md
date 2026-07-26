@@ -74,6 +74,46 @@ runs `cargo publish --dry-run` first as a sanity gate, then the real `cargo publ
 first if you want extra confidence: `cd nthpartyfinder && cargo package --list` /
 `cargo publish --dry-run`.
 
+## Distribution sync — the release is not shipped until every channel serves it
+
+A release landing on GitHub and a user *getting* that release are different events, and the gap
+between them is silent: `brew install nthpartyfinder` succeeds while installing an old build.
+v1.5.0 shipped with the tap still on v1.4.0 and no cask published at all, and nothing failed.
+
+Three things now close that gap:
+
+1. **`publish-homebrew` / `publish-winget`** run in `release.yml` after `publish`, propagating the
+   new version automatically. Each is gated on a secret (`TAP_TOKEN`, `WINGET_TOKEN`) and, when the
+   secret is absent, emits a loud warning plus the exact manual command instead of failing quietly.
+2. **`verify-distribution`** runs at the end of the same release, re-reads what every channel
+   actually serves, and fails the run when a required one lags — so a skipped or broken
+   propagation step cannot pass unnoticed.
+3. **`.github/workflows/distribution-sync.yml`** re-checks weekly and files an issue on drift,
+   catching releases cut by hand and upstream PRs that were never merged.
+
+Check any time, locally:
+
+```bash
+nthpartyfinder/scripts/check-distribution-sync.sh          # required channels must match
+nthpartyfinder/scripts/check-distribution-sync.sh --strict # optional channels too
+```
+
+`homebrew-formula` and `homebrew-cask` are REQUIRED (the README advertises them as working install
+paths). `crates.io` and `winget` are OPTIONAL — publishing to those is a deliberate separate
+decision, so lag between releases is expected rather than a bug.
+
+### One-time setup for full automation
+
+Both secrets are cross-repo writes, which the default `GITHUB_TOKEN` cannot do:
+
+- **`TAP_TOKEN`** — fine-grained PAT (or GitHub App installation token) with **Contents:
+  read+write** on `grcengineering/homebrew-grcengineering`. The tap enforces `required_signatures`,
+  and `--push` satisfies that by creating commits through the GitHub **contents API**, which signs
+  them with GitHub's own key so they land Verified — no signing key ever enters CI.
+- **`WINGET_TOKEN`** — a token that can fork and open PRs, for `wingetcreate submit` against
+  `microsoft/winget-pkgs`. Merging there is a third-party review process and is outside our
+  control, which is why winget is an optional channel.
+
 ## Homebrew
 
 A maintained, **shared** tap for all GRC Engineering tools —
@@ -102,7 +142,8 @@ current Homebrew, or run `brew trust grcengineering/grcengineering` manually.
 After a release's `build-release` matrix has finished (the tarballs must exist to hash):
 
 ```sh
-nthpartyfinder/scripts/sync-homebrew-formula.sh v1.4.0
+nthpartyfinder/scripts/sync-homebrew-formula.sh v1.5.0          # stage for a signed commit
+nthpartyfinder/scripts/sync-homebrew-formula.sh v1.5.0 --push   # commit via the GitHub API + open the PR
 ```
 
 This downloads each platform tarball, computes real sha256 checksums, updates
