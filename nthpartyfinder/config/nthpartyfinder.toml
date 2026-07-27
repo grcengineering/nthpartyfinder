@@ -62,21 +62,22 @@ request_timeout_secs = 15
 #   - url: Full HTTPS URL to the DoH endpoint (must start with https://)
 #   - timeout_secs: Request timeout for this specific server
 
-[[dns.doh_servers]]
-name = "Cloudflare DoH"
-url = "https://cloudflare-dns.com/dns-query"
-timeout_secs = 3
-
-# Google's JSON DoH API is served at /resolve. NOT /dns-query — that endpoint is
-# RFC-8484 wire-format and returns HTTP 400 for application/dns-json requests,
-# which silently produced 0 TXT records (the root-cause of false "no DNS records").
-[[dns.doh_servers]]
-name = "Google DoH"
-url = "https://dns.google/resolve"
-timeout_secs = 3
-
-# IP-literal endpoints avoid a DNS-bootstrap dependency (resolving the DoH
-# hostname) when the network blocks UDP/53; provider cert SANs cover the IPs.
+# EVERY endpoint below is an IP literal, deliberately. Hostname endpoints used to sit alongside
+# these and this is why they were removed:
+#
+# The HTTP clients run with no idle connection pooling, so every DoH request opens a fresh
+# TCP+TLS connection, and connecting to a *hostname* first resolves it through the system
+# resolver — plain getaddrinfo against your router, uncached. With hostname and IP forms
+# alternating under round-robin, roughly half of all DoH requests emitted an A+AAAA pair at the
+# LAN router BEFORE the encrypted query left the machine. On a depth-3 scan (tens of thousands of
+# subdomain lookups x 2 record types) that is order 10^5 unbudgeted UDP/53 queries aimed at
+# exactly the consumer DNS forwarder that DoH exists to bypass — enough to take the resolver path
+# down for every device on the network.
+#
+# Provider cert SANs cover these IPs, so TLS validation still succeeds, and the same three
+# operators are represented — only the bootstrap lookup is gone. If you add a hostname endpoint
+# here, you reintroduce that amplification.
+#
 # Quad9 + OpenDNS were removed: their DoH does NOT serve the JSON GET API, so they
 # always returned 0 records and, when round-robin-selected, caused false negatives.
 [[dns.doh_servers]]
@@ -84,6 +85,9 @@ name = "Cloudflare DoH (IP)"
 url = "https://1.1.1.1/dns-query"
 timeout_secs = 3
 
+# Google's JSON DoH API is served at /resolve. NOT /dns-query — that endpoint is
+# RFC-8484 wire-format and returns HTTP 400 for application/dns-json requests,
+# which silently produced 0 TXT records (the root-cause of false "no DNS records").
 [[dns.doh_servers]]
 name = "Google DoH (IP)"
 url = "https://8.8.8.8/resolve"
@@ -97,11 +101,6 @@ timeout_secs = 3
 # stripe.com (31=31) and vanta.com (39=39) — no filtering, no truncation, so recall
 # is unaffected. Unfiltered by design (a filtering resolver like Quad9/AdGuard would
 # BLOCK the ad/tracker/subprocessor domains this tool exists to discover).
-[[dns.doh_servers]]
-name = "dns.sb DoH"
-url = "https://doh.sb/dns-query"
-timeout_secs = 3
-
 [[dns.doh_servers]]
 name = "dns.sb DoH (IP)"
 url = "https://185.222.222.222/dns-query"

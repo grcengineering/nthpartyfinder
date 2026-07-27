@@ -34,20 +34,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Pinned, not floating `nightly`. cargo-fuzz requires a nightly toolchain, and tracking
+      # whatever nightly happens to be current means any rustc regression lands directly in CI
+      # with no change on our side. That is not hypothetical: from 2026-07-23 onward, nightly
+      # ICE'd (internal compiler error) while compiling `tokio` under the sanitizer flags
+      # cargo-fuzz passes, which left this job red for days across every branch and masked
+      # whatever real fuzz signal it might have found.
+      #
+      # 2026-07-22 is the last nightly observed green here (run 30057954279, rustc 6f72b5dd5).
+      # Bump this deliberately once upstream fixes the ICE — a pinned toolchain that is failing
+      # is a decision to revisit, whereas a floating one that is failing is just noise.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-07-22
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: nthpartyfinder/fuzz -> target
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Build all fuzz targets
-        run: cargo +nightly fuzz build
+        run: cargo +nightly-2026-07-22 fuzz build
       - name: Smoke-run each target (30s)
         run: |
           for t in domain_base dns_txt_spf html_org web_traffic_html finalize_host; do
             echo "::group::fuzz $t"
-            cargo +nightly fuzz run "$t" -- -max_total_time=30 -print_final_stats=1
+            cargo +nightly-2026-07-22 fuzz run "$t" -- -max_total_time=30 -print_final_stats=1
             echo "::endgroup::"
           done

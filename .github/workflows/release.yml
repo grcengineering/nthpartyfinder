@@ -430,8 +430,13 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # The tap enforces required_signatures, so an ordinary `git push` of a workflow-authored
-      # commit is rejected. Commits created through the GitHub API are signed by GitHub's own
-      # key and land Verified, which satisfies the rule without putting a signing key in CI.
+      # commit is rejected. The API-created commits on the release branch are NOT signed when the
+      # request authenticates as a user (web-flow signing applies to the web UI and GitHub Apps,
+      # not to a user token) — verified the hard way on v1.6.0, where they came back
+      # `verified: false, reason: unsigned`. That is fine, because the ruleset protects the tap's
+      # DEFAULT BRANCH and nothing from this branch lands there directly: the PR is squash-merged,
+      # and GitHub signs the squash commit it creates. Merge with squash, never with a plain merge
+      # commit that would carry the unsigned commits onto main.
       # TAP_TOKEN must be a fine-grained PAT (or GitHub App token) with Contents: read+write on
       # the tap repo; the default GITHUB_TOKEN cannot write to another repository.
       - name: Sync formula and cask into the tap
@@ -469,6 +474,12 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+    # This job has no checkout, so the workflow-level `working-directory: nthpartyfinder` would
+    # point at a path that does not exist and every step would fail before running — which is
+    # exactly what happened on the v1.6.0 release. The `publish` job sets this for the same reason.
+    defaults:
+      run:
+        working-directory: .
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
