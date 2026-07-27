@@ -1414,6 +1414,71 @@ mod tests {
         assert!(content.contains("Generated on:"));
     }
 
+    /// The report is handed to auditors and opened offline; it must not reach out to the network.
+    /// A dead `initializeGraph()` used to sit in the template carrying three hardcoded CDN URLs
+    /// for vis.js plus a message claiming the graph "requires an internet connection" — none of
+    /// which was true, since the graph is rendered by the embedded Svelte bundle. It was never
+    /// called, so nothing failed and nothing caught it.
+    #[test]
+    fn test_export_html_has_no_external_subresources() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("selfcontained.html");
+        let path_str = path.to_str().unwrap();
+
+        export_html(&sample_relationships(), path_str).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        for host in [
+            "cdn.jsdelivr.net",
+            "cdnjs.cloudflare.com",
+            "unpkg.com",
+            "fonts.googleapis.com",
+        ] {
+            assert!(
+                !content.contains(host),
+                "report references external host {host}; it must be fully self-contained"
+            );
+        }
+        // Match the code, not the word: the template carries a comment explaining why the dead
+        // bootstrap was removed, and a bare substring check would fire on that explanation.
+        assert!(
+            !content.contains("function initializeGraph"),
+            "dead vis.js bootstrap function is back in the template"
+        );
+        assert!(
+            !content.contains("initializeGraph()"),
+            "something calls the removed vis.js bootstrap"
+        );
+    }
+
+    /// Guards the contract that produced the worst reported defect in this report: pagination
+    /// gates on `data-filtered-out`, and `applyFilters` must SET it. When only the reader existed,
+    /// pagination re-showed rows by index and silently undid the filter — searching then paging
+    /// forward showed rows that did not match, while the search box still displayed the term.
+    /// One reader with no writer is invisible to every other kind of test, so assert both halves.
+    #[test]
+    fn test_html_filter_and_pagination_share_the_same_contract() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("filter_contract.html");
+        let path_str = path.to_str().unwrap();
+
+        export_html(&sample_relationships(), path_str).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            content.contains("setAttribute('data-filtered-out'"),
+            "applyFilters must record its verdict where applyPagination reads it"
+        );
+        assert!(
+            content.contains("getAttribute('data-filtered-out')"),
+            "applyPagination must honor the filter verdict"
+        );
+        assert!(
+            content.contains("state.totalRows = visible.length"),
+            "pagination must count the filtered set, not every row in the table"
+        );
+    }
+
     #[test]
     fn test_export_html_embeds_json_data() {
         let dir = TempDir::new().unwrap();

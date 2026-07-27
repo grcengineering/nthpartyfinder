@@ -683,26 +683,33 @@
                 <div class="legend">
                     <!-- Layer swatches kept in sync with VendorGraph.svelte's --npf-lN-solid
                          ramp (2026-07-17): bright-azure -> deep-navy -> gold -> dark-orange,
-                         each adjacent pair clearly separated. -->
+                         each adjacent pair clearly separated.
+
+                         Labels carry BOTH vocabularies on purpose. The graph's own legend speaks
+                         in layers ("LAYER 1 - DIRECT VENDORS") while this one spoke in party
+                         ordinals ("3rd Party Vendor"), so a single screenshot showed two
+                         different names for the same band with no stated mapping — and the two
+                         lists did not even have the same number of entries. Layer N is the
+                         (N+2)th party, because the root organisation is the first party. -->
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--gradient-ocean);"></div>
-                        Root Domain
+                        Root Domain (you)
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--eng-blue-400);"></div>
-                        3rd Party Vendor
+                        Layer 1 &mdash; Direct Vendors (3rd party)
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--eng-blue-800);"></div>
-                        4th Party Vendor
+                        Layer 2 &mdash; Sub-processors (4th party)
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--amber-500);"></div>
-                        5th Party Vendor
+                        Layer 3 &mdash; Nth Parties (5th party)
                     </div>
                     <div class="legend-item">
                         <div class="legend-color" style="background: var(--grc-orange-700);"></div>
-                        6th+ Party Vendor
+                        Layer 4+ &mdash; Deeper Nth Parties (6th party and beyond)
                     </div>
                 </div>
             </div>
@@ -994,7 +1001,12 @@
             if (!table) return;
 
             const rows = table.querySelectorAll('tbody tr');
-            const visibleCount = Array.from(rows).filter(r => r.style.display !== 'none').length;
+            // Count rows the filter kept, NOT rows currently on screen — with pagination active
+            // those differ, and reporting the page size ("Showing 50 of 7070") told the user
+            // nothing about how many results their search actually matched.
+            const visibleCount = Array.from(rows).filter(
+                r => r.getAttribute('data-filtered-out') !== 'true'
+            ).length;
             const totalCount = rows.length;
 
             const container = table.closest('.table-container');
@@ -1147,16 +1159,30 @@
             const table = document.getElementById(tableId);
             const rows = table.querySelectorAll('tbody tr');
 
-            const start = (state.currentPage - 1) * state.pageSize;
-            const end = start + state.pageSize;
-
-            rows.forEach((row, index) => {
-                // Only apply pagination to rows not hidden by filters
+            // Paginate over the rows that survived filtering, indexed by their position among
+            // *those* rows. Indexing by absolute row position instead was the bug: since
+            // applyFilters never set `data-filtered-out`, this function re-showed rows purely by
+            // index and silently undid the filter — searching "hubspot" and paging forward showed
+            // 49 non-matching rows out of 50 while the search box still read "hubspot".
+            const visible = [];
+            rows.forEach(row => {
                 if (row.getAttribute('data-filtered-out') === 'true') {
                     row.style.display = 'none';
                 } else {
-                    row.style.display = (index >= start && index < end) ? '' : 'none';
+                    visible.push(row);
                 }
+            });
+
+            // Recompute the page count against the filtered set, and pull the current page back
+            // into range when a filter shrinks the results below it.
+            state.totalRows = visible.length;
+            const totalPages = Math.max(1, Math.ceil(state.totalRows / state.pageSize));
+            if (state.currentPage > totalPages) state.currentPage = totalPages;
+
+            const start = (state.currentPage - 1) * state.pageSize;
+            const end = start + state.pageSize;
+            visible.forEach((row, index) => {
+                row.style.display = (index >= start && index < end) ? '' : 'none';
             });
         }
 
@@ -1369,293 +1395,13 @@
             insightsContainer.appendChild(insightsGrid);
         }
 
-        function initializeGraph() {
-            const container = document.getElementById('network-graph');
-            const loadingIndicator = container.querySelector('.loading');
-            
-            try {
-                console.log('Starting graph initialization...');
-                console.log('relationshipsData:', relationshipsData ? relationshipsData.length : 'undefined');
-                console.log('summary:', summary);
-                
-                // Check if vis is loaded with multiple attempts
-                if (typeof vis === 'undefined') {
-                    console.error('vis.js library not loaded, attempting fallback...');
-                    
-                    // Try loading from different CDNs
-                    const cdnUrls = [
-                        'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/dist/vis-network.min.js',
-                        'https://cdnjs.cloudflare.com/ajax/libs/vis/4.21.0/vis.min.js',
-                        'https://unpkg.com/vis@4.21.0/dist/vis.min.js'
-                    ];
-                    
-                    let attempts = 0;
-                    function tryLoadVis() {
-                        if (attempts >= cdnUrls.length) {
-                            loadingIndicator.innerHTML = '<div style="color: orange; text-align: center; padding: 2rem;"><h3>' + lucideIcon('network') + ' Network Visualization Unavailable</h3><p>The interactive graph requires an internet connection to load the visualization library.</p><p style="margin-top: 1rem;"><strong>Don\'t worry!</strong> All the data is still available in the sortable tables below.</p><button class="btn btn-primary" onclick="location.reload()" style="margin-top: 1rem;">' + lucideIcon('refresh-cw') + ' Try Again</button></div>';
-                            return;
-                        }
-                        
-                        loadingIndicator.innerHTML = '<div class="spinner"></div>Loading visualization library... (attempt ' + (attempts + 1) + ')';
-                        
-                        const script = document.createElement('script');
-                        script.src = cdnUrls[attempts];
-                        script.onload = function() {
-                            console.log('vis.js loaded from:', cdnUrls[attempts]);
-                            setTimeout(initializeGraph, 100); // Retry initialization
-                        };
-                        script.onerror = function() {
-                            attempts++;
-                            setTimeout(tryLoadVis, 1000); // Try next CDN after 1 second
-                        };
-                        document.head.appendChild(script);
-                    }
-                    
-                    tryLoadVis();
-                    return;
-                }
-
-                // Check if data is available
-                if (!relationshipsData || !summary) {
-                    console.error('Data not available');
-                    loadingIndicator.innerHTML = '<div style="color: red;">Error: Data not available</div>';
-                    return;
-                }
-
-                console.log('Initializing graph with', relationshipsData.length, 'relationships');
-                
-                // Prepare nodes and edges datasets
-                console.log('Creating data structures...');
-                window.allNodes = new vis.DataSet();
-                window.allEdges = new vis.DataSet();
-                window.visibleNodes = new vis.DataSet();
-                window.visibleEdges = new vis.DataSet();
-                window.expandedNodes = new Set();
-
-                // Per-layer vendor display limits (show 5 at a time, click "load more" for next batch)
-                window.LAYER_LIMITS = { 1: 5, 2: 5, 3: 5, default: 5 };
-
-                // Track how many vendors are currently shown per parent node
-                // Key: parentId, Value: { shown: number, total: number }
-                window.vendorVisibility = {};
-
-                console.log('Data structures created successfully');
-                
-                // Store all relationship data organized by parent
-                window.relationshipsByParent = {};
-                relationshipsData.forEach(function(rel) {
-                    if (!window.relationshipsByParent[rel.nth_party_customer_domain]) {
-                        window.relationshipsByParent[rel.nth_party_customer_domain] = [];
-                    }
-                    window.relationshipsByParent[rel.nth_party_customer_domain].push(rel);
-                });
-                
-                // Add root node
-                const rootChildCount = window.relationshipsByParent[summary.root_domain] ? window.relationshipsByParent[summary.root_domain].length : 0;
-                const rootNode = {
-                    id: summary.root_domain,
-                    label: summary.root_domain + '\n(' + summary.root_organization + ')' + (rootChildCount > 0 ? '\n' + rootChildCount + ' vendors' : ''),
-                    group: 'root',
-                    level: 0,
-                    title: 'Root Domain: ' + summary.root_domain + '<br>Organization: ' + summary.root_organization + (rootChildCount > 0 ? '<br><br>Click to expand ' + rootChildCount + ' vendors' : ''),
-                    hasChildren: rootChildCount > 0,
-                    expanded: false
-                };
-                
-                window.allNodes.add(rootNode);
-                window.visibleNodes.add(rootNode);
-                console.log('Root node created:', rootNode.id, 'with', rootChildCount, 'children');
-                
-                // Build complete node and edge datasets (but don't show them yet)
-                const addedNodes = new Set([summary.root_domain]);
-                
-                relationshipsData.forEach(function(rel, index) {
-                    // Add vendor node if not already added
-                    if (!addedNodes.has(rel.nth_party_domain)) {
-                        // Count only direct children of this node (consistent with expand logic)
-                        const directChildren = relationshipsData.filter(function(r) {
-                            return r.nth_party_customer_domain === rel.nth_party_domain;
-                        });
-                        const childCount = directChildren.length;
-                        const hasChildren = childCount > 0;
-                        const nodeData = {
-                            id: rel.nth_party_domain,
-                            label: rel.nth_party_domain + '\n(' + rel.nth_party_organization + ')' + (hasChildren ? '\n' + childCount + ' vendors' : ''),
-                            group: 'layer' + rel.nth_party_layer,
-                            level: rel.nth_party_layer,
-                            title: 'Domain: ' + rel.nth_party_domain + '<br>Organization: ' + rel.nth_party_organization + '<br>Layer: ' + rel.nth_party_layer + (hasChildren ? '<br><br>Click to expand ' + childCount + ' vendors' : ''),
-                            hasChildren: hasChildren,
-                            expanded: false
-                        };
-                        window.allNodes.add(nodeData);
-                        addedNodes.add(rel.nth_party_domain);
-                    }
-                    
-                    // Add customer node if not already added and it's not the root
-                    if (!addedNodes.has(rel.nth_party_customer_domain) && rel.nth_party_customer_domain !== summary.root_domain) {
-                        const customerLevel = rel.nth_party_layer - 1;
-                        const hasChildren = !!(window.relationshipsByParent[rel.nth_party_customer_domain] && window.relationshipsByParent[rel.nth_party_customer_domain].length > 0);
-                        const nodeData = {
-                            id: rel.nth_party_customer_domain,
-                            label: rel.nth_party_customer_domain,
-                            group: customerLevel === 0 ? 'root' : 'layer' + customerLevel,
-                            level: customerLevel,
-                            title: 'Customer Domain: ' + rel.nth_party_customer_domain + (hasChildren ? '<br><br>Click to expand vendors' : ''),
-                            hasChildren: hasChildren,
-                            expanded: false
-                        };
-                        window.allNodes.add(nodeData);
-                        addedNodes.add(rel.nth_party_customer_domain);
-                    }
-                    
-                    // Add edge to complete dataset with unique ID including index
-                    window.allEdges.add({
-                        id: rel.nth_party_customer_domain + '->' + rel.nth_party_domain + '-' + rel.nth_party_record_type + '-' + index,
-                        from: rel.nth_party_customer_domain,
-                        to: rel.nth_party_domain,
-                        label: rel.nth_party_record_type,
-                        color: getEdgeColor(rel.nth_party_record_type),
-                        title: rel.nth_party_record_type + ': ' + rel.nth_party_record,
-                        arrows: 'to',
-                        layer: rel.nth_party_layer
-                    });
-                });
-                
-                const data = { nodes: window.visibleNodes, edges: window.visibleEdges };
-                
-                const options = {
-                    groups: {
-                        root: { color: { background: '#10b981', border: '#047857' }, font: { color: 'white' } },
-                        layer1: { color: { background: '#3b82f6', border: '#1d4ed8' }, font: { color: 'white' } },
-                        layer2: { color: { background: '#f59e0b', border: '#d97706' }, font: { color: 'white' } },
-                        layer3: { color: { background: '#ef4444', border: '#dc2626' }, font: { color: 'white' } },
-                        layer4: { color: { background: '#6b7280', border: '#374151' }, font: { color: 'white' } },
-                        loadMore: {
-                            color: { background: '#8b5cf6', border: '#7c3aed' },
-                            font: { color: 'white' },
-                            shape: 'ellipse',
-                            borderWidth: 3,
-                            borderDashes: [5, 5]
-                        }
-                    },
-                    nodes: {
-                        shape: 'box',
-                        margin: { top: 10, right: 10, bottom: 10, left: 10 },
-                        widthConstraint: { minimum: 120, maximum: 250 },
-                        heightConstraint: { minimum: 40 },
-                        font: { 
-                            size: 11, 
-                            face: 'Arial, sans-serif',
-                            color: 'white',
-                            strokeWidth: 1,
-                            strokeColor: 'rgba(0,0,0,0.3)'
-                        },
-                        borderWidth: 2,
-                        shadow: { enabled: true, size: 3, x: 2, y: 2 },
-                        chosen: {
-                            node: function(values, id, selected, hovering) {
-                                if (hovering) {
-                                    values.shadow = true;
-                                    values.shadowSize = 8;
-                                    values.shadowX = 3;
-                                    values.shadowY = 3;
-                                }
-                            }
-                        }
-                    },
-                    edges: {
-                        font: { 
-                            size: 9, 
-                            strokeWidth: 3, 
-                            strokeColor: 'white',
-                            face: 'Arial, sans-serif'
-                        },
-                        arrows: { to: { enabled: true, scaleFactor: 0.8 } },
-                        smooth: { 
-                            enabled: true, 
-                            type: 'cubicBezier',
-                            forceDirection: 'vertical',
-                            roundness: 0.4
-                        },
-                        width: 2,
-                        selectionWidth: 4,
-                        hoverWidth: 3,
-                        shadow: { enabled: false }
-                    },
-                    physics: {
-                        enabled: true,
-                        hierarchicalRepulsion: {
-                            centralGravity: 0.1,
-                            springLength: 200,
-                            springConstant: 0.005,
-                            nodeDistance: 150,
-                            damping: 0.3
-                        },
-                        maxVelocity: 30,
-                        minVelocity: 0.1,
-                        solver: 'hierarchicalRepulsion',
-                        stabilization: {
-                            enabled: true,
-                            iterations: 100,
-                            updateInterval: 25
-                        }
-                    },
-                    layout: {
-                        hierarchical: {
-                            enabled: true,
-                            levelSeparation: 200,
-                            nodeSpacing: 150,
-                            treeSpacing: 300,
-                            blockShifting: true,
-                            edgeMinimization: true,
-                            parentCentralization: true,
-                            direction: 'UD', // Top-Down for better readability
-                            sortMethod: 'directed',
-                            shakeTowards: 'leaves'
-                        }
-                    },
-                    interaction: {
-                        dragNodes: true,
-                        dragView: true,
-                        zoomView: true
-                    }
-                };
-                
-                network = new vis.Network(container, data, options);
-                
-                // Add event handlers
-                network.on('click', function(params) {
-                    if (params.nodes.length > 0) {
-                        const nodeId = params.nodes[0];
-                        expandOrCollapseNode(nodeId);
-                    }
-                });
-
-                network.on('stabilizationProgress', function(params) {
-                    const progress = Math.round((params.iterations / params.total) * 100);
-                    loadingIndicator.innerHTML = '<div class="spinner"></div>Layouting graph... ' + progress + '%';
-                });
-
-                network.on('stabilizationIterationsDone', function() {
-                    console.log('Graph stabilization complete');
-                    loadingIndicator.style.display = 'none';
-
-                    // Auto-expand root node to show first batch of vendors on load
-                    if (rootChildCount > 0) {
-                        expandNode(summary.root_domain);
-                    }
-                });
-                
-                console.log('Graph initialized successfully');
-                console.log('Total nodes:', window.allNodes.length, 'Visible nodes:', window.visibleNodes.length);
-                console.log('Total edges:', window.allEdges.length, 'Visible edges:', window.visibleEdges.length);
-                
-            } catch (error) {
-                console.error('Error initializing graph:', error);
-                console.error('Stack trace:', error.stack);
-                loadingIndicator.innerHTML = '<div style="color: red;">Error loading graph: ' + error.message + '</div>';
-            }
-        }
+        // NOTE: a dead vis.js graph-bootstrap function used to live here. Nothing called it, it
+        // targeted an element id (`network-graph`) that does not exist in this template, and it
+        // would have null-dereferenced on its first line if it ever had run. It also embedded
+        // three CDN URLs and a message telling the user the graph "requires an internet
+        // connection" — both false: the graph is rendered by the Svelte bundle embedded above,
+        // and this report makes zero external requests. Removed rather than fixed; the working
+        // graph mounts into `#vendor-graph`. A test in export.rs now asserts it stays gone.
         
         function getEdgeColor(recordType) {
             switch (recordType) {
@@ -2157,14 +1903,23 @@
                 const currentSort = currentSortColumn[tableId];
                 const isAscending = currentSort?.column !== columnIndex || currentSort?.direction === 'desc';
 
+                // Only treat a cell as numeric when the WHOLE cell is a number. `parseFloat`
+                // stops at the first non-numeric character, so "1mind.com" and "1password.com"
+                // both parsed as 1 and compared equal, leaving their order arbitrary — 18 such
+                // mis-ordered pairs in a 7,070-row vendor table.
+                const asNumber = (text) => {
+                    if (text === '' || !/^[+-]?(\d+\.?\d*|\.\d+)$/.test(text)) return null;
+                    const n = Number(text);
+                    return Number.isFinite(n) ? n : null;
+                };
+
                 rows.sort((a, b) => {
                     const aVal = a.children[columnIndex].textContent.trim();
                     const bVal = b.children[columnIndex].textContent.trim();
 
-                    // Handle numeric values
-                    const aNum = parseFloat(aVal);
-                    const bNum = parseFloat(bVal);
-                    if (!isNaN(aNum) && !isNaN(bNum)) {
+                    const aNum = asNumber(aVal);
+                    const bNum = asNumber(bVal);
+                    if (aNum !== null && bNum !== null) {
                         return isAscending ? aNum - bNum : bNum - aNum;
                     }
 
@@ -2239,8 +1994,20 @@
                         }
                     }
 
+                    // Record the verdict where applyPagination can see it. Setting only
+                    // `style.display` (as this did) left the two systems on a contract that just
+                    // one of them honored: `data-filtered-out` had one reader and zero writers.
+                    row.setAttribute('data-filtered-out', show ? 'false' : 'true');
                     row.style.display = show ? '' : 'none';
                 });
+
+                // A new filter changes which rows exist, so page 1 is the only sensible place to
+                // land — staying on page 7 of the old result set is meaningless.
+                if (paginationState[tableId]) {
+                    paginationState[tableId].currentPage = 1;
+                    applyPagination(tableId);
+                    updatePaginationControls(tableId);
+                }
 
                 // Update filter count and hide loading
                 updateFilterCount(tableId);
