@@ -24,8 +24,13 @@
 # Two ways to satisfy that:
 #   * default (no --push): stage a release branch locally and print the exact signed-commit
 #     command for the maintainer's verified key.
-#   * --push: create the commits through the GitHub API, which signs them with GitHub's own key
-#     so they land Verified. This needs no signing key, which is what makes CI automation possible.
+#   * --push: create the commits through the GitHub API on a release branch, then squash-merge.
+#     The branch commits themselves are NOT signed when the API call authenticates as a user —
+#     web-flow signing applies to the web UI and to GitHub Apps, not to a user token (confirmed on
+#     v1.6.0: `verified: false, reason: unsigned`). That is fine, because required_signatures
+#     protects the tap's DEFAULT BRANCH and only the squash commit lands there — and GitHub signs
+#     the squash commit it creates. So: SQUASH-merge the PR this opens. A plain merge commit would
+#     carry the unsigned commits onto main and be rejected.
 #     Requires GH_TOKEN/TAP_TOKEN with Contents: read+write on the tap.
 set -uo pipefail
 
@@ -168,7 +173,8 @@ if [ "$PUSH" = "1" ]; then
       --title "nthpartyfinder ${VERSION}" \
       --body "Automated sync from ${REPO}@${TAG}. Formula + cask updated to ${VERSION} with checksums taken from the published release artifacts."
   fi
-  echo "Done. Merge the PR once the tap's test-bot is green."
+  echo "Done. SQUASH-merge the PR once the tap's test-bot is green (squash gives the"
+  echo "GitHub-signed commit that required_signatures needs; a merge commit would not)."
   exit 0
 fi
 

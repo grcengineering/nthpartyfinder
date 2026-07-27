@@ -108,8 +108,10 @@ Both secrets are cross-repo writes, which the default `GITHUB_TOKEN` cannot do:
 
 - **`TAP_TOKEN`** — fine-grained PAT (or GitHub App installation token) with **Contents:
   read+write** on `grcengineering/homebrew-grcengineering`. The tap enforces `required_signatures`,
-  and `--push` satisfies that by creating commits through the GitHub **contents API**, which signs
-  them with GitHub's own key so they land Verified — no signing key ever enters CI.
+  `--push` opens a release-branch PR against the tap. Its commits are *unsigned* (web-flow signing
+  covers the web UI and GitHub Apps, not user tokens), but `required_signatures` protects the tap's
+  **default branch** — so **squash-merge** the PR and GitHub signs the single commit that actually
+  lands. A plain merge commit would carry the unsigned commits onto main and be rejected.
 - **`WINGET_TOKEN`** — a token that can fork and open PRs, for `wingetcreate submit` against
   `microsoft/winget-pkgs`. Merging there is a third-party review process and is outside our
   control, which is why winget is an optional channel.
