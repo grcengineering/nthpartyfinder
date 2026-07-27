@@ -1334,6 +1334,10 @@ pub async fn discover_nth_parties(
                     cp.results_count = sink.count();
                     cp.results_file = sink.path().to_string_lossy().to_string();
                     drop(sink);
+                    // Record how deep the scan actually got. Outside tests this was never
+                    // assigned, so every checkpoint on disk reported depth 0 and the resume
+                    // banner under-reported progress on every deep scan.
+                    cp.current_depth_reached = cp.current_depth_reached.max(current_depth);
                     if let Err(e) = cp.save(checkpoint_path) {
                         eprintln!("Warning: Failed to save checkpoint on interrupt: {}", e);
                     } else {
@@ -1374,6 +1378,7 @@ pub async fn discover_nth_parties(
                         cp.results_count = sink.count();
                         cp.results_file = sink.path().to_string_lossy().to_string();
                         drop(sink);
+                        cp.current_depth_reached = cp.current_depth_reached.max(current_depth);
                         if let Err(e) = cp.save(checkpoint_path) {
                             logger.debug(&format!("Failed to save checkpoint: {}", e));
                         } else {
