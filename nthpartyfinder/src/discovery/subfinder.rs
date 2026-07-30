@@ -33,7 +33,75 @@ use tracing::{debug, info, warn};
 // subfinder was abandoned to keep holding its sockets.
 
 /// Default ceiling on concurrent subfinder subprocesses. Override with `NTHPARTYFINDER_MAX_SUBFINDER`.
-const DEFAULT_MAX_SUBFINDER_PROCS: usize = 10;
+///
+/// Lowered 10 → 3 on 2026-07-29. Ten was chosen to bound *sockets* against a router's conntrack
+/// table; it does nothing about the query **rate** those ten processes emit, and rate is what
+/// upstream abuse mitigation actually measures. Across a monitored depth-3 scan the correlation was
+/// stark: mean concurrent subfinder processes was **8.2 during samples where DNS was failing versus
+/// 1.9 where it was healthy**, and every degraded sample had the pool saturated.
+///
+/// A controlled test isolated the mechanism and showed it is *lagging*, which is why this was easy
+/// to miss: with ten subfinders running and nothing else, DNS stayed perfect (10/10 probes) —
+/// then degraded to 5/10 **after** they exited. The upstream limiter triggers on accumulated
+/// volume, not instantaneous rate, so the damage lands minutes after the burst that caused it.
+/// That lag is also why the original scan's DNS collapsed roughly ten minutes in rather than
+/// immediately, and why a purely reactive control (the breaker, the governor) always responds too
+/// late: by the time anything fails, the volume that caused it is already spent.
+const DEFAULT_MAX_SUBFINDER_PROCS: usize = 3;
+
+/// Requests per second each subfinder subprocess may issue to its passive sources.
+///
+/// subfinder's own default is **unlimited** for the global rate (only per-source defaults apply),
+/// and nthpartyfinder never passed `-rate-limit`, so the concurrency ceiling above was the *only*
+/// bound on it — a bound on parallelism, not on volume. Each passive source lookup also costs a
+/// system-resolver DNS lookup for the source's own hostname, which egresses on port 53: the exact
+/// traffic class that got this WAN IP throttled.
+///
+/// Chosen so the whole pool (`DEFAULT_MAX_SUBFINDER_PROCS × this`) stays in the low tens of
+/// requests per second — brisk for passive enumeration, unremarkable to an upstream limiter.
+/// Recall is unaffected: subfinder queries the same sources and returns the same subdomains, it
+/// simply paces itself getting there.
+const SUBFINDER_RATE_LIMIT_RPS: u32 = 10;
+
+/// Build-time guard on the subfinder pool's aggregate emission. A compile error, not a test
+/// failure: an ungoverned pool is what got this WAN IP throttled, and neither lever should be
+/// raisable in isolation — the quantity that matters is their product.
+const _: () = {
+    assert!(
+        SUBFINDER_RATE_LIMIT_RPS >= 1,
+        "a rate limit of 0 means UNLIMITED to subfinder — the exact opposite of the intent"
+    );
+    assert!(
+        DEFAULT_MAX_SUBFINDER_PROCS * (SUBFINDER_RATE_LIMIT_RPS as usize) <= 50,
+        "the subfinder pool's aggregate rate (procs x rps) must stay in the low tens"
+    );
+};
+
+/// The exact argument vector every subfinder subprocess is spawned with.
+///
+/// Factored out so a test can assert on the real invocation rather than a hand-copied duplicate:
+/// the failure mode being guarded is "the rate limit exists as a constant but never reaches the
+/// subprocess", which a test that rebuilds the list itself cannot detect.
+///
+/// `-timeout 15` caps subfinder's PER-SOURCE timeout (its own default is 30s). Under the in-scan
+/// contention of five concurrent discovery phases, the subprocess stretched to ~31s on vanta.com;
+/// capping per-source at 15s cut it to ~16.6s with ZERO recall loss (123→123 subdomains, 122→122
+/// vendors). The outer `self.timeout` still bounds total subprocess runtime.
+fn subfinder_args(domain: &str) -> Vec<String> {
+    [
+        "-d",
+        domain,
+        "-silent",
+        "-json",
+        "-timeout",
+        "15",
+        "-rate-limit",
+        &SUBFINDER_RATE_LIMIT_RPS.to_string(),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
 
 /// Resolve the concurrent-subfinder ceiling from the environment, falling back to the default.
 fn resolve_max_subfinder_procs() -> usize {
@@ -821,14 +889,9 @@ impl SubfinderDiscovery {
             .expect("subfinder semaphore is never closed");
 
         let mut child = match Command::new(&binary_path)
-            // `-timeout 15` caps subfinder's PER-SOURCE timeout (its own default is 30s). Under the
-            // in-scan contention of five concurrent discovery phases, the subfinder subprocess
-            // stretched to ~31s on vanta.com; capping per-source at 15s cut it to ~16.6s with ZERO
-            // recall loss (123→123 subdomains, 122→122 vendors) — a measured, recall-neutral ~10%
-            // wall win. The outer `self.timeout` still bounds total subprocess runtime. Speed/recall
-            // tradeoff: a source that needs >15s to return NEW subdomains would be cut; measured
-            // safe for vanta, and deliberately more aggressive than the default for "maximally fast".
-            .args(["-d", domain, "-silent", "-json", "-timeout", "15"])
+            // Argument vector (including the rate limit and the per-source timeout) lives in
+            // `subfinder_args` so a test can assert on the real invocation.
+            .args(subfinder_args(domain))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // Guarantee SIGKILL + reap on EVERY drop path — task cancellation mid-recursion, a
@@ -920,6 +983,48 @@ mod tests {
         if std::env::var("NTHPARTYFINDER_MAX_SUBFINDER").is_err() {
             assert_eq!(resolve_max_subfinder_procs(), DEFAULT_MAX_SUBFINDER_PROCS);
         }
+    }
+
+    /// The subfinder pool's *emitted volume* must stay bounded, not just its parallelism.
+    ///
+    /// Ten ungoverned processes were the residual amplifier after the DoH fixes: with NPF's own
+    /// UDP/53 tier capped, mean concurrent subfinders was 8.2 during DNS-failing samples versus
+    /// 1.9 during healthy ones. Guard both levers together — raising either alone would restore
+    /// the aggregate rate that upstream abuse mitigation actually measures.
+    #[test]
+    fn subfinder_pool_emits_a_bounded_aggregate_rate() {
+        let aggregate = DEFAULT_MAX_SUBFINDER_PROCS as u32 * SUBFINDER_RATE_LIMIT_RPS;
+        assert!(
+            aggregate <= 50,
+            "the subfinder pool may emit at most ~{aggregate} rps in aggregate ({} procs x {} rps); \
+             keep this in the low tens — an unbounded pool is what got this WAN IP throttled",
+            DEFAULT_MAX_SUBFINDER_PROCS,
+            SUBFINDER_RATE_LIMIT_RPS
+        );
+    }
+
+    /// The rate limit must actually reach the subprocess. A constant nothing passes to subfinder
+    /// bounds nothing, and the bug it guards against is invisible to every other test.
+    #[test]
+    fn subfinder_invocation_passes_the_rate_limit() {
+        let args = subfinder_args("example.com");
+        let pos = args.iter().position(|a| a == "-rate-limit").expect(
+            "subfinder must be invoked with -rate-limit; without it its global rate is \
+                     UNLIMITED and the process ceiling bounds parallelism only",
+        );
+        assert_eq!(
+            args.get(pos + 1).map(String::as_str),
+            Some(SUBFINDER_RATE_LIMIT_RPS.to_string().as_str()),
+            "-rate-limit must carry the configured value"
+        );
+        assert!(
+            args.contains(&"-silent".to_string()),
+            "output contract unchanged"
+        );
+        assert!(
+            args.contains(&"-json".to_string()),
+            "output contract unchanged"
+        );
     }
 
     #[test]

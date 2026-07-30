@@ -61,6 +61,51 @@ pub const POOL_IDLE_TIMEOUT_SECS: u64 = 15;
 /// the host-count-scaled idle pool entirely, which is what the conntrack failure mode needed.
 pub const POOL_MAX_IDLE_PER_HOST: usize = 0;
 
+/// Idle keep-alive sockets per host for the **DoH resolver client only**.
+///
+/// `POOL_MAX_IDLE_PER_HOST = 0` is correct for the discovery clients and wrong for DoH, and the
+/// distinction is the *host count*, which is exactly what that const's own measurement identified
+/// as the problem: "~670 ESTABLISHED sockets spread across **~250 one-off vendor/CT/SaaS hosts**
+/// … the count grew unbounded with the number of distinct hosts a deep scan discovers". Discovery
+/// visits an unbounded, ever-growing set of hosts, so a per-host idle pool scales with the scan.
+/// DoH visits a **fixed, tiny, configured set** — 6 endpoints — so its idle pool has a hard
+/// ceiling of `6 × 2 = 12` sockets no matter how deep the scan goes. That is ~9% of the 128
+/// in-flight ceiling and 0.02% of the 65,536-entry conntrack table measured on the reference
+/// router. It cannot grow, so it cannot reproduce the failure mode the zero was chosen for.
+///
+/// Why it must be nonzero (2026-07-29 incident): with no pooling, **every single DoH query pays a
+/// fresh TCP+TLS handshake** — the price the const's doc comment names and accepts ("mainly
+/// re-handshaking the DoH resolvers"). Under a depth-3 fan-out that becomes a handshake storm:
+/// handshakes miss `CONNECT_TIMEOUT_SECS`, `TRANSPORT_DOWN_THRESHOLD` consecutive misses mark DoH
+/// "blocked", and the ladder demotes the whole scan onto DoT and then raw UDP/53. Sustained
+/// plain-port DNS then got the WAN IP throttled upstream for ~2h08m, taking every non-443 DNS
+/// transport on the LAN down with it — including the router's own encrypted upstream on :8443 —
+/// while 443 kept answering in 35ms throughout. The measured router conntrack peak during that
+/// scan was **1,089 / 65,536 with zero drops**, so the conntrack pressure the zero defends against
+/// was never remotely in play, while the handshake cost it imposed started the outage.
+///
+/// In short: the zero traded a real, measured cost (DoH handshake amplification) for protection
+/// against a cost that was measured at 1.7% of capacity. For DoH, and only for DoH, that trade is
+/// inverted here. Keep it small — this is connection *reuse*, not a connection *cache*.
+pub const DOH_POOL_MAX_IDLE_PER_HOST: usize = 2;
+
+/// Build-time guard on the DoH pool. A compile error rather than a test failure, because both
+/// directions are load-bearing and neither should be able to drift in unnoticed: dropping it to 0
+/// restores the handshake-per-query behaviour that started the 2026-07-29 outage, and raising it
+/// turns connection *reuse* into a connection *cache* whose footprint scales with the endpoint list.
+const _: () = {
+    assert!(
+        DOH_POOL_MAX_IDLE_PER_HOST >= 1,
+        "DoH keep-alive must stay enabled: at 0, every DoH query pays a fresh TCP+TLS handshake"
+    );
+    // The safety case is that `endpoints x pool` stays negligible against the in-flight ceiling.
+    // Assert that product against a generous endpoint count rather than the pool size alone.
+    assert!(
+        8 * DOH_POOL_MAX_IDLE_PER_HOST < DEFAULT_MAX_CONNECTIONS / 4,
+        "worst-case DoH idle footprint must stay far under the in-flight connection ceiling"
+    );
+};
+
 /// A `reqwest::ClientBuilder` pre-configured with the connection bounds above.
 ///
 /// Callers chain their own `.timeout(..)`, `.user_agent(..)`, etc. and then `.build()`. Use this
@@ -71,6 +116,19 @@ pub fn hardened_builder() -> reqwest::ClientBuilder {
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
         .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+}
+
+/// Like [`hardened_builder`], but with keep-alive reuse enabled for the fixed DoH endpoint set.
+///
+/// Use this **only** for clients whose destination hosts are a small bounded list known at
+/// construction time. Using it for a discovery client — whose host set grows with what the scan
+/// finds — re-opens the unbounded idle-pool growth that [`POOL_MAX_IDLE_PER_HOST`] exists to
+/// prevent. See [`DOH_POOL_MAX_IDLE_PER_HOST`] for the full rationale and the measurements.
+pub fn doh_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
+        .pool_max_idle_per_host(DOH_POOL_MAX_IDLE_PER_HOST)
 }
 
 // ── Global connection ceiling ────────────────────────────────────────────────
@@ -211,9 +269,30 @@ mod tests {
         );
         assert_eq!(
             POOL_MAX_IDLE_PER_HOST, 0,
-            "idle pooling must stay disabled: a nonzero idle pool re-opens the conntrack-exhaustion \
-             failure mode by leaving ESTABLISHED sockets across every host a deep scan touches, which \
-             the in-flight connection ceiling does not bound (see the const's doc comment)"
+            "idle pooling must stay disabled for clients whose destination host set GROWS WITH THE \
+             SCAN: a nonzero idle pool there re-opens the conntrack-exhaustion failure mode by \
+             leaving ESTABLISHED sockets across every host a deep scan touches, which the in-flight \
+             connection ceiling does not bound (see the const's doc comment). This says nothing \
+             about clients with a fixed endpoint list — see DOH_POOL_MAX_IDLE_PER_HOST"
+        );
+    }
+
+    /// The DoH builder must actually differ from the general one — the whole fix is that DoH gets
+    /// connection reuse while discovery does not. A future refactor that collapses the two builders
+    /// would silently restore the handshake-per-query behaviour with every test still green, so
+    /// assert the observable difference rather than only the constants.
+    #[test]
+    fn test_doh_builder_differs_from_hardened_builder() {
+        // Both must build successfully with the same downstream configuration a caller applies.
+        let general = hardened_builder().build();
+        let doh = doh_builder().build();
+        assert!(general.is_ok(), "general client must build");
+        assert!(doh.is_ok(), "DoH client must build");
+        assert_ne!(
+            POOL_MAX_IDLE_PER_HOST, DOH_POOL_MAX_IDLE_PER_HOST,
+            "the DoH client exists precisely because its pooling differs from the general one; if \
+             these ever converge, either discovery grew an unbounded idle pool or DoH lost its \
+             connection reuse and every query pays a fresh TLS handshake again"
         );
     }
 
