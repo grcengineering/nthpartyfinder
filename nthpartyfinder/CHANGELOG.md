@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.6.1] - 2026-07-29
+
+### Fixed
+- **A deep scan no longer takes the network down for hours — and no longer talks itself onto port 53 to do it.** 1.6.0 attacked this as a *concurrency* problem. Measuring the actual failure on the reference network showed that was the wrong model: the router's connection-tracking table peaked at **1,089 of 65,536 entries with zero drops**, while every non-443 DNS transport on the LAN — including the router's own encrypted upstream on port 8443 — went dead for **2 hours 8 minutes**, of which 2 hours 3 minutes were *after* the scan process had already exited. Throughout, DoH over 443 kept answering in 35ms. The cause was not too many connections; it was the scan demoting its own DNS onto plain port 53 and keeping it there:
+
+  **1. DoH queries now reuse connections.** Idle pooling was globally disabled to protect that conntrack table, which meant *every* DoH query paid a fresh TCP+TLS handshake. Under a depth-3 fan-out that becomes a handshake storm: handshakes miss the connect timeout, consecutive misses mark DoH "blocked", and the ladder demotes the whole scan to DNS-over-TLS and then to raw UDP/53. Pooling is now enabled for the DoH client only — its endpoint list is fixed and small, so its idle footprint is capped at a dozen sockets no matter how deep the scan goes, whereas discovery visits an unbounded set of hosts and correctly keeps pooling off.
+
+  **2. One sick DoH provider can no longer disable DoH.** A single circuit breaker covered the whole DoH tier, so eight consecutive failures could all belong to one struggling endpoint while its siblings were healthy. The breaker now requires *every* configured provider to have failed, and any provider answering clears the streak.
+
+  **3. One broken domain can no longer disable DoH either.** A name that fails at its own authoritative servers returns SERVFAIL from every provider alike, which trivially satisfied "every provider failed". A DoH response carrying a well-formed JSON body is proof the transport works, whatever DNS response code it reports; those are now classified separately and count as transport *success*.
+
+  **4. The raw UDP/53 tier has a hard emission ceiling.** Previously, demotion handed it the entire scan's DNS load — the most heavily rate-limited transport on the internet. It is now bounded to a few queries per second and *sheds* rather than queues, because a waiting limiter converts a flood into a backlog that emits the same volume later. This bound holds even when DoH is genuinely blocked.
+
+  **5. subfinder's request volume is bounded, not just its parallelism.** Up to ten subfinder subprocesses ran with **no rate limit at all** — its global default is unlimited, and nothing was passed. The process ceiling bounded how many ran, never how much they emitted. Concurrency is now 3 and each subprocess is rate-limited. Across a monitored scan, mean concurrent subfinders was 8.2 during samples where DNS was failing versus 1.9 where it was healthy.
+
+  **Verified:** DNS now recovers within ~20 seconds of a scan ending rather than staying dead for hours; a depth-2 scan with every discovery method enabled shows zero transport demotions and no DNS degradation at all. A depth-3 scan still causes transient DNS flapping while it runs (it recovers immediately), which remains under investigation.
+
+### Added
+- Three more default DoH endpoints — the second anycast address of each operator already in use, so endpoint capacity doubles with no new party to trust and no new filtering policy. Each was verified to serve the JSON API with byte-identical answer counts and, critically, **not** to filter the ad/tracker domains this scanner exists to discover: a filtering resolver returns NXDOMAIN rather than an error, which reads as "this vendor does not exist".
+
+- **1.6.0's headline network fix was not actually reaching anyone.** 1.6.0 replaced the hostname DoH endpoints with IP literals in the source, but the default config file shipped inside the binary still listed all three hostnames — and since 1.5.0 a first run silently writes that default config and then uses it. So essentially every user still got `cloudflare-dns.com`, `dns.google` and `doh.sb`, and with them the A+AAAA lookup pair fired at the LAN router before each encrypted query even left the machine. That was the dominant source of forwarder load on a deep scan. The shipped config now lists IP literals only. **If you installed 1.6.0 and have a `config/nthpartyfinder.toml`, delete it (or replace its `doh_servers` list) — an existing config is never rewritten.**
+
+- **Report filters were silently defeated by pagination.** Filtering a table to a search term and then paging forward showed rows that did not match, while the search box still displayed the term and the pager still counted the whole table ("1-50 of 7070") no matter what was filtered. Pagination decided what to show purely by row index because it read a marker that the filter code never wrote. Filters and pagination now share one contract: pagination operates on the surviving rows, the page count is computed from them, and the counter reports matches.
+
+- **Sorting compared domains as numbers.** A prefix-parse made `1mind.com` and `1password.com` both evaluate to `1` and sort as equal. Columns now sort numerically only when the whole cell is a number.
+
+- **The resume banner under-reported progress on every deep scan.** The depth a checkpoint had reached was recorded only in test builds, so every checkpoint written in a real run claimed depth 0.
+
+### Changed
+- The HTML report no longer carries ~287 lines of dead graph-bootstrap code. It referenced three CDN URLs and an element that does not exist, and it displayed a message claiming the graph needs an internet connection — untrue, since the graph ships embedded and the report makes no external requests at all. A regression test now asserts that.
+- The swatch legend and the graph's own legend no longer describe the same layer band with two different vocabularies.
+
 ## [1.6.0] - 2026-07-25
 
 ### Fixed

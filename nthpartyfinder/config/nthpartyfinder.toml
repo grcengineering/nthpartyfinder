@@ -106,6 +106,30 @@ name = "dns.sb DoH (IP)"
 url = "https://185.222.222.222/dns-query"
 timeout_secs = 3
 
+# Each operator's SECOND anycast address. These add endpoint capacity — spreading the per-IP rate
+# limits public resolvers apply — without adding a fourth party to trust or a new filtering policy
+# to audit: same operator, same service, same answers.
+#
+# Live-verified 2026-07-29 per the JSON-GET-API rule: identical TXT answer counts to their
+# primaries (google.com 15, stripe.com 31, vanta.com 39) and confirmed NOT to filter the
+# ad/tracker domains this scanner exists to find (doubleclick.net, google-analytics.com,
+# scorecardresearch.com all resolve). Filtering is the silent hazard when adding any resolver: it
+# returns NXDOMAIN rather than an error, which reads as "this vendor does not exist".
+[[dns.doh_servers]]
+name = "Cloudflare DoH (IP, secondary)"
+url = "https://1.0.0.1/dns-query"
+timeout_secs = 3
+
+[[dns.doh_servers]]
+name = "Google DoH (IP, secondary)"
+url = "https://8.8.4.4/resolve"
+timeout_secs = 3
+
+[[dns.doh_servers]]
+name = "dns.sb DoH (IP, secondary)"
+url = "https://45.11.45.11/dns-query"
+timeout_secs = 3
+
 # -----------------------------------------------------------------------------
 # Traditional DNS Servers (Fallback)
 # -----------------------------------------------------------------------------

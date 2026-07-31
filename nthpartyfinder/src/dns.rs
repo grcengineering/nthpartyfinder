@@ -172,6 +172,10 @@ pub struct DnsServerPool {
     /// `TRANSPORT_DOWN_THRESHOLD` consecutive timeouts instead of being hammered into a worse outage.
     #[cfg_attr(coverage, allow(dead_code))]
     do53_health: TransportHealth,
+    /// Hard emission ceiling on the raw UDP/53 tier — the transport that can damage the network.
+    /// See `Do53Budget`.
+    #[cfg_attr(coverage, allow(dead_code))]
+    do53_budget: Do53Budget,
     /// Whether the DoT (853) tier is attempted at all. Real DoT queries hit hardcoded public 853
     /// resolvers (`DOT_SERVERS`), so hermetic tests (mock-DoH pools from `with_test_urls`) disable
     /// it while production constructors enable it. DoT still only runs when DoH is unavailable.
@@ -224,6 +228,101 @@ const TRANSPORT_DOWN_THRESHOLD: u32 = 8;
 #[cfg_attr(coverage, allow(dead_code))]
 const TRANSPORT_REPROBE_INTERVAL_MS: u64 = 30_000;
 
+/// Sustained queries per second the raw UDP/53 tier may emit, process-wide.
+///
+/// This is a *hard* ceiling, not a pacing target: when the budget is spent the tier is skipped for
+/// that lookup rather than queued behind it. It exists because the UDP/53 tier is the one that can
+/// damage the network it runs on, and the breaker alone is not enough to bound it — the breaker
+/// reacts to failures, so it only engages *after* a flood has already been emitted, and on
+/// 2026-07-29 the flood was itself what caused the failures.
+///
+/// The value is chosen to sit inside what an ordinary browsing device emits: a few queries a
+/// second sustained, with a small burst allowance for the natural clustering of a lookup batch.
+/// A depth-3 scan can want thousands of lookups per minute; on plain port 53 from a residential
+/// line, that is the traffic pattern that gets an IP throttled upstream. Recall lost to this
+/// ceiling is recoverable — the scan reports reduced coverage — whereas a throttled WAN link takes
+/// hours to clear and takes every other device on the LAN with it.
+#[cfg_attr(coverage, allow(dead_code))]
+const DO53_MAX_QPS: u64 = 5;
+
+/// Burst allowance for [`DO53_MAX_QPS`], so a small cluster of lookups is not needlessly serialized
+/// while the sustained rate stays bounded.
+#[cfg_attr(coverage, allow(dead_code))]
+const DO53_BURST: u64 = 10;
+
+/// Build-time guard on the UDP/53 ceiling. This is a *compile* error rather than a test failure on
+/// purpose: the whole point of the ceiling is that it cannot quietly drift upward, and a value
+/// raised in a hurry should not be able to reach a release even if the suite is skipped.
+const _: () = {
+    assert!(
+        DO53_MAX_QPS <= 10,
+        "UDP/53 is the transport that gets a residential IP throttled upstream — keep it low"
+    );
+    assert!(
+        DO53_BURST <= DO53_MAX_QPS * 4,
+        "burst must stay a small multiple of the sustained rate, or it IS the sustained rate"
+    );
+};
+
+/// A shedding token bucket bounding how fast the raw UDP/53 tier may emit queries.
+///
+/// **Sheds rather than queues.** A waiting limiter would convert a flood into a backlog: the same
+/// number of queries still leave the machine, just later, and every caller blocks holding its
+/// resources. Skipping the tier instead keeps the emission rate genuinely bounded and degrades the
+/// way the scanner already knows how to report — as reduced coverage on names it could not resolve.
+///
+/// A plain `Mutex` is right here: the critical section is a compare-and-subtract with no `await`
+/// inside, and by construction this path runs at single-digit QPS.
+#[cfg_attr(coverage, allow(dead_code))]
+#[derive(Debug)]
+struct Do53Budget {
+    state: std::sync::Mutex<Do53BudgetState>,
+}
+
+#[cfg_attr(coverage, allow(dead_code))]
+#[derive(Debug)]
+struct Do53BudgetState {
+    tokens: f64,
+    last_refill_ms: u64,
+}
+
+#[cfg_attr(coverage, allow(dead_code))]
+impl Do53Budget {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(Do53BudgetState {
+                tokens: DO53_BURST as f64,
+                last_refill_ms: now_epoch_millis(),
+            }),
+        }
+    }
+
+    /// Take one token if the budget allows. Returns false when the caller must skip the UDP/53
+    /// tier for this lookup.
+    ///
+    /// A poisoned mutex denies the request: failing closed on the flood-prone transport is the safe
+    /// direction, and it cannot deadlock the scan because every caller treats `false` as "skip".
+    fn try_take(&self) -> bool {
+        let Ok(mut st) = self.state.lock() else {
+            return false;
+        };
+        let now = now_epoch_millis();
+        // Saturating: a clock that steps backwards must not manufacture tokens.
+        let elapsed_ms = now.saturating_sub(st.last_refill_ms);
+        if elapsed_ms > 0 {
+            st.tokens = (st.tokens + (elapsed_ms as f64) * (DO53_MAX_QPS as f64) / 1000.0)
+                .min(DO53_BURST as f64);
+            st.last_refill_ms = now;
+        }
+        if st.tokens >= 1.0 {
+            st.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Well-known DNS-over-TLS (853) resolvers, as `(ip, tls_server_name)`. One DoT resolver is built
 /// over all of them so hickory gets resolver-level provider diversity (Cloudflare + Quad9 + Google)
 /// and connection pooling for free. IP literals avoid a DNS-bootstrap dependency when UDP/53 — the
@@ -261,6 +360,29 @@ struct TransportHealth {
     consecutive_failures: AtomicU32,
     /// Unix-epoch millis after which one re-probe is permitted while the transport is marked down.
     reprobe_after_ms: AtomicU64,
+    /// Bitmask of the distinct upstreams that have failed during the *current* streak, one bit per
+    /// provider index — cleared by any success, alongside the streak.
+    ///
+    /// A transport with several independent providers (DoH) must not be declared unavailable on the
+    /// strength of one sick endpoint. `consecutive_failures` alone cannot tell "Cloudflare is
+    /// rate-limiting us" from "port 443 is blocked", because rotation means eight consecutive
+    /// failures can all belong to a single provider. On 2026-07-29 that distinction was the whole
+    /// incident: DoH was declared blocked six times in fourteen minutes while DoH was demonstrably
+    /// answering — a live probe mid-outage returned HTTP 200 in 35ms — and each false demotion moved
+    /// the scan's DNS onto raw UDP/53, which is what got the WAN IP throttled upstream for ~2h08m.
+    ///
+    /// Requiring every configured provider to have failed makes the breaker mean what its name
+    /// says: the *transport* is unusable, not one endpoint on it. It also self-heals — a provider
+    /// that is permanently broken cannot force a demotion on its own, because any success from a
+    /// working sibling clears the streak.
+    ///
+    /// A `u64` bitmask covers 64 providers, far past any sane configuration; indices at or beyond
+    /// that saturate into the top bit, which is conservative (it can only delay a demotion).
+    failed_sources: AtomicU64,
+    /// Whether the "transport is down" warning has already been emitted for the current outage, so
+    /// `just_went_down` fires once rather than on every lookup while the breaker is open. Reset by
+    /// `record_success` along with the streak.
+    warned_down: std::sync::atomic::AtomicBool,
 }
 
 #[cfg_attr(coverage, allow(dead_code))]
@@ -269,7 +391,13 @@ impl TransportHealth {
     /// the single lookup that wins the periodic re-probe (the CAS ensures exactly one concurrent
     /// probe; the rest skip straight to the next tier).
     fn should_attempt(&self) -> bool {
-        if self.consecutive_failures.load(Ordering::Relaxed) < TRANSPORT_DOWN_THRESHOLD {
+        self.should_attempt_with_sources(1)
+    }
+
+    /// As [`Self::should_attempt`], but for a transport with `source_count` independent upstreams:
+    /// it is only skippable once every one of them has failed in the current streak.
+    fn should_attempt_with_sources(&self, source_count: usize) -> bool {
+        if !self.is_down(source_count) {
             return true;
         }
         let now = now_epoch_millis();
@@ -287,9 +415,11 @@ impl TransportHealth {
     }
 
     /// The transport answered (any authoritative result, including an empty one) — it works. Clear
-    /// the failure streak.
+    /// the failure streak, and with it the set of providers implicated in that streak.
     fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.failed_sources.store(0, Ordering::Relaxed);
+        self.warned_down.store(false, Ordering::Relaxed);
     }
 
     /// The transport failed *while we were overloading the network ourselves*.
@@ -317,10 +447,25 @@ impl TransportHealth {
         &self,
         governor: &std::sync::Arc<crate::dns_governor::DnsGovernor>,
     ) -> bool {
+        self.record_failure_from_unless_congested(governor, 0, 1)
+    }
+
+    /// As [`Self::record_failure_unless_congested`], but attributing the failure to a specific
+    /// upstream so a multi-provider transport is only declared down once *every* provider has
+    /// failed in the current streak.
+    ///
+    /// `source_index` identifies the upstream (a DoH provider index); `source_count` is how many
+    /// are configured. Single-upstream transports pass `(0, 1)` and behave exactly as before.
+    fn record_failure_from_unless_congested(
+        &self,
+        governor: &std::sync::Arc<crate::dns_governor::DnsGovernor>,
+        source_index: usize,
+        source_count: usize,
+    ) -> bool {
         if governor.is_backing_off() {
             self.record_congestion()
         } else {
-            self.record_failure()
+            self.record_failure_from(source_index, source_count)
         }
     }
 
@@ -328,16 +473,72 @@ impl TransportHealth {
     /// Advance the streak; returns true exactly once, on the transition into "down", so the caller
     /// warns a single time per outage.
     fn record_failure(&self) -> bool {
+        self.record_failure_from(0, 1)
+    }
+
+    /// Advance the streak and mark `source_index` as implicated.
+    ///
+    /// The transport flips to "down" only when BOTH conditions hold: the streak has reached
+    /// `TRANSPORT_DOWN_THRESHOLD`, and every one of the `source_count` configured upstreams has
+    /// failed at least once during it. The second condition is what stops one sick provider from
+    /// demoting a working transport — see the `failed_sources` field docs for the incident that
+    /// made it necessary.
+    ///
+    /// Returns true exactly once, on the transition into "down", so the caller warns a single time.
+    fn record_failure_from(&self, source_index: usize, source_count: usize) -> bool {
         let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        if n == TRANSPORT_DOWN_THRESHOLD {
-            self.reprobe_after_ms.store(
-                now_epoch_millis() + TRANSPORT_REPROBE_INTERVAL_MS,
-                Ordering::Relaxed,
-            );
-            true
+
+        // Saturate out-of-range indices into the top bit rather than wrapping: a wrapped index
+        // would alias onto a different provider's bit and could fake full coverage.
+        let bit = 1u64 << source_index.min(63);
+        let prev = self.failed_sources.fetch_or(bit, Ordering::Relaxed);
+        let seen = prev | bit;
+
+        // `source_count` is clamped the same way so the "all providers failed" mask is reachable.
+        let needed = match source_count.clamp(1, 64) {
+            64 => u64::MAX,
+            k => (1u64 << k) - 1,
+        };
+        let all_sources_failed = seen & needed == needed;
+
+        if n >= TRANSPORT_DOWN_THRESHOLD && all_sources_failed {
+            // Warn (and start the re-probe clock) only on the transition, not on every subsequent
+            // failure once down. `should_attempt` treats any streak at/above the threshold as down,
+            // so the transition is the first call where both conditions hold.
+            let was_down = n > TRANSPORT_DOWN_THRESHOLD && prev & needed == needed;
+            if !was_down {
+                self.reprobe_after_ms.store(
+                    now_epoch_millis() + TRANSPORT_REPROBE_INTERVAL_MS,
+                    Ordering::Relaxed,
+                );
+            }
+            !was_down
         } else {
             false
         }
+    }
+
+    /// Report the down-transition exactly once, for callers that record failures elsewhere.
+    ///
+    /// The DoH tier attributes failures per-provider deep inside the rotation loop (the only layer
+    /// that knows which upstream failed), so its outer call site must not record again — that would
+    /// double-count and could trip the breaker on one provider's streak. It still needs to warn on
+    /// the transition, which this provides: true the first time the transport is observed down.
+    fn just_went_down(&self, source_count: usize) -> bool {
+        self.is_down(source_count) && !self.warned_down.swap(true, Ordering::Relaxed)
+    }
+
+    /// Is this transport currently considered down? Mirrors the condition in
+    /// [`Self::record_failure_from`] so `should_attempt` cannot drift from it.
+    fn is_down(&self, source_count: usize) -> bool {
+        if self.consecutive_failures.load(Ordering::Relaxed) < TRANSPORT_DOWN_THRESHOLD {
+            return false;
+        }
+        let needed = match source_count.clamp(1, 64) {
+            64 => u64::MAX,
+            k => (1u64 << k) - 1,
+        };
+        self.failed_sources.load(Ordering::Relaxed) & needed == needed
     }
 }
 
@@ -362,6 +563,10 @@ fn classify_pair<T, U, E: std::fmt::Display, F: std::fmt::Display>(
     .into_iter()
     .flatten()
     .any(|m| {
+        // DNS_NAME is deliberately absent: the resolver answered over a working link and simply
+        // reported SERVFAIL/REFUSED for this name. Reading that as congestion would make the
+        // adaptive governor throttle a healthy network because one domain is broken — exactly the
+        // failure this function's own doc comment warns about.
         m.contains("DNS_THROTTLE")
             || m.contains("DNS_ENDPOINT")
             || m.contains("timed out")
@@ -575,7 +780,11 @@ impl DnsServerPool {
             })
             .collect();
 
-        let client = crate::http_client::hardened_builder()
+        // `doh_builder`, not `hardened_builder`: the DoH endpoint list is fixed and tiny, so
+        // keep-alive reuse here has a hard ceiling, whereas disabling it makes every query pay a
+        // fresh TLS handshake — the storm that tripped the DoH breaker and demoted the scan onto
+        // UDP/53 on 2026-07-29. See `http_client::DOH_POOL_MAX_IDLE_PER_HOST`.
+        let client = crate::http_client::doh_builder()
             .timeout(std::time::Duration::from_secs(
                 config.http.request_timeout_secs,
             ))
@@ -604,6 +813,7 @@ impl DnsServerPool {
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
+            do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -659,6 +869,35 @@ impl DnsServerPool {
                 name: "dns.sb DoH (IP)".to_string(),
                 timeout_secs: 3,
             },
+            // Each operator's SECOND anycast address. These add endpoint capacity — spreading the
+            // per-IP rate limits that public resolvers apply — without adding a fourth party to
+            // trust or a new filtering policy to audit: same operator, same service, same answers.
+            //
+            // Live-verified 2026-07-29 against the project's JSON-GET-API rule, identical TXT
+            // answer counts to their primaries (google.com 15, stripe.com 31, vanta.com 39), and
+            // confirmed NOT to filter the ad/tracker domains this scanner exists to discover
+            // (doubleclick.net, google-analytics.com, scorecardresearch.com all resolve). A
+            // filtering resolver is the silent hazard here: it returns NXDOMAIN rather than an
+            // error, which the scanner would read as "this vendor does not exist".
+            //
+            // Note this is depth, not a fix: more endpoints delay the DoH breaker, they do not stop
+            // it tripping. The reason a deep scan stopped exhausting DoH is connection reuse
+            // (`http_client::DOH_POOL_MAX_IDLE_PER_HOST`) plus the per-provider breaker above.
+            DohServerConfig {
+                url: "https://1.0.0.1/dns-query".to_string(),
+                name: "Cloudflare DoH (IP, secondary)".to_string(),
+                timeout_secs: 3,
+            },
+            DohServerConfig {
+                url: "https://8.8.4.4/resolve".to_string(),
+                name: "Google DoH (IP, secondary)".to_string(),
+                timeout_secs: 3,
+            },
+            DohServerConfig {
+                url: "https://45.11.45.11/dns-query".to_string(),
+                name: "dns.sb DoH (IP, secondary)".to_string(),
+                timeout_secs: 3,
+            },
         ];
 
         let dns_servers = vec![
@@ -684,7 +923,9 @@ impl DnsServerPool {
             },
         ];
 
-        let client = crate::http_client::hardened_builder()
+        // See the note in `from_config`: DoH gets keep-alive reuse because its endpoint list is
+        // fixed and tiny. `http_client::DOH_POOL_MAX_IDLE_PER_HOST`.
+        let client = crate::http_client::doh_builder()
             .timeout(std::time::Duration::from_secs(5))
             .user_agent("nthpartyfinder/1.0")
             .build()
@@ -705,6 +946,7 @@ impl DnsServerPool {
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
+            do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -819,6 +1061,7 @@ impl DnsServerPool {
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
+            do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -847,11 +1090,33 @@ impl DnsServerPool {
     /// DNS server"). Production lookup paths must rotate through these instead.
     #[cfg(not(coverage))]
     fn next_doh_server_opt(&self) -> Option<&DohServerConfig> {
+        self.next_doh_server_indexed().map(|(_, s)| s)
+    }
+
+    /// May the raw UDP/53 tier issue one query right now?
+    ///
+    /// Both gates, in one place so a test can exercise the real admission decision rather than the
+    /// budget in isolation — the wiring is the part that matters, and a unit test of `Do53Budget`
+    /// alone stays green if this call site drops it.
+    ///
+    /// Order matters: the budget is a ceiling on what we are willing to emit, checked before the
+    /// breaker's opinion about what is failing. Note `try_take` consumes a token, so this is not a
+    /// predicate — call it exactly once per intended query.
+    fn admit_do53_query(&self) -> bool {
+        self.do53_health.should_attempt() && self.do53_budget.try_take()
+    }
+
+    /// Rotation that also yields the provider's index, so a failure can be attributed to the
+    /// specific upstream that produced it. The DoH breaker needs this: it may only declare the
+    /// transport down once *every* configured provider has failed, which is impossible to tell
+    /// from an unattributed failure count (see `TransportHealth::failed_sources`).
+    #[cfg(not(coverage))]
+    fn next_doh_server_indexed(&self) -> Option<(usize, &DohServerConfig)> {
         if self.doh_servers.is_empty() {
-            None
-        } else {
-            Some(self.next_doh_server())
+            return None;
         }
+        let index = self.current_doh_index.fetch_add(1, Ordering::Relaxed) % self.doh_servers.len();
+        Some((index, &self.doh_servers[index]))
     }
 
     #[cfg(not(coverage))]
@@ -915,11 +1180,18 @@ impl DnsServerPool {
         // answers (records present / genuinely absent). Anything else (2 = SERVFAIL,
         // 5 = REFUSED, …) is a resolver-side failure that must never read as "this domain
         // has no records". A missing `Status` field is tolerated (lenient providers/fixtures).
+        //
+        // Classed `DNS_NAME`, NOT `DNS_ENDPOINT`: we received an HTTPS response carrying a
+        // well-formed dns-json body, so the TRANSPORT demonstrably works — what failed is this
+        // NAME, at its own authoritative servers. Conflating the two was a real bug (2026-07-29):
+        // a pathological name SERVFAILs identically on every provider, which trivially satisfies
+        // the DoH breaker's "all providers failed" condition and demoted a perfectly healthy
+        // transport onto UDP/53. One broken domain must never take the transport down.
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
                 self.note_throttle();
                 return Err(anyhow::anyhow!(
-                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
                     rcode,
                     domain
@@ -1018,11 +1290,18 @@ impl DnsServerPool {
         let response = http_response.json::<Value>().await?;
         // RCODE gate mirroring the TXT path: only NOERROR (0) and NXDOMAIN (3) are genuine
         // answers; SERVFAIL/REFUSED/… must never read as "no CNAME".
+        //
+        // Classed `DNS_NAME`, NOT `DNS_ENDPOINT`: we received an HTTPS response carrying a
+        // well-formed dns-json body, so the TRANSPORT demonstrably works — what failed is this
+        // NAME, at its own authoritative servers. Conflating the two was a real bug (2026-07-29):
+        // a pathological name SERVFAILs identically on every provider, which trivially satisfies
+        // the DoH breaker's "all providers failed" condition and demoted a perfectly healthy
+        // transport onto UDP/53. One broken domain must never take the transport down.
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
                 self.note_throttle();
                 return Err(anyhow::anyhow!(
-                    "DNS_ENDPOINT: DoH provider {} returned DNS RCODE {} for {}",
+                    "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
                     rcode,
                     domain
@@ -1118,7 +1397,9 @@ impl DnsServerPool {
             // DoH-only configs are legal; so are DNS-only ones — never index an
             // empty pool (panic), surface a plain error the callers treat as a
             // non-class failure and fall back from.
-            let Some(server) = self.next_doh_server_opt().cloned() else {
+            let Some((server_index, server)) =
+                self.next_doh_server_indexed().map(|(i, s)| (i, s.clone()))
+            else {
                 return Err(anyhow::anyhow!(
                     "no DoH servers configured for TXT lookup of {}",
                     domain
@@ -1140,9 +1421,31 @@ impl DnsServerPool {
                         last_err = Some(e);
                         break;
                     }
+                    // A DNS_NAME error means the provider ANSWERED — an HTTPS response carrying a
+                    // well-formed dns-json body that happens to report SERVFAIL/REFUSED for this
+                    // name. That is positive evidence the transport works, so it clears the streak
+                    // rather than advancing it. Counting it as a transport failure is how one
+                    // pathological domain (which fails identically on every provider) used to
+                    // satisfy the "all providers failed" condition and demote healthy DoH.
+                    if msg.contains("DNS_NAME") {
+                        self.doh_health.record_success();
+                    } else {
+                        // Attribute a genuine transport failure to the provider that produced it.
+                        // The DoH breaker may only trip once EVERY configured provider has failed
+                        // in the current streak, so an unattributed count would let one sick
+                        // endpoint demote a working transport.
+                        self.doh_health.record_failure_from_unless_congested(
+                            &self.governor,
+                            server_index,
+                            self.doh_servers.len(),
+                        );
+                    }
                     let throttled = msg.contains("DNS_THROTTLE");
-                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
-                    if !throttled && !endpoint_broken {
+                    // DNS_NAME joins DNS_ENDPOINT here only for the purposes of "already counted":
+                    // both call `note_throttle` at their choke point, so counting again would
+                    // double-count. They differ entirely in transport-health treatment above.
+                    let already_counted = msg.contains("DNS_ENDPOINT") || msg.contains("DNS_NAME");
+                    if !throttled && !already_counted {
                         // Transport/parse failures (connect refused, TLS error,
                         // 200-with-HTML body) are provider failures too — count
                         // them for the exit-3 guard. Classed errors were already
@@ -1216,7 +1519,9 @@ impl DnsServerPool {
         let mut last_err: Option<anyhow::Error> = None;
         for i in 0..attempts {
             // Mirror the TXT path: never index an empty DoH pool.
-            let Some(server) = self.next_doh_server_opt().cloned() else {
+            let Some((server_index, server)) =
+                self.next_doh_server_indexed().map(|(i, s)| (i, s.clone()))
+            else {
                 return Err(anyhow::anyhow!(
                     "no DoH servers configured for CNAME lookup of {}",
                     domain
@@ -1234,9 +1539,31 @@ impl DnsServerPool {
                         last_err = Some(e);
                         break;
                     }
+                    // A DNS_NAME error means the provider ANSWERED — an HTTPS response carrying a
+                    // well-formed dns-json body that happens to report SERVFAIL/REFUSED for this
+                    // name. That is positive evidence the transport works, so it clears the streak
+                    // rather than advancing it. Counting it as a transport failure is how one
+                    // pathological domain (which fails identically on every provider) used to
+                    // satisfy the "all providers failed" condition and demote healthy DoH.
+                    if msg.contains("DNS_NAME") {
+                        self.doh_health.record_success();
+                    } else {
+                        // Attribute a genuine transport failure to the provider that produced it.
+                        // The DoH breaker may only trip once EVERY configured provider has failed
+                        // in the current streak, so an unattributed count would let one sick
+                        // endpoint demote a working transport.
+                        self.doh_health.record_failure_from_unless_congested(
+                            &self.governor,
+                            server_index,
+                            self.doh_servers.len(),
+                        );
+                    }
                     let throttled = msg.contains("DNS_THROTTLE");
-                    let endpoint_broken = msg.contains("DNS_ENDPOINT");
-                    if !throttled && !endpoint_broken {
+                    // DNS_NAME joins DNS_ENDPOINT here only for the purposes of "already counted":
+                    // both call `note_throttle` at their choke point, so counting again would
+                    // double-count. They differ entirely in transport-health treatment above.
+                    let already_counted = msg.contains("DNS_ENDPOINT") || msg.contains("DNS_NAME");
+                    if !throttled && !already_counted {
                         // Count transport/parse provider failures (see TXT path).
                         self.note_throttle();
                     }
@@ -1373,7 +1700,10 @@ impl DnsServerPool {
             Ok(records) => records,
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
+                if msg.contains("DNS_THROTTLE")
+                    || msg.contains("DNS_ENDPOINT")
+                    || msg.contains("DNS_NAME")
+                {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -1383,7 +1713,10 @@ impl DnsServerPool {
             Ok(records) => records,
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("DNS_THROTTLE") || msg.contains("DNS_ENDPOINT") {
+                if msg.contains("DNS_THROTTLE")
+                    || msg.contains("DNS_ENDPOINT")
+                    || msg.contains("DNS_NAME")
+                {
                     dns_failure_counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Vec::new()
@@ -1412,7 +1745,10 @@ impl DnsServerPool {
         // provider outage) `should_attempt` returns false after TRANSPORT_DOWN_THRESHOLD consecutive
         // failures, so we skip the 3s DoH round-trip and descend the encrypted-then-plain ladder
         // below, re-probing DoH periodically to resume it the moment it recovers.
-        if self.doh_health.should_attempt() {
+        if self
+            .doh_health
+            .should_attempt_with_sources(self.doh_servers.len())
+        {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 self.doh_txt_lookup_resilient(domain),
@@ -1434,10 +1770,11 @@ impl DnsServerPool {
                     if e.to_string().contains("DNS_THROTTLE")
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
-                    if self
-                        .doh_health
-                        .record_failure_unless_congested(&self.governor)
-                    {
+                    // The per-provider failures were already recorded inside the resilient
+                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
+                    // again here would double-count and could trip the breaker on a single
+                    // provider's streak. Just report the transition if this failure completed it.
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1451,10 +1788,11 @@ impl DnsServerPool {
                     }
                 }
                 _ => {
-                    if self
-                        .doh_health
-                        .record_failure_unless_congested(&self.governor)
-                    {
+                    // The per-provider failures were already recorded inside the resilient
+                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
+                    // again here would double-count and could trip the breaker on a single
+                    // provider's streak. Just report the transition if this failure completed it.
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1540,7 +1878,10 @@ impl DnsServerPool {
         // Tier 3 — direct UDP/53: the flood-prone tier, health-gated so a router that blocks or
         // rate-limits port 53 is skipped after TRANSPORT_DOWN_THRESHOLD consecutive timeouts instead
         // of being hammered into a worse outage (the DNS-flood-protection collapse).
-        if self.do53_health.should_attempt() {
+        // The budget check comes BEFORE the health check on purpose: it is a ceiling on what we are
+        // willing to emit, not a reaction to what failed. Skipping here costs one name's recall;
+        // not skipping is what got the WAN IP throttled for ~2h08m on 2026-07-29.
+        if self.admit_do53_query() {
             if let Some(server) = self.next_dns_server_opt() {
                 if let Ok(resolver) = self.create_dns_resolver(server, false) {
                     let outcome = match kind {
@@ -1594,7 +1935,10 @@ impl DnsServerPool {
         // Tier 1 — DoH (443), health-gated and shared with TXT via self.doh_health: skip DoH and
         // descend the DoT→UDP/53 ladder when DoH is blocked/unavailable, re-probing periodically.
         // See fast_txt_lookup.
-        if self.doh_health.should_attempt() {
+        if self
+            .doh_health
+            .should_attempt_with_sources(self.doh_servers.len())
+        {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 self.doh_cname_lookup_resilient(domain),
@@ -1610,10 +1954,11 @@ impl DnsServerPool {
                     if e.to_string().contains("DNS_THROTTLE")
                         || e.to_string().contains("DNS_ENDPOINT") =>
                 {
-                    if self
-                        .doh_health
-                        .record_failure_unless_congested(&self.governor)
-                    {
+                    // The per-provider failures were already recorded inside the resilient
+                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
+                    // again here would double-count and could trip the breaker on a single
+                    // provider's streak. Just report the transition if this failure completed it.
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -1627,10 +1972,11 @@ impl DnsServerPool {
                     }
                 }
                 _ => {
-                    if self
-                        .doh_health
-                        .record_failure_unless_congested(&self.governor)
-                    {
+                    // The per-provider failures were already recorded inside the resilient
+                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
+                    // again here would double-count and could trip the breaker on a single
+                    // provider's streak. Just report the transition if this failure completed it.
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             "DoH",
                             "trying DNS-over-TLS (853), then direct DNS",
@@ -2909,6 +3255,267 @@ mod tests {
         assert!(
             h.should_attempt(),
             "success clears the streak -> DoH resumes"
+        );
+    }
+
+    // ── The 2026-07-29 false-demotion regression ─────────────────────────────────────
+    //
+    // A depth-3 scan declared DoH "blocked" six times in fourteen minutes while DoH was
+    // demonstrably answering (a live probe mid-outage returned HTTP 200 in 35ms). Each false
+    // demotion moved the scan's DNS onto raw UDP/53, and sustained plain-port DNS got the WAN IP
+    // throttled upstream for ~2h08m — taking every non-443 DNS transport on the LAN with it.
+    //
+    // The mechanism: one `TransportHealth` covers the whole DoH tier, so eight consecutive
+    // failures could all belong to a single sick provider while its siblings were healthy.
+
+    #[test]
+    fn one_sick_provider_never_demotes_a_multi_provider_transport() {
+        let h = TransportHealth::default();
+        const PROVIDERS: usize = 6;
+
+        // Provider 0 fails far past the threshold. Every other provider is fine.
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD * 5) {
+            assert!(
+                !h.record_failure_from(0, PROVIDERS),
+                "a single provider's streak must never announce the transport as down"
+            );
+            assert!(
+                h.should_attempt_with_sources(PROVIDERS),
+                "DoH must stay eligible while five of six providers are untested"
+            );
+        }
+        assert!(!h.is_down(PROVIDERS));
+    }
+
+    #[test]
+    fn transport_demotes_only_once_every_provider_has_failed() {
+        let h = TransportHealth::default();
+        const PROVIDERS: usize = 3;
+
+        // Cover the streak length first, all on one provider — not down.
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+            h.record_failure_from(0, PROVIDERS);
+        }
+        assert!(
+            h.should_attempt_with_sources(PROVIDERS),
+            "one provider only"
+        );
+
+        // Second provider fails — still a provider left untested.
+        h.record_failure_from(1, PROVIDERS);
+        assert!(h.should_attempt_with_sources(PROVIDERS), "two of three");
+
+        // The last provider fails: now the transport itself is unusable, and it says so once.
+        assert!(
+            h.record_failure_from(2, PROVIDERS),
+            "warns on the transition once every provider has failed"
+        );
+        assert!(!h.should_attempt_with_sources(PROVIDERS), "now down");
+        assert!(
+            !h.record_failure_from(2, PROVIDERS),
+            "never re-warns while down"
+        );
+    }
+
+    #[test]
+    fn any_provider_success_clears_the_implicated_set() {
+        let h = TransportHealth::default();
+        const PROVIDERS: usize = 3;
+        for i in 0..PROVIDERS {
+            for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+                h.record_failure_from(i, PROVIDERS);
+            }
+        }
+        assert!(h.is_down(PROVIDERS), "all providers failed -> down");
+
+        h.record_success();
+        assert!(
+            h.should_attempt_with_sources(PROVIDERS),
+            "success revives it"
+        );
+
+        // And the implicated set is genuinely cleared, not merely the counter: one provider
+        // failing again must not instantly re-trip the breaker on the stale mask.
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD * 2) {
+            h.record_failure_from(0, PROVIDERS);
+        }
+        assert!(
+            h.should_attempt_with_sources(PROVIDERS),
+            "stale failed-source bits must not survive a success"
+        );
+    }
+
+    #[test]
+    fn single_source_transports_are_unaffected_by_provider_awareness() {
+        // DoT and UDP/53 have one upstream each; their behaviour must be byte-identical to before.
+        let h = TransportHealth::default();
+        let mut warned = 0;
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+            if h.record_failure() {
+                warned += 1;
+            }
+        }
+        assert_eq!(warned, 1);
+        assert!(!h.should_attempt());
+    }
+
+    #[test]
+    fn just_went_down_reports_the_transition_exactly_once() {
+        let h = TransportHealth::default();
+        const PROVIDERS: usize = 2;
+        for i in 0..PROVIDERS {
+            for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+                h.record_failure_from(i, PROVIDERS);
+            }
+        }
+        assert!(h.just_went_down(PROVIDERS), "first observation reports");
+        assert!(!h.just_went_down(PROVIDERS), "subsequent ones do not");
+        h.record_success();
+        for i in 0..PROVIDERS {
+            for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+                h.record_failure_from(i, PROVIDERS);
+            }
+        }
+        assert!(h.just_went_down(PROVIDERS), "a NEW outage reports again");
+    }
+
+    /// One pathological DOMAIN must never demote a healthy TRANSPORT.
+    ///
+    /// The per-provider breaker (above) assumed provider failures are independent. A name that
+    /// SERVFAILs at its own authoritative servers is not: it fails identically on every provider,
+    /// so it satisfies "all providers failed" by itself. Observed live on 2026-07-29 —
+    /// `client-gateway.prod-ca-central-1.metrics.…` returned RCODE 2 from Cloudflare, Google and
+    /// dns.sb alike, and the ladder demoted DoH seven times while DoH was answering in 42ms.
+    ///
+    /// The fix is classification, not counting: a DoH response carrying a well-formed dns-json
+    /// body proves the transport works, whatever RCODE it reports.
+    #[test]
+    fn a_name_that_fails_on_every_provider_is_not_a_transport_failure() {
+        // Model the two error classes exactly as the lookup paths emit them.
+        let name_failure = "DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example";
+        let endpoint_failure =
+            "DNS_ENDPOINT: DoH provider X returned HTTP 400 for broken.example — endpoint does \
+             not serve the JSON DoH API";
+
+        assert!(
+            name_failure.contains("DNS_NAME"),
+            "the RCODE path must emit DNS_NAME so the rotation loop can credit the transport"
+        );
+        assert!(
+            !name_failure.contains("DNS_ENDPOINT"),
+            "DNS_NAME must not also match DNS_ENDPOINT — the rotation loop discriminates on \
+             substring, so an overlapping tag would re-create the conflation"
+        );
+        assert!(
+            endpoint_failure.contains("DNS_ENDPOINT") && !endpoint_failure.contains("DNS_NAME"),
+            "a genuinely broken endpoint must stay DNS_ENDPOINT and keep tripping the breaker"
+        );
+
+        // And the breaker itself: crediting a success must clear a streak that spans every
+        // provider, which is what makes an all-provider name failure survivable.
+        let h = TransportHealth::default();
+        const PROVIDERS: usize = 6;
+        for i in 0..PROVIDERS {
+            for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+                h.record_failure_from(i, PROVIDERS);
+            }
+        }
+        assert!(h.is_down(PROVIDERS), "precondition: every provider failed");
+        h.record_success();
+        assert!(
+            h.should_attempt_with_sources(PROVIDERS),
+            "one answering provider must revive the transport — this is the path a DNS_NAME error \
+             now takes, and it is what stops a single broken domain from demoting DoH"
+        );
+    }
+
+    /// The governor must not read a name failure as network congestion, or one broken domain
+    /// throttles the whole scan.
+    #[test]
+    fn a_name_failure_is_unrelated_to_the_governor_not_rejected() {
+        use crate::dns_governor::DnsOutcome;
+        let name_err: std::result::Result<(), String> =
+            Err("DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example".to_string());
+        let cname_err: std::result::Result<(), String> = Err("DNS_NAME: ditto".to_string());
+        assert_eq!(
+            classify_pair(&name_err, &cname_err),
+            DnsOutcome::Unrelated,
+            "a name failure must be Unrelated: the link is healthy, so the adaptive controller \
+             has nothing to back off from"
+        );
+
+        let throttled: std::result::Result<(), String> =
+            Err("DNS_THROTTLE: provider returned 429".to_string());
+        assert_eq!(
+            classify_pair(&throttled, &throttled),
+            DnsOutcome::Rejected,
+            "a genuine throttle must still be Rejected so the governor backs off"
+        );
+    }
+
+    // ── UDP/53 emission ceiling ──────────────────────────────────────────────────────
+
+    /// The one that actually matters: the ceiling must be WIRED INTO the UDP/53 admission path.
+    ///
+    /// Unit-testing `Do53Budget` alone is not enough — it stays green if the tier stops consulting
+    /// the budget, which is precisely the regression that would re-enable the flood. This drives
+    /// the real admission decision the tier uses.
+    #[test]
+    fn udp53_tier_admission_is_bounded_by_the_budget() {
+        let pool = DnsServerPool::new();
+        let admitted = (0..1000).filter(|_| pool.admit_do53_query()).count() as u64;
+        assert_eq!(
+            admitted, DO53_BURST,
+            "the UDP/53 tier must admit at most the burst allowance before shedding; if this \
+             equals 1000 the budget is no longer consulted by the admission path and a DoH \
+             outage will again dump the whole scan onto port 53"
+        );
+        assert!(
+            !pool.admit_do53_query(),
+            "further queries stay shed until the budget refills"
+        );
+    }
+
+    #[test]
+    fn do53_budget_bounds_a_burst_then_sheds() {
+        let b = Do53Budget::new();
+        let granted = (0..1000).filter(|_| b.try_take()).count() as u64;
+        assert_eq!(
+            granted, DO53_BURST,
+            "a cold burst may spend exactly the burst allowance, then every further \
+             request is shed rather than queued"
+        );
+        assert!(!b.try_take(), "budget stays closed until it refills");
+    }
+
+    #[test]
+    fn do53_budget_refills_at_the_configured_rate() {
+        let b = Do53Budget::new();
+        while b.try_take() {}
+        // Rewind the refill clock by one second instead of sleeping: same arithmetic, no wall time.
+        {
+            let mut st = b.state.lock().unwrap();
+            st.last_refill_ms = st.last_refill_ms.saturating_sub(1000);
+        }
+        let granted = (0..1000).filter(|_| b.try_take()).count() as u64;
+        assert_eq!(
+            granted, DO53_MAX_QPS,
+            "one second of elapsed time yields exactly DO53_MAX_QPS tokens"
+        );
+    }
+
+    #[test]
+    fn do53_budget_cannot_be_refilled_by_a_backwards_clock() {
+        let b = Do53Budget::new();
+        while b.try_take() {}
+        {
+            let mut st = b.state.lock().unwrap();
+            // A clock that jumped forward then back must not manufacture budget.
+            st.last_refill_ms = st.last_refill_ms.saturating_add(60_000);
+        }
+        assert!(
+            !b.try_take(),
+            "a backwards clock step must not grant tokens (saturating_sub)"
         );
     }
 
@@ -6254,8 +6861,11 @@ mod tests {
             "RCODE 2 (SERVFAIL) is a resolver failure, not a genuine empty — must surface as an error"
         );
         assert!(
-            result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
-            "a non-0/3 RCODE must be tagged DNS_ENDPOINT"
+            result.unwrap_err().to_string().contains("DNS_NAME"),
+            "a non-0/3 RCODE must be tagged DNS_NAME, NOT DNS_ENDPOINT: the provider ANSWERED over \
+             a working transport, so this is a fact about the NAME. Classing it as an endpoint \
+             fault let one pathological domain — which SERVFAILs identically on every provider — \
+             satisfy the breaker's all-providers-failed test and demote healthy DoH onto UDP/53"
         );
         assert_eq!(
             test_counter.load(Ordering::Relaxed),
