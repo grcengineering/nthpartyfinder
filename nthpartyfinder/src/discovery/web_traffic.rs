@@ -80,7 +80,7 @@ impl WebTrafficDiscovery {
     pub fn new(timeout_secs: u64) -> Self {
         let client = crate::http_client::hardened_builder()
             .timeout(Duration::from_secs(timeout_secs))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            .user_agent(crate::http_client::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false)
             .build()
@@ -141,7 +141,10 @@ impl WebTrafficDiscovery {
                 }
             }
             Err(e) => {
-                debug!("Web traffic: network analysis failed for {}: {}", domain, e);
+                debug!(
+                    "Web traffic: network analysis failed for {}: {:#}",
+                    domain, e
+                );
                 // Phase-2 render/capture failed → only static Phase-1 domains are returned. Record
                 // the degradation so a browser/network hiccup that thins web-traffic recall shows up
                 // in the scan-health summary instead of silently under-counting (RC-2).

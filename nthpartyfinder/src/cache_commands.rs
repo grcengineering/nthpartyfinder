@@ -373,7 +373,7 @@ pub async fn validate_cache(verbose: bool, specific_domain: Option<&str>) -> Res
     let client = crate::http_client::hardened_builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none()) // Don't follow redirects to detect them
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .user_agent(crate::http_client::USER_AGENT)
         .build()
         .context("Failed to create HTTP client")?;
 

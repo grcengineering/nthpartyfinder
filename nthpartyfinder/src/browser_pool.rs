@@ -753,9 +753,10 @@ pub fn acquire_tab() -> anyhow::Result<TabGuard> {
             .map_err(|e| anyhow::anyhow!("Failed to create browser tab: {e}"))
         {
             Ok(tab) => {
-                // A reused browser carries the previous render's cache and cookies. If we cannot
-                // reset them we must NOT render on it: a warm cache silently changes what the
-                // response interceptors can read. Fail over to a fresh process instead.
+                // A reused browser carries the previous render's cookies, and any browser can be
+                // asked to serve a response out of its cache. If we cannot establish those
+                // isolation invariants we must NOT render on it — both silently change what the
+                // response interceptors read. Fail over to a fresh process instead.
                 if let Err(e) = isolate_tab(&tab) {
                     last_err = Some(e.context("failed to reset browser network state"));
                     force_fresh = true;
@@ -801,9 +802,12 @@ pub fn acquire_tab() -> anyhow::Result<TabGuard> {
 /// Cache Storage, which reproduces the `getResponseBody` failure even with the HTTP cache off —
 /// so it is bypassed too.
 ///
-/// These four CDP calls cost ~ms against a 14s mean render, and make every render see the network
-/// state it saw before pooling. The browser is exclusively held here — it was popped off the idle
-/// pool — so the browser-wide clears cannot race another render.
+/// The first is handled by *ignoring* the cache for the render's whole session rather than by
+/// emptying it — see `setCacheDisabled` below for why that distinction cost every render in the
+/// scan when it was got wrong. The second needs the cookie jar genuinely emptied, so that clear
+/// stays. Each of these calls costs ~ms against a 14s mean render. The browser is exclusively held
+/// here — it was popped off the idle pool — so the browser-wide cookie clear cannot race another
+/// render.
 ///
 /// **Residual, stated rather than papered over:** `localStorage`, `sessionStorage`, and IndexedDB
 /// still persist per-origin across renders on a reused browser. Total isolation would need a
@@ -818,6 +822,11 @@ pub fn acquire_tab() -> anyhow::Result<TabGuard> {
 fn isolate_tab(tab: &Arc<headless_chrome::Tab>) -> anyhow::Result<()> {
     use headless_chrome::protocol::cdp::Network;
 
+    // Every call here is O(1) against Chrome's in-memory state, so each is synchronous and fatal:
+    // a Chrome that cannot answer one of these is broken, not busy, and failing over to a fresh
+    // process is the right response. That property is what `Network.clearBrowserCache` — removed
+    // below — did not have.
+    //
     // `setCacheDisabled` requires the Network domain. Enabling twice is a no-op; the response
     // handlers enable it again themselves.
     tab.call_method(Network::Enable {
@@ -828,17 +837,44 @@ fn isolate_tab(tab: &Arc<headless_chrome::Tab>) -> anyhow::Result<()> {
         enable_durable_messages: None,
     })
     .map_err(|e| anyhow::anyhow!("Network.enable failed: {e}"))?;
+
+    // THIS is what keeps a cached body from reaching `getResponseBody`. With the cache ignored for
+    // every request on this session, no response can be served from — or written to — the disk
+    // cache, so the interceptors always see a real body.
+    //
+    // A `Network.clearBrowserCache` call used to follow, on the theory that a reused browser's warm
+    // cache could still poison a render. It cannot: measured against a browser whose cache had been
+    // warmed by a full render, a second render in a new tab with only `setCacheDisabled` retrieved
+    // 38/38 response bodies with zero failures and zero responses served `fromDiskCache`. The clear
+    // was redundant — and expensive in a way that broke everything: it is disk-backend-bound and
+    // costs ~4-8s on the FIRST call against a given profile (measured 4038ms and 8471ms cold, then
+    // 89-578ms warm). Every render launches Chrome with a fresh temp profile, so every render paid
+    // the cold cost, and under scan load that exceeded the 30s `idle_browser_timeout` bounding every
+    // `call_method`. Since the failure was fatal here, *every render in the scan died* (Chrome 150,
+    // 2026-07-31: web-traffic capture, trust-center render-capture and the subprocessor SPA fallback
+    // all returned "failed to reset browser network state", collapsing subprocessor recall to zero).
+    //
+    // Deleting it — rather than making it best-effort or conditional on reuse — is deliberate. Any
+    // scheme that still issues it merely relocates the cold call: skipping fresh launches moves the
+    // first-ever call to the browser's first *reuse*, i.e. inside the render path, where a late
+    // completion can mutate browser state mid-render.
     tab.call_method(Network::SetCacheDisabled {
         cache_disabled: true,
     })
     .map_err(|e| anyhow::anyhow!("Network.setCacheDisabled failed: {e}"))?;
     tab.call_method(Network::SetBypassServiceWorker { bypass: true })
         .map_err(|e| anyhow::anyhow!("Network.setBypassServiceWorker failed: {e}"))?;
-    tab.call_method(Network::ClearBrowserCache(None))
-        .map_err(|e| anyhow::anyhow!("Network.clearBrowserCache failed: {e}"))?;
+
+    // Cookies stay cleared, synchronously and before the render, exactly as before. This is not
+    // redundant the way the cache clear was: `setCacheDisabled` says nothing about the cookie jar,
+    // and a pooled browser serves several vendors that can share one origin — every Vanta-hosted
+    // trust centre is `trust.vanta.com/{company}` — so a previous vendor's consent state or session
+    // cookie really can change what the next one renders. It is also cheap enough to keep on the
+    // critical path: measured 0-1ms even as the first call against a cold profile.
     tab.call_method(Network::ClearBrowserCookies(None))
         .map_err(|e| anyhow::anyhow!("Network.clearBrowserCookies failed: {e}"))?;
-    // NB: this does NOT close Chrome's accumulated idle keep-alive sockets — those live in Chrome's
+
+    // NB: none of this closes Chrome's accumulated idle keep-alive sockets — those live in Chrome's
     // process-global connection pool, out of reach of a per-session CDP call. Bounding that
     // accumulation is the job of the low per-browser render quota (MAX_RENDERS_PER_BROWSER), whose
     // full-teardown retirement is the only guaranteed socket release.

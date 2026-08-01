@@ -156,6 +156,10 @@ pub struct DnsServerPool {
     /// that don't opt in. This is the authoritative source of truth for throttle visibility;
     /// the older per-path increments are a harmless redundant signal (the guard is `> 0`).
     failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// Parallel counter for failures attributable to the queried NAME rather than the transport.
+    /// Incremented *in addition to* `failure_counter`, so the exit-3 guard is unchanged while the
+    /// scan summary can separate "this domain's DNS is broken" from "your link is unstable".
+    name_failure_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// Per-transport availability trackers (circuit breakers), shared across TXT and CNAME so one
     /// detection covers the whole scan. The lookup ladder tries them in network-footprint order —
     /// DoH (443) → DoT (853) → direct UDP/53 — skipping any transport whose breaker is down and
@@ -810,6 +814,7 @@ impl DnsServerPool {
             max_dns_retries: config.rate_limits.max_retries,
             backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
+            name_failure_counter: None,
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
@@ -927,7 +932,7 @@ impl DnsServerPool {
         // fixed and tiny. `http_client::DOH_POOL_MAX_IDLE_PER_HOST`.
         let client = crate::http_client::doh_builder()
             .timeout(std::time::Duration::from_secs(5))
-            .user_agent("nthpartyfinder/1.0")
+            .user_agent(crate::http_client::USER_AGENT)
             .build()
             .expect("Failed to create HTTP client for DoH");
 
@@ -943,6 +948,7 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 500,
             failure_counter: None,
+            name_failure_counter: None,
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
@@ -966,6 +972,54 @@ impl DnsServerPool {
     ) -> Self {
         self.failure_counter = Some(c);
         self
+    }
+
+    /// Companion to [`Self::with_failure_counter`] for the name-attributable subset.
+    pub fn with_name_failure_counter(
+        mut self,
+        c: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        self.name_failure_counter = Some(c);
+        self
+    }
+
+    /// Count a failure that the queried NAME caused: the resolver answered over a working
+    /// transport with SERVFAIL/REFUSED, so the name's own authoritative servers are at fault.
+    /// Increments the general counter too — it is still a DNS failure for the exit-3 guard — but
+    /// the separate tally lets the summary avoid telling the user to fix a network that is fine.
+    fn note_name_failure(&self) {
+        self.note_throttle();
+        self.note_name_attribution();
+    }
+
+    /// Add to the name-attributed tally *only* — for callers that have already counted the failure
+    /// in the general counter themselves.
+    fn note_name_attribution(&self) {
+        if let Some(c) = &self.name_failure_counter {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Count a classified failure that surfaced as a propagated *error message* rather than at the
+    /// choke point, keeping the two tallies consistent.
+    ///
+    /// Callers on this path own an explicit `&AtomicUsize` for the general count, so they bump it
+    /// directly; what they cannot see is which *kind* of failure it was. Without this, a `DNS_NAME`
+    /// error counted here would land in the general tally alone, and the summary computes
+    /// `transport_failures = general - name` — so every one of them would be reported as a degraded
+    /// local link and re-introduce the false "re-run on a stable network" advice for a domain whose
+    /// own authoritative servers are broken.
+    fn note_classified_failure(&self, msg: &str, general: &AtomicUsize) {
+        if !(msg.contains("DNS_THROTTLE")
+            || msg.contains("DNS_ENDPOINT")
+            || msg.contains("DNS_NAME"))
+        {
+            return;
+        }
+        general.fetch_add(1, Ordering::Relaxed);
+        if msg.contains("DNS_NAME") {
+            self.note_name_attribution();
+        }
     }
 
     /// GRC-367 (fix 1): the choke-point increment. A no-op until `with_failure_counter` has been
@@ -1058,6 +1112,7 @@ impl DnsServerPool {
             max_dns_retries: 3,
             backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
+            name_failure_counter: None,
             doh_health: TransportHealth::default(),
             dot_health: TransportHealth::default(),
             do53_health: TransportHealth::default(),
@@ -1189,7 +1244,7 @@ impl DnsServerPool {
         // transport onto UDP/53. One broken domain must never take the transport down.
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
-                self.note_throttle();
+                self.note_name_failure();
                 return Err(anyhow::anyhow!(
                     "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
@@ -1299,7 +1354,7 @@ impl DnsServerPool {
         // transport onto UDP/53. One broken domain must never take the transport down.
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
-                self.note_throttle();
+                self.note_name_failure();
                 return Err(anyhow::anyhow!(
                     "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
@@ -1699,26 +1754,14 @@ impl DnsServerPool {
         let txt = match txt_result {
             Ok(records) => records,
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("DNS_THROTTLE")
-                    || msg.contains("DNS_ENDPOINT")
-                    || msg.contains("DNS_NAME")
-                {
-                    dns_failure_counter.fetch_add(1, Ordering::Relaxed);
-                }
+                self.note_classified_failure(&e.to_string(), dns_failure_counter);
                 Vec::new()
             }
         };
         let cname = match cname_result {
             Ok(records) => records,
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("DNS_THROTTLE")
-                    || msg.contains("DNS_ENDPOINT")
-                    || msg.contains("DNS_NAME")
-                {
-                    dns_failure_counter.fetch_add(1, Ordering::Relaxed);
-                }
+                self.note_classified_failure(&e.to_string(), dns_failure_counter);
                 Vec::new()
             }
         };
@@ -6871,6 +6914,145 @@ mod tests {
             test_counter.load(Ordering::Relaxed),
             1,
             "a SERVFAIL RCODE must increment the choke-point counter exactly once"
+        );
+    }
+
+    // A SERVFAIL is a real DNS failure (so the exit-3 guard must still see it) but it is the
+    // NAME's fault, not the link's. Both facts have to be recorded separately, or the summary
+    // tells the user to "re-run on a stable network" for a domain whose own authoritative servers
+    // are broken — advice that cannot work, since the same SERVFAIL comes back from every resolver
+    // on every network (klaviyo.com's `buywithprime` delegation, 2026-07-31).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn servfail_counts_as_a_dns_failure_but_is_attributed_to_the_name_not_the_link() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "Status": 2,
+                        "Question": [{"name": "servfail.example", "type": 16}],
+                        "Answer": []
+                    }))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let all = std::sync::Arc::new(AtomicUsize::new(0));
+        let by_name = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&all))
+            .with_name_failure_counter(std::sync::Arc::clone(&by_name));
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_txt_lookup("servfail.example", &doh_server).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            all.load(Ordering::Relaxed),
+            1,
+            "a SERVFAIL is still a DNS failure — the exit-3 guard reads this counter and must not \
+             stop seeing it"
+        );
+        assert_eq!(
+            by_name.load(Ordering::Relaxed),
+            1,
+            "…and it must ALSO land in the name-attributed tally, which is what lets the summary \
+             stop blaming the user's network for the target's broken delegation"
+        );
+    }
+
+    // The choke points are not the only place a classified failure is counted: paths that receive a
+    // failure as a propagated *error message* count it too. Those must keep the two tallies
+    // consistent, because the summary derives transport failures by SUBTRACTION
+    // (`transport = general - name`). A DNS_NAME error counted into the general tally alone shows up
+    // as a degraded local link — silently undoing the attribution split for every name failure that
+    // travels this route.
+    #[test]
+    fn a_propagated_name_failure_is_attributed_to_the_name_not_just_counted() {
+        let pool_general = std::sync::Arc::new(AtomicUsize::new(0));
+        let by_name = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec!["http://127.0.0.1:1/dns-query".to_string()])
+            .with_failure_counter(std::sync::Arc::clone(&pool_general))
+            .with_name_failure_counter(std::sync::Arc::clone(&by_name));
+
+        // The caller on this path owns its own general counter and passes it in.
+        let caller_counter = AtomicUsize::new(0);
+
+        pool.note_classified_failure(
+            "DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example",
+            &caller_counter,
+        );
+        assert_eq!(caller_counter.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            by_name.load(Ordering::Relaxed),
+            1,
+            "a propagated DNS_NAME failure must reach the name tally, or `general - name` reports \
+             it as a degraded local link"
+        );
+
+        pool.note_classified_failure(
+            "DNS_THROTTLE: provider X returned HTTP 429",
+            &caller_counter,
+        );
+        assert_eq!(caller_counter.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            by_name.load(Ordering::Relaxed),
+            1,
+            "a throttle is transport-side and must not be attributed to the name"
+        );
+
+        // An unclassified error (a bare timeout, a parse failure) is not a classified DNS failure
+        // and must not inflate either tally.
+        pool.note_classified_failure("some unrelated error", &caller_counter);
+        assert_eq!(caller_counter.load(Ordering::Relaxed), 2);
+        assert_eq!(by_name.load(Ordering::Relaxed), 1);
+
+        // The subtraction the summary performs must never claim a transport failure that did not
+        // happen: with one name failure and one throttle, exactly one is transport-side.
+        assert_eq!(
+            caller_counter.load(Ordering::Relaxed) - by_name.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    // The mirror image: a transport failure must NOT be attributed to the name, or the summary
+    // would excuse a genuinely degraded link as somebody else's DNS problem.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn a_throttled_provider_is_never_attributed_to_the_name() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let all = std::sync::Arc::new(AtomicUsize::new(0));
+        let by_name = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&all))
+            .with_name_failure_counter(std::sync::Arc::clone(&by_name));
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool.doh_txt_lookup("throttled.example", &doh_server).await;
+
+        assert!(result.is_err());
+        assert!(
+            all.load(Ordering::Relaxed) >= 1,
+            "a 429 is a transport-side failure and must be counted"
+        );
+        assert_eq!(
+            by_name.load(Ordering::Relaxed),
+            0,
+            "a throttled provider says nothing about the queried name — attributing it there would \
+             suppress the one warning whose remedy (retry elsewhere) actually works"
         );
     }
 

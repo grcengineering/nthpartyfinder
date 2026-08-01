@@ -93,7 +93,7 @@ fn page_client() -> Result<&'static reqwest::Client> {
     let client = crate::http_client::hardened_builder()
         .timeout(Duration::from_secs(10))
         .tcp_keepalive(Duration::from_secs(60))
-        .user_agent("Mozilla/5.0 (compatible; nthpartyfinder/1.0; +https://github.com/grcengineering/nthpartyfinder)")
+        .user_agent(crate::http_client::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
     Ok(PAGE_CLIENT.get_or_init(|| client))

@@ -303,6 +303,20 @@ pub(crate) enum SubprocessorSourceCategory {
 /// Number of distinct source categories; discovery can stop once all have yielded.
 pub(crate) const SUBPROCESSOR_SOURCE_CATEGORY_COUNT: usize = 2;
 
+/// Whether a cached set of subprocessor source URLs has been *proven* stale and may be deleted.
+///
+/// Deleting the cache entry throws away more than the URLs: it also discards the
+/// `trust_center_strategy` learned by a full headless render, which the next scan then has to
+/// rediscover from scratch. That is only justified when the URLs demonstrably no longer serve
+/// subprocessors — i.e. every one of them was actually reached and came back empty.
+///
+/// An errored source proves nothing about the URL. A browser outage, a transient 5xx or a network
+/// blip all produce the same empty result as a genuinely dead page, and treating them alike lets a
+/// few seconds of local trouble permanently erase learned state for that domain.
+fn cached_urls_are_provably_stale(yielded_any: bool, any_source_errored: bool) -> bool {
+    !yielded_any && !any_source_errored
+}
+
 /// Classify a candidate subprocessor URL into a source category by host. A
 /// `trust.`/`trustcenter.`/`trust-*` subdomain (or an embedded `.trust.` label) is
 /// the hosted trust center; everything else (a `/legal/subprocessors`-style path on
@@ -1152,11 +1166,11 @@ impl SubprocessorAnalyzer {
         // we cannot connect to yields nothing either way, and a responsive-but-slow server still
         // gets the full 30s to send its body.
         crate::http_client::hardened_builder()
-            .timeout(Duration::from_secs(30))  // Increased timeout for slower servers
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")  // Realistic browser user agent
+            .timeout(Duration::from_secs(30)) // Increased timeout for slower servers
+            .user_agent(crate::http_client::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5))
-            .danger_accept_invalid_certs(false)  // Security: reject invalid certificates
-            .https_only(true)                    // Security: force HTTPS
+            .danger_accept_invalid_certs(false) // Security: reject invalid certificates
+            .https_only(true) // Security: force HTTPS
             .build()
             .expect("Failed to create HTTP client")
     }
@@ -1348,8 +1362,19 @@ impl SubprocessorAnalyzer {
                 .ok()?;
 
             if !gql_resp.status().is_success() {
-                debug!(
-                    "Vanta: GraphQL request failed with status {}",
+                // 401 here is not transient and not a network problem: Vanta signs each GraphQL
+                // *document* and the server validates the signature against the query text it
+                // receives. The manifest gives us the signature, but the query above is
+                // hand-written, so the moment Vanta edits that operation's document the signature
+                // stops matching and every request is rejected with "Invalid signature"
+                // (reproduced 2026-07-31). Nothing this code can do restores it — the browser
+                // render path is the supported route, because there the SPA issues the request with
+                // Vanta's own valid signature and the interceptors read the reply. Warn rather than
+                // debug so a dead fast path is visible instead of silently costing two round trips
+                // per Vanta trust centre.
+                tracing::warn!(
+                    "Vanta: trust-centre GraphQL fast path rejected with {} — falling back to \
+                     headless rendering for this trust centre",
                     gql_resp.status()
                 );
                 return None;
@@ -1553,6 +1578,9 @@ impl SubprocessorAnalyzer {
                 debug_logger.log_cache_hit_organization(domain, cached_urls.len());
             }
             let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
+            // Distinguishes "these cached URLs are genuinely dead" from "we could not reach them
+            // this time" — only the former justifies deleting the cache entry below.
+            let mut any_source_errored = false;
             for url in &cached_urls {
                 if let Some(ctx) = rate_limit_ctx {
                     ctx.http_limiter.acquire(domain).await;
@@ -1573,21 +1601,38 @@ impl SubprocessorAnalyzer {
                             url, domain
                         )
                     }
-                    Err(e) => debug!("Cached source {} failed for {}: {}", url, domain, e),
+                    Err(e) => {
+                        any_source_errored = true;
+                        debug!("Cached source {} failed for {}: {:#}", url, domain, e)
+                    }
                 }
             }
             if !per_source.is_empty() {
                 let merged = merge_sourced_subprocessors(per_source);
                 return Ok(filter_subprocessor_results(merged));
             }
-            // Stale cache: nothing came back. Clear it and fall through to discovery.
-            debug!(
-                "Cached source URLs for {} yielded nothing; clearing and rediscovering",
-                domain
-            );
-            let cache = self.cache.read().await;
-            if let Err(e) = cache.clear_domain_cache(domain).await {
-                debug!("Failed to clear stale cache for {}: {}", domain, e);
+            // Nothing came back. Only *now* is the cache provably stale — and only if every source
+            // was actually reached. If any source errored (a browser outage, a transient 5xx), an
+            // empty result says nothing about the URL's validity, and clearing would delete the
+            // learned `trust_center_strategy` along with it: a discovery that took a full render to
+            // work out, thrown away because Chrome was briefly unavailable. Keep the cache and let
+            // the next scan re-probe it instead.
+            if cached_urls_are_provably_stale(false, any_source_errored) {
+                debug!(
+                    "Cached source URLs for {} yielded nothing; clearing and rediscovering",
+                    domain
+                );
+                let cache = self.cache.read().await;
+                if let Err(e) = cache.clear_domain_cache(domain).await {
+                    debug!("Failed to clear stale cache for {}: {:#}", domain, e);
+                }
+            } else {
+                tracing::warn!(
+                    "Cached source URLs for {} yielded nothing, but at least one source errored — \
+                     keeping the cached URLs and extraction strategy rather than treating a failed \
+                     fetch as proof they are stale",
+                    domain
+                );
             }
         } else {
             debug!("🆕 NO CACHE: Starting URL discovery for {}", domain);
@@ -1659,15 +1704,15 @@ impl SubprocessorAnalyzer {
                 // and the aggregate row count hides it — vanta's peer `chargify.com` once lost
                 // all 28 of its rows while the scan-wide total went UP.
                 crate::perf::METRICS.subproc_budget_exhausted.hit();
-                // Mark the subprocessor phase degraded for the scan-health summary: this vendor's
-                // recall was cut short by the time budget, not because it had nothing. Without this
-                // the aggregate vendor count silently absorbs the loss (the RC-1 collapse).
-                crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
                 let queued = Duration::from_nanos(
                     browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
                 );
                 if per_source.is_empty() {
                     crate::perf::METRICS.subproc_zero_yield.hit();
+                    // Mark the phase degraded for the scan-health summary: this vendor's recall was
+                    // cut short by the time budget, not because it had nothing. Without this the
+                    // aggregate vendor count silently absorbs the loss (the RC-1 collapse).
+                    crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
                     tracing::warn!(
                         "SUBPROC_BUDGET_EXHAUSTED: {} yielded no subprocessors after {:.1}s of \
                          working time ({:.1}s queued for a browser, excluded). Recall for this \
@@ -1677,12 +1722,32 @@ impl SubprocessorAnalyzer {
                         queued.as_secs_f64()
                     );
                 } else {
-                    debug!(
+                    // Deliberately NOT a coverage failure. The budget bounds a *guess list* — 25
+                    // candidate URLs whose tail is low-probability spelling variants — and here it
+                    // expired only after an authoritative source had already answered. Recording it
+                    // flipped the whole scan to DEGRADED with the advice "re-run on a stable network
+                    // for full recall", which cannot work: the budget expires identically on a
+                    // perfect network. That made it a false alarm which trains the reader to ignore
+                    // the real one (a vendor that yielded *nothing*, above).
+                    //
+                    // Honest about what this does cost: unlike the `categories_done` break, which
+                    // fires only once BOTH source categories have answered, this can stop with one
+                    // category still unprobed — so a vendor whose hosted trust centre answered but
+                    // whose own /legal page was never reached does lose those rows. That is a
+                    // recall *ceiling* to raise by re-tuning MAX_ANALYSIS_TIME against a measured
+                    // deep scan (TF-BUDGET), not a fault to warn about on every healthy scan: the
+                    // common vendor publishes one list, not two, so flagging every one-category
+                    // finish would fire on nearly all of them. The event stays counted in
+                    // `subproc.budget_exhausted` and is named here at -v with its stopping point.
+                    tracing::info!(
                         "Subprocessor analysis time limit exceeded for {} after {:.1}s working \
-                         time; {} source(s) already found, stopping URL discovery",
+                         time; {} source(s) already found, stopping URL discovery at {} of {} \
+                         candidate URLs",
                         domain,
                         working_elapsed.as_secs_f64(),
-                        per_source.len()
+                        per_source.len(),
+                        url_index,
+                        urls_to_test.len()
                     );
                 }
                 if let Some(debug_logger) = &debug_logger {
@@ -2647,7 +2712,10 @@ impl SubprocessorAnalyzer {
                             );
                         }
                         Err(e) => {
-                            debug!("Trust center strategy failed for {}: {}", source_domain, e);
+                            debug!(
+                                "Trust center strategy failed for {}: {:#}",
+                                source_domain, e
+                            );
                         }
                     }
                 }
@@ -2704,7 +2772,7 @@ impl SubprocessorAnalyzer {
                                 );
                             }
                             Err(e) => {
-                                debug!("Auto-discovered strategy execution failed: {}", e);
+                                debug!("Auto-discovered strategy execution failed: {:#}", e);
                             }
                         }
                     }
@@ -2763,7 +2831,7 @@ impl SubprocessorAnalyzer {
                         );
                     }
                     Err(e) => {
-                        debug!("Render-capture failed for {}: {}", source_domain, e);
+                        debug!("Render-capture failed for {}: {:#}", source_domain, e);
                     }
                 }
             }
@@ -2827,16 +2895,28 @@ impl SubprocessorAnalyzer {
                         );
                         content
                     }
+                    // Below: the page was *identified as a SPA* and we could not render it. The
+                    // static HTML we fall back to is a script-only skeleton, so extraction over it
+                    // yields an empty vec that is byte-identical to "this vendor publishes no
+                    // subprocessors". Record the degradation, or a total recall collapse reports as
+                    // a clean SUCCESS — exactly how a browser outage produced a vanta.com scan with
+                    // zero subprocessor rows and no failure anywhere in the summary. `{:#}` prints
+                    // the whole anyhow chain: the outer context alone ("failed to reset browser
+                    // network state") names the symptom but never the failing CDP call.
                     Ok(Err(e)) => {
-                        debug!(
-                            "Browser rendering failed for {}: {}, using static HTML",
+                        crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                        tracing::warn!(
+                            "Browser rendering failed for {}: {:#} — falling back to the un-rendered \
+                             SPA shell, so subprocessor recall for this source is incomplete",
                             source_domain, e
                         );
                         content
                     }
                     Err(e) => {
-                        debug!(
-                            "Browser task panicked for {}: {}, using static HTML",
+                        crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                        tracing::warn!(
+                            "Browser task panicked for {}: {} — falling back to the un-rendered SPA \
+                             shell, so subprocessor recall for this source is incomplete",
                             source_domain, e
                         );
                         content
@@ -7239,6 +7319,31 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use crate::vendor::RecordType;
+
+    #[test]
+    fn a_transient_source_error_never_licenses_deleting_the_learned_cache() {
+        // The cache entry carries the `trust_center_strategy` a full headless render worked out.
+        // Clearing it costs the next scan that whole rediscovery, so an empty result only justifies
+        // deletion when every cached URL was actually *reached* and answered with nothing.
+
+        // Reached, genuinely empty: the URLs really are stale — clear and rediscover.
+        assert!(
+            cached_urls_are_provably_stale(false, false),
+            "cached URLs that were all reached and yielded nothing are stale and should be cleared"
+        );
+
+        // The regression this guards: a browser outage (or any transient fetch error) makes every
+        // source yield nothing. Deleting here erased learned extraction strategies wholesale on a
+        // scan that happened to run while Chrome was unavailable.
+        assert!(
+            !cached_urls_are_provably_stale(false, true),
+            "an errored source proves nothing about the URL — the cache must survive it"
+        );
+
+        // Having results at all rules out staleness regardless of a partial error.
+        assert!(!cached_urls_are_provably_stale(true, false));
+        assert!(!cached_urls_are_provably_stale(true, true));
+    }
 
     #[test]
     fn short_org_keys_match_the_whole_name_but_never_a_fragment() {
