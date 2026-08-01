@@ -327,7 +327,7 @@ impl CtLogDiscovery {
     ) -> Self {
         let client = crate::http_client::hardened_builder()
             .timeout(timeout)
-            .user_agent("nthpartyfinder/1.0")
+            .user_agent(crate::http_client::USER_AGENT)
             .build()
             .unwrap_or_default();
 

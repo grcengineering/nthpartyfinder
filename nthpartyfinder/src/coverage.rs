@@ -199,13 +199,16 @@ pub fn feature_status(
 }
 
 /// A one-line human summary of how (and how badly) coverage was degraded, or `None` if the scan ran
-/// clean. `subproc_starved` is `perf::METRICS.subproc_budget_exhausted` (vendors whose subprocessor
-/// work overran the per-vendor time budget — a silent recall loss the phase's own return value
-/// hides); `dns_failures` is the classified DNS failure count.
+/// clean. `subproc_starved` is `perf::METRICS.subproc_zero_yield` (vendors whose subprocessor work
+/// overran the per-vendor time budget having found NOTHING — a silent recall loss the phase's own
+/// return value hides; a budget stop *after* a source was found is normal early exit, not
+/// starvation). `dns_failures` is the classified DNS failure count and `dns_name_failures` the
+/// subset caused by the queried name's own authoritative servers rather than by this machine's link.
 pub fn degradation_summary(
     snap: &CoverageSnapshot,
     subproc_starved: u64,
     dns_failures: u64,
+    dns_name_failures: u64,
 ) -> Option<String> {
     let mut parts = Vec::new();
     if subproc_starved > 0 {
@@ -242,13 +245,40 @@ pub fn degradation_summary(
             snap.ct.failed
         ));
     }
-    if dns_failures > 0 {
-        parts.push(format!("DNS degraded on {dns_failures} lookup(s)"));
+    // Split by who is actually at fault. A name that answers SERVFAIL/REFUSED from its own
+    // authoritative servers fails identically on every resolver and on a perfect link — reporting
+    // it under the same "re-run on a stable network" advice as a real transport problem is a
+    // warning whose remedy cannot work, and it drowns the transport failures that the advice does
+    // fit. (Observed 2026-07-31: klaviyo.com's `buywithprime.klaviyo.com` delegation SERVFAILs from
+    // 1.1.1.1 and 8.8.8.8 alike, and produced 29 "DNS degraded" lookups on an otherwise clean scan.)
+    let transport_failures = dns_failures.saturating_sub(dns_name_failures);
+    if transport_failures > 0 {
+        parts.push(format!("DNS degraded on {transport_failures} lookup(s)"));
+    }
+    if dns_name_failures > 0 {
+        parts.push(format!(
+            "{dns_name_failures} name(s) failed at their own authoritative DNS (not a local network fault)"
+        ));
     }
     if parts.is_empty() {
         None
     } else {
         Some(parts.join("; "))
+    }
+}
+
+/// The closing sentence of the DEGRADED banner: what, if anything, the reader should actually do.
+///
+/// "Re-run on a stable network" is only advice when something on the path to a resolver failed. A
+/// scan degraded solely by a target's own broken authoritative DNS, or by a per-vendor time budget,
+/// reproduces identically on a perfect link — telling that reader to change networks sends them
+/// after a fault that is not theirs and teaches them to discount the banner when it is real.
+pub fn degradation_advice(dns_failures: u64, dns_name_failures: u64) -> &'static str {
+    if dns_failures > dns_name_failures {
+        " Results may undercount; see the discovery-coverage section above and re-run on a stable \
+         network for full recall."
+    } else {
+        " Results may undercount; see the discovery-coverage section above."
     }
 }
 
@@ -372,9 +402,62 @@ mod tests {
     }
 
     #[test]
+    fn the_closing_advice_only_blames_the_network_when_the_network_actually_failed() {
+        // Some failures were transport-side: retrying elsewhere genuinely can help.
+        assert!(degradation_advice(20, 6).contains("re-run on a stable network"));
+        assert!(degradation_advice(16, 0).contains("re-run on a stable network"));
+
+        // Every failure was the target's own authoritative DNS — a different network resolves it
+        // exactly the same way, so the advice would send the reader after a fault that is not
+        // theirs (optro.com, 2026-07-31: 154 name failures, zero transport failures).
+        assert!(!degradation_advice(154, 154).contains("stable network"));
+
+        // Degraded with no DNS failures at all (e.g. a starved subprocessor budget) — likewise
+        // nothing about the network to act on.
+        assert!(!degradation_advice(0, 0).contains("stable network"));
+
+        // Whatever the case, the reader is always pointed at the manifest that explains it.
+        for (a, b) in [(20, 6), (16, 0), (154, 154), (0, 0)] {
+            assert!(degradation_advice(a, b).contains("discovery-coverage section"));
+        }
+    }
+
+    #[test]
+    fn dns_summary_separates_a_broken_target_zone_from_a_broken_local_link() {
+        let snap = CoverageSnapshot::default();
+
+        // The reported case: every DNS failure was the queried name answering SERVFAIL from its own
+        // authority (klaviyo.com's `buywithprime` delegation). Blaming the local link here sends the
+        // reader chasing a network problem that does not exist.
+        let name_only = degradation_summary(&snap, 0, 29, 29).unwrap();
+        assert!(
+            name_only.contains("29 name(s) failed at their own authoritative DNS"),
+            "name failures must be named as such: {name_only}"
+        );
+        assert!(
+            !name_only.contains("DNS degraded on"),
+            "no transport failures occurred, so nothing may be reported as a degraded link: \
+             {name_only}"
+        );
+
+        // A genuine transport problem still reads exactly as before.
+        let transport_only = degradation_summary(&snap, 0, 16, 0).unwrap();
+        assert!(transport_only.contains("DNS degraded on 16 lookup(s)"));
+        assert!(!transport_only.contains("authoritative DNS"));
+
+        // Mixed: the transport count is the remainder, so the two never double-count.
+        let mixed = degradation_summary(&snap, 0, 20, 6).unwrap();
+        assert!(mixed.contains("DNS degraded on 14 lookup(s)"), "{mixed}");
+        assert!(
+            mixed.contains("6 name(s) failed at their own authoritative DNS"),
+            "{mixed}"
+        );
+    }
+
+    #[test]
     fn degradation_summary_is_none_when_clean() {
         assert_eq!(
-            degradation_summary(&CoverageSnapshot::default(), 0, 0),
+            degradation_summary(&CoverageSnapshot::default(), 0, 0, 0),
             None
         );
     }
@@ -385,7 +468,7 @@ mod tests {
         snap.subprocessor.degraded = true;
         snap.subprocessor.failed = 4;
         // With starvation present, the wording names the starved vendor count, not the failure count.
-        let s = degradation_summary(&snap, 12, 0).unwrap();
+        let s = degradation_summary(&snap, 12, 0, 0).unwrap();
         assert!(s.contains("subprocessor starved on 12 vendor(s)"));
         assert!(!s.contains("failed on 4"));
     }
@@ -397,7 +480,7 @@ mod tests {
         snap.webtraffic.failed = 3;
         snap.ct.degraded = true;
         snap.ct.failed = 1;
-        let s = degradation_summary(&snap, 0, 16).unwrap();
+        let s = degradation_summary(&snap, 0, 16, 0).unwrap();
         assert!(s.contains("web-traffic capture failed on 3 domain(s)"));
         assert!(s.contains("CT-log discovery failed on 1 domain(s)"));
         assert!(s.contains("DNS degraded on 16 lookup(s)"));
@@ -438,7 +521,7 @@ mod tests {
         let mut snap = CoverageSnapshot::default();
         snap.subprocessor.degraded = true;
         snap.subprocessor.failed = 2;
-        let s = degradation_summary(&snap, 0, 0).unwrap();
+        let s = degradation_summary(&snap, 0, 0, 0).unwrap();
         assert!(s.contains("subprocessor failed on 2 domain(s)"));
         assert!(!s.contains("starved"));
     }

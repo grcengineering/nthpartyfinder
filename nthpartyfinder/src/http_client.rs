@@ -23,6 +23,61 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
+/// What this scanner calls itself on every outbound HTTP request.
+///
+/// It identifies the tool and its version and links somewhere a site operator can read what it
+/// does. That is the honest thing for a scanner to send — and, unexpectedly, also the thing that
+/// *works*: impersonating a browser is what got requests blocked.
+///
+/// Three clients used to send a hardcoded `Chrome/120.0.0.0` string, commented "Realistic browser
+/// user agent". A pinned browser version is only realistic on the day it is written. Chrome 120
+/// shipped in 2023, no real user runs it now, and bot-management services score an outdated browser
+/// claim as an automation signal. Measured 2026-07-31: `trust.drata.com/subprocessors` returns
+/// **403 with `cf-mitigated: challenge`** for `Chrome/120` and for `Chrome/131`, and **200** for
+/// both a current Chrome string and this one. Across twelve real trust-centre and subprocessor
+/// URLs plus seven SaaS-tenant probes, this UA was never worse than the browser strings and was
+/// the only one that got Drata's list at all.
+///
+/// Deriving the version from `CARGO_PKG_VERSION` is the point: there is no browser version here to
+/// go stale, so this cannot rot back into a bot signature the way the string it replaces did.
+pub const USER_AGENT: &str = concat!(
+    "nthpartyfinder/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/grcengineering/nthpartyfinder)"
+);
+
+const _: () = {
+    // Guard the property that actually matters, so a future edit cannot quietly reintroduce the
+    // failure: no claim to be a browser. `konst`-free byte scan because this runs at compile time.
+    const fn contains(haystack: &str, needle: &str) -> bool {
+        let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+        if n.len() > h.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i <= h.len() - n.len() {
+            let mut j = 0;
+            while j < n.len() && h[i + j] == n[j] {
+                j += 1;
+            }
+            if j == n.len() {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+    assert!(
+        !contains(USER_AGENT, "Mozilla") && !contains(USER_AGENT, "Chrome"),
+        "the user agent must not impersonate a browser: a pinned browser version rots into an \
+         automation signal (Chrome/120 => HTTP 403 cf-mitigated:challenge on real trust centres)"
+    );
+    assert!(
+        contains(USER_AGENT, "nthpartyfinder/"),
+        "the user agent must identify this tool so site operators can attribute the traffic"
+    );
+};
+
 /// Abandon a TCP+TLS handshake that has not completed within this long.
 ///
 /// Short enough that a stalled handshake on a saturated network is shed before it lingers in the
@@ -257,6 +312,33 @@ mod tests {
     /// Guard the bounds against a careless future edit: a connect timeout that drifts up to the
     /// old unbounded regime, or an idle window back near reqwest's 90s default, re-opens the
     /// conntrack-exhaustion risk this module exists to close.
+    #[test]
+    fn the_user_agent_identifies_the_tool_and_never_impersonates_a_browser() {
+        // The regression: three clients sent a pinned `Chrome/120.0.0.0` string commented
+        // "Realistic browser user agent". It was realistic in 2023. By 2026 no real user runs
+        // Chrome 120, so bot management scores the claim as automation — measured 2026-07-31,
+        // trust.drata.com/subprocessors answered 403 with `cf-mitigated: challenge` for Chrome/120
+        // AND Chrome/131, but 200 for this UA. Impersonating a browser is what got us blocked.
+        assert!(
+            !USER_AGENT.contains("Mozilla") && !USER_AGENT.contains("Chrome"),
+            "user agent must not claim to be a browser, got {USER_AGENT:?}"
+        );
+        assert!(
+            USER_AGENT.starts_with("nthpartyfinder/"),
+            "a site operator must be able to attribute this traffic, got {USER_AGENT:?}"
+        );
+        // Version tracks the package, so there is no pinned version left to rot. Pinning any
+        // version — browser or our own — is how this broke the first time.
+        assert!(
+            USER_AGENT.contains(env!("CARGO_PKG_VERSION")),
+            "user agent must carry the live crate version, got {USER_AGENT:?}"
+        );
+        assert!(
+            USER_AGENT.contains("https://github.com/grcengineering/nthpartyfinder"),
+            "user agent must link somewhere an operator can read what this tool does, got {USER_AGENT:?}"
+        );
+    }
+
     #[test]
     fn test_connection_bounds_stay_conservative() {
         assert!(

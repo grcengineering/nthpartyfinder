@@ -86,6 +86,8 @@ pub struct AnalysisLogger {
     phase: Arc<RwLock<UiPhase>>,
     analysis_metadata: Arc<Mutex<AnalysisMetadata>>,
     dns_failures: Arc<AtomicUsize>,
+    /// Subset of `dns_failures` attributable to the queried NAME, not to this machine's link.
+    dns_name_failures: Arc<AtomicUsize>,
     log_buffer: Arc<Mutex<Vec<String>>>,
     log_file_path: Option<String>,
     color_enabled: bool,
@@ -160,6 +162,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled,
@@ -179,6 +182,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled,
@@ -198,6 +202,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled,
@@ -221,6 +226,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled,
@@ -734,6 +740,21 @@ impl AnalysisLogger {
         self.dns_failures.load(Ordering::Relaxed)
     }
 
+    /// The subset of [`Self::dns_failure_count`] that failed at the *queried name's own*
+    /// authoritative servers (SERVFAIL/REFUSED answered over a working transport) rather than
+    /// anywhere on this machine's path to a resolver.
+    pub fn dns_name_failure_count(&self) -> usize {
+        self.dns_name_failures.load(Ordering::Relaxed)
+    }
+
+    /// Shared handle for `DnsServerPool::with_name_failure_counter`, mirroring
+    /// [`Self::dns_failure_counter_arc`]. Name failures increment *both* counters: they are real
+    /// DNS failures for the exit-3 guard, but they are not evidence of a degraded local link, so
+    /// the summary must be able to report them apart.
+    pub fn dns_name_failure_counter_arc(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.dns_name_failures)
+    }
+
     pub fn dns_failure_counter(&self) -> &AtomicUsize {
         &self.dns_failures
     }
@@ -810,6 +831,7 @@ impl AnalysisLogger {
             }
 
             let dns_fail_count = self.dns_failure_count();
+            let dns_name_fail_count = self.dns_name_failure_count();
             if dns_fail_count > 0 {
                 println!(
                     "{}: {}",
@@ -821,27 +843,51 @@ impl AnalysisLogger {
             println!("{}\n", "========================".bold().cyan());
 
             let cov = crate::coverage::SCAN_COVERAGE.snapshot();
-            let subproc_starved = crate::perf::METRICS.subproc_budget_exhausted.snapshot().0;
-            let degradation =
-                crate::coverage::degradation_summary(&cov, subproc_starved, dns_fail_count as u64);
+            // The starvation verdict uses `subproc_zero_yield`, not `subproc_budget_exhausted`: the
+            // budget also expires on vendors that had ALREADY found an authoritative source and
+            // were only sweeping the tail of a low-probability guess list. Flagging those as
+            // starved made the banner fire on healthy scans and told the reader to "re-run on a
+            // stable network", which cannot help — a budget expires identically on a perfect
+            // link. Only a vendor that ran out of time having found NOTHING lost real recall.
+            let subproc_starved = crate::perf::METRICS.subproc_zero_yield.snapshot().0;
+            let degradation = crate::coverage::degradation_summary(
+                &cov,
+                subproc_starved,
+                dns_fail_count as u64,
+                dns_name_fail_count as u64,
+            );
             if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
                 println!(
                     "{} Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
                     "WARNING:".bright_yellow().bold(),
                     dns_fail_count
                 );
-                println!(
-                    "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
-                );
+                if dns_name_fail_count >= dns_fail_count {
+                    println!(
+                        "   Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
+                    );
+                } else {
+                    println!(
+                        "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+                    );
+                }
             } else if let Some(detail) = &degradation {
                 // Any phase failed/was starved OR DNS degraded → say so, instead of a bare SUCCESS.
                 // This is what makes an unintended run-to-run difference announce itself, rather
                 // than the subprocessor-collapse-still-prints-SUCCESS pathology.
                 println!(
-                    "{} Completed with {} vendor relationships, but coverage was DEGRADED — {}. Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall.",
+                    "{} Completed with {} vendor relationships, but coverage was DEGRADED — {}.{}",
                     "DEGRADED:".bright_yellow().bold(),
-                    metadata.total_vendor_relationships.to_string().bright_yellow().bold(),
-                    detail
+                    metadata
+                        .total_vendor_relationships
+                        .to_string()
+                        .bright_yellow()
+                        .bold(),
+                    detail,
+                    crate::coverage::degradation_advice(
+                        dns_fail_count as u64,
+                        dns_name_fail_count as u64
+                    )
                 );
             } else if metadata.total_vendor_relationships > 0 {
                 println!(
@@ -882,6 +928,7 @@ impl AnalysisLogger {
             }
 
             let dns_fail_count = self.dns_failure_count();
+            let dns_name_fail_count = self.dns_name_failure_count();
             if dns_fail_count > 0 {
                 println!("DNS Failures: {}", dns_fail_count);
             }
@@ -889,21 +936,42 @@ impl AnalysisLogger {
             println!("========================\n");
 
             let cov = crate::coverage::SCAN_COVERAGE.snapshot();
-            let subproc_starved = crate::perf::METRICS.subproc_budget_exhausted.snapshot().0;
-            let degradation =
-                crate::coverage::degradation_summary(&cov, subproc_starved, dns_fail_count as u64);
+            // The starvation verdict uses `subproc_zero_yield`, not `subproc_budget_exhausted`: the
+            // budget also expires on vendors that had ALREADY found an authoritative source and
+            // were only sweeping the tail of a low-probability guess list. Flagging those as
+            // starved made the banner fire on healthy scans and told the reader to "re-run on a
+            // stable network", which cannot help — a budget expires identically on a perfect
+            // link. Only a vendor that ran out of time having found NOTHING lost real recall.
+            let subproc_starved = crate::perf::METRICS.subproc_zero_yield.snapshot().0;
+            let degradation = crate::coverage::degradation_summary(
+                &cov,
+                subproc_starved,
+                dns_fail_count as u64,
+                dns_name_fail_count as u64,
+            );
             if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
                 println!(
                     "WARNING: Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
                     dns_fail_count
                 );
-                println!(
-                    "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
-                );
+                if dns_name_fail_count >= dns_fail_count {
+                    println!(
+                        "   Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
+                    );
+                } else {
+                    println!(
+                        "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+                    );
+                }
             } else if let Some(detail) = &degradation {
                 println!(
-                    "DEGRADED: Completed with {} vendor relationships, but coverage was DEGRADED — {}. Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall.",
-                    metadata.total_vendor_relationships, detail
+                    "DEGRADED: Completed with {} vendor relationships, but coverage was DEGRADED — {}.{}",
+                    metadata.total_vendor_relationships,
+                    detail,
+                    crate::coverage::degradation_advice(
+                        dns_fail_count as u64,
+                        dns_name_fail_count as u64
+                    )
                 );
             } else if metadata.total_vendor_relationships > 0 {
                 println!(
@@ -1165,6 +1233,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: None,
             color_enabled: true,
@@ -1183,6 +1252,7 @@ impl AnalysisLogger {
             phase: Arc::new(RwLock::new(UiPhase::PreInit)),
             analysis_metadata: Arc::new(Mutex::new(AnalysisMetadata::default())),
             dns_failures: Arc::new(AtomicUsize::new(0)),
+            dns_name_failures: Arc::new(AtomicUsize::new(0)),
             log_buffer: Arc::new(Mutex::new(Vec::new())),
             log_file_path: Some(log_file_path),
             color_enabled: true,

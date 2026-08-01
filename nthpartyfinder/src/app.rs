@@ -1997,7 +1997,8 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // the SPF include-chain recursion — is counted once at the source.
     let dns_pool = Arc::new(
         dns::DnsServerPool::from_config(&_app_config)
-            .with_failure_counter(logger.dns_failure_counter_arc()),
+            .with_failure_counter(logger.dns_failure_counter_arc())
+            .with_name_failure_counter(logger.dns_name_failure_counter_arc()),
     );
     logger.debug(&format!(
         "Initialized DNS server pool with {} DoH servers and {} DNS servers",
@@ -2900,7 +2901,8 @@ async fn analyze_single_domain_for_batch(
     // `logger` owns the DNS-failure counter this pool increments on throttle.
     let dns_pool = Arc::new(
         dns::DnsServerPool::from_config(app_config)
-            .with_failure_counter(logger.dns_failure_counter_arc()),
+            .with_failure_counter(logger.dns_failure_counter_arc())
+            .with_name_failure_counter(logger.dns_name_failure_counter_arc()),
     );
     let recursive_semaphore = Arc::new(Semaphore::new(parallel_jobs.min(10)));
 
