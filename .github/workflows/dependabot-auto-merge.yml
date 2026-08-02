@@ -1,0 +1,96 @@
+# Merge the dependency bumps that a green run of this repo's own CI gate already proves safe,
+# without waiting for a human to notice the PR exists.
+#
+# Before this workflow, Dependabot PRs sat until someone happened to open the repo and merge them
+# by hand — 13 were open at once, the oldest a week stale, every one of them green. Nothing was
+# blocking them; nobody was watching for them. This closes that gap for the subset CI can actually
+# vouch for, and leaves everything else exactly where a human needs to look at it:
+#
+#   * github-actions, docker  — always eligible. Both ecosystems here are SHA-pin bumps by design
+#     (see dependabot.yml's own comments): there is no semver to evaluate, just a hash of upstream
+#     content moving forward, and the full required-checks gate (build, 4000+ tests, 95% coverage,
+#     CodeQL, SAST, secret scan, cargo-deny, 4 platform builds) still has to pass before merge.
+#   * cargo, patch or minor   — eligible. The same full gate applies. Major bumps are excluded on
+#     principle (a version bump the crate author flagged as breaking deserves a look), not because
+#     the gate can't catch a regression.
+#   * npm                     — NEVER auto-merged. No CI workflow in this repo builds or tests the
+#     Svelte Flow frontend at all, so there is no green run to trust a bump against — auto-merging
+#     here would be trusting nothing. Stays fully manual until that gap is closed separately.
+#
+# Runs on pull_request_target (not pull_request) so the token has write permissions even though
+# the PR is Dependabot-authored — safe specifically because this workflow never checks out or
+# executes the PR's own code. dependabot/fetch-metadata reads PR metadata via the API; everything
+# else is `gh pr merge`, which only ever asks GitHub's own merge API to act. Nothing here runs
+# code that traveled through the pull request.
+name: Dependabot Auto-Merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    name: Merge if CI proves it safe
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Read the PR's dependency metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Decide eligibility
+        id: eligible
+        env:
+          ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          case "$ECOSYSTEM" in
+            github_actions|docker)
+              echo "yes=true" >> "$GITHUB_OUTPUT"
+              echo "reason=${ECOSYSTEM} is always a SHA-pin bump, never a semver change" >> "$GITHUB_OUTPUT"
+              ;;
+            cargo)
+              case "$UPDATE_TYPE" in
+                version-update:semver-patch|version-update:semver-minor)
+                  echo "yes=true" >> "$GITHUB_OUTPUT"
+                  echo "reason=cargo ${UPDATE_TYPE#version-update:semver-}, full test+coverage gate applies" >> "$GITHUB_OUTPUT"
+                  ;;
+                *)
+                  echo "yes=false" >> "$GITHUB_OUTPUT"
+                  echo "reason=cargo ${UPDATE_TYPE#version-update:semver-} — the crate author flagged this breaking" >> "$GITHUB_OUTPUT"
+                  ;;
+              esac
+              ;;
+            *)
+              echo "yes=false" >> "$GITHUB_OUTPUT"
+              echo "reason=${ECOSYSTEM} has no CI coverage in this repo to trust a bump against" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Enable auto-merge
+        if: steps.eligible.outputs.yes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REASON: ${{ steps.eligible.outputs.reason }}
+        run: |
+          echo "::notice::Auto-merge enabled — ${REASON}"
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: Leave a note when a PR needs a human
+        if: steps.eligible.outputs.yes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REASON: ${{ steps.eligible.outputs.reason }}
+        run: |
+          echo "::notice::Left for manual review — ${REASON}"
+          gh pr comment "$PR_URL" --body "Not auto-merged: ${REASON}. Needs a human review and merge."

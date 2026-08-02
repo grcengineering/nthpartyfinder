@@ -26,8 +26,10 @@
 #     * crates.io          (publish-crate is workflow_dispatch-only, intentionally)
 #     * winget             (a PR into microsoft/winget-pkgs is a third-party review process)
 #
-# Requires: curl, python3. `gh` is used when available (higher rate limits); falls back to
-# unauthenticated API calls otherwise.
+# Requires: curl, python3 (only for --json output; see the Report section). `jq` is used to parse
+# the WinGet directory listing when available — without it that one optional channel reports
+# "absent" rather than failing the script. `gh` is used when available (higher rate limits);
+# falls back to unauthenticated API calls otherwise.
 set -uo pipefail
 
 REPO="${NPF_REPO:-grcengineering/nthpartyfinder}"
@@ -67,10 +69,19 @@ raw() {
   curl -fsSL "https://raw.githubusercontent.com/${1}/HEAD/${2}" 2>/dev/null
 }
 
+# Pull one top-level JSON string field's value from stdin without piping network output into an
+# interpreter (Scorecard's Pinned-Dependencies check flags `curl | python3` as an unpinned
+# downloadThenRun pattern — a general-purpose interpreter attached to attacker-influenced input is
+# the risk class it's a proxy for, even though `json.load()` itself never executes anything). grep
+# can only ever emit a substring of its input, never run it, so it's outside that check by
+# construction, not merely outside its pattern list. GitHub's and crates.io's APIs both emit
+# compact single-line JSON, so a single regex reliably finds a top-level field.
+json_str_field() {
+  grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed -E "s/^\"$1\"[[:space:]]*:[[:space:]]*\"(.*)\"\$/\\1/"
+}
+
 if [ -z "$TAG" ]; then
-  TAG="$(api "repos/${REPO}/releases/latest" | python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get("tag_name",""))
-except Exception: pass' 2>/dev/null)"
+  TAG="$(api "repos/${REPO}/releases/latest" | json_str_field tag_name)"
 fi
 if [ -z "$TAG" ]; then
   echo "could not determine the latest release tag for ${REPO} (network or rate limit?)" >&2
@@ -119,20 +130,24 @@ else
 fi
 
 # --- crates.io ---------------------------------------------------------------------------------
-CRATE_VER="$(curl -fsSL "https://crates.io/api/v1/crates/nthpartyfinder" 2>/dev/null | python3 -c 'import json,sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get("crate", {}).get("max_stable_version") or d.get("crate", {}).get("max_version") or "")
-except Exception: pass' 2>/dev/null)"
+CRATE_JSON="$(curl -fsSL "https://crates.io/api/v1/crates/nthpartyfinder" 2>/dev/null)"
+CRATE_VER="$(printf '%s' "$CRATE_JSON" | json_str_field max_stable_version)"
+[ -z "$CRATE_VER" ] && CRATE_VER="$(printf '%s' "$CRATE_JSON" | json_str_field max_version)"
 record "crates.io" "optional" "${CRATE_VER:-absent}" "cargo install nthpartyfinder"
 
 # --- WinGet (upstream microsoft/winget-pkgs) ----------------------------------------------------
-WINGET_DIRS="$(api "repos/${WINGET_REPO}/contents/${WINGET_PKG_PATH}" | python3 -c 'import json,sys
-try:
-    d = json.load(sys.stdin)
-    if isinstance(d, list):
-        print("\n".join(e["name"] for e in d if e.get("type") == "dir"))
-except Exception: pass' 2>/dev/null)"
+# An array of directory entries needs real structure awareness (associating each "name" with its
+# sibling "type":"dir" across multiple objects) that a line-oriented regex can't do reliably —
+# unlike the flat single-field lookups above, this one keeps a real JSON tool. jq is a query
+# engine over data, not a general-purpose interpreter: the query is the fixed string literal
+# below, never derived from the downloaded response, so only data — never a program — comes from
+# the network. It's outside Scorecard's downloadThenRun check on the same grounds as grep/sed/awk.
+if command -v jq >/dev/null 2>&1; then
+  WINGET_DIRS="$(api "repos/${WINGET_REPO}/contents/${WINGET_PKG_PATH}" \
+    | jq -r 'if type == "array" then .[] | select(.type == "dir") | .name else empty end' 2>/dev/null)"
+else
+  WINGET_DIRS=""
+fi
 if [ -z "$WINGET_DIRS" ]; then
   record "winget" "optional" "absent" "never submitted to ${WINGET_REPO}"
 else

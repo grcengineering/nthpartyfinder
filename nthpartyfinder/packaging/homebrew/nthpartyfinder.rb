@@ -27,15 +27,15 @@ class Nthpartyfinder < Formula
 
   if OS.mac?
     if Hardware::CPU.arm?
-      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.0/nthpartyfinder-aarch64-apple-darwin.tgz"
-      sha256 "b8211856656dc9299a754e527893ea59bedc84d6c4dbf5a91ac88ae5bd3ba348"
+      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.1/nthpartyfinder-aarch64-apple-darwin.tgz"
+      sha256 "324abaccf126c77f357859992bfa51598627d9ad6bf15f4dfb970230e7f21eb4"
     else
-      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.0/nthpartyfinder-x86_64-apple-darwin.tgz"
-      sha256 "57913e26eaef3811279d5a0654a883ebf3ef5806f93cd1c57b74f93b66680671"
+      url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.1/nthpartyfinder-x86_64-apple-darwin.tgz"
+      sha256 "b80f60e003509672fb1d374ae1bd3636af42e2b1903fb3bbb59fa683cf3c5802"
     end
   elsif OS.linux?
-    url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.0/nthpartyfinder-x86_64-unknown-linux-gnu.tgz"
-    sha256 "c180a2b90b855c0a020f02fa6f49c087f9a3fbeccca7c45142d2e874f87b7ba3"
+    url "https://github.com/grcengineering/nthpartyfinder/releases/download/v1.6.1/nthpartyfinder-x86_64-unknown-linux-gnu.tgz"
+    sha256 "28ebc014c475af2f091227a66fd34e650a16b8e7f4b98ff381f0d61c1d3b14d2"
   end
 
   def install

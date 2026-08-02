@@ -31,3 +31,29 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "ci(deps)"
+
+  # npm — two real package.json/package-lock.json pairs existed with no ecosystem entry here, so
+  # neither ever got a Dependabot PR: root (Playwright test tooling) and the Svelte Flow vendor-graph
+  # frontend bundled into every HTML report. GitHub's baseline dependency-graph scan still opened
+  # security ALERTS against them independently of this file (that's how GHSA-r28c-9q8g-f849 in
+  # postcss, a transitive vite dep, was found) — but without an entry here, a version-bump PR never
+  # followed, so the alert just sat open. This closes that gap for both directories.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-root:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: "npm"
+    directory: "/nthpartyfinder/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-frontend:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
