@@ -1,0 +1,134 @@
+# Surface what dependabot-auto-merge.yml correctly leaves for a human, so it stays visible even
+# across weeks nobody happens to open this repo — the exact gap that let 13 green PRs sit
+# unmerged for a week and a real Dependabot security alert (postcss, GHSA-r28c-9q8g-f849) go
+# unaddressed until someone went looking.
+#
+# This workflow never merges or changes anything by itself. It only makes the backlog loud:
+#   * Dependabot/security-bot PRs still open after 3 days (auto-merge clears the easy ones same-day;
+#     anything still open after 3 has a real reason — a major bump, an npm bump, a merge conflict)
+#   * Open Dependabot security alerts (a real CVE against a dependency, whether or not a PR exists)
+#   * Open CodeQL alerts
+#
+# One issue, reused: refreshed on every run rather than opened anew, so a standing backlog reads as
+# one thread with history instead of a pile of duplicates (same idiom as distribution-sync.yml).
+name: Security PR Tracker
+
+on:
+  schedule:
+    # Thursdays 14:11 UTC — a few days after Dependabot's own weekly run, so the week's new PRs
+    # have had time to hit CI and, where eligible, auto-merge before this judges what's left.
+    - cron: "11 14 * * 4"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  track:
+    name: Track bot PRs and alerts needing a human
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      security-events: read
+      issues: write
+    steps:
+      - name: Gather open bot PRs and security alerts
+        id: gather
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # PRs authored by Dependabot (or any other GitHub App bot — e.g. a future Renovate/Socket
+          # remediation bot) that are still open 3+ days after being opened. Newer ones are still
+          # inside the window where CI + auto-merge get first crack at them.
+          CUTOFF="$(date -u -d '3 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          # `$cutoff` below is jq's own variable syntax, bound safely by --arg; it must stay inside
+          # single quotes so bash does NOT expand it. String-interpolating $CUTOFF directly into
+          # the jq program instead — the "fix" shellcheck suggests — is the actual jq-injection
+          # risk this --arg binding exists to avoid. `gh`'s own --jq flag has no --arg companion
+          # (it takes one bare expression), so the filter runs as a real jq stage piped after gh.
+          # shellcheck disable=SC2016
+          STALE_PRS="$(gh pr list --state open --json number,title,author,createdAt,url \
+            | jq --arg cutoff "$CUTOFF" \
+              '[.[] | select(.author.is_bot == true and .createdAt < $cutoff)]')"
+          STALE_COUNT="$(printf '%s' "$STALE_PRS" | jq 'length')"
+
+          ALERTS="$(gh api "repos/${GH_REPO}/dependabot/alerts" --paginate \
+            --jq '[.[] | select(.state == "open")]' 2>/dev/null || echo '[]')"
+          ALERT_COUNT="$(printf '%s' "$ALERTS" | jq 'length')"
+
+          CODEQL="$(gh api "repos/${GH_REPO}/code-scanning/alerts" --paginate \
+            --jq '[.[] | select(.state == "open")]' 2>/dev/null || echo '[]')"
+          CODEQL_COUNT="$(printf '%s' "$CODEQL" | jq 'length')"
+
+          {
+            echo "stale_pr_count=${STALE_COUNT}"
+            echo "alert_count=${ALERT_COUNT}"
+            echo "codeql_count=${CODEQL_COUNT}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo '### Bot PRs open 3+ days'
+            if [ "$STALE_COUNT" = "0" ]; then
+              echo '_none_'
+            else
+              printf '%s' "$STALE_PRS" | jq -r '.[] | "- [#\(.number)](\(.url)) \(.title) — opened \(.createdAt)"'
+            fi
+            echo
+            echo '### Open Dependabot security alerts'
+            if [ "$ALERT_COUNT" = "0" ]; then
+              echo '_none_'
+            else
+              printf '%s' "$ALERTS" | jq -r '.[] | "- **\(.security_advisory.severity)** \(.dependency.package.name) (\(.dependency.package.ecosystem)): \(.security_advisory.summary) — https://github.com/'"${GH_REPO}"'/security/dependabot/\(.number)"'
+            fi
+            echo
+            echo '### Open CodeQL alerts'
+            if [ "$CODEQL_COUNT" = "0" ]; then
+              echo '_none_'
+            else
+              printf '%s' "$CODEQL" | jq -r '.[] | "- **\(.rule.security_severity_level // "unrated")** \(.rule.id) in `\(.most_recent_instance.location.path)` — https://github.com/'"${GH_REPO}"'/security/code-scanning/\(.number)"'
+            fi
+          } > body.md
+
+      - name: Publish to the run summary
+        shell: bash
+        run: cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or refresh the tracking issue
+        if: steps.gather.outputs.stale_pr_count != '0' || steps.gather.outputs.alert_count != '0' || steps.gather.outputs.codeql_count != '0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="Security items waiting on a human"
+          BODY="$(printf 'Auto-merge (dependabot-auto-merge.yml) only handles patch/minor cargo and SHA-pin docker/github-actions bumps. Everything below needs a look.\n\n%s\n\nRun: %s/%s/actions/runs/%s' \
+            "$(cat body.md)" "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
+
+          EXISTING="$(gh issue list --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+            echo "Refreshed issue #${EXISTING}"
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label "dependencies" 2>/dev/null \
+              || gh issue create --title "$TITLE" --body "$BODY"
+          fi
+
+      - name: Close the tracking issue when the backlog clears
+        if: steps.gather.outputs.stale_pr_count == '0' && steps.gather.outputs.alert_count == '0' && steps.gather.outputs.codeql_count == '0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="Security items waiting on a human"
+          EXISTING="$(gh issue list --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number')"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Backlog clear as of this run — closing."
+            gh issue close "$EXISTING"
+            echo "Closed issue #${EXISTING}"
+          fi
