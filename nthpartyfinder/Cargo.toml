@@ -55,7 +55,7 @@ hickory-resolver = { version = "0.26", features = ["https-ring", "tls-ring", "we
 # Headless browser for JavaScript content
 headless_chrome = "1.0"
 # AI-powered content analysis
-fancy-regex = "0.18"
+fancy-regex = "0.19"
 psl = "2"
 rayon = "1.8"
 which = "8"

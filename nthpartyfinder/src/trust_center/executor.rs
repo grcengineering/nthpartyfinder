@@ -1005,8 +1005,17 @@ mod tests {
         // (which uses Thompson NFA and never backtracks).
         // Pattern: backreference \1 forces the Fancy VM; nested (a+)+ causes exponential
         // backtracking that exceeds the default 1M backtrack limit.
+        //
+        // Input length is NOT a free choice — fancy-regex 0.19.0's pooled-VM performance work
+        // pushed the input size needed to exceed the step limit from ~40 to ~1200-1500 chars
+        // (empirically probed against the released crate: 1200 chars still resolves in <100ms
+        // with no error, 1500 reliably errors). A fixed constant close to that boundary is
+        // exactly the kind of test that breaks again on the next backtracking speedup — 5000
+        // gives a wide empirically-verified margin (still resolves in ~100ms) so this keeps
+        // passing across future fancy-regex releases without needing another compile-time
+        // failure to notice engine drift.
         let evil_pattern = r"((a+)+)\1b";
-        let evil_input = "a".repeat(40);
+        let evil_input = "a".repeat(5000);
         let result = extract_embedded_base64(&evil_input, evil_pattern);
         assert!(
             result.is_err(),
@@ -1039,8 +1048,9 @@ mod tests {
     fn test_extract_embedded_js_object_regex_captures_error() {
         // Must use a "fancy" feature (backreference \1) to force fancy_regex's
         // backtracking VM, then nested (a+)+ exceeds the 1M backtrack limit.
+        // See the sibling base64 test above for why the input length is 5000, not 40.
         let evil_pattern = r"((a+)+)\1b";
-        let evil_input = "a".repeat(40);
+        let evil_input = "a".repeat(5000);
         let result = extract_embedded_js_object(&evil_input, evil_pattern);
         assert!(
             result.is_err(),
