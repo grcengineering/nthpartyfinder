@@ -6,12 +6,22 @@
 # any master commit produced by an auto-merge completed under that token. Verified across six
 # same-day merges: the four completed via `gh pr merge --auto` under GITHUB_TOKEN (mergedBy:
 # app/github-actions) ALL produced zero push-triggered runs; the two merged directly by a human
-# with a personal token both got the full set. dependabot-auto-merge.yml now prefers a MERGE_TOKEN
-# secret specifically to avoid this at the source (see its header) — this workflow is the safety
-# net for whatever still slips through: MERGE_TOKEN not yet configured, a future auto-merge path
-# that reintroduces the same pattern, or a genuine one-off GitHub delivery gap unrelated to any of
-# this (the original incident that started this investigation looked exactly like the latter
-# before the token correlation was found, and there is no way to prove there is only one cause).
+# with a personal token both got the full set.
+#
+# This workflow is not a safety net for a gap something else is supposed to close — it IS the
+# closure, by deliberate choice. The alternative (authenticate dependabot-auto-merge.yml's merge
+# with a stored fine-grained PAT instead of GITHUB_TOKEN, so the push escapes the suppression) was
+# considered and explicitly rejected: a PAT is a standing, long-lived credential in the secrets
+# store, a materially worse blast radius than GITHUB_TOKEN's few-minute lifetime. GITHUB_TOKEN
+# stays exactly as GitHub generates it — fresh per run, scope-capped, dead at job end — and this
+# schedule-driven detector is the accepted, non-credential cost of keeping it that way: a bounded
+# detection delay (~23 minutes) on every auto-merge, instead of a static secret with no expiry.
+#
+# It also covers whatever this deliberate tradeoff doesn't explain: a future auto-merge path that
+# reintroduces the same pattern some other way, or a genuine one-off GitHub delivery gap unrelated
+# to any of this (the original incident that started this investigation looked exactly like the
+# latter before the token correlation was found, and there is no way to prove there is only one
+# cause).
 #
 # Detection deliberately runs on a SCHEDULE, not push — the whole premise here is that push-based
 # triggering can silently fail, so the detector cannot depend on push-based triggering itself.
@@ -111,11 +121,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Appends, never overwrites or replaces prior content — unlike distribution-sync.yml's
-      # refresh-in-place tracker, this one is forensic: a single occurrence is nearly always
-      # explained by MERGE_TOKEN not being configured yet, but a PATTERN across several
-      # occurrences (timing, always-after-auto-merge, always a specific workflow) is the only
-      # realistic path to noticing a genuinely new cause, and that requires the full history to
-      # stay readable in one place rather than each detection erasing the last.
+      # refresh-in-place tracker, this one is forensic: a single occurrence is nearly always the
+      # accepted GITHUB_TOKEN/auto-merge tradeoff explained in this workflow's header, but a
+      # PATTERN across several occurrences (timing, always-after-auto-merge, always a specific
+      # workflow) is the only realistic path to noticing a genuinely new cause, and that requires
+      # the full history to stay readable in one place rather than each detection erasing the last.
       - name: Record this occurrence on the standing issue
         if: steps.check.outputs.exit_code != '0'
         shell: bash
@@ -128,7 +138,7 @@ jobs:
           # are left for printf to substitute, not expanded by the shell first.
           # shellcheck disable=SC2016
           BODY="$(printf '%s\n\n```json\n%s\n```\n\nRe-dispatched: %s\n\nRun: %s/%s/actions/runs/%s' \
-            "Detected at $(date -u +%Y-%m-%dT%H:%M:%SZ). One occurrence is most likely dependabot-auto-merge.yml completing a merge without a MERGE_TOKEN secret configured (see that workflow's header) — check whether the commit(s) below were auto-merged before assuming anything new. Missing workflows were re-dispatched against master's current tip; see the run for whether that succeeded." \
+            "Detected at $(date -u +%Y-%m-%dT%H:%M:%SZ). One occurrence is most likely the accepted dependabot-auto-merge.yml/GITHUB_TOKEN tradeoff (see that workflow's header) — check whether the commit(s) below were auto-merged before assuming anything new. Missing workflows were re-dispatched against master's current tip; see the run for whether that succeeded." \
             "$(cat report.json)" \
             "${REDISPATCHED:-none}" \
             "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}")"
