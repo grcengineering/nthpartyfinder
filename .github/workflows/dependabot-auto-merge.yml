@@ -22,6 +22,27 @@
 # executes the PR's own code. dependabot/fetch-metadata reads PR metadata via the API; everything
 # else is `gh pr merge`, which only ever asks GitHub's own merge API to act. Nothing here runs
 # code that traveled through the pull request.
+#
+# MERGE_TOKEN (optional secret) — without this, every auto-merge this workflow completes silently
+# stops triggering push-to-master CI, CodeQL, Docker Build, Security, and OpenSSF Scorecard.
+# Confirmed empirically (2026-08-02), not theorized: of six PRs merged the same day, the four
+# completed via `gh pr merge --auto` using the default GITHUB_TOKEN (mergedBy: app/github-actions)
+# ALL produced a master commit with zero push-triggered workflow runs; the two merged directly by
+# a human with a personal token (mergedBy: p4gs) both got the full set. This matches GitHub's own
+# documented anti-recursion policy to the letter: "events triggered by the GITHUB_TOKEN... will
+# not create a new workflow run" — auto-merge completing under that token is exactly such an
+# event. It is not a rare fluke; it is the deterministic, designed behavior, and it will recur on
+# every auto-merge this workflow performs until the merge is attributed to a real identity instead.
+#
+# Fix: create a fine-grained PAT (Contents: read+write, Pull requests: read+write on this repo —
+# same shape as RELEASING.md's TAP_TOKEN/WINGET_TOKEN) and add it as the repo secret MERGE_TOKEN.
+# When present, the merge step below authenticates with it instead of GITHUB_TOKEN, so the
+# resulting push is attributed to that token's identity and Actions' anti-recursion suppression
+# no longer applies — CI runs normally after every future auto-merge. When absent, auto-merge
+# still works (nothing here becomes stricter or blocks), but the job says so loudly in the run
+# log and in a PR comment, because a silently CI-less merge is exactly the failure this exists to
+# prevent. ci-completeness-monitor.yml is the safety net for whatever slips through either way —
+# this fixes the cause; that catches the rest.
 name: Dependabot Auto-Merge
 
 on:
@@ -78,11 +99,21 @@ jobs:
       - name: Enable auto-merge
         if: steps.eligible.outputs.yes == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A non-empty MERGE_TOKEN takes priority: the merge is then attributed to a real PAT
+          # identity, so the resulting push isn't subject to GITHUB_TOKEN's anti-recursion
+          # suppression and post-merge CI fires normally. See the file header for why this
+          # matters — it is not a style preference, it is the actual fix for a confirmed gap.
+          GH_TOKEN: ${{ secrets.MERGE_TOKEN || secrets.GITHUB_TOKEN }}
+          HAS_MERGE_TOKEN: ${{ secrets.MERGE_TOKEN != '' }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           REASON: ${{ steps.eligible.outputs.reason }}
         run: |
           echo "::notice::Auto-merge enabled — ${REASON}"
+          if [ "$HAS_MERGE_TOKEN" != "true" ]; then
+            echo "::warning::MERGE_TOKEN is not set - this merge completes under GITHUB_TOKEN, so CI/CodeQL/Docker Build/Security/Scorecard will NOT run on the resulting master commit (GitHubs anti-recursion policy for GITHUB_TOKEN-authored pushes; confirmed 2026-08-02 across 4/4 auto-merges). ci-completeness-monitor.yml will catch and re-fire it later, but add a MERGE_TOKEN secret (see this workflows header comment) to close the gap at the source."
+            NOTE="Auto-merging without a MERGE_TOKEN secret configured. The resulting master commit will not trigger push-based CI (GitHub's own anti-recursion rule for GITHUB_TOKEN-authored pushes). ci-completeness-monitor.yml will detect this and re-fire the missing workflows, but see dependabot-auto-merge.yml's header comment to fix it at the source."
+            gh pr comment "$PR_URL" --body "$NOTE" || true
+          fi
           gh pr merge --auto --squash "$PR_URL"
 
       - name: Leave a note when a PR needs a human

@@ -6,6 +6,9 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main, master]
+  # For ci-completeness-monitor.yml to re-fire this workflow on demand when a push to master
+  # never triggered it in the first place (see that workflow for why this can happen).
+  workflow_dispatch: {}
 
 # Least-privilege default; the build job widens to packages: write for pushes.
 permissions:

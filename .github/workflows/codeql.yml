@@ -7,6 +7,9 @@ on:
     branches: ["master", "main"]
   schedule:
     - cron: "27 3 * * 1"
+  # For ci-completeness-monitor.yml to re-fire this workflow on demand when a push to master
+  # never triggered it in the first place (see that workflow for why this can happen).
+  workflow_dispatch: {}
 
 # Least-privilege default for the workflow; each job widens to exactly what it needs.
 permissions:
