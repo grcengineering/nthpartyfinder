@@ -317,6 +317,77 @@ pub fn parse_timeout_choice(input: &str) -> Option<TimeoutChoice> {
     }
 }
 
+/// Whether the first-run analysis-timeout prompt should be shown (pure, testable).
+///
+/// All four conditions must hold, and each exists to keep the prompt from ever
+/// blocking a run that has no human in front of it: an explicit `--timeout` or the
+/// env override means the question is already answered, `onboarded` means it has
+/// been asked once already, and a non-TTY stdin means nobody is there to answer.
+pub fn should_prompt_timeout_onboarding(
+    cli_timeout: Option<u64>,
+    env_timeout: Option<&str>,
+    onboarded: bool,
+    stdin_is_tty: bool,
+) -> bool {
+    cli_timeout.is_none() && env_timeout.is_none() && !onboarded && stdin_is_tty
+}
+
+/// Apply the user's answer to the first-run timeout prompt (pure, testable).
+///
+/// `None` covers both an unparseable answer and a failed read; both fall through to
+/// the normal precedence chain rather than inventing a value.
+pub fn apply_timeout_onboarding_choice(
+    choice: Option<TimeoutChoice>,
+    cli_timeout: &mut Option<u64>,
+    prefs_default: &mut Option<u64>,
+) {
+    match choice {
+        Some(TimeoutChoice::ThisRun(n)) => *cli_timeout = Some(n),
+        Some(TimeoutChoice::SetDefault(n)) => {
+            *cli_timeout = Some(n);
+            *prefs_default = Some(n);
+        }
+        // KeepDefault or unparseable → leave precedence to fall through to default.
+        Some(TimeoutChoice::KeepDefault) | None => {}
+    }
+}
+
+/// Render the first-run analysis-timeout prompt and read the answer.
+///
+/// Everything this function writes and reads happens inside `logger.suspend_for_io`,
+/// and that is load-bearing rather than cosmetic. `AnalysisLogger` has had a live
+/// indicatif bar since `start_init_progress`, redrawing stderr at 12 Hz; a prompt
+/// written with raw `eprintln!` outside a suspend is painted over by the next redraw.
+/// In v1.6.1 this block ran unsuspended, so the trailing "> " line was erased and a
+/// first-run user saw only a progress bar apparently stuck at "10% Starting vendor
+/// discovery..." while the process sat in `read_line` — the scan had not started and
+/// could not start until they pressed a key they had no way of knowing was wanted.
+/// `logger.rs`'s own doc comment on `suspend_for_io` states this contract.
+// coverage: renders to a terminal and blocks on real stdin, so no test can drive it; the
+// two decisions it makes — whether to ask, and what an answer means — live in
+// `should_prompt_timeout_onboarding` / `apply_timeout_onboarding_choice`, both tested
+// directly, and the suspension itself is asserted by
+// `every_stdin_read_is_inside_a_bar_suspending_function`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn prompt_timeout_onboarding(logger: &AnalysisLogger) -> Option<TimeoutChoice> {
+    logger.suspend_for_io(|| {
+        eprintln!();
+        eprintln!("  ⏱  Analysis timeout (first-run setup)");
+        eprintln!("     Default is 600s. Depth-3 / cold-cache scans often need more.");
+        eprintln!("       [Enter]   keep 600s for this run");
+        eprintln!("       <n>       use <n> seconds for this run (0 = no timeout)");
+        eprintln!("       <n> d     use <n> seconds AND save it as your default");
+        eprint!("     > ");
+        let mut line = String::new();
+        let choice = match std::io::stdin().read_line(&mut line) {
+            Ok(_) => parse_timeout_choice(&line),
+            Err(_) => None,
+        };
+        eprintln!();
+        choice
+    })
+}
+
 /// Construct the full output path from output_dir and filename.
 pub fn build_full_output_path(output_dir: &str, output_filename: &str) -> PathBuf {
     Path::new(output_dir).join(output_filename)
@@ -1472,6 +1543,15 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     ctrlc::set_handler(
         move || {
         analysis::set_interrupted();
+        // Deliberately a raw eprintln and NOT `logger.suspend_for_io` / `MultiProgress::println`,
+        // even though a live bar can redraw over this line during the 2s sleep below. Both of
+        // those take indicatif's internal write lock, and this closure runs on the ctrlc crate's
+        // handler thread: if the main thread is inside a suspended interactive prompt (which
+        // holds that lock for as long as the user takes to answer), routing this through the bar
+        // would block the handler before it reaches `process::exit` — i.e. Ctrl-C would stop
+        // working at exactly the prompt where a user is most likely to reach for it. A cosmetically
+        // overdrawn message is the better trade; the run still exits, and the "Force exiting" line
+        // below lands after the bars have stopped. See ISA TF-CTRLC-MSG.
         eprintln!("\n⚠️  Interrupt received. Saving checkpoint and exiting...");
         std::thread::sleep(std::time::Duration::from_secs(2));
         // `std::process::exit` runs no destructors, so the `PoolShutdownGuard` in `run_inner`
@@ -2145,43 +2225,36 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     }
     logger.debug("Memory pressure monitor started (5s interval)");
 
-    logger.start_scan_progress(100).await;
-
     // (#4) First-run timeout onboarding. Fires at most once, and only when interactive,
     // with no explicit --timeout, no env override, and not yet onboarded — so it never
     // breaks non-interactive/CI runs. Lets the user keep 600s, override for this run, or
     // persist a new default.
+    //
+    // Order matters and is load-bearing: this asks BEFORE `start_scan_progress`, which is
+    // what moves the bar's message to "Starting vendor discovery...". Asking after it made
+    // the UI assert a phase the program had not entered, so a first-run user watching a
+    // bar tick at "10% Starting vendor discovery..." had no way to tell the scan had never
+    // started and was waiting on them. Keep the prompt above that line.
     let env_timeout = std::env::var("NTHPARTY_ANALYSIS_TIMEOUT_SECS").ok();
-    if args.timeout.is_none()
-        && env_timeout.is_none()
-        && !prefs.onboarded
-        && std::io::stdin().is_terminal()
-    {
-        eprintln!();
-        eprintln!("  ⏱  Analysis timeout (first-run setup)");
-        eprintln!("     Default is 600s. Depth-3 / cold-cache scans often need more.");
-        eprintln!("       [Enter]   keep 600s for this run");
-        eprintln!("       <n>       use <n> seconds for this run (0 = no timeout)");
-        eprintln!("       <n> d     use <n> seconds AND save it as your default");
-        eprint!("     > ");
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_ok() {
-            match parse_timeout_choice(&line) {
-                Some(TimeoutChoice::ThisRun(n)) => args.timeout = Some(n),
-                Some(TimeoutChoice::SetDefault(n)) => {
-                    args.timeout = Some(n);
-                    prefs.analysis_timeout_secs = Some(n);
-                }
-                // KeepDefault or unparseable → leave precedence to fall through to default.
-                Some(TimeoutChoice::KeepDefault) | None => {}
-            }
-        }
+    if should_prompt_timeout_onboarding(
+        args.timeout,
+        env_timeout.as_deref(),
+        prefs.onboarded,
+        std::io::stdin().is_terminal(),
+    ) {
+        let choice = prompt_timeout_onboarding(&logger);
+        apply_timeout_onboarding_choice(
+            choice,
+            &mut args.timeout,
+            &mut prefs.analysis_timeout_secs,
+        );
         prefs.onboarded = true;
         if let Err(e) = prefs.save() {
             logger.debug(&format!("Could not persist timeout preference: {}", e));
         }
-        eprintln!();
     }
+
+    logger.start_scan_progress(100).await;
 
     let analysis_timeout = compute_analysis_timeout_with_env_and_default(
         args.timeout,
@@ -3769,6 +3842,218 @@ mod tests {
         assert_eq!(parse_timeout_choice("abc"), None);
         assert_eq!(parse_timeout_choice("1800 bogus"), None);
         assert_eq!(parse_timeout_choice("twelve!"), None);
+    }
+
+    // ── first-run timeout onboarding: gating ──────────────────────────
+
+    #[test]
+    fn onboarding_prompts_only_on_a_true_first_run_at_a_terminal() {
+        // The one combination that should ask: no explicit answer anywhere, never
+        // asked before, and a human on the other end of stdin.
+        assert!(should_prompt_timeout_onboarding(None, None, false, true));
+    }
+
+    #[test]
+    fn onboarding_never_prompts_without_a_tty() {
+        // The load-bearing gate for CI, pipes, and `nthpartyfinder ... < /dev/null`:
+        // a prompt there would block a run with nobody to answer it.
+        assert!(!should_prompt_timeout_onboarding(None, None, false, false));
+    }
+
+    #[test]
+    fn onboarding_never_prompts_when_the_answer_is_already_supplied() {
+        // --timeout wins.
+        assert!(!should_prompt_timeout_onboarding(
+            Some(900),
+            None,
+            false,
+            true
+        ));
+        // env override wins.
+        assert!(!should_prompt_timeout_onboarding(
+            None,
+            Some("900"),
+            false,
+            true
+        ));
+        // 0 is a real answer ("no timeout"), not an absent one.
+        assert!(!should_prompt_timeout_onboarding(
+            Some(0),
+            None,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn onboarding_never_prompts_twice() {
+        assert!(!should_prompt_timeout_onboarding(None, None, true, true));
+    }
+
+    // ── first-run timeout onboarding: applying the answer ─────────────
+
+    #[test]
+    fn onboarding_this_run_sets_the_run_timeout_but_persists_nothing() {
+        let (mut cli, mut persisted) = (None, None);
+        apply_timeout_onboarding_choice(
+            Some(TimeoutChoice::ThisRun(1800)),
+            &mut cli,
+            &mut persisted,
+        );
+        assert_eq!(cli, Some(1800));
+        assert_eq!(persisted, None, "ThisRun must not write a new default");
+    }
+
+    #[test]
+    fn onboarding_set_default_sets_both() {
+        let (mut cli, mut persisted) = (None, None);
+        apply_timeout_onboarding_choice(
+            Some(TimeoutChoice::SetDefault(2400)),
+            &mut cli,
+            &mut persisted,
+        );
+        assert_eq!(cli, Some(2400));
+        assert_eq!(persisted, Some(2400));
+    }
+
+    #[test]
+    fn onboarding_keep_default_and_unreadable_input_both_change_nothing() {
+        for choice in [Some(TimeoutChoice::KeepDefault), None] {
+            let (mut cli, mut persisted) = (None, None);
+            apply_timeout_onboarding_choice(choice, &mut cli, &mut persisted);
+            assert_eq!(cli, None, "{choice:?} must not set a run timeout");
+            assert_eq!(persisted, None, "{choice:?} must not persist a default");
+        }
+    }
+
+    #[test]
+    fn onboarding_zero_disables_the_timeout_end_to_end() {
+        // "0" is the documented way to turn the timeout off; prove it survives the
+        // whole chain rather than being treated as "unset" and falling back to 600s.
+        let (mut cli, mut persisted) = (None, None);
+        apply_timeout_onboarding_choice(parse_timeout_choice("0"), &mut cli, &mut persisted);
+        assert_eq!(cli, Some(0));
+        assert_eq!(
+            compute_analysis_timeout_with_env_and_default(cli, None, persisted),
+            None,
+            "0 must resolve to no timeout"
+        );
+    }
+
+    // ── regression guard for the v1.6.1 first-run hang ────────────────
+
+    /// Every blocking stdin read in this file must sit inside a function that also
+    /// suspends the progress bars, or be explicitly allowlisted below.
+    ///
+    /// Why this test exists: in v1.6.1 the first-run timeout prompt printed with raw
+    /// `eprintln!` and blocked on `stdin().read_line()` while an indicatif bar was
+    /// redrawing stderr at 12 Hz. The redraws painted over the prompt, so the user saw
+    /// a bar apparently stuck at "10% Starting vendor discovery..." and no question —
+    /// and Ctrl-C'd out of a scan that had never started. `suspend_for_io` is the
+    /// sanctioned way to ask anything; its doc comment in `logger.rs` says so. This
+    /// test is the mechanical version of that sentence.
+    ///
+    /// It is a lexical check, not a semantic one: it maps each `read_line(` call site
+    /// to its nearest preceding `fn` and asserts that function's body mentions
+    /// `suspend_for_io`. That is enough to catch a new prompt being added the old way.
+    #[test]
+    fn every_stdin_read_is_inside_a_bar_suspending_function() {
+        const SRC: &str = include_str!("app.rs");
+
+        // Functions allowed to read stdin without suspending, each for a stated reason.
+        const ALLOWLIST: &[(&str, &str)] = &[
+            (
+                "read_line",
+                "the RealInput adapter itself — its callers are the audited prompt sites",
+            ),
+            (
+                "run_batch_analysis",
+                "batch mode starts no progress bar before its one prompt",
+            ),
+        ];
+
+        let lines: Vec<&str> = SRC.lines().collect();
+
+        // Locate the test module so its own fixtures are not scanned.
+        let tests_start = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("mod tests"))
+            .unwrap_or(lines.len());
+
+        let mut offenders: Vec<String> = Vec::new();
+
+        for (idx, line) in lines.iter().enumerate().take(tests_start) {
+            if !line.contains("read_line(") || line.trim_start().starts_with("//") {
+                continue;
+            }
+            // Nearest enclosing function declaration. The range is inclusive of `idx`
+            // itself, because `fn read_line(...)` — the trait method and its impl —
+            // matches the `read_line(` search on its own declaration line.
+            let Some(fn_line) = (0..=idx).rev().find(|&i| {
+                let t = lines[i].trim_start();
+                (t.starts_with("fn ")
+                    || t.starts_with("pub fn ")
+                    || t.starts_with("async fn ")
+                    || t.starts_with("pub async fn "))
+                    && lines[i].contains('(')
+            }) else {
+                offenders.push(format!("line {}: no enclosing fn found", idx + 1));
+                continue;
+            };
+            let name = lines[fn_line]
+                .split("fn ")
+                .nth(1)
+                .and_then(|rest| rest.split(['(', '<']).next())
+                .unwrap_or("<unknown>")
+                .trim()
+                .to_string();
+
+            if ALLOWLIST.iter().any(|(allowed, _)| *allowed == name) {
+                continue;
+            }
+            // Body = from the declaration to the next declaration (or the test module).
+            let body_end = ((fn_line + 1)..tests_start)
+                .find(|&i| {
+                    let t = lines[i].trim_start();
+                    t.starts_with("fn ")
+                        || t.starts_with("pub fn ")
+                        || t.starts_with("async fn ")
+                        || t.starts_with("pub async fn ")
+                })
+                .unwrap_or(tests_start);
+            let body = lines[fn_line..body_end].join("\n");
+            if !body.contains("suspend_for_io") {
+                offenders.push(format!(
+                    "line {} in fn `{}` reads stdin without suspend_for_io",
+                    idx + 1,
+                    name
+                ));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "stdin is read while progress bars may be live, which erases the prompt \
+             (the v1.6.1 first-run hang). Wrap the prompt in logger.suspend_for_io, or \
+             add the function to ALLOWLIST with a reason.\n  {}",
+            offenders.join("\n  ")
+        );
+    }
+
+    /// The post-scan interactive prompts in `interactive.rs` are safe only because the
+    /// progress bar is torn down first, and that teardown lives in `analysis.rs` — a
+    /// different file from the prompts it protects. Pin the dependency so deleting the
+    /// teardown fails here instead of silently resurrecting the hang after a scan.
+    #[test]
+    fn analysis_tears_down_the_progress_bar_before_post_scan_prompts() {
+        const ANALYSIS_SRC: &str = include_str!("analysis.rs");
+        assert!(
+            ANALYSIS_SRC.contains("finish_progress"),
+            "analysis.rs no longer finishes the progress bar. The vendor-confirmation \
+             prompts that run after the scan print with raw println! and would be \
+             overwritten by a still-live bar. Either restore the teardown or route \
+             those prompts through logger.suspend_for_io."
+        );
     }
 
     // ── build_full_output_path ────────────────────────────────────────
