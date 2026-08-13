@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.2] - 2026-08-13
 
 ### Fixed
 - **A first run asked you a question you could not see, and then looked like it had hung.** On a freshly installed copy the scan appeared to stop dead at `10% Starting vendor discovery...` and stay there indefinitely. Nothing was scanning. The process was parked in a `read_line`, waiting for an answer to the first-run analysis-timeout prompt — and that prompt had been wiped off the screen before it could be read.
