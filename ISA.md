@@ -1,11 +1,10 @@
 ---
 project: nthpartyfinder
-principal_stated_goal: "Please make it so that installing nthpartyfinder via homebrew by default installs ALL dependencies. And make it so that the install flow is way more seamless and way less clunky -- I had to run a brew trust command after initially trying to install it and it failing, then i had to decide if i wanted to install two optional dependencies, then when i ran nthpartyfinder i was prompted about whether or not i wanted to install subfinder (I chose \"yes\") but then i wasn't prompted to install Chrome headless and then the scan ended up hanging on SaaS tenant discovery probably because Chrome headless wasn't installed and NPF's code doesn't gracefully handle this situation (Yet)."
-task: "Homebrew installs ALL deps by default + seamless/non-clunky install flow + graceful Chrome-missing degradation (no hang) + self-contained data (embed vendor registry / known_vendors / saas_platforms so a Homebrew binary works out-of-the-box). (2026-07-20)"
+principal_stated_goal: "Ok I just tried installing the latest version of nthpartyfinder via homebrew on my other MacBook Pro and when I went to run it it just hung on vendor discovery without any clear indication as to why. I noticed it hanging initially when it first prompted what I wanted my default timeout value to be, so maybe there's an issue with how that feature was implemented? Please investigate and root cause analyze what is broken. [screenshot supplied] || Please first double check your root cause analysis (now that I've switch to Opus), then fix, test, verify, and ship"
+task: "First-run analysis-timeout prompt renders underneath a live progress bar and reads as a hang: the scan never starts, the bar lies (\"10% Starting vendor discovery...\"), and the bar's redraws overwrite the prompt so the user cannot see a question is waiting. Fix the prompt, sweep the class, ship. (2026-08-13)"
 effort: E4
-phase: verify
-progress: "Code COMPLETE + REVIEWED on branch fix/homebrew-deps-seamless-install (off master ff753a9). All gates green on the FINAL post-review code (fmt/clippy -D/lib tests EXIT=0 +8 new/deny/coverage 99.23-98.61/brew style/cargo package verify/release smoke). Adversarial review dispositioned: C1 (probe-driven Chrome disable could false-negative Linux-snap/WSL/~Applications Chrome) ADOPTED via redesign — latch now set only by an actual launch timeout, never a heuristic; M1 mitigated (hard cask dep kept per explicit ask + --adopt caveat); M2 rebutted (brew trust IS real here); L1 void, L3 ack, L4 clean. ISC-522/523/526 LIVE-verified; ISC-520/524/527/528 verified; ISC-525 mechanism verified + unit-tested, live Chrome-absent scan DEFERRED (this box has Chrome). Version 1.4.0→1.5.0. COMMITTED e414928 (13 files, 588+/80-, signed by Justin's Secretive Secure-Enclave ECDSA key via his physical tap — human ship-gate satisfied; author/committer = Jai-on-behalf-of-p4gs per the rule's own example flow). Pushed to origin; PR #88 open (base master). **CI caught a real regression the local gates + `cargo package` missed:** the two Docker builds (`Dockerfile`, `Dockerfile.dev`) COPY `src/`+`config/` but NOT the new `build.rs`, so in-container `cargo` sets no `OUT_DIR` and the `include!(env!("OUT_DIR")/embedded_vendors.rs)` fails (`EMBEDDED_VENDOR_FILES not found`). `cargo package` passed because packaging auto-includes crate-root `build.rs`; Docker uses explicit COPYs. **Fix:** added `COPY build.rs ./` (before the build, after config/ is present) to both Dockerfiles. 25/26 PR checks were green (all 4 cross-platform Build/Coverage 99.23-98.61/CodeQL/Unit/Integration/Fuzz/SAST/deny/secrets); only the Docker `build` job failed. Docker not runnable locally to pre-verify → fix pushed + CI re-watched. Fix commit needs Justin's Secretive tap (2nd commit on the branch). Ship-time follow-ups after CI green: merge PR #88, cut v1.5.0 release (tag), ISC-521 tap push via sync-homebrew-formula.sh v1.5.0, verify brew install on this box (M1 empirical check), WinGet 1.5.0 manifest."
-progress: "SHIPPED as PR #80 (commit bebad11) and MERGED to master by owner (838cf34); ALL 28 CI checks were green pre-merge. Gates green (fmt/clippy -D/4587 tests/deny/coverage 99.26-98.63); Forge+Cato adversarial review actioned (CRITICAL EMFILE-classifier-dead-on-to_string + offline-toggle footgun + docs, all fixed); live monitored re-run confirms sockets bounded (peak ~743 vs pre-fix unbounded→1058-collapse), 0 EMFILE, 0 ping-fails. FOLLOW-UP TASK (owner directive 2026-07-18): retire scripts/safe-scan.sh entirely — all scan safety must be binary-native, no external wrapper. Closed the one remaining gap the wrapper covered that the binary didn't (startup sweep of Chrome/subfinder orphaned by a PRIOR hard-killed run): added browser_pool::sweep_orphaned_chrome + discovery::subfinder::sweep_orphaned_subfinder (both cfg(unix), system-wide sysinfo scan for ppid==1/no-live-parent processes matching our profile signature/name, called at run_inner startup before any new Chrome/subfinder spawns). Removed scripts/safe-scan.sh; reworded 5 doc-comment references; added the standing rule to project CLAUDE.md. Branch fix/binary-native-orphan-sweep (based on origin/master @ 2f23c1d, the 9-dependabot-merge tip). Merged current master (incl. #82 DNS transport ladder + tier-A + DoH hardening) to clear conflict; re-verifying gates."
+phase: climbing
+progress: "RCA CONFIRMED BY REPRODUCTION (not theory): on a real pty with a fresh first-run state (prefs onboarded=false), the binary blocks forever at the timeout prompt — 'Analysis timeout active' never printed in 45s — and a single Enter releases it, immediately logging that line and advancing the bar to 'DNS record analysis'. So the scan never starts; the process sits in std::io::stdin().read_line(). Two defects: (1) app.rs:2159-2184 prints the prompt with raw eprintln!/eprint! and reads stdin WITHOUT logger.suspend_for_io(), while an indicatif MultiProgress bar with a 250ms steady tick redraws on the same stderr — the redraws overwrite the prompt tail so the user never sees the '>' line; (2) app.rs:2148 sets the bar to '10% Starting vendor discovery...' BEFORE the prompt, so the UI asserts a phase the program has not entered. Class sweep of every interactive prompt in flight."
 mode: algorithm
 started: 2026-07-20T00:00:00-04:00
 updated: 2026-07-20T00:00:00-04:00
@@ -29,6 +28,84 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-08-13 — First-run timeout prompt is erased by the live progress bar and reads as a hang
+
+**Trigger (owner, verbatim → `principal_stated_goal`).** Fresh Homebrew install of v1.6.1 on a second MacBook Pro; `nthpartyfinder -d vanta.com -r 3 -f html` appeared to hang at `10% Starting vendor discovery...` with a half-rendered "Analysis timeout (first-run setup)" block above it. Owner Ctrl-C'd out after ~2 minutes and asked for an RCA, then — after switching to a stronger model — asked to double-check the RCA, fix, test, verify and ship.
+
+### Root cause — established by reproduction, not by reading code
+
+Reproduced on a real pty with a first-run prefs state (`onboarded = false`):
+
+- **Send nothing for 45s** → bar ticks at `10% Starting vendor discovery...`; the post-prompt log line `Analysis timeout active: 600s` is *never* emitted (grep count 0). The process is parked in `std::io::stdin().read_line()`.
+- **Send one Enter** → that line prints immediately and the bar advances to `DNS record analysis`.
+
+So the scan never started. Two distinct defects compounded into "silent hang":
+
+1. **The prompt was written outside the bar's suspend.** `app.rs` printed the block with raw `eprintln!`/`eprint!` and read stdin directly, while `AnalysisLogger`'s indicatif `MultiProgress` had been live since `start_init_progress` and redraws stderr at 12 Hz with a 250 ms steady tick. Each redraw repainted over the prompt, erasing its tail — the `<n> d` line and the `> ` caret. `logger.rs`'s own doc comment on `suspend_for_io` states the contract this call site broke: *"All direct stdout/stderr output MUST go through this method while bars are active."* The two sibling prompts in the same function (output directory, checkpoint resume) do use it; this one did not.
+2. **The bar asserted a phase the program had not entered.** `start_scan_progress` — which sets the message to `Starting vendor discovery...` — ran *before* the prompt. So the UI claimed discovery was underway while the process sat waiting for a keystroke the user could not see was wanted.
+
+Independent corroboration (fresh-context agent, no shared reasoning): `discover_nth_parties` sets the bar to `12% DNS record analysis` as its very first act, so a screen frozen at `10% / Starting vendor discovery...` is proof discovery never began. That rules out the competing hypothesis — a repeat of the 2026-07-20 Chrome-absent browser wedge, which produced a superficially identical screen.
+
+### Class sweep — every interactive prompt, against "does a live bar erase it?"
+
+`🧹 CLASS-SWEEP: prompt-under-live-progress-bar — 9 sites via grep read_line + call-graph trace; 1 fixed, 8 tombstoned safe`
+
+| Site | Asks for | Bar live? | Suspended? | Verdict |
+|---|---|---|---|---|
+| `dep_check.rs` (ONNX download, remember-path) | runtime download | no — fires before `start_init_progress` | n/a | safe |
+| `model_fetch.rs` (NER model) | model download | no — same | n/a | safe |
+| `dependencies.rs` (browser / subfinder install) | dep install | no — invoked at `app.rs` before the bar starts | n/a | safe |
+| `app.rs` output directory | output path | yes | **yes** | safe |
+| `app.rs` checkpoint resume / delete | resume | yes | **yes** | safe |
+| **`app.rs` timeout onboarding** | analysis timeout | **yes** | **no** | **BROKEN → fixed** |
+| `interactive.rs` ×6 (vendor org confirmation) | org mappings | no — `analysis.rs` calls `finish_progress`, which `finish_and_clear()`s and drops both bars, before these run | n/a | safe, but safe *by ordering in another file* → pinned by a test |
+| `app.rs` `run_batch_analysis` | start batch | no bar; function has zero callers | n/a | safe |
+
+### Criteria
+
+- [x] **ISC-529** Reproduced before fixing: first run at a pty blocks indefinitely, `Analysis timeout active` never printed. *(probe: `scratchpad/explore.exp`, 45 s, grep count 0)*
+- [x] **ISC-530** Discriminator: a single Enter releases it and the bar advances to `DNS record analysis` — blocked on stdin, not wedged in discovery. *(probe: `scratchpad/unblock.exp` → `RELEASED BY ENTER`)*
+- [x] **ISC-531** Competing hypothesis (Chrome-absent browser wedge, the 2026-07-20 cause of the same screen) actively refuted, not merely unmentioned.
+- [x] **ISC-532** Prompt render + stdin read both happen inside `logger.suspend_for_io`; zero raw writes escape it.
+- [x] **ISC-533** The bar never displays `Starting vendor discovery...` while the program is waiting for input — prompt moved above `start_scan_progress`.
+- [x] **ISC-534** Class swept: every interactive prompt in the crate classified against "bar live?"; each broken one fixed, each safe one tombstoned with its reason.
+- [x] **ISC-535** Gating is unit-testable without a TTY and covers all four conditions (`--timeout`, env, `onboarded`, non-TTY).
+- [x] **ISC-536** Answer-application is unit-tested: `ThisRun` persists nothing, `SetDefault` persists, `KeepDefault`/unreadable change nothing, `0` resolves to no-timeout end to end.
+- [x] **ISC-537** A guard test fails if any stdin read in `app.rs` lands outside a bar-suspending function — **proven non-vacuous** by reintroducing the v1.6.1 shape (test exits 101) and restoring it (exits 0).
+- [x] **ISC-538** The cross-file dependency that keeps `interactive.rs` safe (`analysis.rs` finishing the bar) is pinned by a test, so deleting it fails here rather than silently resurrecting the hang after a scan.
+- [x] **ISC-539** Non-interactive behaviour unchanged: piped stdin never prompts and never blocks. *(probe: run with stdin from `/dev/null`, first-run prefs, expect completion)*
+- [x] **ISC-540** Live end-to-end on a fresh first-run state: prompt renders complete and legible (caret present, nothing overpainted), answering it proceeds into the scan, scan completes.
+- [ ] **ISC-541** Full gates green: `fmt`, `clippy -D warnings`, the full suite via `~/.cargo/bin/cargo test` showing a real `test result: ok` line in the thousands, `cargo deny`, coverage ≥95/95.
+- [ ] **ISC-542** Shipped: branch → PR → all CI checks green → merged to master → master push-CI green.
+
+### Anti-claims — what must NOT happen
+
+- **The prompt must not be deleted.** It is a deliberate feature; the defect is how it renders, not that it exists.
+- **The progress bar must not be disabled or its tick slowed** as a way of dodging the collision.
+- **Non-interactive runs must not gain a prompt or a block.** All four gates stay.
+- **No changes to DNS, browser, discovery or analysis internals.** This is a terminal-UI defect; touching the scan engine would be unrelated risk.
+- **The coverage gate must not be lowered** to accommodate new code.
+
+### Decisions
+
+- **Fix by relocation + suspension, not by silencing the bar.** Suspending is the contract the codebase already documents and already follows at two sibling sites; silencing the bar would trade one UX defect for another.
+- **Prompt moved above `start_scan_progress` rather than grouped with the other first-run prompts.** Grouping would have reordered it ahead of the checkpoint-resume question, changing an unrelated flow; moving it one statement earlier fixes the false phase claim with no reordering risk.
+- **`interactive.rs` tombstoned rather than refactored.** Its six prompts are `async` with awaits interleaved, and `suspend_for_io` takes a sync `FnOnce` — wrapping them is a real refactor of a working vendor-confirmation flow for a hazard that is currently latent, not live. Pinned with a test instead.
+
+### Two more instances of the class, both tombstoned with reasons (not silently skipped)
+
+- **TF-CTRLC-MSG — the Ctrl-C handler's own message is eaten by the same mechanism.** `app.rs` prints `⚠️ Interrupt received. Saving checkpoint and exiting...` with a raw `eprintln!` and then sleeps 2 s, during which the bar redraws ~8× and erases it — which is why the owner's screenshot shows the first `^C` producing nothing but another bar line. **Not fixed, by design:** both available fixes (`suspend_for_io`, `MultiProgress::println`) take indicatif's internal write lock, and this closure runs on the ctrlc handler thread. If the main thread is inside a suspended prompt — holding that lock for as long as the user takes to answer — the handler would block before reaching `process::exit`, so Ctrl-C would stop working at exactly the prompt where a user reaches for it. Trading a cosmetic overdraw for a working Ctrl-C is the right way round. Rationale is now a code comment at the site so nobody "fixes" it into a deadlock.
+- **TF-REDIRECT-LOGS — every log line after the bar starts is silently dropped when stderr is not a TTY.** `AnalysisLogger::print_message` routes through `pb.println` with no TTY check; on a non-TTY indicatif's draw target is hidden and `println` is a no-op, and the `printed` flag is still true so the `eprintln!` fallback never fires. `ProgressAwareWriter` (the *tracing* path) already guards against exactly this and says so in its comment — `print_message` does not. **Measured:** redirecting a run to a file yields 0 occurrences of the post-bar line `Initialization complete`; the same run on a pty yields 1. This is how a perfectly healthy scan in this very session looked "stuck at Checking dependencies" for six minutes. Real and worth fixing, but it is a different failure mode (hidden target discards) on a different code path (logging, not prompting) and would change output for every redirected run — it gets its own change, not a ride-along in this one.
+
+### Follow-ups surfaced (out of scope, filed not fixed)
+
+- **TF-CHROME-LOOKUP** — three divergent Chrome-discovery implementations (`browser_pool::find_chrome_binary` checks `CHROME_PATH` + WSL only; `dep_check::chrome_system_paths` checks macOS app bundles; `browser_install::detect_browser` does a 13-name PATH search). `find_chrome_binary` cannot see a normally-installed macOS Chrome.
+- **TF-CHROME-DOC** — `browser_pool.rs`'s comment describes a "startup pre-flight" that does not exist in 1.6.1; that behaviour only lives in a stale packaged snapshot under `target/package/`.
+- **TF-DEPCHECK-VACUOUS** — `dep_check::check_chrome()` is unreachable in production (`app.rs` passes literal `false`s), so the `default_run_checks_chrome_via_effective_flags` regression test exercises a call shape production never makes.
+- **TF-BROWSER-SEM** — `BROWSER_SEMAPHORE.acquire()` has no timeout; bounded only by peers releasing permits.
+- **TF-BATCH-DEAD** — `run_batch_analysis` has zero callers.
+- **TF-BREW-CAVEAT** — the Homebrew caveat "the scan never hangs" is scoped to browser phases but reads as a global promise; it was false in practice for this defect.
 
 ## Task 2026-07-20 — Homebrew all-deps + seamless install + graceful Chrome degradation + self-contained data
 

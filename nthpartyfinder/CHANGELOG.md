@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **A first run asked you a question you could not see, and then looked like it had hung.** On a freshly installed copy the scan appeared to stop dead at `10% Starting vendor discovery...` and stay there indefinitely. Nothing was scanning. The process was parked in a `read_line`, waiting for an answer to the first-run analysis-timeout prompt — and that prompt had been wiped off the screen before it could be read.
+
+  The prompt printed with raw `eprintln!` while the progress bar was live. indicatif clears the last N terminal lines before every redraw, and with the main bar plus the detail bar N is two — so within one 250 ms tick the last two lines of the prompt, the `<n> d` option and the `>` caret, were erased and painted over by the bar. What survived was a truncated block of text sitting above a bar that claimed a scan was running. It was not: `start_scan_progress` sets that message one statement *before* the prompt, so the interface announced a phase the program had not entered, and the analysis future is not even constructed until afterwards. The 600 s analysis timeout starts later still, so nothing ever rescued the wait — it was unbounded. Escaping with Ctrl-C did not help either: the flag that records "already onboarded" is written after the read, so the next run behaved identically.
+
+  The prompt now renders inside `suspend_for_io` — the helper this codebase already documents as mandatory for interactive I/O, and which both neighbouring prompts already used — and it asks before the bar claims discovery has started. Measured on a first-run state at a pty: bar frames painted over the prompt **175 → 0**, false `Starting vendor discovery...` frames shown before the prompt **2 → 0**. Answering it still works, and a non-interactive run still never prompts, never blocks, and persists nothing.
+
+  Every other interactive prompt was checked against the same question — *can a live bar erase this?* The dependency, ONNX-runtime, NER-model and browser-install prompts all fire before the bar starts. The output-directory and checkpoint-resume prompts already suspended. The post-scan vendor-confirmation prompts are safe only because `analysis.rs` clears the bar first, which is a dependency across two files, so that is now pinned by a test. A further guard test fails if any future stdin read in `app.rs` lands outside a bar-suspending function; it was checked by reintroducing the original defect and confirming the test fails on it.
+
+  Two known instances of the same class are deliberately left alone, with reasons recorded: the Ctrl-C handler's own "Interrupt received" line can still be overdrawn (both fixes for it would take indicatif's lock from a signal-handler thread, which would break Ctrl-C at exactly the prompt where people reach for it), and log lines emitted after the bar starts are dropped when stderr is redirected to a file rather than a terminal (a different failure mode on a different code path, which gets its own change).
+
 ## [1.6.1] - 2026-07-31
 
 ### Fixed
