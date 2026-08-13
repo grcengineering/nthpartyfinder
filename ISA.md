@@ -3,8 +3,8 @@ project: nthpartyfinder
 principal_stated_goal: "Ok I just tried installing the latest version of nthpartyfinder via homebrew on my other MacBook Pro and when I went to run it it just hung on vendor discovery without any clear indication as to why. I noticed it hanging initially when it first prompted what I wanted my default timeout value to be, so maybe there's an issue with how that feature was implemented? Please investigate and root cause analyze what is broken. [screenshot supplied] || Please first double check your root cause analysis (now that I've switch to Opus), then fix, test, verify, and ship"
 task: "First-run analysis-timeout prompt renders underneath a live progress bar and reads as a hang: the scan never starts, the bar lies (\"10% Starting vendor discovery...\"), and the bar's redraws overwrite the prompt so the user cannot see a question is waiting. Fix the prompt, sweep the class, ship. (2026-08-13)"
 effort: E4
-phase: climbing
-progress: "RCA CONFIRMED BY REPRODUCTION (not theory): on a real pty with a fresh first-run state (prefs onboarded=false), the binary blocks forever at the timeout prompt — 'Analysis timeout active' never printed in 45s — and a single Enter releases it, immediately logging that line and advancing the bar to 'DNS record analysis'. So the scan never starts; the process sits in std::io::stdin().read_line(). Two defects: (1) app.rs:2159-2184 prints the prompt with raw eprintln!/eprint! and reads stdin WITHOUT logger.suspend_for_io(), while an indicatif MultiProgress bar with a 250ms steady tick redraws on the same stderr — the redraws overwrite the prompt tail so the user never sees the '>' line; (2) app.rs:2148 sets the bar to '10% Starting vendor discovery...' BEFORE the prompt, so the UI asserts a phase the program has not entered. Class sweep of every interactive prompt in flight."
+phase: complete
+progress: 14/14
 mode: algorithm
 started: 2026-07-20T00:00:00-04:00
 updated: 2026-07-20T00:00:00-04:00
@@ -76,8 +76,8 @@ Independent corroboration (fresh-context agent, no shared reasoning): `discover_
 - [x] **ISC-538** The cross-file dependency that keeps `interactive.rs` safe (`analysis.rs` finishing the bar) is pinned by a test, so deleting it fails here rather than silently resurrecting the hang after a scan.
 - [x] **ISC-539** Non-interactive behaviour unchanged: piped stdin never prompts and never blocks. *(probe: run with stdin from `/dev/null`, first-run prefs, expect completion)*
 - [x] **ISC-540** Live end-to-end on a fresh first-run state: prompt renders complete and legible (caret present, nothing overpainted), answering it proceeds into the scan, scan completes.
-- [ ] **ISC-541** Full gates green: `fmt`, `clippy -D warnings`, the full suite via `~/.cargo/bin/cargo test` showing a real `test result: ok` line in the thousands, `cargo deny`, coverage ≥95/95.
-- [ ] **ISC-542** Shipped: branch → PR → all CI checks green → merged to master → master push-CI green.
+- [x] **ISC-541** Full gates green: `fmt`, `clippy -D warnings`, the full suite via `~/.cargo/bin/cargo test` showing a real `test result: ok` line in the thousands, `cargo deny`, coverage ≥95/95.
+- [x] **ISC-542** Shipped: branch → PR → all CI checks green → merged to master → master push-CI green.
 
 ### Anti-claims — what must NOT happen
 
