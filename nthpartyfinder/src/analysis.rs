@@ -36,6 +36,44 @@ pub fn is_interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Scan-lifetime dedup memos for apex-scoped discovery methods (P1.5) and dispatch
+/// singleflight (P1.1). Constructed once per scan and shared by reference through the
+/// recursion, exactly like `subprocessor_attempted_orgs`. Every method is apex-scoped —
+/// enumerating a registrable base's subdomains, or querying `%.<apex>` on a CT log, or
+/// probing SaaS tenants named after the apex — so running it once per apex covers every
+/// subdomain and every parent that reaches into that apex.
+#[derive(Default)]
+pub struct ScanDedup {
+    /// Registrable bases whose subfinder enumeration has been claimed this scan.
+    subfinder_apexes: Mutex<HashSet<String>>,
+    /// Registrable bases whose CT-log query has been claimed this scan.
+    ct_apexes: Mutex<HashSet<String>>,
+    /// Registrable bases whose SaaS-tenant probe has been claimed this scan.
+    saas_apexes: Mutex<HashSet<String>>,
+}
+
+impl ScanDedup {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Claim `apex` for `set`, returning true iff this is the first claim (so the caller
+    /// should RUN the method). Later claims return false (skip — already covered).
+    async fn claim(set: &Mutex<HashSet<String>>, apex: &str) -> bool {
+        set.lock().await.insert(apex.to_string())
+    }
+
+    async fn claim_subfinder(&self, apex: &str) -> bool {
+        Self::claim(&self.subfinder_apexes, apex).await
+    }
+    async fn claim_ct(&self, apex: &str) -> bool {
+        Self::claim(&self.ct_apexes, apex).await
+    }
+    async fn claim_saas(&self, apex: &str) -> bool {
+        Self::claim(&self.saas_apexes, apex).await
+    }
+}
+
 /// The absolute maximum recursion depth, regardless of user configuration.
 pub const ABSOLUTE_MAX_DEPTH: u32 = 10;
 
@@ -843,6 +881,8 @@ pub async fn discover_nth_parties(
     // re-run the expensive browser-rendered subprocessor lookup on secondary/tertiary
     // domains of an org we already analyzed (slack.com then slack.design/slack.dev/…).
     subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5).
+    scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
     current_depth: u32,
     root_customer_domain: &str,
@@ -1082,6 +1122,46 @@ pub async fn discover_nth_parties(
                 !skip
             };
 
+        // P1.5: apex-scoped dedup for subfinder / CT / SaaS. Each enumerates a registrable
+        // base (subfinder: the base's subdomains; CT: `%.<apex>`; SaaS: tenants named after
+        // the apex), so one run per apex per scan covers every subdomain of that apex and
+        // every parent that reaches into it. A subdomain input skips these entirely — its
+        // apex is always separately queued (add_base_domain_if_subdomain) and carries the
+        // superset. Claim-before-run (like subprocessor_attempted_orgs) so racing reaches of
+        // the same apex can't double-run.
+        // NOTE: these gated bindings are JOIN-LOCAL — they must NOT shadow the discovery
+        // parameters, which are still handed to every child recursion below (each child does
+        // its own apex claim). Disabling a method here for the whole subtree would be a recall
+        // regression.
+        let apex = domain_utils::extract_base_domain(domain);
+        let is_apex = apex == domain;
+        let subfinder_for_join = if is_apex && scan_dedup.claim_subfinder(&apex).await {
+            subdomain_discovery
+        } else {
+            if subdomain_discovery.is_some() {
+                crate::perf::METRICS.subfinder_apex_skip.hit();
+            }
+            None
+        };
+        let ct_for_join = if is_apex && scan_dedup.claim_ct(&apex).await {
+            ct_discovery
+        } else {
+            if ct_discovery.is_some() {
+                crate::perf::METRICS.ct_apex_skip.hit();
+            }
+            None
+        };
+        // SaaS: run_saas_phase already skips subdomains internally (P1.8). Add the
+        // cross-parent apex dedup here: an apex reached via a second parent skips re-probing.
+        let saas_for_join = if !is_apex || scan_dedup.claim_saas(&apex).await {
+            saas_tenant_discovery
+        } else {
+            if saas_tenant_discovery.is_some() {
+                crate::perf::METRICS.saas_apex_skip.hit();
+            }
+            None
+        };
+
         let discovery_started = std::time::Instant::now();
         let (sp, sf, st, ct_v, wt) = tokio::join!(
             crate::perf::timed_async(
@@ -1096,15 +1176,15 @@ pub async fn discover_nth_parties(
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_subfinder,
-                run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
+                run_subfinder_phase(domain, subfinder_for_join, &dns_pool, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_saas,
-                run_saas_phase(domain, saas_tenant_discovery, &logger),
+                run_saas_phase(domain, saas_for_join, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_ct,
-                run_ct_phase(domain, ct_discovery, &logger),
+                run_ct_phase(domain, ct_for_join, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_webtraffic,
@@ -1216,6 +1296,7 @@ pub async fn discover_nth_parties(
                     let discovered_vendors = discovered_vendors.clone();
                     let processed_domains = processed_domains.clone();
                     let subprocessor_attempted_orgs = subprocessor_attempted_orgs.clone();
+                    let scan_dedup = scan_dedup.clone();
                     let semaphore = semaphore.clone();
                     let recursive_semaphore = recursive_semaphore.clone();
                     let domain = domain.to_string();
@@ -1267,6 +1348,7 @@ pub async fn discover_nth_parties(
                             discovered_vendors,
                             processed_domains,
                             subprocessor_attempted_orgs,
+                            scan_dedup,
                             semaphore.clone(),
                             root_customer_domain,
                             root_customer_organization,
@@ -1444,6 +1526,7 @@ pub async fn process_vendor_domain(
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
     processed_domains: Arc<Mutex<HashSet<String>>>,
     subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
     root_customer_domain: String,
     root_customer_organization: String,
@@ -1631,6 +1714,7 @@ pub async fn process_vendor_domain(
         discovered_vendors.clone(),
         processed_domains.clone(),
         subprocessor_attempted_orgs.clone(),
+        scan_dedup.clone(),
         semaphore.clone(),
         current_depth + 1,
         &root_customer_domain,
@@ -1820,6 +1904,23 @@ pub async fn discover_nth_parties_minimal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // P1.5: apex-scoped dedup claims — first claim runs, later claims skip; per-method
+    // independent; per-apex independent.
+    #[tokio::test]
+    async fn test_scan_dedup_claim_semantics() {
+        let d = ScanDedup::new();
+        // First claim of an apex for a method returns true (run); second returns false (skip).
+        assert!(d.claim_subfinder("vanta.com").await, "first claim runs");
+        assert!(!d.claim_subfinder("vanta.com").await, "second claim skips");
+        // A different apex is independent.
+        assert!(d.claim_subfinder("stripe.com").await);
+        // A different method for the same apex is independent.
+        assert!(d.claim_ct("vanta.com").await, "ct is a separate memo");
+        assert!(d.claim_saas("vanta.com").await, "saas is a separate memo");
+        assert!(!d.claim_ct("vanta.com").await);
+        assert!(!d.claim_saas("vanta.com").await);
+    }
 
     #[test]
     fn test_is_common_denominator_new_google_domains() {

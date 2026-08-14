@@ -2116,6 +2116,8 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // Scan-scoped set of orgs whose subprocessor page has already been sought, so
     // secondary domains of an already-analyzed org skip the expensive lookup.
     let subprocessor_attempted_orgs = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5). Constructed once per scan.
+    let scan_dedup = Arc::new(analysis::ScanDedup::new());
     // `--parallel-jobs 0` means "no operator cap", so the semaphore falls back to the
     // depth-1 configured concurrency. A zero-permit semaphore would deadlock any future
     // caller that acquires it.
@@ -2330,6 +2332,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         discovered_vendors.clone(),
         processed_domains.clone(),
         subprocessor_attempted_orgs.clone(),
+        scan_dedup.clone(),
         semaphore.clone(),
         1,
         &root_customer_domain,
