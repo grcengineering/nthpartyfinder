@@ -77,6 +77,38 @@ impl ScanDedup {
 /// The absolute maximum recursion depth, regardless of user configuration.
 pub const ABSOLUTE_MAX_DEPTH: u32 = 10;
 
+/// The outcome of the depth-aware processed-domain gate (P1.3).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProcessedGate {
+    /// Already claimed at a shallower-or-equal depth — skip (a true duplicate reach).
+    Skip,
+    /// New, or reached strictly shallower than before — claim at this depth and proceed
+    /// (re-expansion: the deeper first-crawl truncated the subtree and mislabeled layers).
+    Claim,
+    /// Not yet claimed but this depth exceeds the budget — do not claim, do not proceed
+    /// (it may still be reached within budget via a shallower path later).
+    DepthRefused,
+}
+
+/// Pure decision for the recursion gate. `existing_depth` is the min depth a domain was
+/// previously claimed at (None if never). Depth-aware: a strictly shallower reach re-expands.
+pub fn processed_gate_decision(
+    existing_depth: Option<u32>,
+    current_depth: u32,
+    depth_allowed: bool,
+) -> ProcessedGate {
+    if let Some(claimed) = existing_depth {
+        if current_depth >= claimed {
+            return ProcessedGate::Skip;
+        }
+    }
+    if depth_allowed {
+        ProcessedGate::Claim
+    } else {
+        ProcessedGate::DepthRefused
+    }
+}
+
 /// Check whether the current depth exceeds the allowed limits.
 /// Returns `true` if analysis should proceed, `false` if it should be skipped.
 pub fn is_depth_allowed(current_depth: u32, max_depth: Option<u32>) -> bool {
@@ -876,7 +908,10 @@ pub async fn discover_nth_parties(
     domain: &str,
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
+    // P1.3: domain -> the MINIMUM recursion depth at which it has been claimed. A depth-aware
+    // gate: a domain first reached deep is re-expanded when later reached shallower (else its
+    // subtree keeps inflated layers and its within-budget grandchildren are never discovered).
+    processed_domains: Arc<Mutex<HashMap<String, u32>>>,
     // Normalized org names whose subprocessor page has already been sought, so we don't
     // re-run the expensive browser-rendered subprocessor lookup on secondary/tertiary
     // domains of an org we already analyzed (slack.com then slack.design/slack.dev/…).
@@ -922,15 +957,36 @@ pub async fn discover_nth_parties(
         return Ok(());
     }
 
-    {
-        let processed = processed_domains.lock().await;
-        if processed.contains(domain) {
-            logger.debug(&format!("Domain {} already processed, skipping", domain));
-            return Ok(());
+    // P1.3: one atomic, depth-aware test-and-set. Holding the lock across the read, the
+    // (pure, cheap) depth check, and the insert closes the check-then-insert race that let
+    // two parents run the FULL discovery suite for the same domain concurrently. The gate is
+    // depth-aware: a domain already claimed at a shallower-or-equal depth is skipped; a
+    // strictly shallower reach re-expands (re-claims at the lower depth and proceeds), which
+    // output dedup absorbs. Depth-refused domains are NOT inserted — they may still be reached
+    // within budget via a shallower path later.
+    let depth_refused = {
+        let mut processed = processed_domains.lock().await;
+        match processed_gate_decision(
+            processed.get(domain).copied(),
+            current_depth,
+            is_depth_allowed(current_depth, max_depth),
+        ) {
+            ProcessedGate::Skip => {
+                crate::perf::METRICS.dedup_domain_hit.hit();
+                logger.debug(&format!(
+                    "Domain {} already processed at depth <= {} — skipping",
+                    domain, current_depth
+                ));
+                return Ok(());
+            }
+            ProcessedGate::Claim => {
+                processed.insert(domain.to_string(), current_depth);
+                false
+            }
+            ProcessedGate::DepthRefused => true,
         }
-    }
-
-    if !is_depth_allowed(current_depth, max_depth) {
+    };
+    if depth_refused {
         if current_depth > ABSOLUTE_MAX_DEPTH {
             logger.warn(&format!(
                 "Hit absolute depth cap ({}) for domain {}",
@@ -943,11 +999,6 @@ pub async fn discover_nth_parties(
             ));
         }
         return Ok(());
-    }
-
-    {
-        let mut processed = processed_domains.lock().await;
-        processed.insert(domain.to_string());
     }
 
     logger.record_domain_processed();
@@ -1425,7 +1476,7 @@ pub async fn discover_nth_parties(
                     cp.discovered_vendors = vendors.clone();
                     drop(vendors);
                     let processed = processed_domains.lock().await;
-                    cp.completed_domains = processed.clone();
+                    cp.completed_domains = processed.keys().cloned().collect();
                     drop(processed);
                     let sink = result_sink.lock().await;
                     cp.results_count = sink.count();
@@ -1469,7 +1520,7 @@ pub async fn discover_nth_parties(
                         cp.discovered_vendors = vendors.clone();
                         drop(vendors);
                         let processed = processed_domains.lock().await;
-                        cp.completed_domains = processed.clone();
+                        cp.completed_domains = processed.keys().cloned().collect();
                         drop(processed);
                         let sink = result_sink.lock().await;
                         cp.results_count = sink.count();
@@ -1524,7 +1575,7 @@ pub async fn process_vendor_domain(
     current_depth: u32,
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
+    processed_domains: Arc<Mutex<HashMap<String, u32>>>,
     subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
     scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
@@ -1904,6 +1955,49 @@ pub async fn discover_nth_parties_minimal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // P1.3: depth-aware processed gate — the correctness-critical decision.
+    #[test]
+    fn test_processed_gate_new_domain_claims() {
+        assert_eq!(processed_gate_decision(None, 2, true), ProcessedGate::Claim);
+    }
+
+    #[test]
+    fn test_processed_gate_reached_deeper_or_equal_skips() {
+        // Already claimed at depth 2; a reach at depth 2 or 3 is a true duplicate → skip.
+        assert_eq!(
+            processed_gate_decision(Some(2), 2, true),
+            ProcessedGate::Skip
+        );
+        assert_eq!(
+            processed_gate_decision(Some(2), 3, true),
+            ProcessedGate::Skip
+        );
+    }
+
+    #[test]
+    fn test_processed_gate_reached_shallower_re_expands() {
+        // Claimed deep (3), now reached shallow (1) → re-expand (Claim), not skip.
+        // This is the fix for inflated layers + never-discovered grandchildren.
+        assert_eq!(
+            processed_gate_decision(Some(3), 1, true),
+            ProcessedGate::Claim
+        );
+    }
+
+    #[test]
+    fn test_processed_gate_depth_refused_does_not_claim() {
+        // New domain but over budget → DepthRefused (not inserted, may return within budget).
+        assert_eq!(
+            processed_gate_decision(None, 4, false),
+            ProcessedGate::DepthRefused
+        );
+        // But an already-claimed domain still Skips even when over budget (the claim wins).
+        assert_eq!(
+            processed_gate_decision(Some(2), 4, false),
+            ProcessedGate::Skip
+        );
+    }
 
     // P1.5: apex-scoped dedup claims — first claim runs, later claims skip; per-method
     // independent; per-apex independent.

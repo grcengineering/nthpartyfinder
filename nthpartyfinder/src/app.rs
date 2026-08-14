@@ -2112,7 +2112,15 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
-    let processed_domains = Arc::new(Mutex::new(processed_domains_set));
+    // P1.3/P1.9: the recursion gate is a depth-aware HashMap<domain, min-depth>. The checkpoint
+    // still serializes a depthless HashSet<String> (schema unchanged), so entries restored from a
+    // resume are seeded at depth 0 — the shallowest depth, which the gate treats as "already
+    // covered at the shallowest possible layer" so a resumed domain is never needlessly re-expanded.
+    let processed_domains_map: HashMap<String, u32> = processed_domains_set
+        .into_iter()
+        .map(|d| (d, 0u32))
+        .collect();
+    let processed_domains = Arc::new(Mutex::new(processed_domains_map));
     // Scan-scoped set of orgs whose subprocessor page has already been sought, so
     // secondary domains of an already-analyzed org skip the expensive lookup.
     let subprocessor_attempted_orgs = Arc::new(Mutex::new(std::collections::HashSet::new()));
