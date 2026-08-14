@@ -1,10 +1,10 @@
 ---
 project: nthpartyfinder
-principal_stated_goal: "Ok I just tried installing the latest version of nthpartyfinder via homebrew on my other MacBook Pro and when I went to run it it just hung on vendor discovery without any clear indication as to why. I noticed it hanging initially when it first prompted what I wanted my default timeout value to be, so maybe there's an issue with how that feature was implemented? Please investigate and root cause analyze what is broken. [screenshot supplied] || Please first double check your root cause analysis (now that I've switch to Opus), then fix, test, verify, and ship"
-task: "First-run analysis-timeout prompt renders underneath a live progress bar and reads as a hang: the scan never starts, the bar lies (\"10% Starting vendor discovery...\"), and the bar's redraws overwrite the prompt so the user cannot see a question is waiting. Fix the prompt, sweep the class, ship. (2026-08-13)"
+principal_stated_goal: "Complete Plans/deep-scan-optimization-roadmap.md and ensure that you 1.) add relevant regression and unit tests to our local test suite and GitHub Actions test suite; 2.) perform depth 3 scans against vanta.com with HTML report outputs to validate that your fixes work as intended; 3.) run our test suite at relevant stages throughout your work here to ensure no new bugs are being introduced or regressions are being created"
+task: "IMPLEMENT the deep-scan optimization roadmap: dedup core + quick wins + render/scheduling/accuracy waves, each test-gated, validated by depth-3 vanta.com scans, shipped via PR. (2026-08-14)"
 effort: E4
-phase: complete
-progress: 14/14
+phase: climbing
+progress: 0/14
 mode: algorithm
 started: 2026-07-20T00:00:00-04:00
 updated: 2026-07-20T00:00:00-04:00
@@ -28,6 +28,77 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-08-14 — Implement the optimization roadmap (waves A-E)
+
+**Trigger (owner, verbatim → frontmatter).** Implement Plans/deep-scan-optimization-roadmap.md with (1) regression+unit tests locally and in CI, (2) depth-3 vanta.com HTML-report validation scans, (3) test-suite runs at every stage.
+
+### Criteria
+
+- [ ] **ISC-555** Wave A quick wins implemented: P1.6 canary-once, P1.8 SaaS apex/junk-name gate, P2.5 retry short-circuit, P2.11 DNS root-path hygiene, P4.2 min-layer merge, P4.3 root canonicalization, P4.5 per-layer stats. *(probe: per-item unit tests + code diff)*
+- [ ] **ISC-556** Phase-0 instrumentation live: dedup/dispatch counters, per-tier org telemetry, seed provenance, report-gen timers — visible in the perf attribution table. *(probe: table output on validation scan)*
+- [ ] **ISC-557** Dedup core (P1.1+P1.3 unified depth-aware dispatch claim) implemented: one primitive, dispatch when current_depth < stored_min_depth, edges recorded for all parents, no spawn-then-die duplicates. *(probe: unit tests + dedup.dispatch_avoided counter on scan)*
+- [ ] **ISC-558** P1.2 base-keyed recursion implemented with the review's mitigation (web-traffic render keyed per distinct hostname if A/B shows delta — or documented decision). *(probe: distinct processed keys sharing a base ≈ 1 on scan)*
+- [ ] **ISC-559** P1.4 org-resolution singleflight implemented (OnceCell-per-base; failures memoized same as today). *(probe: unit test + duplicate-chain counter)*
+- [ ] **ISC-560** P1.5 apex memos for subfinder/CT/SaaS implemented claim-before-run. *(probe: unit tests + subfinder run-count on scan)*
+- [ ] **ISC-561** P1.9 checkpoint schema versioned + resume reconciliation for every new structure; legacy checkpoint migration tested. *(probe: interrupt+resume test)*
+- [ ] **ISC-562** Wave C render items P2.1 (no blind re-render; DOM reuse; retry_rescued counter), P2.2 (adaptive settle w/ hard cap), P2.3 (capture idle-exit), P2.4 (tri-state fetch + dead-host memo), P2.6 (per-URL envelope), P2.7 (negative cache w/ outage guard). *(probe: unit tests + render.* metrics on scan)*
+- [ ] **ISC-563** Wave D scheduling: P3.3 async FIFO browser permits, P3.4 checkpoint off driver, P3.5 real pressure-permit withholding, P2.12 WHOIS pacing + connection-permit enrollment. *(probe: unit tests + permit-wait p99 metric)*
+- [ ] **ISC-564** Wave E accuracy: P4.1 BFS layer recompute at export, P4.4 infra-filter consistency, P4.6 edge evidence merging, P4.7 depth-aware org claims, P2.10b CNAME-from-TXT. *(probe: unit tests incl. layer recompute fixture)*
+- [ ] **ISC-565** Every wave gated: fmt + clippy -D + FULL suite via ~/.cargo/bin/cargo test with a real `test result: ok` line (thousands of tests) at each wave boundary; coverage ≥95/95 before PR. *(probe: logged runs)*
+- [ ] **ISC-566** Depth-3 vanta.com validation scan(s) with HTML output on the fixed binary: duplicate SaaS sequences = 1/vendor, subfinder runs ≈ unique apexes, dedup counters nonzero, report loads, edge count sane vs baseline (no silent recall collapse: unique orgs within tolerance of 17,566-baseline-unique modulo run variance). *(probe: scan log + perf table + report)*
+- [ ] **ISC-567** Deferred items carry documented gates, not silence: P2.10a (flapping investigation open), P3.2 (BFS frontier — follow-on), P2.9 SAN-cap A/B, P2.8 offline tally, P2.14/P2.15, P4.8 recall A/B. *(probe: roadmap status column updated)*
+- [ ] **ISC-568** Shipped: branch → PR → all checks green → merged (or PR left open only if owner gate requires) → master CI green; new tests running in GitHub Actions (CI runs the full suite — verify new test names appear in CI logs). *(probe: PR checks + CI log grep)*
+
+### Anti-claims
+
+- **No recall regressions ratified silently**: any A/B delta in relationship sets beyond run variance is surfaced, never absorbed.
+- **No coverage-gate lowering; no scanner-finding suppression.**
+- **No wrapper scripts; all safety/behavior stays binary-native.**
+- **Gated roadmap items stay gated** — implementing P2.10a or P3.2 in this pass without their preconditions would violate the roadmap's own review dispositions.
+- **The 3-permit subfinder pool and 5-QPS Do53 budget are deliberate WAN bounds — never raised as an "optimization".**
+
+### Log
+
+- Branch perf/deep-scan-dedup-roadmap off master 73eeb5f. Baseline suite: 4,415 green on af4771a; zero code commits between af4771a and branch base besides version bump.
+- Forge unavailable (codex unauthenticated) — in-family implementation + review; claim-11 note.
+- **Wave A landed** (7 items): P4.2 min-layer merge (app.rs), P4.3 canonicalize_scan_target + base-collapsed root identity (app.rs), P4.5 count_vendors_by_min_layer (export.rs), P1.6 SaaS canary OnceCell (saas_tenant.rs), P1.8 base-label tenant names + apex-only SaaS gate (saas_tenant.rs + analysis.rs), P2.5 subprocessor dead-host short-circuit (subprocessor.rs). Phase-0 counters added to perf.rs (38 total): dedup.domain_hit/dispatch_avoided/org_subproc_skip, whois.cache_hit, subproc.dead_host_skip, saas/subfinder/ct.apex_skip. +~14 unit tests incl. the flipped test_generate_tenant_names_subdomain (was asserting the bug). fmt+clippy-D clean; full suite running at wave boundary.
+- **Decision:** P2.11 (DNS root-path UDP-budget hygiene) moved out of Wave A into the DNS wave — it edits the incident-sensitive dns.rs and should be validated with P2.10b together, not piecemeal. Recorded in roadmap status banner.
+
+## Task 2026-08-13b — Depth-3 live-scan inspection + efficiency RCA → optimization roadmap
+
+**Trigger (owner, verbatim → `principal_stated_goal`).** Run + closely inspect a depth-3 vanta.com scan (no timeout, HTML report); find optimization opportunities across efficiency/accuracy/effectiveness/performance; root-cause each in the code; produce a thorough roadmap. Special mandate: dedup of redundant scanning at depths 2+.
+
+### Criteria
+
+- [x] **ISC-543** The depth-3 vanta.com scan (shipped v1.6.2 binary, cold cache, `--timeout 0`, `-f html`, all default methods) ran to completion: exit code recorded, HTML report exists and is non-trivial. *(probe: exit code + report file size + relationship count)*
+- [x] **ISC-544** Scan telemetry captured for analysis: full pty log, perf attribution table, wall-clock, phase timings. *(probe: /tmp/npf-d3-scan/scan.raw + perf table present)*
+- [x] **ISC-545** Every inefficiency observed in the live scan is mapped to a root cause with file:line evidence — no "it was slow" without a mechanism.
+- [x] **ISC-546** Depth-2+ redundant-scanning paths enumerated exhaustively: every dedup structure named (what it covers, what leaks), each leak with file:line and, where measurable, scan-log evidence.
+- [x] **ISC-547** Known open perf items (TF-SINGLEFLIGHT, TF-PREFIRE, TF-EDGEDEDUP, subfinder DNS-memo bypass, TF-CONN-CEILING, TF-SUBPROC-SETTLE, TF-WT-BLOCK, TF-DEEP-PERF, ISC-439 global budget) re-verified against current master — folded in or marked fixed, never re-derived blindly.
+- [x] **ISC-548** Accuracy/effectiveness analyzed, not just speed: attribution quality, coverage gaps, layer assignment, duplicate/double-counted relationships in the report.
+- [x] **ISC-549** Roadmap document exists in-repo; every item carries: problem → root cause (file:line) → proposed change → expected impact → verification probe → effort/risk.
+- [x] **ISC-550** Roadmap is prioritized (impact × effort), phased, with a dedicated depth-2+ dedup section.
+- [x] **ISC-551** Each major roadmap item is tied to observed scan data where measurable, or explicitly marked static-analysis-only.
+- [x] **ISC-552** Independent second look on the roadmap ran (fresh-context, non-forked); findings dispositioned in the Log.
+- [x] **ISC-553** Anti-claims held: zero product-code changes shipped by this task; the scan ran on the shipped binary; no network collapse (machine stayed usable; scan's own DNS-health counters inspected).
+- [x] **ISC-554** ISA closed: progress M/N, evidence stubs, follow-ups filed.
+
+### Anti-claims
+
+- **No code changes in this task** — it produces analysis + a roadmap; implementation is follow-on work.
+- **No scanner-safety wrappers** (standing repo rule) and no config tuning to make the scan "look" faster — inspect the default experience.
+- **Do not trust prior sessions' measurements** where the code has since changed — re-verify on master or mark stale.
+
+### Log
+
+- Scan launched 2026-08-13 22:48 EDT, PID recorded, pty capture at /tmp/npf-d3-scan/scan.raw.
+- Nine-lens workflow returned 83 file:line-cited findings; 6 load-bearing claims spot-verified natively (dead semaphores, dedup key, subfinder raw_record, checkpoint-in-driver, vendor limits, per-call SaaS baselines) before roadmap authorship.
+- Roadmap authored at Plans/deep-scan-optimization-roadmap.md.
+- **Second look (fresh-context, non-forked) verdict: PASS-WITH-FIXES.** ~35 citations spot-checked, all load-bearing claims verified. 13 findings, ALL ADOPTED (0 rebutted): F1 P1.1/P1.3 claim-semantics unification (HIGH — P1.1 as drafted would have re-created the depth-blind defect at dispatch); F2 P1.2 risk note rewritten to name the browser-phase recall delta; F3 new P1.9 checkpoint/resume reconciliation item; F4 P2.10 reframed as gated owner decision (GRC-367 deliberately armed the limiter; depth-3 flapping investigation still open); F5 P2.9 SAN cap narrowed to corroborated-only; F6 P1.3 probe made falsifiable (layer-assignment identity, not set identity); F7 TF-PREFIRE/TF-SINGLEFLIGHT cited on their implementing items, TF-WT-BLOCK added to out-of-scope; F8 new P2.15 batch-mode scope; F9 new P2.14 cross-scan org cache; F10 P2.6 "silent" wording corrected (1.6.1 classifies truncation); F11 245/290 number drift fixed + P1.5 SaaS-memo-key sequence annotation; F12 84% render figure marked pre-1.6.1-stale + retry_rescued counter made mandatory; F13 new P0.4 report-generation measurement (the one stone the lenses left unturned).
+- Measurement caveat: 9-agent workflow ran concurrently with the scan's first ~25 min (load avg peaked 326) — wall-clock from that window is contended; redundancy COUNTS (the mandate's evidence) are load-independent.
+- Evidence stubs: ISC-543 scan completed (wall 10,416s; 32.8MB HTML, 14,836 rels; clean SIGINT after export, 0 orphans). ISC-544 pty log 74,521 lines + full perf table captured. ISC-545/546 roadmap items all file:line-cited; headline measured: 112,872→17,566 edge dedup (84.4% duplicates), 20 duplicate SaaS sequences, 63-vs-756 d2/d3 pass split, subfinder phase 99.3% queue wait, 515/820 zero-yield budget exhaustion, 343 DNS-failure WARNs + ladder demotions. ISC-547 prior-art table (19 items, in Anti-roadmap). ISC-548 Phase 4 (8 accuracy items). ISC-549/550/551 Plans/deep-scan-optimization-roadmap.md (5 phases + anti-roadmap + sequencing + measured appendix, [measured]/[static] tagged). ISC-552 fresh-context review PASS-WITH-FIXES, 13/13 adopted (dispositions above). ISC-553 zero code changes; shipped binary; network healthy; 0 orphans. ISC-554 this close.
+- Follow-ups filed (roadmap carries them): post-scan A/R/S review prompt parks unattended pty runs after export (1,887-item review; needs non-interactive default) — same prompt-class as the v1.6.2 first-run fix; phase.ct=0 confirms CT off by default in shipped config.
 
 ## Task 2026-08-13 — First-run timeout prompt is erased by the live progress bar and reads as a hang
 

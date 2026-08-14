@@ -135,6 +135,30 @@ pub struct Metrics {
     pub depth_d4: Metric,
     /// Whole-discovery wall time spent at recursion depth 5 or deeper.
     pub depth_d5plus: Metric,
+
+    // ── Dedup / redundancy visibility (Phase 0 of the depth-2+ optimization roadmap) ──
+    /// A recursion target that was already in `processed_domains` — a duplicate reach of a
+    /// domain whose full discovery had already run (or is running) under another parent.
+    pub dedup_domain_hit: Metric,
+    /// A duplicate vendor base skipped at DISPATCH time (P1.1) — the edge was still recorded,
+    /// but no recursion task was constructed because the base is already claimed at ≤ this depth.
+    pub dedup_dispatch_avoided: Metric,
+    /// An org-level subprocessor lookup skipped because another domain of the same org already
+    /// claimed it (the existing `subprocessor_attempted_orgs` gate).
+    pub dedup_org_subproc_skip: Metric,
+    /// A per-domain org resolution served from the in-memory memo instead of the full
+    /// WHOIS/web/NER chain (P1.4 singleflight/memo hit).
+    pub whois_cache_hit: Metric,
+    /// A subprocessor candidate URL skipped because its host was already transport-dead this
+    /// pass (P2.5).
+    pub subproc_dead_host_skip: Metric,
+    /// A SaaS-tenant phase skipped for a subdomain input because its apex carries the probe
+    /// (P1.8).
+    pub saas_apex_skip: Metric,
+    /// A subfinder enumeration skipped because its apex was already enumerated this scan (P1.5).
+    pub subfinder_apex_skip: Metric,
+    /// A CT-log query skipped because its apex was already queried this scan (P1.5).
+    pub ct_apex_skip: Metric,
 }
 
 impl Metrics {
@@ -170,6 +194,14 @@ impl Metrics {
             depth_d3: Metric::new(),
             depth_d4: Metric::new(),
             depth_d5plus: Metric::new(),
+            dedup_domain_hit: Metric::new(),
+            dedup_dispatch_avoided: Metric::new(),
+            dedup_org_subproc_skip: Metric::new(),
+            whois_cache_hit: Metric::new(),
+            subproc_dead_host_skip: Metric::new(),
+            saas_apex_skip: Metric::new(),
+            subfinder_apex_skip: Metric::new(),
+            ct_apex_skip: Metric::new(),
         }
     }
 
@@ -194,7 +226,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 30] {
+    fn all(&self) -> [(&'static str, &Metric); 38] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -226,6 +258,14 @@ impl Metrics {
             ("depth.d3", &self.depth_d3),
             ("depth.d4", &self.depth_d4),
             ("depth.d5plus", &self.depth_d5plus),
+            ("dedup.domain_hit", &self.dedup_domain_hit),
+            ("dedup.dispatch_avoided", &self.dedup_dispatch_avoided),
+            ("dedup.org_subproc_skip", &self.dedup_org_subproc_skip),
+            ("whois.cache_hit", &self.whois_cache_hit),
+            ("subproc.dead_host_skip", &self.subproc_dead_host_skip),
+            ("saas.apex_skip", &self.saas_apex_skip),
+            ("subfinder.apex_skip", &self.subfinder_apex_skip),
+            ("ct.apex_skip", &self.ct_apex_skip),
         ]
     }
 
@@ -776,13 +816,21 @@ mod tests {
             "depth.d3",
             "depth.d4",
             "depth.d5plus",
+            "dedup.domain_hit",
+            "dedup.dispatch_avoided",
+            "dedup.org_subproc_skip",
+            "whois.cache_hit",
+            "subproc.dead_host_skip",
+            "saas.apex_skip",
+            "subfinder.apex_skip",
+            "ct.apex_skip",
         ] {
             assert!(
                 snap.get(expected).is_some(),
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 30);
+        assert_eq!(snap.rows.len(), 38);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed

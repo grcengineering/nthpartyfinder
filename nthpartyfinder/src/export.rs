@@ -197,6 +197,33 @@ struct ExportSummary {
     unique_organizations: usize,
 }
 
+/// P4.5: count DISTINCT vendor domains per layer, assigning each vendor to its
+/// MINIMUM layer, so a vendor lands in exactly one band. The old per-layer stat
+/// counted `(parent, child, source)` rows: a vendor discovered via three sources
+/// counted 3×, and a vendor appearing at two layers counted in both bands. Returns
+/// a Vec indexed by layer (1..=max), each entry the distinct-vendor count for that band.
+pub fn count_vendors_by_min_layer(relationships: &[VendorRelationship]) -> Vec<(u32, usize)> {
+    use std::collections::HashMap;
+    // vendor domain -> minimum layer it appears at
+    let mut min_layer: HashMap<&str, u32> = HashMap::new();
+    for r in relationships {
+        let e = min_layer
+            .entry(r.nth_party_domain.as_str())
+            .or_insert(r.nth_party_layer);
+        if r.nth_party_layer < *e {
+            *e = r.nth_party_layer;
+        }
+    }
+    let max_layer = min_layer.values().copied().max().unwrap_or(0);
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    for layer in min_layer.values() {
+        *counts.entry(*layer).or_insert(0) += 1;
+    }
+    (1..=max_layer)
+        .filter_map(|l| counts.get(&l).map(|&c| (l, c)))
+        .collect()
+}
+
 pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
     if relationships.is_empty() {
         println!("No vendor relationships found.");
@@ -223,16 +250,9 @@ pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
     println!("Unique vendor domains: {}", unique_domains.len());
     println!("Unique vendor organizations: {}", unique_orgs.len());
 
-    // Show breakdown by layer
-    for layer in 1..=max_depth {
-        let layer_count = relationships
-            .iter()
-            .filter(|r| r.nth_party_layer == layer)
-            .count();
-
-        if layer_count > 0 {
-            println!("  Layer {} vendors: {}", layer, layer_count);
-        }
+    // Show breakdown by layer — distinct vendors per min-layer band (P4.5).
+    for (layer, count) in count_vendors_by_min_layer(relationships) {
+        println!("  Layer {} vendors: {}", layer, count);
     }
 
     println!("========================\n");
@@ -319,16 +339,10 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     }
     content.push('\n');
 
-    // Breakdown by layer
+    // Breakdown by layer — distinct vendors per min-layer band (P4.5).
     content.push_str("### Breakdown by Layer\n\n");
-    for layer in 1..=max_depth {
-        let layer_count = relationships
-            .iter()
-            .filter(|r| r.nth_party_layer == layer)
-            .count();
-        if layer_count > 0 {
-            content.push_str(&format!("- **Layer {} vendors:** {}\n", layer, layer_count));
-        }
+    for (layer, count) in count_vendors_by_min_layer(relationships) {
+        content.push_str(&format!("- **Layer {} vendors:** {}\n", layer, count));
     }
     content.push('\n');
 
@@ -968,6 +982,31 @@ mod tests {
         ];
         // Just verify it doesn't panic and prints layer breakdown
         print_analysis_summary(&rels);
+    }
+
+    // P4.5: distinct vendors per min-layer band, not (parent,child,source) rows.
+    #[test]
+    fn test_count_vendors_by_min_layer_counts_distinct_vendors() {
+        let rels = vec![
+            // one vendor, three source rows at layer 2 -> counts ONCE in layer 2
+            make_vendor("a.com", "A", 2, RecordType::DnsTxtSpf),
+            make_vendor("a.com", "A", 2, RecordType::DnsTxtDmarc),
+            make_vendor("a.com", "A", 2, RecordType::DnsTxtVerification),
+            // one vendor at layers 3 and 2 -> counts ONCE, in its MIN band (2)
+            make_vendor("b.com", "B", 3, RecordType::DnsTxtSpf),
+            make_vendor("b.com", "B", 2, RecordType::DnsTxtSpf),
+            // a genuine layer-3 vendor
+            make_vendor("c.com", "C", 3, RecordType::DnsTxtSpf),
+        ];
+        let counts = count_vendors_by_min_layer(&rels);
+        // layer 2: a.com + b.com = 2 distinct; layer 3: c.com = 1 distinct.
+        assert_eq!(counts, vec![(2, 2), (3, 1)]);
+        // Old (wrong) row-count would have been layer2=4, layer3=2.
+    }
+
+    #[test]
+    fn test_count_vendors_by_min_layer_empty() {
+        assert!(count_vendors_by_min_layer(&[]).is_empty());
     }
 
     #[test]

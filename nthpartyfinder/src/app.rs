@@ -139,6 +139,13 @@ pub fn deduplicate_results(results: Vec<VendorRelationship>) -> (Vec<VendorRelat
             if !existing.evidence.contains(&r.evidence) {
                 existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
             }
+            // P4.2: the same (vendor, customer, record-type) edge is genuinely recorded
+            // at more than one depth (a vendor reached via both a shallow and a deep
+            // parent). The dedup key omits the layer, so without this the surviving row
+            // keeps whichever layer was written first — nondeterministic across runs and
+            // often the deeper (wrong) one. Keep the minimum: an edge's honest layer is
+            // the shallowest path that reaches it.
+            existing.nth_party_layer = existing.nth_party_layer.min(r.nth_party_layer);
         } else {
             seen.insert(key, deduped.len());
             deduped.push(r);
@@ -391,6 +398,39 @@ fn prompt_timeout_onboarding(logger: &AnalysisLogger) -> Option<TimeoutChoice> {
 /// Construct the full output path from output_dir and filename.
 pub fn build_full_output_path(output_dir: &str, output_filename: &str) -> PathBuf {
     Path::new(output_dir).join(output_filename)
+}
+
+/// P4.3: canonicalize a user-typed scan target so the root node's identity matches
+/// the edge-side normalization (`extract_base_domain`, which lowercases + PSL-collapses).
+/// Without this, a `www.`/mixed-case/scheme-prefixed target produced a graph whose root id
+/// (raw string) never matched any edge's `nth_party_customer_domain` (base-collapsed), so the
+/// HTML graph rendered empty. Strips scheme, path, trailing dot, port, and lowercases; does
+/// NOT PSL-collapse (that is the caller's `extract_base_domain` step) so an intentional
+/// subdomain scan target is preserved for discovery.
+pub fn canonicalize_scan_target(raw: &str) -> String {
+    let mut s = raw.trim();
+    // Strip scheme.
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = s.strip_prefix(scheme) {
+            s = rest;
+            break;
+        }
+    }
+    // Drop anything from the first path separator onward.
+    if let Some(slash) = s.find('/') {
+        s = &s[..slash];
+    }
+    // Drop credentials (user@host) if present.
+    if let Some(at) = s.rfind('@') {
+        s = &s[at + 1..];
+    }
+    // Drop a trailing :port.
+    if let Some(colon) = s.rfind(':') {
+        if s[colon + 1..].chars().all(|c| c.is_ascii_digit()) && !s[colon + 1..].is_empty() {
+            s = &s[..colon];
+        }
+    }
+    s.trim_end_matches('.').to_lowercase()
 }
 
 /// Determine whether a checkpoint is compatible and should be resumed,
@@ -1781,10 +1821,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         return Ok(());
     }
 
-    let domain = args
+    let domain_raw = args
         .domain
         .as_ref()
         .expect("Domain is required when not using --init or --input-file");
+    // P4.3: canonicalize once at intake; every downstream use (scan target, whois,
+    // output filename, root identity) sees the same normalized form.
+    let domain_canonical = canonicalize_scan_target(domain_raw);
+    let domain = &domain_canonical;
 
     let output_dir = match args.get_domain_output_dir() {
         Ok(dir) => dir,
@@ -2055,8 +2099,16 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
-    let root_customer_domain = domain.clone();
-    let root_customer_org = discovered_vendors.get(domain).unwrap_or(domain).clone();
+    // P4.3: the root's identity must equal the base-collapsed form that every depth-1
+    // edge uses as its `nth_party_customer_domain`, or the HTML graph's root node has no
+    // children. `domain` is already canonical (scheme/case/port stripped); collapse to the
+    // registrable base to match `extract_base_domain` on the edge side.
+    let root_customer_domain = crate::domain_utils::extract_base_domain(domain);
+    let root_customer_org = discovered_vendors
+        .get(&root_customer_domain)
+        .or_else(|| discovered_vendors.get(domain))
+        .unwrap_or(&root_customer_domain)
+        .clone();
 
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
@@ -3218,6 +3270,54 @@ mod tests {
         )
     }
 
+    // ── canonicalize_scan_target (P4.3) ────────────────────────────────
+
+    #[test]
+    fn test_canonicalize_scan_target_plain() {
+        assert_eq!(canonicalize_scan_target("vanta.com"), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_lowercases_and_trims() {
+        assert_eq!(canonicalize_scan_target("  Vanta.COM  "), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_strips_scheme_path_port() {
+        assert_eq!(
+            canonicalize_scan_target("https://vanta.com/security"),
+            "vanta.com"
+        );
+        assert_eq!(
+            canonicalize_scan_target("http://vanta.com:8443"),
+            "vanta.com"
+        );
+        assert_eq!(canonicalize_scan_target("vanta.com."), "vanta.com");
+        assert_eq!(canonicalize_scan_target("user@vanta.com"), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_preserves_subdomain() {
+        // Canonicalization does NOT PSL-collapse — a subdomain scan target survives.
+        assert_eq!(canonicalize_scan_target("www.vanta.com"), "www.vanta.com");
+        assert_eq!(
+            canonicalize_scan_target("APP.example.com"),
+            "app.example.com"
+        );
+    }
+
+    // The graph-disconnect fix: after canonicalization, the root customer domain
+    // (extract_base_domain of the canonical target) equals what depth-1 edges use.
+    #[test]
+    fn test_root_identity_matches_edge_side_for_www_target() {
+        let canonical = canonicalize_scan_target("www.vanta.com");
+        let root = crate::domain_utils::extract_base_domain(&canonical);
+        // A depth-1 edge's customer domain is extract_base_domain of the same target.
+        let edge_customer = crate::domain_utils::extract_base_domain("www.vanta.com");
+        assert_eq!(root, edge_customer);
+        assert_eq!(root, "vanta.com");
+    }
+
     // ── build_output_filename ──────────────────────────────────────────
 
     #[test]
@@ -3395,6 +3495,59 @@ mod tests {
         assert_eq!(raw, 2);
         assert!(deduped[0].evidence.contains("evidence-A"));
         assert!(deduped[0].evidence.contains("evidence-B"));
+    }
+
+    /// Like `make_relationship` but with an explicit nth_party_layer, for the
+    /// layer-merge regression tests below.
+    fn make_relationship_at_layer(
+        domain: &str,
+        customer_domain: &str,
+        record_type: RecordType,
+        evidence: &str,
+        layer: u32,
+    ) -> VendorRelationship {
+        VendorRelationship::new(
+            domain.to_string(),
+            "Org".to_string(),
+            layer,
+            customer_domain.to_string(),
+            "Customer Org".to_string(),
+            "record".to_string(),
+            record_type,
+            "root.com".to_string(),
+            "Root Org".to_string(),
+            evidence.to_string(),
+        )
+    }
+
+    // P4.2 regression: deduplicate_results must keep the MINIMUM layer across merged
+    // rows, deterministically, regardless of input order.
+    #[test]
+    fn test_deduplicate_keeps_minimum_layer_deep_then_shallow() {
+        let results = vec![
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 3),
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (deduped, _) = deduplicate_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].nth_party_layer, 2,
+            "must keep the shallower layer"
+        );
+    }
+
+    #[test]
+    fn test_deduplicate_keeps_minimum_layer_shallow_then_deep() {
+        let results = vec![
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 2),
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 4),
+        ];
+        let (deduped, _) = deduplicate_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].nth_party_layer, 2,
+            "order must not change the result"
+        );
     }
 
     #[test]

@@ -51,6 +51,37 @@ const EXACT_MATCH_MAX_LEN: usize = 3;
 
 /// Insert an org→domain mapping key, refusing keys too short to match safely.
 /// See [`MIN_ORG_KEY_LEN`].
+/// P2.5: extract the host from a `scheme://host[:port]/path` candidate URL, for the
+/// per-host dead-host short-circuit. Pure and lightweight — no URL crate needed.
+fn subproc_url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host = host_port
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(host_port);
+    // Strip a :port.
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
+}
+
+/// P2.5: distinguish a HOST-level transport failure (every connection attempt failed —
+/// DNS/refused/connect-timeout, so no path on this host can succeed this pass) from a
+/// PATH-level failure (a 404/415 on one URL, which says nothing about sibling paths).
+/// Keyed on the exact message `scrape_subprocessor_page_with_retry` emits when all attempts
+/// fail transport; an "HTTP error: <status>" or content-type rejection is path-level.
+fn is_transport_dead_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("HTTP attempts failed") || msg.contains("No HTTP attempt was made")
+}
+
 fn insert_org_key(
     mapping: &mut std::collections::HashMap<String, String>,
     key: &str,
@@ -1686,11 +1717,26 @@ impl SubprocessorAnalyzer {
         let mut working_urls: Vec<String> = Vec::new();
         let mut categories_done: std::collections::HashSet<SubprocessorSourceCategory> =
             std::collections::HashSet::new();
+        // P2.5: hosts that failed at the transport level this pass. The first ~25 candidates
+        // span only a handful of distinct hosts, so once `trust.{domain}` (or the apex) blackholes
+        // every connection, probing its remaining candidates just re-pays the connect-timeout ×
+        // retries. Skip them — a host that refused all connections cannot serve a sibling path.
+        let mut dead_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Stop once every source category has yielded a result.
             if categories_done.len() >= SUBPROCESSOR_SOURCE_CATEGORY_COUNT {
                 break;
+            }
+            // P2.5: skip candidates on a host already proven transport-dead this pass.
+            if let Some(host) = subproc_url_host(url) {
+                if dead_hosts.contains(&host) {
+                    debug!(
+                        "Skipping {} — host {} already transport-dead this pass",
+                        url, host
+                    );
+                    continue;
+                }
             }
             let working_elapsed = analysis_start
                 .elapsed()
@@ -1821,6 +1867,14 @@ impl SubprocessorAnalyzer {
                 }
                 Err(e) => {
                     debug!("Failed to scrape {}: {}", url, e);
+                    // P2.5: a transport-level failure means the host is unreachable, not that
+                    // this path is missing — mark the host so its remaining candidates are skipped.
+                    if is_transport_dead_error(&e) {
+                        if let Some(host) = subproc_url_host(url) {
+                            crate::perf::METRICS.subproc_dead_host_skip.hit();
+                            dead_hosts.insert(host);
+                        }
+                    }
                     if let Some(logger) = logger {
                         logger.log_failure(
                             domain,
@@ -7319,6 +7373,45 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
     use super::*;
     use crate::vendor::RecordType;
+
+    // ── P2.5: dead-host short-circuit helpers ──────────────────────────
+
+    #[test]
+    fn test_subproc_url_host_extracts_host() {
+        assert_eq!(
+            subproc_url_host("https://trust.example.com/subprocessors"),
+            Some("trust.example.com".to_string())
+        );
+        assert_eq!(
+            subproc_url_host("https://example.com:8443/legal"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            subproc_url_host("http://EXAMPLE.com/"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            subproc_url_host("https://example.com"),
+            Some("example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_is_transport_dead_error_distinguishes_host_from_path() {
+        // Transport-dead: every attempt failed at connection level -> host is dead.
+        let transport = anyhow::anyhow!("All 3 HTTP attempts failed for URL https://x/y: refused");
+        assert!(is_transport_dead_error(&transport));
+        let no_attempt =
+            anyhow::anyhow!("No HTTP attempt was made for URL https://x (max_retries = 0)");
+        assert!(is_transport_dead_error(&no_attempt));
+
+        // Path-level: an HTTP status or content-type rejection says nothing about the host.
+        let http_status = anyhow::anyhow!("HTTP error: 404 Not Found");
+        assert!(!is_transport_dead_error(&http_status));
+        let content_type =
+            anyhow::anyhow!("Invalid content type: application/json (expected HTML or PDF)");
+        assert!(!is_transport_dead_error(&content_type));
+    }
 
     #[test]
     fn a_transient_source_error_never_licenses_deleting_the_learned_cache() {

@@ -15,6 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 #[cfg(not(coverage))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(coverage)]
 use tracing::debug;
@@ -79,6 +80,13 @@ pub struct SaasTenantDiscovery {
     #[allow(dead_code)]
     timeout: Duration,
     concurrency: usize,
+    // P1.6: the baseline canary probes hit a FIXED canary tenant name against each
+    // unique pattern, so their results are a pure function of the platform set —
+    // completely independent of the domain being probed. This instance is scan-global
+    // (constructed once in app.rs and shared by reference through the recursion), so the
+    // baselines are computed exactly once per scan instead of re-fetched (42 requests)
+    // for every one of hundreds-to-thousands of analyzed domains.
+    baselines: Arc<tokio::sync::OnceCell<HashMap<String, BaselineResponse>>>,
 }
 
 impl SaasTenantDiscovery {
@@ -95,6 +103,7 @@ impl SaasTenantDiscovery {
             client,
             timeout,
             concurrency,
+            baselines: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -212,17 +221,9 @@ impl SaasTenantDiscovery {
 
     // cfg(not(coverage)): performs live HTTP probes against SaaS tenant URLs — requires network
     #[cfg(not(coverage))]
-    pub async fn probe_with_logger(
-        &self,
-        target_domain: &str,
-        logger: Option<&AnalysisLogger>,
-    ) -> Result<Vec<TenantProbeResult>> {
-        let tenant_names = generate_tenant_names(target_domain);
-        debug!("Generated tenant name candidates: {:?}", tenant_names);
-
-        // Phase 1: Baseline canary probes — one per unique pattern
-        // Detects wildcard platforms that return identical responses for any tenant
-        let mut baselines: HashMap<String, BaselineResponse> = HashMap::new();
+    /// P1.6: fetch one baseline canary probe per unique tenant pattern. Domain-invariant
+    /// (the canary tenant name is fixed), so this runs once per scan behind the OnceCell.
+    async fn compute_baselines(&self) -> HashMap<String, BaselineResponse> {
         let unique_patterns: Vec<String> = self
             .platforms
             .iter()
@@ -230,15 +231,6 @@ impl SaasTenantDiscovery {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-
-        if let Some(log) = logger {
-            log.show_sub_progress(&format!(
-                "Probing SaaS platforms for {} (baselining {} patterns)",
-                target_domain,
-                unique_patterns.len()
-            ))
-            .await;
-        }
 
         let baseline_results: Vec<(String, Option<BaselineResponse>)> =
             stream::iter(unique_patterns)
@@ -253,6 +245,7 @@ impl SaasTenantDiscovery {
                 .collect()
                 .await;
 
+        let mut baselines: HashMap<String, BaselineResponse> = HashMap::new();
         for (pattern, baseline) in baseline_results {
             if let Some(b) = baseline {
                 debug!(
@@ -262,6 +255,29 @@ impl SaasTenantDiscovery {
                 baselines.insert(pattern, b);
             }
         }
+        baselines
+    }
+
+    pub async fn probe_with_logger(
+        &self,
+        target_domain: &str,
+        logger: Option<&AnalysisLogger>,
+    ) -> Result<Vec<TenantProbeResult>> {
+        let tenant_names = generate_tenant_names(target_domain);
+        debug!("Generated tenant name candidates: {:?}", tenant_names);
+
+        // Phase 1: Baseline canary probes — one per unique pattern (P1.6).
+        // Detects wildcard platforms that return identical responses for any tenant.
+        // Domain-invariant, so computed exactly once per scan via the shared OnceCell;
+        // concurrent first callers share one computation (get_or_init serializes init).
+        if let Some(log) = logger {
+            log.show_sub_progress(&format!("Probing SaaS platforms for {}", target_domain))
+                .await;
+        }
+        let baselines: &HashMap<String, BaselineResponse> = self
+            .baselines
+            .get_or_init(|| self.compute_baselines())
+            .await;
         debug!(
             "Established {} baselines from {} patterns",
             baselines.len(),
@@ -372,7 +388,13 @@ impl SaasTenantDiscovery {
 
 /// Generate tenant name candidates from a domain
 pub fn generate_tenant_names(domain: &str) -> Vec<String> {
-    let base = domain.split('.').next().unwrap_or(domain);
+    // P1.8: derive the tenant name from the REGISTRABLE base's first label, not the raw
+    // input's. A subdomain seed like `spf.protection.outlook.com` or `www.vanta.com` used
+    // to yield tenant names `spf`/`www` — wasted probes against generic dictionary labels
+    // that also EXIST as other people's real tenants on many platforms, a false-positive
+    // channel. Collapsing to the base ('outlook'/'vanta') fixes both.
+    let base_domain = crate::domain_utils::extract_base_domain(domain);
+    let base = base_domain.split('.').next().unwrap_or(&base_domain);
     let base_lower = base.to_lowercase();
 
     vec![
@@ -1168,10 +1190,35 @@ mod tests {
 
     #[test]
     fn test_generate_tenant_names_subdomain() {
+        // P1.8 regression: a subdomain input derives the tenant name from the registrable
+        // BASE, not the subdomain label. Previously `mail.example.org` produced tenant name
+        // "mail" (a generic dictionary label = wasted probes + false-positive channel); it
+        // now produces "example" from the base example.org.
         let names = generate_tenant_names("mail.example.org");
-        assert_eq!(names[0], "mail");
-        assert!(names.contains(&"mail-inc".to_string()));
-        assert!(names.contains(&"mail-corp".to_string()));
+        assert_eq!(names[0], "example");
+        assert!(names.contains(&"example-inc".to_string()));
+        assert!(names.contains(&"example-corp".to_string()));
+        assert!(
+            !names.iter().any(|n| n.starts_with("mail")),
+            "junk subdomain-label tenant names must not be generated"
+        );
+    }
+
+    #[test]
+    fn test_generate_tenant_names_junk_subdomain_labels_eliminated() {
+        // The exact classes the roadmap flagged: spf/www/api-prefixed hosts must not
+        // generate their subdomain label as a tenant name.
+        for (input, expected_base) in [
+            ("spf.protection.outlook.com", "outlook"),
+            ("www.vanta.com", "vanta"),
+            ("api.stripe.com", "stripe"),
+        ] {
+            let names = generate_tenant_names(input);
+            assert_eq!(
+                names[0], expected_base,
+                "{input} should key on the base label {expected_base}"
+            );
+        }
     }
 
     #[test]

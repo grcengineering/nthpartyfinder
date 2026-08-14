@@ -717,6 +717,20 @@ async fn run_saas_phase(
     let Some(tenant_disc) = saas_tenant_discovery else {
         return Vec::new();
     };
+    // P1.8: gate SaaS probing to apex inputs. Tenant names derive from the registrable
+    // base, so probing a subdomain (`www.vanta.com`) issues the identical ~245-probe matrix
+    // as its apex (`vanta.com`), which is ALWAYS separately queued for subdomains
+    // (add_base_domain_if_subdomain). Skipping the subdomain removes the duplicate matrix
+    // at zero recall cost — the apex runs the full pass.
+    let base_domain = crate::domain_utils::extract_base_domain(domain);
+    if base_domain != domain {
+        crate::perf::METRICS.saas_apex_skip.hit();
+        logger.debug(&format!(
+            "Skipping SaaS phase for subdomain {} — apex {} carries the probe",
+            domain, base_domain
+        ));
+        return Vec::new();
+    }
     logger.info(&format!("Running SaaS tenant discovery for {}...", domain));
     match tenant_disc.probe_with_logger(domain, Some(logger)).await {
         Ok(tenants) => {
@@ -1059,6 +1073,7 @@ pub async fn discover_nth_parties(
                 let skip =
                     subprocessor_skip_decision(org.as_deref(), current_depth, &mut attempted);
                 if skip {
+                    crate::perf::METRICS.dedup_org_subproc_skip.hit();
                     logger.debug(&format!(
                     "Skipping subprocessor lookup for {} — org already analyzed at a shallower layer",
                     domain
