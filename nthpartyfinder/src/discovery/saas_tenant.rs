@@ -86,7 +86,9 @@ pub struct SaasTenantDiscovery {
     // (constructed once in app.rs and shared by reference through the recursion), so the
     // baselines are computed exactly once per scan instead of re-fetched (42 requests)
     // for every one of hundreds-to-thousands of analyzed domains.
-    baselines: Arc<tokio::sync::OnceCell<HashMap<String, BaselineResponse>>>,
+    // Fully-qualified path: the `HashMap` import is `#[cfg(not(coverage))]`-gated, but this
+    // field is on the (ungated) struct, so it must not depend on that import.
+    baselines: Arc<tokio::sync::OnceCell<std::collections::HashMap<String, BaselineResponse>>>,
 }
 
 impl SaasTenantDiscovery {
@@ -258,6 +260,10 @@ impl SaasTenantDiscovery {
         baselines
     }
 
+    // cfg(not(coverage)): performs live HTTP probes against SaaS tenant URLs — requires network.
+    // (This gate previously sat above; the compute_baselines helper was inserted between it and
+    // this fn, so it needs its own gate to stay excluded from the coverage build's stub twin.)
+    #[cfg(not(coverage))]
     pub async fn probe_with_logger(
         &self,
         target_domain: &str,
