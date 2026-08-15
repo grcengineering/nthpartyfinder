@@ -17,6 +17,45 @@ use std::time::{Duration, Instant};
 use tracing::debug;
 use url::Url;
 
+/// P2.2/P2.3: the pure decision for an adaptive network-idle render wait, shared by the
+/// web-traffic capture and (via `crate::discovery::web_traffic`) the subprocessor renders.
+/// Returns `true` when the render should stop waiting:
+///
+/// - `elapsed >= hard_cap` → the previous fixed-sleep worst case; never exceeded.
+/// - `elapsed < min_wait` → never exit before a small floor (let the page start).
+/// - `!pending && quiet >= idle_window` → nothing in flight and the network has gone quiet.
+/// - `quiet >= stall_window` → total silence even if a counter was left non-zero by a
+///   redirect/WebSocket that never emits loadingFinished.
+///
+/// Because it never exits while a request is pending (before the stall window), recall on a page
+/// still doing work is identical to the old fixed wait.
+pub fn should_exit_network_idle(
+    elapsed: Duration,
+    min_wait: Duration,
+    hard_cap: Duration,
+    idle_window: Duration,
+    stall_window: Duration,
+    pending: bool,
+    quiet: Duration,
+) -> bool {
+    if elapsed >= hard_cap {
+        return true;
+    }
+    if elapsed < min_wait {
+        return false;
+    }
+    (!pending && quiet >= idle_window) || quiet >= stall_window
+}
+
+/// The standard idle-wait windows derived from a hard cap (the old fixed-sleep value).
+pub fn network_idle_windows(hard_cap: Duration) -> (Duration, Duration, Duration) {
+    (
+        hard_cap.min(Duration::from_millis(600)),  // min_wait
+        hard_cap.min(Duration::from_millis(800)),  // idle_window
+        hard_cap.min(Duration::from_millis(2500)), // stall_window
+    )
+}
+
 use crate::domain_utils;
 use crate::http_client::GatedSend;
 
@@ -257,26 +296,26 @@ impl WebTrafficDiscovery {
             // worst-case wait exactly, and because we never exit while a request is pending,
             // recall on any page still doing work is identical to the old fixed wait.
             let hard_cap = Duration::from_millis(wait_ms);
-            let idle_window = hard_cap.min(Duration::from_millis(800));
-            let stall_window = hard_cap.min(Duration::from_millis(2500));
-            let min_wait = hard_cap.min(Duration::from_millis(600));
+            let (min_wait, idle_window, stall_window) = network_idle_windows(hard_cap);
             let poll = Duration::from_millis(50);
             let started = Instant::now();
             loop {
                 std::thread::sleep(poll);
                 let elapsed = started.elapsed();
-                if elapsed >= hard_cap {
-                    break;
-                }
-                if elapsed < min_wait {
-                    continue;
-                }
                 let quiet = last_activity
                     .lock()
                     .map(|t| t.elapsed())
                     .unwrap_or(Duration::ZERO);
                 let pending = in_flight.load(Ordering::SeqCst) > 0;
-                if (!pending && quiet >= idle_window) || quiet >= stall_window {
+                if should_exit_network_idle(
+                    elapsed,
+                    min_wait,
+                    hard_cap,
+                    idle_window,
+                    stall_window,
+                    pending,
+                    quiet,
+                ) {
                     break;
                 }
             }
@@ -486,6 +525,42 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // P2.2/P2.3: the pure adaptive-idle decision.
+    #[test]
+    fn test_should_exit_network_idle() {
+        let (min_wait, idle, stall) = network_idle_windows(Duration::from_millis(5000));
+        assert_eq!(min_wait, Duration::from_millis(600));
+        assert_eq!(idle, Duration::from_millis(800));
+        assert_eq!(stall, Duration::from_millis(2500));
+        let cap = Duration::from_millis(5000);
+        let ex = |elapsed_ms, pending, quiet_ms| {
+            should_exit_network_idle(
+                Duration::from_millis(elapsed_ms),
+                min_wait,
+                cap,
+                idle,
+                stall,
+                pending,
+                Duration::from_millis(quiet_ms),
+            )
+        };
+        // Before min_wait: never exit, even if quiet.
+        assert!(!ex(300, false, 300));
+        // Past the hard cap: always exit.
+        assert!(ex(5000, true, 0));
+        assert!(ex(6000, true, 0));
+        // Nothing pending + quiet >= idle_window: exit.
+        assert!(ex(1000, false, 800));
+        assert!(
+            !ex(1000, false, 700),
+            "quiet below idle window: keep waiting"
+        );
+        // Pending: do NOT exit on the idle window (recall — page still working)...
+        assert!(!ex(1000, true, 900));
+        // ...but the stall window forces an exit even while pending (redirect/WS left it non-zero).
+        assert!(ex(3000, true, 2500));
+    }
 
     #[test]
     fn test_extract_script_src() {

@@ -50,6 +50,13 @@ pub struct ScanDedup {
     ct_apexes: Mutex<HashSet<String>>,
     /// Registrable bases whose SaaS-tenant probe has been claimed this scan.
     saas_apexes: Mutex<HashSet<String>>,
+    /// P1.4: per-base org-resolution singleflight. Concurrent discoverers of the same
+    /// registrable base (the popular SaaS/CDN vendors appear under most parents at depth 2+)
+    /// used to each run the full multi-second WHOIS→web→NER chain within the check-then-act
+    /// window. A keyed OnceCell coalesces them: the first runs the chain, the rest await its
+    /// result. The value is the FINAL normalized org string, so the coalesced result is
+    /// byte-identical to a fresh resolution.
+    org_cells: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<String>>>>,
 }
 
 impl ScanDedup {
@@ -71,6 +78,27 @@ impl ScanDedup {
     }
     async fn claim_saas(&self, apex: &str) -> bool {
         Self::claim(&self.saas_apexes, apex).await
+    }
+
+    /// P1.4: resolve a base domain's org through `compute` exactly once per scan, coalescing
+    /// concurrent callers. Returns the shared normalized org string. Counts a `whois.cache_hit`
+    /// when the value was already resolved (the compute is not run).
+    async fn resolve_org_once<F, Fut>(&self, base: &str, compute: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        let cell = {
+            let mut cells = self.org_cells.lock().await;
+            cells
+                .entry(base.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        if cell.get().is_some() {
+            crate::perf::METRICS.whois_cache_hit.hit();
+        }
+        cell.get_or_init(compute).await.clone()
     }
 }
 
@@ -616,7 +644,7 @@ pub async fn subprocessor_analysis_with_logging(
 fn subprocessor_skip_decision(
     org: Option<&str>,
     current_depth: u32,
-    attempted_orgs: &mut HashSet<String>,
+    attempted_orgs: &mut HashMap<String, u32>,
 ) -> bool {
     let Some(org) = org else {
         return false;
@@ -637,11 +665,29 @@ fn subprocessor_skip_decision(
     {
         return false;
     }
-    if attempted_orgs.contains(&key) {
-        current_depth > 1
-    } else {
-        attempted_orgs.insert(key);
-        false
+    // P4.7: the claim carries the depth it was made at. Because the traversal is a concurrent
+    // DFS, a deep satellite (slack.design at depth 3) could claim an org before its shallower
+    // PRIMARY (slack.com at depth 2), suppressing the primary's subprocessor page — the tool's
+    // highest-evidence source. A strictly shallower reach therefore re-claims and RUNS.
+    match attempted_orgs.get(&key).copied() {
+        None => {
+            attempted_orgs.insert(key, current_depth);
+            false
+        }
+        Some(claimed_depth) => {
+            if current_depth < claimed_depth {
+                // Shallower than the existing claim (includes a depth-1 primary arriving after
+                // a deep satellite) → the shallower domain is authoritative; re-claim and run.
+                attempted_orgs.insert(key, current_depth);
+                false
+            } else if current_depth == 1 {
+                // Depth-1 direct vendors always run — the root layer is never suppressed.
+                false
+            } else {
+                // Already covered at a shallower-or-equal depth → skip the redundant lookup.
+                true
+            }
+        }
     }
 }
 
@@ -915,7 +961,7 @@ pub async fn discover_nth_parties(
     // Normalized org names whose subprocessor page has already been sought, so we don't
     // re-run the expensive browser-rendered subprocessor lookup on secondary/tertiary
     // domains of an org we already analyzed (slack.com then slack.design/slack.dev/…).
-    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashMap<String, u32>>>,
     // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5).
     scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
@@ -1576,7 +1622,7 @@ pub async fn process_vendor_domain(
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
     processed_domains: Arc<Mutex<HashMap<String, u32>>>,
-    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashMap<String, u32>>>,
     scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
     root_customer_domain: String,
@@ -1649,65 +1695,64 @@ pub async fn process_vendor_domain(
             .await
             .contains_key(&customer_base_domain);
 
-    let resolve = |domain: String, needed: bool| async move {
-        if !needed {
-            return None;
+    // P1.4: resolve a base's org through the scan-global singleflight. The whole
+    // whois→web→NER chain plus the plausibility-gated normalization runs inside the once-cell
+    // compute, so the value is the FINAL normalized string and coalesced callers receive a
+    // byte-identical result. The plausibility backstop, verified-flag handling, and per-domain
+    // logging are unchanged — only who runs them (once per base, not once per racing vendor).
+    let resolve_org = |domain: String, needed: bool| {
+        let scan_dedup = scan_dedup.clone();
+        let logger = logger.clone();
+        async move {
+            if !needed {
+                return None;
+            }
+            let org = scan_dedup
+                .resolve_org_once(&domain, || async {
+                    match whois::get_organization_with_status_and_config(
+                        &domain,
+                        web_org_enabled,
+                        web_org_min_confidence,
+                    )
+                    .await
+                    {
+                        Ok(org_result) => {
+                            // Backstop against extracted taglines reaching the report. Applies
+                            // to INFERRED names only; a curated/verified source is never
+                            // overruled by the plausibility heuristic (real legal names are odd
+                            // enough that the heuristic is the thing more likely to be wrong).
+                            let resolved = if org_result.is_verified
+                                || org_normalizer::is_plausible_org_name(&org_result.name)
+                            {
+                                org_normalizer::normalize(&org_result.name)
+                            } else {
+                                org_normalizer::normalize(&domain)
+                            };
+                            logger.log_whois_lookup(&domain, org_result.is_verified);
+                            resolved
+                        }
+                        Err(e) => {
+                            logger.debug(&format!(
+                                "Failed to get organization for {}: {}",
+                                domain, e
+                            ));
+                            logger.log_whois_lookup(&domain, false);
+                            org_normalizer::normalize(&domain)
+                        }
+                    }
+                })
+                .await;
+            Some((domain, org))
         }
-        Some((
-            domain.clone(),
-            whois::get_organization_with_status_and_config(
-                &domain,
-                web_org_enabled,
-                web_org_min_confidence,
-            )
-            .await,
-        ))
     };
 
     let (vendor_lookup, customer_lookup) = tokio::join!(
-        resolve(base_domain.clone(), vendor_needed),
-        resolve(customer_base_domain.clone(), customer_needed),
+        resolve_org(base_domain.clone(), vendor_needed),
+        resolve_org(customer_base_domain.clone(), customer_needed),
     );
 
-    for (label, lookup) in [("", vendor_lookup), ("customer ", customer_lookup)] {
-        let Some((domain, result)) = lookup else {
-            continue;
-        };
-        match result {
-            Ok(org_result) => {
-                // Backstop against extracted taglines reaching the report ("Connective
-                // Infrastructure for Production AI" as a company name). The chain already
-                // gates every extracted name at its source (`whois::accept_extracted_name`),
-                // so this should never fire; it is here because the cost of a scraped
-                // sentence appearing as a vendor's identity is much higher than the cost of
-                // one extra check.
-                //
-                // Applies to INFERRED names only. A curated source (the user's own overrides,
-                // the vendor registry, the embedded dataset) is the most trustworthy evidence
-                // the tool has, and a plausibility heuristic must never overrule it — real
-                // legal names are odd enough ("Meta Platforms, Inc.") that the heuristic, not
-                // the curated datum, is the thing more likely to be wrong.
-                let resolved = if org_result.is_verified
-                    || org_normalizer::is_plausible_org_name(&org_result.name)
-                {
-                    org_normalizer::normalize(&org_result.name)
-                } else {
-                    org_normalizer::normalize(&domain)
-                };
-                let mut vendors = discovered_vendors.lock().await;
-                vendors.insert(domain.clone(), resolved);
-                logger.log_whois_lookup(&domain, org_result.is_verified);
-            }
-            Err(e) => {
-                logger.debug(&format!(
-                    "Failed to get organization for {}{}: {}",
-                    label, domain, e
-                ));
-                let mut vendors = discovered_vendors.lock().await;
-                vendors.insert(domain.clone(), org_normalizer::normalize(&domain));
-                logger.log_whois_lookup(&domain, false);
-            }
-        }
+    for (domain, org) in [vendor_lookup, customer_lookup].into_iter().flatten() {
+        discovered_vendors.lock().await.insert(domain, org);
     }
 
     let (customer_org, vendor_org) = {
@@ -1999,6 +2044,44 @@ mod tests {
         );
     }
 
+    // P1.4: org-resolution singleflight — the compute runs once per base; later callers get
+    // the same value without re-running it.
+    #[tokio::test]
+    async fn test_resolve_org_once_coalesces() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let d = ScanDedup::new();
+        let runs = AtomicUsize::new(0);
+
+        let first = d
+            .resolve_org_once("stripe.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "Stripe".to_string()
+            })
+            .await;
+        assert_eq!(first, "Stripe");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // Second call for the same base must NOT run compute — returns the cached value.
+        let second = d
+            .resolve_org_once("stripe.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "SHOULD-NOT-RUN".to_string()
+            })
+            .await;
+        assert_eq!(second, "Stripe", "coalesced value must equal the first");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "compute ran only once");
+
+        // A different base runs its own compute.
+        let other = d
+            .resolve_org_once("vanta.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "Vanta".to_string()
+            })
+            .await;
+        assert_eq!(other, "Vanta");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
     // P1.5: apex-scoped dedup claims — first claim runs, later claims skip; per-method
     // independent; per-apex independent.
     #[tokio::test]
@@ -2086,8 +2169,7 @@ mod tests {
 
     #[test]
     fn test_subprocessor_skip_decision() {
-        use std::collections::HashSet;
-        let mut attempted = HashSet::new();
+        let mut attempted = HashMap::new();
 
         // Unknown org → never skip (fail toward recall), nothing claimed.
         assert!(!subprocessor_skip_decision(None, 3, &mut attempted));
@@ -2132,6 +2214,32 @@ mod tests {
         assert!(!subprocessor_skip_decision(
             Some("Stripe"),
             2,
+            &mut attempted
+        ));
+    }
+
+    // P4.7: a deep satellite claiming an org first must NOT suppress the shallower primary —
+    // a strictly shallower reach re-claims and runs.
+    #[test]
+    fn test_subprocessor_skip_decision_shallower_primary_re_runs() {
+        let mut attempted = HashMap::new();
+        // Deep satellite (slack.design at depth 3) claims "Slack" first → runs.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            3,
+            &mut attempted
+        ));
+        // The shallower PRIMARY (slack.com at depth 2) must RUN, not be skipped — it re-claims.
+        assert!(
+            !subprocessor_skip_decision(Some("Slack"), 2, &mut attempted),
+            "shallower primary must run, not be suppressed by the deep satellite"
+        );
+        // Now a depth-3 reach is redundant (claimed at 2) → skip.
+        assert!(subprocessor_skip_decision(Some("Slack"), 3, &mut attempted));
+        // And an even shallower depth-1 direct vendor still runs.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            1,
             &mut attempted
         ));
     }

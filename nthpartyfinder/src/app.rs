@@ -743,7 +743,11 @@ pub fn assemble_and_filter_results(
     // The single choke point. Every relationship from every source, every run mode (fresh,
     // resumed, batch) passes through here, so this is the only place an attribution invariant
     // can be enforced once instead of remembered at each new emit site.
-    let (filtered, finalize) = crate::finalize::finalize_report(filtered);
+    let (mut filtered, finalize) = crate::finalize::finalize_report(filtered);
+    // P4.1: correct, deterministic layer labels over the final edge set.
+    if let Some(root) = filtered.first().map(|r| r.root_customer_domain.clone()) {
+        recompute_layers_bfs(&mut filtered, &root);
+    }
     AssembledResults {
         results: filtered,
         raw_count,
@@ -751,6 +755,52 @@ pub fn assemble_and_filter_results(
         infra_removed,
         marketing_removed,
         finalize,
+    }
+}
+
+/// P4.1: recompute every edge's `nth_party_layer` as its BFS distance from the root over the
+/// FINAL edge set. The scan is a concurrent depth-first crawl, so an edge's recorded layer is
+/// whatever depth its parent happened to be crawled at first — nondeterministic across runs and,
+/// when a vendor is reached both deep and shallow, often the wrong (deeper) one. Recomputing
+/// layer(parent→child) = dist(root, parent) + 1 makes the reported layers deterministic and
+/// correct. An edge whose parent is unreachable from the root over the final (post-filter) edge
+/// set keeps its recorded layer, so nothing is silently zeroed.
+pub fn recompute_layers_bfs(relationships: &mut [VendorRelationship], root: &str) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    if relationships.is_empty() {
+        return;
+    }
+    // parent -> children (owned keys so we can mutate `relationships` afterwards).
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for r in relationships.iter() {
+        children
+            .entry(r.nth_party_customer_domain.clone())
+            .or_default()
+            .push(r.nth_party_domain.clone());
+    }
+    // BFS distance from the root over the parent→child graph.
+    let mut dist: HashMap<String, u32> = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    dist.insert(root.to_string(), 0);
+    visited.insert(root.to_string());
+    queue.push_back(root.to_string());
+    while let Some(node) = queue.pop_front() {
+        let d = dist[&node];
+        if let Some(kids) = children.get(&node) {
+            for c in kids {
+                if visited.insert(c.clone()) {
+                    dist.insert(c.clone(), d + 1);
+                    queue.push_back(c.clone());
+                }
+            }
+        }
+    }
+    // Re-stamp each edge's layer from its parent's BFS distance; leave unreachable parents.
+    for r in relationships.iter_mut() {
+        if let Some(&parent_dist) = dist.get(&r.nth_party_customer_domain) {
+            r.nth_party_layer = parent_dist + 1;
+        }
     }
 }
 
@@ -2123,7 +2173,9 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     let processed_domains = Arc::new(Mutex::new(processed_domains_map));
     // Scan-scoped set of orgs whose subprocessor page has already been sought, so
     // secondary domains of an already-analyzed org skip the expensive lookup.
-    let subprocessor_attempted_orgs = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // P4.7: org key -> the min depth at which its subprocessor page was claimed.
+    let subprocessor_attempted_orgs =
+        Arc::new(Mutex::new(std::collections::HashMap::<String, u32>::new()));
     // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5). Constructed once per scan.
     let scan_dedup = Arc::new(analysis::ScanDedup::new());
     // `--parallel-jobs 0` means "no operator cap", so the semaphore falls back to the
@@ -3279,6 +3331,68 @@ mod tests {
             "Root Org".to_string(),
             evidence.to_string(),
         )
+    }
+
+    // ── recompute_layers_bfs (P4.1) ────────────────────────────────────
+
+    #[test]
+    fn test_recompute_layers_bfs_assigns_bfs_distance() {
+        // root -> a (layer 1); a -> b (layer 2). Record b's edge with a WRONG deep layer (5)
+        // and confirm the BFS recompute corrects it to 2.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 5),
+        ];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert_eq!(rels[0].nth_party_layer, 1, "root->a is layer 1");
+        assert_eq!(
+            rels[1].nth_party_layer, 2,
+            "a->b is layer 2, not the recorded 5"
+        );
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_shallow_path_wins() {
+        // A vendor reachable both deep (root->a->b->v, layer 3) and directly (root->v, layer 1).
+        // Every edge INTO v via a deep parent still gets its own parent's distance, and the
+        // direct root->v edge is layer 1 — deterministic regardless of input order.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 2),
+            make_relationship_at_layer("v.com", "b.com", RecordType::DnsTxtSpf, "e", 9),
+            make_relationship_at_layer("v.com", "root.com", RecordType::DnsTxtSpf, "e", 9),
+        ];
+        recompute_layers_bfs(&mut rels, "root.com");
+        // root->a =1, a->b =2, b->v =3, root->v =1
+        assert_eq!(rels[0].nth_party_layer, 1);
+        assert_eq!(rels[1].nth_party_layer, 2);
+        assert_eq!(rels[2].nth_party_layer, 3, "b->v parent b is at distance 2");
+        assert_eq!(rels[3].nth_party_layer, 1, "root->v is layer 1");
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_unreachable_parent_keeps_layer() {
+        // An edge whose parent is not reachable from the root (e.g. an orphaned subtree after
+        // infra filtering) keeps its recorded layer rather than being zeroed.
+        let mut rels = vec![make_relationship_at_layer(
+            "child.com",
+            "orphan.com",
+            RecordType::DnsTxtSpf,
+            "e",
+            4,
+        )];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert_eq!(
+            rels[0].nth_party_layer, 4,
+            "unreachable parent keeps recorded layer"
+        );
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_empty_is_noop() {
+        let mut rels: Vec<VendorRelationship> = vec![];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert!(rels.is_empty());
     }
 
     // ── canonicalize_scan_target (P4.3) ────────────────────────────────
