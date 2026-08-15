@@ -159,6 +159,23 @@ pub struct Metrics {
     pub subfinder_apex_skip: Metric,
     /// A CT-log query skipped because its apex was already queried this scan (P1.5).
     pub ct_apex_skip: Metric,
+    /// A subprocessor probe skipped entirely because a fresh negative-cache entry proved the
+    /// domain has no discoverable subprocessor page (P2.7). Each hit is one warm-rescan vendor
+    /// that skips the full ~25-URL / futile-SPA-render probe loop.
+    pub subproc_negative_cache_hit: Metric,
+    /// A trust-center capture retry that ACTUALLY rescued a subprocessor array the first capture
+    /// missed (P2.1 prerequisite). The retry was a deliberate reliability mechanism; before P2.1
+    /// can gate it on transport-error/truncation instead of "no array", a deep scan must show this
+    /// is non-zero — i.e. the retry earns its second render. A scan-wide zero is the evidence that
+    /// the second render is pure waste on futile SPAs and can be removed.
+    pub render_retry_rescued: Metric,
+    /// Wall time of the final `deduplicate_results` pass over all raw relationships (P0.4). The
+    /// suspected O(S^2)-ish evidence `contains` merge; if material at 15k+ relationships it earns a
+    /// follow-on, otherwise the stone is closed as measured-immaterial.
+    pub report_dedup: Metric,
+    /// Wall time of report export itself (P0.4) — multi-MB embedded-data HTML at thousands of
+    /// relationships had performance data nowhere until this counter.
+    pub report_export: Metric,
 }
 
 impl Metrics {
@@ -202,6 +219,10 @@ impl Metrics {
             saas_apex_skip: Metric::new(),
             subfinder_apex_skip: Metric::new(),
             ct_apex_skip: Metric::new(),
+            subproc_negative_cache_hit: Metric::new(),
+            render_retry_rescued: Metric::new(),
+            report_dedup: Metric::new(),
+            report_export: Metric::new(),
         }
     }
 
@@ -226,7 +247,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 38] {
+    fn all(&self) -> [(&'static str, &Metric); 42] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -266,6 +287,13 @@ impl Metrics {
             ("saas.apex_skip", &self.saas_apex_skip),
             ("subfinder.apex_skip", &self.subfinder_apex_skip),
             ("ct.apex_skip", &self.ct_apex_skip),
+            (
+                "subproc.negative_cache_hit",
+                &self.subproc_negative_cache_hit,
+            ),
+            ("render.retry_rescued", &self.render_retry_rescued),
+            ("report.dedup", &self.report_dedup),
+            ("report.export", &self.report_export),
         ]
     }
 
@@ -830,7 +858,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 38);
+        assert_eq!(snap.rows.len(), 42);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed

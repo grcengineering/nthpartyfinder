@@ -348,6 +348,43 @@ fn cached_urls_are_provably_stale(yielded_any: bool, any_source_errored: bool) -
     !yielded_any && !any_source_errored
 }
 
+/// P2.7: how long a proven "no subprocessor page here" verdict stays authoritative. Domain
+/// ownership and legal-page layout churn on months-to-years timescales, so a warm rescan inside
+/// this window can safely skip the full candidate probe. Ten days keeps a weekly re-scan cheap
+/// while re-checking often enough that a newly published trust center is picked up within a scan
+/// cycle or two.
+pub(crate) const NEGATIVE_SUBPROCESSOR_CACHE_TTL_SECS: u64 = 10 * 24 * 3600;
+
+/// P2.7 write gate: may we record "this domain has no discoverable subprocessor page"?
+///
+/// Only when the full candidate loop genuinely completed to a real absence — it yielded nothing,
+/// it was **not** cut short by the per-vendor time budget (a starved loop looked at a fraction of
+/// the candidates), and **no transport-level failure** occurred (an unreachable host or browser
+/// outage means "we could not look", never "there is nothing here"). This is the write-direction
+/// twin of [`cached_urls_are_provably_stale`]'s discipline: absence is only provable when every
+/// candidate was actually reached and every one came back cleanly empty. A budgeted or
+/// outage-truncated pass must fall through and re-probe next scan, exactly as today.
+pub(crate) fn may_record_subprocessor_absence(
+    yielded_any: bool,
+    budget_exhausted: bool,
+    any_transport_error: bool,
+) -> bool {
+    !yielded_any && !budget_exhausted && !any_transport_error
+}
+
+/// P2.7 read gate: is a stored negative-cache entry still authoritative for skipping the probe?
+///
+/// Valid iff it is within TTL. `now.saturating_sub(probed_at)` guards a clock that went backwards
+/// (returns 0 → fresh) rather than underflowing. A positive cache entry (working URLs) is checked
+/// separately by the caller and always supersedes, so this function only concerns freshness.
+pub(crate) fn negative_subprocessor_entry_is_fresh(
+    probed_at: u64,
+    now: u64,
+    ttl_secs: u64,
+) -> bool {
+    now.saturating_sub(probed_at) < ttl_secs
+}
+
 /// Classify a candidate subprocessor URL into a source category by host. A
 /// `trust.`/`trustcenter.`/`trust-*` subdomain (or an embedded `.trust.` label) is
 /// the hosted trust center; everything else (a `/legal/subprocessors`-style path on
@@ -626,6 +663,19 @@ pub struct SubprocessorUrlCacheEntry {
     /// Trust center extraction strategy (auto-discovered or manually configured)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_center_strategy: Option<crate::trust_center::TrustCenterStrategy>,
+}
+
+/// P2.7 negative-cache record: a domain proven this scan to have no discoverable subprocessor
+/// page. Stored in a sibling `cache/{domain}.negative.json` rather than as a field on
+/// `SubprocessorUrlCacheEntry` so the positive-cache schema and its many constructors stay
+/// untouched — a domain has either a positive entry or a negative one, not both, so this is still
+/// one file per domain. A positive entry always supersedes (checked before this is consulted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegativeCacheEntry {
+    /// Unix seconds when absence was proven (full candidate loop completed, every host reached,
+    /// nothing found).
+    pub probed_at: u64,
+    pub cache_version: u32,
 }
 
 /// Metadata about extraction success to help optimize patterns
@@ -1011,6 +1061,64 @@ impl SubprocessorCache {
             return self.cache_dir.join("_invalid_domain_.json");
         }
         self.cache_dir.join(format!("{}.json", safe_domain))
+    }
+
+    /// P2.7: path to the sibling negative-cache file (`cache/{domain}.negative.json`). Reuses the
+    /// positive path's sanitization, swapping the extension, so it inherits the same path-traversal
+    /// safety.
+    pub fn get_negative_cache_file_path(&self, domain: &str) -> PathBuf {
+        self.get_cache_file_path(domain)
+            .with_extension("negative.json")
+    }
+
+    /// P2.7: record that `domain` has no discoverable subprocessor page as of `now` (unix secs).
+    /// Callers must gate this on [`may_record_subprocessor_absence`] — this method only writes.
+    // coverage(off): filesystem I/O — writes negative-cache JSON via tokio::fs
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub async fn cache_no_subprocessor_page(&self, domain: &str, now: u64) -> Result<()> {
+        let entry = NegativeCacheEntry {
+            probed_at: now,
+            cache_version: Self::CACHE_VERSION,
+        };
+        let content = serde_json::to_string_pretty(&entry)?;
+        tokio::fs::write(self.get_negative_cache_file_path(domain), content).await?;
+        debug!("Cached negative subprocessor result for domain {}", domain);
+        Ok(())
+    }
+
+    /// P2.7: true iff a fresh negative-cache entry proves `domain` has no subprocessor page, so the
+    /// full candidate probe can be skipped. Version-gated (like the positive cache) and TTL-checked
+    /// via [`negative_subprocessor_entry_is_fresh`]. A stale or version-mismatched entry reads as a
+    /// miss (falls through to a fresh probe).
+    // coverage(off): filesystem I/O — reads negative-cache JSON via tokio::fs
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub async fn has_fresh_negative_entry(&self, domain: &str, now: u64) -> bool {
+        let path = self.get_negative_cache_file_path(domain);
+        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Ok(entry) = serde_json::from_str::<NegativeCacheEntry>(&content) {
+                return entry.cache_version == Self::CACHE_VERSION
+                    && negative_subprocessor_entry_is_fresh(
+                        entry.probed_at,
+                        now,
+                        NEGATIVE_SUBPROCESSOR_CACHE_TTL_SECS,
+                    );
+            }
+        }
+        false
+    }
+
+    /// P2.7: remove any negative-cache entry for `domain`. Called whenever a working URL is cached
+    /// so a later success supersedes a prior proven-absence (belt-and-suspenders alongside the
+    /// positive-supersedes check on read). A missing file is not an error.
+    // coverage(off): filesystem I/O — removes negative-cache file via tokio::fs
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub async fn clear_negative_cache(&self, domain: &str) {
+        let path = self.get_negative_cache_file_path(domain);
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                debug!("Failed to clear negative cache for {}: {:#}", domain, e);
+            }
+        }
     }
 
     /// Clear cache for a specific domain
@@ -1599,6 +1707,28 @@ impl SubprocessorAnalyzer {
             let cache = self.cache.read().await;
             cache.get_cached_subprocessor_urls(domain).await
         };
+        // P2.7: a fresh negative-cache entry (this domain was proven to have no discoverable
+        // subprocessor page within the TTL) short-circuits the entire ~25-URL / futile-SPA-render
+        // probe on a warm rescan — the measured case for ~60-70% of vendors. A positive cache entry
+        // always supersedes, so this is only consulted when no working URLs are cached.
+        if cached_urls.is_empty() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let negative_hit = {
+                let cache = self.cache.read().await;
+                cache.has_fresh_negative_entry(domain, now).await
+            };
+            if negative_hit {
+                crate::perf::METRICS.subproc_negative_cache_hit.hit();
+                debug!(
+                    "Negative-cache hit for {} — skipping full subprocessor probe",
+                    domain
+                );
+                return Ok(Vec::new());
+            }
+        }
         if !cached_urls.is_empty() {
             debug!(
                 "📋 CACHE HIT PATH: {} cached source URL(s) for {}",
@@ -1722,6 +1852,12 @@ impl SubprocessorAnalyzer {
         // every connection, probing its remaining candidates just re-pays the connect-timeout ×
         // retries. Skip them — a host that refused all connections cannot serve a sibling path.
         let mut dead_hosts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // P2.7: guards on writing a negative-cache entry after the loop. A budget-truncated pass
+        // examined only a prefix of the candidates; a transport failure means a host was
+        // unreachable — neither proves the domain has no subprocessor page, so only a full, clean,
+        // empty pass may record absence.
+        let mut budget_exhausted = false;
+        let mut any_transport_error = false;
 
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Stop once every source category has yielded a result.
@@ -1802,6 +1938,9 @@ impl SubprocessorAnalyzer {
                         working_elapsed.as_secs_f64()
                     ));
                 }
+                // P2.7: the loop was cut short — the unprobed candidate tail means a later empty
+                // result is not a provable absence.
+                budget_exhausted = true;
                 break;
             }
             // Skip a category we've already satisfied — we only need one working
@@ -1870,6 +2009,9 @@ impl SubprocessorAnalyzer {
                     // P2.5: a transport-level failure means the host is unreachable, not that
                     // this path is missing — mark the host so its remaining candidates are skipped.
                     if is_transport_dead_error(&e) {
+                        // P2.7: a host we could not reach means this pass cannot prove absence —
+                        // block the negative-cache write regardless of whether the host parsed.
+                        any_transport_error = true;
                         if let Some(host) = subproc_url_host(url) {
                             crate::perf::METRICS.subproc_dead_host_skip.hit();
                             dead_hosts.insert(host);
@@ -1890,6 +2032,21 @@ impl SubprocessorAnalyzer {
 
         if per_source.is_empty() {
             debug!("No subprocessor pages found for domain: {}", domain);
+            // P2.7: record a provable absence so a warm rescan skips the whole probe. Only when
+            // the loop ran to completion (not budget-truncated) and reached every host (no
+            // transport failure) — an outage-truncated pass falls through unrecorded and re-probes
+            // next scan. Same "an outage must never memoize as absence" discipline as the positive
+            // cache's stale-clear guard.
+            if may_record_subprocessor_absence(false, budget_exhausted, any_transport_error) {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let cache = self.cache.read().await;
+                if let Err(e) = cache.cache_no_subprocessor_page(domain, now).await {
+                    debug!("Failed to write negative cache for {}: {:#}", domain, e);
+                }
+            }
             return Ok(Vec::new());
         }
 
@@ -1900,6 +2057,8 @@ impl SubprocessorAnalyzer {
             if let Err(e) = cache.cache_working_urls(domain, &working_urls).await {
                 debug!("Failed to cache working URLs for {}: {}", domain, e);
             }
+            // P2.7: a success supersedes any prior proven-absence for this domain.
+            cache.clear_negative_cache(domain).await;
         }
 
         // Merge + dedupe across sources, recording provenance in the evidence.
@@ -7436,6 +7595,108 @@ mod tests {
         // Having results at all rules out staleness regardless of a partial error.
         assert!(!cached_urls_are_provably_stale(true, false));
         assert!(!cached_urls_are_provably_stale(true, true));
+    }
+
+    // ── P2.7 negative subprocessor cache ───────────────────────────────
+
+    #[test]
+    fn negative_cache_records_absence_only_on_a_full_clean_empty_pass() {
+        // The one case that proves absence: the whole candidate loop ran, every host was reached,
+        // and nothing came back. Only then may a warm rescan trust "no page here" and skip probing.
+        assert!(
+            may_record_subprocessor_absence(false, false, false),
+            "a full loop that reached every candidate and found nothing proves absence"
+        );
+
+        // Any success means there IS a page — never record absence.
+        assert!(!may_record_subprocessor_absence(true, false, false));
+
+        // Budget-truncated: the loop looked at only a prefix of the candidates, so the vendor's
+        // real page could sit in the unprobed tail. Recording absence here would cache a false
+        // "nothing" that a warm rescan then trusts — exactly the recall trap the budget guard warns
+        // about elsewhere. Must fall through and re-probe.
+        assert!(
+            !may_record_subprocessor_absence(false, true, false),
+            "a budget-truncated pass examined only a prefix — absence is unproven"
+        );
+
+        // Transport failure: a host was unreachable (blackhole / browser outage). An outage must
+        // never memoize as absence — the same discipline as the positive cache's stale-clear guard.
+        assert!(
+            !may_record_subprocessor_absence(false, false, true),
+            "an unreachable host means we could not look, not that there is nothing"
+        );
+
+        // Belt-and-suspenders: any blocking condition suppresses the write.
+        assert!(!may_record_subprocessor_absence(false, true, true));
+        assert!(!may_record_subprocessor_absence(true, true, true));
+    }
+
+    #[test]
+    fn negative_cache_entry_is_fresh_within_ttl_and_stale_after() {
+        let ttl = NEGATIVE_SUBPROCESSOR_CACHE_TTL_SECS;
+        let now = 1_000_000_000u64;
+
+        // Just written: fresh.
+        assert!(negative_subprocessor_entry_is_fresh(now, now, ttl));
+        // One second before the TTL boundary: still fresh.
+        assert!(negative_subprocessor_entry_is_fresh(
+            now - (ttl - 1),
+            now,
+            ttl
+        ));
+        // Exactly at the TTL boundary: expired (strict `<`).
+        assert!(!negative_subprocessor_entry_is_fresh(now - ttl, now, ttl));
+        // Well past TTL: stale, re-probe.
+        assert!(!negative_subprocessor_entry_is_fresh(
+            now - (ttl + 5000),
+            now,
+            ttl
+        ));
+        // Clock ran backwards (probed_at in the "future"): saturating_sub → 0, treated as fresh
+        // rather than underflowing to a huge age.
+        assert!(negative_subprocessor_entry_is_fresh(now + 500, now, ttl));
+    }
+
+    #[tokio::test]
+    async fn negative_cache_write_read_clear_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SubprocessorCache::new_with_dir(dir.path().to_path_buf());
+        let now = 2_000_000_000u64;
+
+        // Nothing written yet → miss (fresh probe would run).
+        assert!(!cache.has_fresh_negative_entry("vanta.com", now).await);
+
+        // Record a proven absence → a warm rescan within TTL hits it and skips probing.
+        cache
+            .cache_no_subprocessor_page("vanta.com", now)
+            .await
+            .unwrap();
+        assert!(cache.has_fresh_negative_entry("vanta.com", now + 5).await);
+
+        // The same entry past its TTL is no longer authoritative → re-probe.
+        assert!(
+            !cache
+                .has_fresh_negative_entry(
+                    "vanta.com",
+                    now + NEGATIVE_SUBPROCESSOR_CACHE_TTL_SECS + 1
+                )
+                .await
+        );
+
+        // A later success clears it (supersede-on-success) → miss.
+        cache.clear_negative_cache("vanta.com").await;
+        assert!(!cache.has_fresh_negative_entry("vanta.com", now + 5).await);
+        // Clearing a domain with no entry is a no-op, not an error.
+        cache.clear_negative_cache("vanta.com").await;
+
+        // Distinct domains have independent entries — one absence never masks another domain.
+        cache
+            .cache_no_subprocessor_page("acme.com", now)
+            .await
+            .unwrap();
+        assert!(cache.has_fresh_negative_entry("acme.com", now + 5).await);
+        assert!(!cache.has_fresh_negative_entry("other.com", now + 5).await);
     }
 
     #[test]

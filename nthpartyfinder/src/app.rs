@@ -736,15 +736,28 @@ pub fn assemble_and_filter_results(
 ) -> AssembledResults {
     let mut all_results = resumed_results;
     all_results.extend(new_results);
-    let (deduped, raw_count) = deduplicate_results(all_results);
+    // P0.4: time the dedup pass — the suspected O(S^2)-ish evidence-`contains` merge. If material
+    // at 15k+ relationships it earns a follow-on; otherwise the stone closes as immaterial.
+    let (deduped, raw_count) = crate::perf::timed(&crate::perf::METRICS.report_dedup, || {
+        deduplicate_results(all_results)
+    });
     let dedup_count = deduped.len();
     let (filtered, infra_removed) = filter_infra_providers(deduped, include_infra);
     let (filtered, marketing_removed) = filter_marketing_tracking(filtered, include_infra);
     // The single choke point. Every relationship from every source, every run mode (fresh,
     // resumed, batch) passes through here, so this is the only place an attribution invariant
     // can be enforced once instead of remembered at each new emit site.
-    let (mut filtered, finalize) = crate::finalize::finalize_report(filtered);
-    // P4.1: correct, deterministic layer labels over the final edge set.
+    let (filtered, finalize) = crate::finalize::finalize_report(filtered);
+    // P4.4: prune subtrees orphaned by infra/marketing filtering, then P4.1: recompute
+    // deterministic BFS layer labels over the resulting connected edge set.
+    let (mut filtered, orphans_removed) =
+        match filtered.first().map(|r| r.root_customer_domain.clone()) {
+            Some(root) => {
+                let (pruned, n) = prune_orphaned_edges(filtered, &root);
+                (pruned, n)
+            }
+            None => (filtered, 0),
+        };
     if let Some(root) = filtered.first().map(|r| r.root_customer_domain.clone()) {
         recompute_layers_bfs(&mut filtered, &root);
     }
@@ -752,10 +765,52 @@ pub fn assemble_and_filter_results(
         results: filtered,
         raw_count,
         dedup_count,
-        infra_removed,
+        // Orphaned-edge pruning is a direct consequence of infra filtering, so its count
+        // rolls into infra_removed for the report's "filtered" tally.
+        infra_removed: infra_removed + orphans_removed,
         marketing_removed,
         finalize,
     }
+}
+
+/// P4.4: drop edges whose parent is not a rendered node. When infra/marketing filtering
+/// removes `X → infra` edges (the infra domain is dropped as a vendor), any surviving
+/// `infra → Y` edge is left with a parent that appears nowhere as a vendor node — an orphaned
+/// subtree the graph can never reach from the root and the report counts as phantom vendors.
+/// This prunes, to a fixpoint (removing one orphan can orphan its children), every edge whose
+/// parent is neither the root nor a surviving vendor (`nth_party_domain`). Chosen over the
+/// alternative of rendering filtered infra as flagged pass-through nodes because that is a
+/// frontend change; pruning keeps the backend graph internally consistent. Returns the count
+/// removed.
+pub fn prune_orphaned_edges(
+    mut rows: Vec<VendorRelationship>,
+    root: &str,
+) -> (Vec<VendorRelationship>, usize) {
+    use std::collections::HashSet;
+    let before = rows.len();
+    loop {
+        let nodes: HashSet<&str> = rows.iter().map(|r| r.nth_party_domain.as_str()).collect();
+        // keep an edge iff its parent is the root or appears somewhere as a vendor node.
+        let keep: Vec<bool> = rows
+            .iter()
+            .map(|r| {
+                let parent = r.nth_party_customer_domain.as_str();
+                parent == root || nodes.contains(parent)
+            })
+            .collect();
+        drop(nodes);
+        if keep.iter().all(|&k| k) {
+            break;
+        }
+        let mut i = 0;
+        rows.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
+    }
+    let removed = before - rows.len();
+    (rows, removed)
 }
 
 /// P4.1: recompute every edge's `nth_party_layer` as its BFS distance from the root over the
@@ -810,12 +865,14 @@ pub fn dispatch_export(
     format: &str,
     output_path: &str,
 ) -> Result<()> {
-    match format {
+    // P0.4: time report export — multi-MB embedded-data HTML at thousands of relationships had
+    // no performance data until this counter.
+    crate::perf::timed(&crate::perf::METRICS.report_export, || match format {
         "json" => export::export_json(results, output_path),
         "markdown" => export::export_markdown(results, output_path),
         "html" => export::export_html(results, output_path),
         _ => export::export_csv(results, output_path),
-    }
+    })
 }
 
 /// State restored from a checkpoint for resuming an analysis.
@@ -3327,10 +3384,60 @@ mod tests {
             "Customer Org".to_string(),
             "record".to_string(),
             record_type,
-            "root.com".to_string(),
+            // A depth-1 edge's customer IS the scan root; self-root the fixture so the
+            // P4.4 orphan-prune (which drops edges whose parent is neither the root nor a
+            // vendor node) treats these as the valid root→vendor edges they represent.
+            customer_domain.to_string(),
             "Root Org".to_string(),
             evidence.to_string(),
         )
+    }
+
+    // ── prune_orphaned_edges (P4.4) ────────────────────────────────────
+
+    #[test]
+    fn test_prune_orphaned_edges_removes_phantom_parent_subtree() {
+        // root->a (a is a node), then infra->y where infra never appears as a vendor node.
+        // The infra->y edge is orphaned and must be pruned.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("y.com", "infra.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (kept, removed) = prune_orphaned_edges(std::mem::take(&mut rels), "root.com");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].nth_party_domain, "a.com");
+    }
+
+    #[test]
+    fn test_prune_orphaned_edges_transitive() {
+        // infra->y (orphan) and y->z. Removing infra->y orphans y->z too (y is no longer a node).
+        let (kept, removed) = prune_orphaned_edges(
+            vec![
+                make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+                make_relationship_at_layer("y.com", "infra.com", RecordType::DnsTxtSpf, "e", 2),
+                make_relationship_at_layer("z.com", "y.com", RecordType::DnsTxtSpf, "e", 3),
+            ],
+            "root.com",
+        );
+        assert_eq!(
+            removed, 2,
+            "both infra->y and the now-orphaned y->z are pruned"
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].nth_party_domain, "a.com");
+    }
+
+    #[test]
+    fn test_prune_orphaned_edges_keeps_connected_graph() {
+        // A fully connected graph (every parent is root or a node) is untouched.
+        let rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (kept, removed) = prune_orphaned_edges(rels, "root.com");
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
     }
 
     // ── recompute_layers_bfs (P4.1) ────────────────────────────────────
