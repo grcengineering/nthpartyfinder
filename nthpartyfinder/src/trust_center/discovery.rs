@@ -528,6 +528,10 @@ async fn capture_with_retry(url: &str) -> Result<Vec<InterceptedResponse>> {
     );
     let retry = capture_network_json_responses(url).await?;
     if responses_contain_subprocessor_array(&retry) {
+        // P2.1 prerequisite: the retry rescued a subprocessor array the first capture missed.
+        // A scan-wide non-zero here is what justifies keeping the second render; a zero is the
+        // evidence that the retry is pure waste on futile SPAs and P2.1 can gate it away.
+        crate::perf::METRICS.render_retry_rescued.hit();
         Ok(retry)
     } else {
         // Neither capture found subprocessors — return the larger set so the

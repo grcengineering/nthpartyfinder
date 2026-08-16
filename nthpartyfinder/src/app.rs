@@ -139,6 +139,13 @@ pub fn deduplicate_results(results: Vec<VendorRelationship>) -> (Vec<VendorRelat
             if !existing.evidence.contains(&r.evidence) {
                 existing.evidence = format!("{} | {}", existing.evidence, r.evidence);
             }
+            // P4.2: the same (vendor, customer, record-type) edge is genuinely recorded
+            // at more than one depth (a vendor reached via both a shallow and a deep
+            // parent). The dedup key omits the layer, so without this the surviving row
+            // keeps whichever layer was written first — nondeterministic across runs and
+            // often the deeper (wrong) one. Keep the minimum: an edge's honest layer is
+            // the shallowest path that reaches it.
+            existing.nth_party_layer = existing.nth_party_layer.min(r.nth_party_layer);
         } else {
             seen.insert(key, deduped.len());
             deduped.push(r);
@@ -391,6 +398,39 @@ fn prompt_timeout_onboarding(logger: &AnalysisLogger) -> Option<TimeoutChoice> {
 /// Construct the full output path from output_dir and filename.
 pub fn build_full_output_path(output_dir: &str, output_filename: &str) -> PathBuf {
     Path::new(output_dir).join(output_filename)
+}
+
+/// P4.3: canonicalize a user-typed scan target so the root node's identity matches
+/// the edge-side normalization (`extract_base_domain`, which lowercases + PSL-collapses).
+/// Without this, a `www.`/mixed-case/scheme-prefixed target produced a graph whose root id
+/// (raw string) never matched any edge's `nth_party_customer_domain` (base-collapsed), so the
+/// HTML graph rendered empty. Strips scheme, path, trailing dot, port, and lowercases; does
+/// NOT PSL-collapse (that is the caller's `extract_base_domain` step) so an intentional
+/// subdomain scan target is preserved for discovery.
+pub fn canonicalize_scan_target(raw: &str) -> String {
+    let mut s = raw.trim();
+    // Strip scheme.
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = s.strip_prefix(scheme) {
+            s = rest;
+            break;
+        }
+    }
+    // Drop anything from the first path separator onward.
+    if let Some(slash) = s.find('/') {
+        s = &s[..slash];
+    }
+    // Drop credentials (user@host) if present.
+    if let Some(at) = s.rfind('@') {
+        s = &s[at + 1..];
+    }
+    // Drop a trailing :port.
+    if let Some(colon) = s.rfind(':') {
+        if s[colon + 1..].chars().all(|c| c.is_ascii_digit()) && !s[colon + 1..].is_empty() {
+            s = &s[..colon];
+        }
+    }
+    s.trim_end_matches('.').to_lowercase()
 }
 
 /// Determine whether a checkpoint is compatible and should be resumed,
@@ -696,7 +736,11 @@ pub fn assemble_and_filter_results(
 ) -> AssembledResults {
     let mut all_results = resumed_results;
     all_results.extend(new_results);
-    let (deduped, raw_count) = deduplicate_results(all_results);
+    // P0.4: time the dedup pass — the suspected O(S^2)-ish evidence-`contains` merge. If material
+    // at 15k+ relationships it earns a follow-on; otherwise the stone closes as immaterial.
+    let (deduped, raw_count) = crate::perf::timed(&crate::perf::METRICS.report_dedup, || {
+        deduplicate_results(all_results)
+    });
     let dedup_count = deduped.len();
     let (filtered, infra_removed) = filter_infra_providers(deduped, include_infra);
     let (filtered, marketing_removed) = filter_marketing_tracking(filtered, include_infra);
@@ -704,13 +748,114 @@ pub fn assemble_and_filter_results(
     // resumed, batch) passes through here, so this is the only place an attribution invariant
     // can be enforced once instead of remembered at each new emit site.
     let (filtered, finalize) = crate::finalize::finalize_report(filtered);
+    // P4.4: prune subtrees orphaned by infra/marketing filtering, then P4.1: recompute
+    // deterministic BFS layer labels over the resulting connected edge set.
+    let (mut filtered, orphans_removed) =
+        match filtered.first().map(|r| r.root_customer_domain.clone()) {
+            Some(root) => {
+                let (pruned, n) = prune_orphaned_edges(filtered, &root);
+                (pruned, n)
+            }
+            None => (filtered, 0),
+        };
+    if let Some(root) = filtered.first().map(|r| r.root_customer_domain.clone()) {
+        recompute_layers_bfs(&mut filtered, &root);
+    }
     AssembledResults {
         results: filtered,
         raw_count,
         dedup_count,
-        infra_removed,
+        // Orphaned-edge pruning is a direct consequence of infra filtering, so its count
+        // rolls into infra_removed for the report's "filtered" tally.
+        infra_removed: infra_removed + orphans_removed,
         marketing_removed,
         finalize,
+    }
+}
+
+/// P4.4: drop edges whose parent is not a rendered node. When infra/marketing filtering
+/// removes `X → infra` edges (the infra domain is dropped as a vendor), any surviving
+/// `infra → Y` edge is left with a parent that appears nowhere as a vendor node — an orphaned
+/// subtree the graph can never reach from the root and the report counts as phantom vendors.
+/// This prunes, to a fixpoint (removing one orphan can orphan its children), every edge whose
+/// parent is neither the root nor a surviving vendor (`nth_party_domain`). Chosen over the
+/// alternative of rendering filtered infra as flagged pass-through nodes because that is a
+/// frontend change; pruning keeps the backend graph internally consistent. Returns the count
+/// removed.
+pub fn prune_orphaned_edges(
+    mut rows: Vec<VendorRelationship>,
+    root: &str,
+) -> (Vec<VendorRelationship>, usize) {
+    use std::collections::HashSet;
+    let before = rows.len();
+    loop {
+        let nodes: HashSet<&str> = rows.iter().map(|r| r.nth_party_domain.as_str()).collect();
+        // keep an edge iff its parent is the root or appears somewhere as a vendor node.
+        let keep: Vec<bool> = rows
+            .iter()
+            .map(|r| {
+                let parent = r.nth_party_customer_domain.as_str();
+                parent == root || nodes.contains(parent)
+            })
+            .collect();
+        drop(nodes);
+        if keep.iter().all(|&k| k) {
+            break;
+        }
+        let mut i = 0;
+        rows.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
+    }
+    let removed = before - rows.len();
+    (rows, removed)
+}
+
+/// P4.1: recompute every edge's `nth_party_layer` as its BFS distance from the root over the
+/// FINAL edge set. The scan is a concurrent depth-first crawl, so an edge's recorded layer is
+/// whatever depth its parent happened to be crawled at first — nondeterministic across runs and,
+/// when a vendor is reached both deep and shallow, often the wrong (deeper) one. Recomputing
+/// layer(parent→child) = dist(root, parent) + 1 makes the reported layers deterministic and
+/// correct. An edge whose parent is unreachable from the root over the final (post-filter) edge
+/// set keeps its recorded layer, so nothing is silently zeroed.
+pub fn recompute_layers_bfs(relationships: &mut [VendorRelationship], root: &str) {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    if relationships.is_empty() {
+        return;
+    }
+    // parent -> children (owned keys so we can mutate `relationships` afterwards).
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for r in relationships.iter() {
+        children
+            .entry(r.nth_party_customer_domain.clone())
+            .or_default()
+            .push(r.nth_party_domain.clone());
+    }
+    // BFS distance from the root over the parent→child graph.
+    let mut dist: HashMap<String, u32> = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    dist.insert(root.to_string(), 0);
+    visited.insert(root.to_string());
+    queue.push_back(root.to_string());
+    while let Some(node) = queue.pop_front() {
+        let d = dist[&node];
+        if let Some(kids) = children.get(&node) {
+            for c in kids {
+                if visited.insert(c.clone()) {
+                    dist.insert(c.clone(), d + 1);
+                    queue.push_back(c.clone());
+                }
+            }
+        }
+    }
+    // Re-stamp each edge's layer from its parent's BFS distance; leave unreachable parents.
+    for r in relationships.iter_mut() {
+        if let Some(&parent_dist) = dist.get(&r.nth_party_customer_domain) {
+            r.nth_party_layer = parent_dist + 1;
+        }
     }
 }
 
@@ -720,12 +865,14 @@ pub fn dispatch_export(
     format: &str,
     output_path: &str,
 ) -> Result<()> {
-    match format {
+    // P0.4: time report export — multi-MB embedded-data HTML at thousands of relationships had
+    // no performance data until this counter.
+    crate::perf::timed(&crate::perf::METRICS.report_export, || match format {
         "json" => export::export_json(results, output_path),
         "markdown" => export::export_markdown(results, output_path),
         "html" => export::export_html(results, output_path),
         _ => export::export_csv(results, output_path),
-    }
+    })
 }
 
 /// State restored from a checkpoint for resuming an analysis.
@@ -1781,10 +1928,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         return Ok(());
     }
 
-    let domain = args
+    let domain_raw = args
         .domain
         .as_ref()
         .expect("Domain is required when not using --init or --input-file");
+    // P4.3: canonicalize once at intake; every downstream use (scan target, whois,
+    // output filename, root identity) sees the same normalized form.
+    let domain_canonical = canonicalize_scan_target(domain_raw);
+    let domain = &domain_canonical;
 
     let output_dir = match args.get_domain_output_dir() {
         Ok(dir) => dir,
@@ -2055,15 +2206,35 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         }
     }
 
-    let root_customer_domain = domain.clone();
-    let root_customer_org = discovered_vendors.get(domain).unwrap_or(domain).clone();
+    // P4.3: the root's identity must equal the base-collapsed form that every depth-1
+    // edge uses as its `nth_party_customer_domain`, or the HTML graph's root node has no
+    // children. `domain` is already canonical (scheme/case/port stripped); collapse to the
+    // registrable base to match `extract_base_domain` on the edge side.
+    let root_customer_domain = crate::domain_utils::extract_base_domain(domain);
+    let root_customer_org = discovered_vendors
+        .get(&root_customer_domain)
+        .or_else(|| discovered_vendors.get(domain))
+        .unwrap_or(&root_customer_domain)
+        .clone();
 
     let discovered_vendors = Arc::new(Mutex::new(discovered_vendors));
     let unverified_orgs = Arc::new(Mutex::new(unverified_orgs));
-    let processed_domains = Arc::new(Mutex::new(processed_domains_set));
+    // P1.3/P1.9: the recursion gate is a depth-aware HashMap<domain, min-depth>. The checkpoint
+    // still serializes a depthless HashSet<String> (schema unchanged), so entries restored from a
+    // resume are seeded at depth 0 — the shallowest depth, which the gate treats as "already
+    // covered at the shallowest possible layer" so a resumed domain is never needlessly re-expanded.
+    let processed_domains_map: HashMap<String, u32> = processed_domains_set
+        .into_iter()
+        .map(|d| (d, 0u32))
+        .collect();
+    let processed_domains = Arc::new(Mutex::new(processed_domains_map));
     // Scan-scoped set of orgs whose subprocessor page has already been sought, so
     // secondary domains of an already-analyzed org skip the expensive lookup.
-    let subprocessor_attempted_orgs = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // P4.7: org key -> the min depth at which its subprocessor page was claimed.
+    let subprocessor_attempted_orgs =
+        Arc::new(Mutex::new(std::collections::HashMap::<String, u32>::new()));
+    // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5). Constructed once per scan.
+    let scan_dedup = Arc::new(analysis::ScanDedup::new());
     // `--parallel-jobs 0` means "no operator cap", so the semaphore falls back to the
     // depth-1 configured concurrency. A zero-permit semaphore would deadlock any future
     // caller that acquires it.
@@ -2278,6 +2449,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         discovered_vendors.clone(),
         processed_domains.clone(),
         subprocessor_attempted_orgs.clone(),
+        scan_dedup.clone(),
         semaphore.clone(),
         1,
         &root_customer_domain,
@@ -3212,10 +3384,170 @@ mod tests {
             "Customer Org".to_string(),
             "record".to_string(),
             record_type,
-            "root.com".to_string(),
+            // A depth-1 edge's customer IS the scan root; self-root the fixture so the
+            // P4.4 orphan-prune (which drops edges whose parent is neither the root nor a
+            // vendor node) treats these as the valid root→vendor edges they represent.
+            customer_domain.to_string(),
             "Root Org".to_string(),
             evidence.to_string(),
         )
+    }
+
+    // ── prune_orphaned_edges (P4.4) ────────────────────────────────────
+
+    #[test]
+    fn test_prune_orphaned_edges_removes_phantom_parent_subtree() {
+        // root->a (a is a node), then infra->y where infra never appears as a vendor node.
+        // The infra->y edge is orphaned and must be pruned.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("y.com", "infra.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (kept, removed) = prune_orphaned_edges(std::mem::take(&mut rels), "root.com");
+        assert_eq!(removed, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].nth_party_domain, "a.com");
+    }
+
+    #[test]
+    fn test_prune_orphaned_edges_transitive() {
+        // infra->y (orphan) and y->z. Removing infra->y orphans y->z too (y is no longer a node).
+        let (kept, removed) = prune_orphaned_edges(
+            vec![
+                make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+                make_relationship_at_layer("y.com", "infra.com", RecordType::DnsTxtSpf, "e", 2),
+                make_relationship_at_layer("z.com", "y.com", RecordType::DnsTxtSpf, "e", 3),
+            ],
+            "root.com",
+        );
+        assert_eq!(
+            removed, 2,
+            "both infra->y and the now-orphaned y->z are pruned"
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].nth_party_domain, "a.com");
+    }
+
+    #[test]
+    fn test_prune_orphaned_edges_keeps_connected_graph() {
+        // A fully connected graph (every parent is root or a node) is untouched.
+        let rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (kept, removed) = prune_orphaned_edges(rels, "root.com");
+        assert_eq!(removed, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    // ── recompute_layers_bfs (P4.1) ────────────────────────────────────
+
+    #[test]
+    fn test_recompute_layers_bfs_assigns_bfs_distance() {
+        // root -> a (layer 1); a -> b (layer 2). Record b's edge with a WRONG deep layer (5)
+        // and confirm the BFS recompute corrects it to 2.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 5),
+        ];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert_eq!(rels[0].nth_party_layer, 1, "root->a is layer 1");
+        assert_eq!(
+            rels[1].nth_party_layer, 2,
+            "a->b is layer 2, not the recorded 5"
+        );
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_shallow_path_wins() {
+        // A vendor reachable both deep (root->a->b->v, layer 3) and directly (root->v, layer 1).
+        // Every edge INTO v via a deep parent still gets its own parent's distance, and the
+        // direct root->v edge is layer 1 — deterministic regardless of input order.
+        let mut rels = vec![
+            make_relationship_at_layer("a.com", "root.com", RecordType::DnsTxtSpf, "e", 1),
+            make_relationship_at_layer("b.com", "a.com", RecordType::DnsTxtSpf, "e", 2),
+            make_relationship_at_layer("v.com", "b.com", RecordType::DnsTxtSpf, "e", 9),
+            make_relationship_at_layer("v.com", "root.com", RecordType::DnsTxtSpf, "e", 9),
+        ];
+        recompute_layers_bfs(&mut rels, "root.com");
+        // root->a =1, a->b =2, b->v =3, root->v =1
+        assert_eq!(rels[0].nth_party_layer, 1);
+        assert_eq!(rels[1].nth_party_layer, 2);
+        assert_eq!(rels[2].nth_party_layer, 3, "b->v parent b is at distance 2");
+        assert_eq!(rels[3].nth_party_layer, 1, "root->v is layer 1");
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_unreachable_parent_keeps_layer() {
+        // An edge whose parent is not reachable from the root (e.g. an orphaned subtree after
+        // infra filtering) keeps its recorded layer rather than being zeroed.
+        let mut rels = vec![make_relationship_at_layer(
+            "child.com",
+            "orphan.com",
+            RecordType::DnsTxtSpf,
+            "e",
+            4,
+        )];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert_eq!(
+            rels[0].nth_party_layer, 4,
+            "unreachable parent keeps recorded layer"
+        );
+    }
+
+    #[test]
+    fn test_recompute_layers_bfs_empty_is_noop() {
+        let mut rels: Vec<VendorRelationship> = vec![];
+        recompute_layers_bfs(&mut rels, "root.com");
+        assert!(rels.is_empty());
+    }
+
+    // ── canonicalize_scan_target (P4.3) ────────────────────────────────
+
+    #[test]
+    fn test_canonicalize_scan_target_plain() {
+        assert_eq!(canonicalize_scan_target("vanta.com"), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_lowercases_and_trims() {
+        assert_eq!(canonicalize_scan_target("  Vanta.COM  "), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_strips_scheme_path_port() {
+        assert_eq!(
+            canonicalize_scan_target("https://vanta.com/security"),
+            "vanta.com"
+        );
+        assert_eq!(
+            canonicalize_scan_target("http://vanta.com:8443"),
+            "vanta.com"
+        );
+        assert_eq!(canonicalize_scan_target("vanta.com."), "vanta.com");
+        assert_eq!(canonicalize_scan_target("user@vanta.com"), "vanta.com");
+    }
+
+    #[test]
+    fn test_canonicalize_scan_target_preserves_subdomain() {
+        // Canonicalization does NOT PSL-collapse — a subdomain scan target survives.
+        assert_eq!(canonicalize_scan_target("www.vanta.com"), "www.vanta.com");
+        assert_eq!(
+            canonicalize_scan_target("APP.example.com"),
+            "app.example.com"
+        );
+    }
+
+    // The graph-disconnect fix: after canonicalization, the root customer domain
+    // (extract_base_domain of the canonical target) equals what depth-1 edges use.
+    #[test]
+    fn test_root_identity_matches_edge_side_for_www_target() {
+        let canonical = canonicalize_scan_target("www.vanta.com");
+        let root = crate::domain_utils::extract_base_domain(&canonical);
+        // A depth-1 edge's customer domain is extract_base_domain of the same target.
+        let edge_customer = crate::domain_utils::extract_base_domain("www.vanta.com");
+        assert_eq!(root, edge_customer);
+        assert_eq!(root, "vanta.com");
     }
 
     // ── build_output_filename ──────────────────────────────────────────
@@ -3395,6 +3727,59 @@ mod tests {
         assert_eq!(raw, 2);
         assert!(deduped[0].evidence.contains("evidence-A"));
         assert!(deduped[0].evidence.contains("evidence-B"));
+    }
+
+    /// Like `make_relationship` but with an explicit nth_party_layer, for the
+    /// layer-merge regression tests below.
+    fn make_relationship_at_layer(
+        domain: &str,
+        customer_domain: &str,
+        record_type: RecordType,
+        evidence: &str,
+        layer: u32,
+    ) -> VendorRelationship {
+        VendorRelationship::new(
+            domain.to_string(),
+            "Org".to_string(),
+            layer,
+            customer_domain.to_string(),
+            "Customer Org".to_string(),
+            "record".to_string(),
+            record_type,
+            "root.com".to_string(),
+            "Root Org".to_string(),
+            evidence.to_string(),
+        )
+    }
+
+    // P4.2 regression: deduplicate_results must keep the MINIMUM layer across merged
+    // rows, deterministically, regardless of input order.
+    #[test]
+    fn test_deduplicate_keeps_minimum_layer_deep_then_shallow() {
+        let results = vec![
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 3),
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 2),
+        ];
+        let (deduped, _) = deduplicate_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].nth_party_layer, 2,
+            "must keep the shallower layer"
+        );
+    }
+
+    #[test]
+    fn test_deduplicate_keeps_minimum_layer_shallow_then_deep() {
+        let results = vec![
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 2),
+            make_relationship_at_layer("stripe.com", "example.com", RecordType::DnsTxtSpf, "e", 4),
+        ];
+        let (deduped, _) = deduplicate_results(results);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(
+            deduped[0].nth_party_layer, 2,
+            "order must not change the result"
+        );
     }
 
     #[test]

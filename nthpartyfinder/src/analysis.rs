@@ -36,8 +36,106 @@ pub fn is_interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Scan-lifetime dedup memos for apex-scoped discovery methods (P1.5) and dispatch
+/// singleflight (P1.1). Constructed once per scan and shared by reference through the
+/// recursion, exactly like `subprocessor_attempted_orgs`. Every method is apex-scoped —
+/// enumerating a registrable base's subdomains, or querying `%.<apex>` on a CT log, or
+/// probing SaaS tenants named after the apex — so running it once per apex covers every
+/// subdomain and every parent that reaches into that apex.
+#[derive(Default)]
+pub struct ScanDedup {
+    /// Registrable bases whose subfinder enumeration has been claimed this scan.
+    subfinder_apexes: Mutex<HashSet<String>>,
+    /// Registrable bases whose CT-log query has been claimed this scan.
+    ct_apexes: Mutex<HashSet<String>>,
+    /// Registrable bases whose SaaS-tenant probe has been claimed this scan.
+    saas_apexes: Mutex<HashSet<String>>,
+    /// P1.4: per-base org-resolution singleflight. Concurrent discoverers of the same
+    /// registrable base (the popular SaaS/CDN vendors appear under most parents at depth 2+)
+    /// used to each run the full multi-second WHOIS→web→NER chain within the check-then-act
+    /// window. A keyed OnceCell coalesces them: the first runs the chain, the rest await its
+    /// result. The value is the FINAL normalized org string, so the coalesced result is
+    /// byte-identical to a fresh resolution.
+    org_cells: Mutex<HashMap<String, Arc<tokio::sync::OnceCell<String>>>>,
+}
+
+impl ScanDedup {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Claim `apex` for `set`, returning true iff this is the first claim (so the caller
+    /// should RUN the method). Later claims return false (skip — already covered).
+    async fn claim(set: &Mutex<HashSet<String>>, apex: &str) -> bool {
+        set.lock().await.insert(apex.to_string())
+    }
+
+    async fn claim_subfinder(&self, apex: &str) -> bool {
+        Self::claim(&self.subfinder_apexes, apex).await
+    }
+    async fn claim_ct(&self, apex: &str) -> bool {
+        Self::claim(&self.ct_apexes, apex).await
+    }
+    async fn claim_saas(&self, apex: &str) -> bool {
+        Self::claim(&self.saas_apexes, apex).await
+    }
+
+    /// P1.4: resolve a base domain's org through `compute` exactly once per scan, coalescing
+    /// concurrent callers. Returns the shared normalized org string. Counts a `whois.cache_hit`
+    /// when the value was already resolved (the compute is not run).
+    async fn resolve_org_once<F, Fut>(&self, base: &str, compute: F) -> String
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        let cell = {
+            let mut cells = self.org_cells.lock().await;
+            cells
+                .entry(base.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
+                .clone()
+        };
+        if cell.get().is_some() {
+            crate::perf::METRICS.whois_cache_hit.hit();
+        }
+        cell.get_or_init(compute).await.clone()
+    }
+}
+
 /// The absolute maximum recursion depth, regardless of user configuration.
 pub const ABSOLUTE_MAX_DEPTH: u32 = 10;
+
+/// The outcome of the depth-aware processed-domain gate (P1.3).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProcessedGate {
+    /// Already claimed at a shallower-or-equal depth — skip (a true duplicate reach).
+    Skip,
+    /// New, or reached strictly shallower than before — claim at this depth and proceed
+    /// (re-expansion: the deeper first-crawl truncated the subtree and mislabeled layers).
+    Claim,
+    /// Not yet claimed but this depth exceeds the budget — do not claim, do not proceed
+    /// (it may still be reached within budget via a shallower path later).
+    DepthRefused,
+}
+
+/// Pure decision for the recursion gate. `existing_depth` is the min depth a domain was
+/// previously claimed at (None if never). Depth-aware: a strictly shallower reach re-expands.
+pub fn processed_gate_decision(
+    existing_depth: Option<u32>,
+    current_depth: u32,
+    depth_allowed: bool,
+) -> ProcessedGate {
+    if let Some(claimed) = existing_depth {
+        if current_depth >= claimed {
+            return ProcessedGate::Skip;
+        }
+    }
+    if depth_allowed {
+        ProcessedGate::Claim
+    } else {
+        ProcessedGate::DepthRefused
+    }
+}
 
 /// Check whether the current depth exceeds the allowed limits.
 /// Returns `true` if analysis should proceed, `false` if it should be skipped.
@@ -546,7 +644,7 @@ pub async fn subprocessor_analysis_with_logging(
 fn subprocessor_skip_decision(
     org: Option<&str>,
     current_depth: u32,
-    attempted_orgs: &mut HashSet<String>,
+    attempted_orgs: &mut HashMap<String, u32>,
 ) -> bool {
     let Some(org) = org else {
         return false;
@@ -567,11 +665,29 @@ fn subprocessor_skip_decision(
     {
         return false;
     }
-    if attempted_orgs.contains(&key) {
-        current_depth > 1
-    } else {
-        attempted_orgs.insert(key);
-        false
+    // P4.7: the claim carries the depth it was made at. Because the traversal is a concurrent
+    // DFS, a deep satellite (slack.design at depth 3) could claim an org before its shallower
+    // PRIMARY (slack.com at depth 2), suppressing the primary's subprocessor page — the tool's
+    // highest-evidence source. A strictly shallower reach therefore re-claims and RUNS.
+    match attempted_orgs.get(&key).copied() {
+        None => {
+            attempted_orgs.insert(key, current_depth);
+            false
+        }
+        Some(claimed_depth) => {
+            if current_depth < claimed_depth {
+                // Shallower than the existing claim (includes a depth-1 primary arriving after
+                // a deep satellite) → the shallower domain is authoritative; re-claim and run.
+                attempted_orgs.insert(key, current_depth);
+                false
+            } else if current_depth == 1 {
+                // Depth-1 direct vendors always run — the root layer is never suppressed.
+                false
+            } else {
+                // Already covered at a shallower-or-equal depth → skip the redundant lookup.
+                true
+            }
+        }
     }
 }
 
@@ -717,6 +833,20 @@ async fn run_saas_phase(
     let Some(tenant_disc) = saas_tenant_discovery else {
         return Vec::new();
     };
+    // P1.8: gate SaaS probing to apex inputs. Tenant names derive from the registrable
+    // base, so probing a subdomain (`www.vanta.com`) issues the identical ~245-probe matrix
+    // as its apex (`vanta.com`), which is ALWAYS separately queued for subdomains
+    // (add_base_domain_if_subdomain). Skipping the subdomain removes the duplicate matrix
+    // at zero recall cost — the apex runs the full pass.
+    let base_domain = crate::domain_utils::extract_base_domain(domain);
+    if base_domain != domain {
+        crate::perf::METRICS.saas_apex_skip.hit();
+        logger.debug(&format!(
+            "Skipping SaaS phase for subdomain {} — apex {} carries the probe",
+            domain, base_domain
+        ));
+        return Vec::new();
+    }
     logger.info(&format!("Running SaaS tenant discovery for {}...", domain));
     match tenant_disc.probe_with_logger(domain, Some(logger)).await {
         Ok(tenants) => {
@@ -824,11 +954,16 @@ pub async fn discover_nth_parties(
     domain: &str,
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
+    // P1.3: domain -> the MINIMUM recursion depth at which it has been claimed. A depth-aware
+    // gate: a domain first reached deep is re-expanded when later reached shallower (else its
+    // subtree keeps inflated layers and its within-budget grandchildren are never discovered).
+    processed_domains: Arc<Mutex<HashMap<String, u32>>>,
     // Normalized org names whose subprocessor page has already been sought, so we don't
     // re-run the expensive browser-rendered subprocessor lookup on secondary/tertiary
     // domains of an org we already analyzed (slack.com then slack.design/slack.dev/…).
-    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashMap<String, u32>>>,
+    // Scan-lifetime apex memos for subfinder/CT/SaaS dedup (P1.5).
+    scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
     current_depth: u32,
     root_customer_domain: &str,
@@ -868,15 +1003,36 @@ pub async fn discover_nth_parties(
         return Ok(());
     }
 
-    {
-        let processed = processed_domains.lock().await;
-        if processed.contains(domain) {
-            logger.debug(&format!("Domain {} already processed, skipping", domain));
-            return Ok(());
+    // P1.3: one atomic, depth-aware test-and-set. Holding the lock across the read, the
+    // (pure, cheap) depth check, and the insert closes the check-then-insert race that let
+    // two parents run the FULL discovery suite for the same domain concurrently. The gate is
+    // depth-aware: a domain already claimed at a shallower-or-equal depth is skipped; a
+    // strictly shallower reach re-expands (re-claims at the lower depth and proceeds), which
+    // output dedup absorbs. Depth-refused domains are NOT inserted — they may still be reached
+    // within budget via a shallower path later.
+    let depth_refused = {
+        let mut processed = processed_domains.lock().await;
+        match processed_gate_decision(
+            processed.get(domain).copied(),
+            current_depth,
+            is_depth_allowed(current_depth, max_depth),
+        ) {
+            ProcessedGate::Skip => {
+                crate::perf::METRICS.dedup_domain_hit.hit();
+                logger.debug(&format!(
+                    "Domain {} already processed at depth <= {} — skipping",
+                    domain, current_depth
+                ));
+                return Ok(());
+            }
+            ProcessedGate::Claim => {
+                processed.insert(domain.to_string(), current_depth);
+                false
+            }
+            ProcessedGate::DepthRefused => true,
         }
-    }
-
-    if !is_depth_allowed(current_depth, max_depth) {
+    };
+    if depth_refused {
         if current_depth > ABSOLUTE_MAX_DEPTH {
             logger.warn(&format!(
                 "Hit absolute depth cap ({}) for domain {}",
@@ -889,11 +1045,6 @@ pub async fn discover_nth_parties(
             ));
         }
         return Ok(());
-    }
-
-    {
-        let mut processed = processed_domains.lock().await;
-        processed.insert(domain.to_string());
     }
 
     logger.record_domain_processed();
@@ -1059,6 +1210,7 @@ pub async fn discover_nth_parties(
                 let skip =
                     subprocessor_skip_decision(org.as_deref(), current_depth, &mut attempted);
                 if skip {
+                    crate::perf::METRICS.dedup_org_subproc_skip.hit();
                     logger.debug(&format!(
                     "Skipping subprocessor lookup for {} — org already analyzed at a shallower layer",
                     domain
@@ -1066,6 +1218,46 @@ pub async fn discover_nth_parties(
                 }
                 !skip
             };
+
+        // P1.5: apex-scoped dedup for subfinder / CT / SaaS. Each enumerates a registrable
+        // base (subfinder: the base's subdomains; CT: `%.<apex>`; SaaS: tenants named after
+        // the apex), so one run per apex per scan covers every subdomain of that apex and
+        // every parent that reaches into it. A subdomain input skips these entirely — its
+        // apex is always separately queued (add_base_domain_if_subdomain) and carries the
+        // superset. Claim-before-run (like subprocessor_attempted_orgs) so racing reaches of
+        // the same apex can't double-run.
+        // NOTE: these gated bindings are JOIN-LOCAL — they must NOT shadow the discovery
+        // parameters, which are still handed to every child recursion below (each child does
+        // its own apex claim). Disabling a method here for the whole subtree would be a recall
+        // regression.
+        let apex = domain_utils::extract_base_domain(domain);
+        let is_apex = apex == domain;
+        let subfinder_for_join = if is_apex && scan_dedup.claim_subfinder(&apex).await {
+            subdomain_discovery
+        } else {
+            if subdomain_discovery.is_some() {
+                crate::perf::METRICS.subfinder_apex_skip.hit();
+            }
+            None
+        };
+        let ct_for_join = if is_apex && scan_dedup.claim_ct(&apex).await {
+            ct_discovery
+        } else {
+            if ct_discovery.is_some() {
+                crate::perf::METRICS.ct_apex_skip.hit();
+            }
+            None
+        };
+        // SaaS: run_saas_phase already skips subdomains internally (P1.8). Add the
+        // cross-parent apex dedup here: an apex reached via a second parent skips re-probing.
+        let saas_for_join = if !is_apex || scan_dedup.claim_saas(&apex).await {
+            saas_tenant_discovery
+        } else {
+            if saas_tenant_discovery.is_some() {
+                crate::perf::METRICS.saas_apex_skip.hit();
+            }
+            None
+        };
 
         let discovery_started = std::time::Instant::now();
         let (sp, sf, st, ct_v, wt) = tokio::join!(
@@ -1081,15 +1273,15 @@ pub async fn discover_nth_parties(
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_subfinder,
-                run_subfinder_phase(domain, subdomain_discovery, &dns_pool, &logger),
+                run_subfinder_phase(domain, subfinder_for_join, &dns_pool, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_saas,
-                run_saas_phase(domain, saas_tenant_discovery, &logger),
+                run_saas_phase(domain, saas_for_join, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_ct,
-                run_ct_phase(domain, ct_discovery, &logger),
+                run_ct_phase(domain, ct_for_join, &logger),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_webtraffic,
@@ -1201,6 +1393,7 @@ pub async fn discover_nth_parties(
                     let discovered_vendors = discovered_vendors.clone();
                     let processed_domains = processed_domains.clone();
                     let subprocessor_attempted_orgs = subprocessor_attempted_orgs.clone();
+                    let scan_dedup = scan_dedup.clone();
                     let semaphore = semaphore.clone();
                     let recursive_semaphore = recursive_semaphore.clone();
                     let domain = domain.to_string();
@@ -1252,6 +1445,7 @@ pub async fn discover_nth_parties(
                             discovered_vendors,
                             processed_domains,
                             subprocessor_attempted_orgs,
+                            scan_dedup,
                             semaphore.clone(),
                             root_customer_domain,
                             root_customer_organization,
@@ -1328,7 +1522,7 @@ pub async fn discover_nth_parties(
                     cp.discovered_vendors = vendors.clone();
                     drop(vendors);
                     let processed = processed_domains.lock().await;
-                    cp.completed_domains = processed.clone();
+                    cp.completed_domains = processed.keys().cloned().collect();
                     drop(processed);
                     let sink = result_sink.lock().await;
                     cp.results_count = sink.count();
@@ -1372,7 +1566,7 @@ pub async fn discover_nth_parties(
                         cp.discovered_vendors = vendors.clone();
                         drop(vendors);
                         let processed = processed_domains.lock().await;
-                        cp.completed_domains = processed.clone();
+                        cp.completed_domains = processed.keys().cloned().collect();
                         drop(processed);
                         let sink = result_sink.lock().await;
                         cp.results_count = sink.count();
@@ -1427,8 +1621,9 @@ pub async fn process_vendor_domain(
     current_depth: u32,
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
-    processed_domains: Arc<Mutex<HashSet<String>>>,
-    subprocessor_attempted_orgs: Arc<Mutex<HashSet<String>>>,
+    processed_domains: Arc<Mutex<HashMap<String, u32>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashMap<String, u32>>>,
+    scan_dedup: Arc<ScanDedup>,
     semaphore: Arc<Semaphore>,
     root_customer_domain: String,
     root_customer_organization: String,
@@ -1500,65 +1695,64 @@ pub async fn process_vendor_domain(
             .await
             .contains_key(&customer_base_domain);
 
-    let resolve = |domain: String, needed: bool| async move {
-        if !needed {
-            return None;
+    // P1.4: resolve a base's org through the scan-global singleflight. The whole
+    // whois→web→NER chain plus the plausibility-gated normalization runs inside the once-cell
+    // compute, so the value is the FINAL normalized string and coalesced callers receive a
+    // byte-identical result. The plausibility backstop, verified-flag handling, and per-domain
+    // logging are unchanged — only who runs them (once per base, not once per racing vendor).
+    let resolve_org = |domain: String, needed: bool| {
+        let scan_dedup = scan_dedup.clone();
+        let logger = logger.clone();
+        async move {
+            if !needed {
+                return None;
+            }
+            let org = scan_dedup
+                .resolve_org_once(&domain, || async {
+                    match whois::get_organization_with_status_and_config(
+                        &domain,
+                        web_org_enabled,
+                        web_org_min_confidence,
+                    )
+                    .await
+                    {
+                        Ok(org_result) => {
+                            // Backstop against extracted taglines reaching the report. Applies
+                            // to INFERRED names only; a curated/verified source is never
+                            // overruled by the plausibility heuristic (real legal names are odd
+                            // enough that the heuristic is the thing more likely to be wrong).
+                            let resolved = if org_result.is_verified
+                                || org_normalizer::is_plausible_org_name(&org_result.name)
+                            {
+                                org_normalizer::normalize(&org_result.name)
+                            } else {
+                                org_normalizer::normalize(&domain)
+                            };
+                            logger.log_whois_lookup(&domain, org_result.is_verified);
+                            resolved
+                        }
+                        Err(e) => {
+                            logger.debug(&format!(
+                                "Failed to get organization for {}: {}",
+                                domain, e
+                            ));
+                            logger.log_whois_lookup(&domain, false);
+                            org_normalizer::normalize(&domain)
+                        }
+                    }
+                })
+                .await;
+            Some((domain, org))
         }
-        Some((
-            domain.clone(),
-            whois::get_organization_with_status_and_config(
-                &domain,
-                web_org_enabled,
-                web_org_min_confidence,
-            )
-            .await,
-        ))
     };
 
     let (vendor_lookup, customer_lookup) = tokio::join!(
-        resolve(base_domain.clone(), vendor_needed),
-        resolve(customer_base_domain.clone(), customer_needed),
+        resolve_org(base_domain.clone(), vendor_needed),
+        resolve_org(customer_base_domain.clone(), customer_needed),
     );
 
-    for (label, lookup) in [("", vendor_lookup), ("customer ", customer_lookup)] {
-        let Some((domain, result)) = lookup else {
-            continue;
-        };
-        match result {
-            Ok(org_result) => {
-                // Backstop against extracted taglines reaching the report ("Connective
-                // Infrastructure for Production AI" as a company name). The chain already
-                // gates every extracted name at its source (`whois::accept_extracted_name`),
-                // so this should never fire; it is here because the cost of a scraped
-                // sentence appearing as a vendor's identity is much higher than the cost of
-                // one extra check.
-                //
-                // Applies to INFERRED names only. A curated source (the user's own overrides,
-                // the vendor registry, the embedded dataset) is the most trustworthy evidence
-                // the tool has, and a plausibility heuristic must never overrule it — real
-                // legal names are odd enough ("Meta Platforms, Inc.") that the heuristic, not
-                // the curated datum, is the thing more likely to be wrong.
-                let resolved = if org_result.is_verified
-                    || org_normalizer::is_plausible_org_name(&org_result.name)
-                {
-                    org_normalizer::normalize(&org_result.name)
-                } else {
-                    org_normalizer::normalize(&domain)
-                };
-                let mut vendors = discovered_vendors.lock().await;
-                vendors.insert(domain.clone(), resolved);
-                logger.log_whois_lookup(&domain, org_result.is_verified);
-            }
-            Err(e) => {
-                logger.debug(&format!(
-                    "Failed to get organization for {}{}: {}",
-                    label, domain, e
-                ));
-                let mut vendors = discovered_vendors.lock().await;
-                vendors.insert(domain.clone(), org_normalizer::normalize(&domain));
-                logger.log_whois_lookup(&domain, false);
-            }
-        }
+    for (domain, org) in [vendor_lookup, customer_lookup].into_iter().flatten() {
+        discovered_vendors.lock().await.insert(domain, org);
     }
 
     let (customer_org, vendor_org) = {
@@ -1616,6 +1810,7 @@ pub async fn process_vendor_domain(
         discovered_vendors.clone(),
         processed_domains.clone(),
         subprocessor_attempted_orgs.clone(),
+        scan_dedup.clone(),
         semaphore.clone(),
         current_depth + 1,
         &root_customer_domain,
@@ -1806,6 +2001,104 @@ pub async fn discover_nth_parties_minimal(
 mod tests {
     use super::*;
 
+    // P1.3: depth-aware processed gate — the correctness-critical decision.
+    #[test]
+    fn test_processed_gate_new_domain_claims() {
+        assert_eq!(processed_gate_decision(None, 2, true), ProcessedGate::Claim);
+    }
+
+    #[test]
+    fn test_processed_gate_reached_deeper_or_equal_skips() {
+        // Already claimed at depth 2; a reach at depth 2 or 3 is a true duplicate → skip.
+        assert_eq!(
+            processed_gate_decision(Some(2), 2, true),
+            ProcessedGate::Skip
+        );
+        assert_eq!(
+            processed_gate_decision(Some(2), 3, true),
+            ProcessedGate::Skip
+        );
+    }
+
+    #[test]
+    fn test_processed_gate_reached_shallower_re_expands() {
+        // Claimed deep (3), now reached shallow (1) → re-expand (Claim), not skip.
+        // This is the fix for inflated layers + never-discovered grandchildren.
+        assert_eq!(
+            processed_gate_decision(Some(3), 1, true),
+            ProcessedGate::Claim
+        );
+    }
+
+    #[test]
+    fn test_processed_gate_depth_refused_does_not_claim() {
+        // New domain but over budget → DepthRefused (not inserted, may return within budget).
+        assert_eq!(
+            processed_gate_decision(None, 4, false),
+            ProcessedGate::DepthRefused
+        );
+        // But an already-claimed domain still Skips even when over budget (the claim wins).
+        assert_eq!(
+            processed_gate_decision(Some(2), 4, false),
+            ProcessedGate::Skip
+        );
+    }
+
+    // P1.4: org-resolution singleflight — the compute runs once per base; later callers get
+    // the same value without re-running it.
+    #[tokio::test]
+    async fn test_resolve_org_once_coalesces() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let d = ScanDedup::new();
+        let runs = AtomicUsize::new(0);
+
+        let first = d
+            .resolve_org_once("stripe.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "Stripe".to_string()
+            })
+            .await;
+        assert_eq!(first, "Stripe");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // Second call for the same base must NOT run compute — returns the cached value.
+        let second = d
+            .resolve_org_once("stripe.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "SHOULD-NOT-RUN".to_string()
+            })
+            .await;
+        assert_eq!(second, "Stripe", "coalesced value must equal the first");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "compute ran only once");
+
+        // A different base runs its own compute.
+        let other = d
+            .resolve_org_once("vanta.com", || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                "Vanta".to_string()
+            })
+            .await;
+        assert_eq!(other, "Vanta");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    // P1.5: apex-scoped dedup claims — first claim runs, later claims skip; per-method
+    // independent; per-apex independent.
+    #[tokio::test]
+    async fn test_scan_dedup_claim_semantics() {
+        let d = ScanDedup::new();
+        // First claim of an apex for a method returns true (run); second returns false (skip).
+        assert!(d.claim_subfinder("vanta.com").await, "first claim runs");
+        assert!(!d.claim_subfinder("vanta.com").await, "second claim skips");
+        // A different apex is independent.
+        assert!(d.claim_subfinder("stripe.com").await);
+        // A different method for the same apex is independent.
+        assert!(d.claim_ct("vanta.com").await, "ct is a separate memo");
+        assert!(d.claim_saas("vanta.com").await, "saas is a separate memo");
+        assert!(!d.claim_ct("vanta.com").await);
+        assert!(!d.claim_saas("vanta.com").await);
+    }
+
     #[test]
     fn test_is_common_denominator_new_google_domains() {
         assert!(is_common_denominator("googletagmanager.com"));
@@ -1876,8 +2169,7 @@ mod tests {
 
     #[test]
     fn test_subprocessor_skip_decision() {
-        use std::collections::HashSet;
-        let mut attempted = HashSet::new();
+        let mut attempted = HashMap::new();
 
         // Unknown org → never skip (fail toward recall), nothing claimed.
         assert!(!subprocessor_skip_decision(None, 3, &mut attempted));
@@ -1922,6 +2214,32 @@ mod tests {
         assert!(!subprocessor_skip_decision(
             Some("Stripe"),
             2,
+            &mut attempted
+        ));
+    }
+
+    // P4.7: a deep satellite claiming an org first must NOT suppress the shallower primary —
+    // a strictly shallower reach re-claims and runs.
+    #[test]
+    fn test_subprocessor_skip_decision_shallower_primary_re_runs() {
+        let mut attempted = HashMap::new();
+        // Deep satellite (slack.design at depth 3) claims "Slack" first → runs.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            3,
+            &mut attempted
+        ));
+        // The shallower PRIMARY (slack.com at depth 2) must RUN, not be skipped — it re-claims.
+        assert!(
+            !subprocessor_skip_decision(Some("Slack"), 2, &mut attempted),
+            "shallower primary must run, not be suppressed by the deep satellite"
+        );
+        // Now a depth-3 reach is redundant (claimed at 2) → skip.
+        assert!(subprocessor_skip_decision(Some("Slack"), 3, &mut attempted));
+        // And an even shallower depth-1 direct vendor still runs.
+        assert!(!subprocessor_skip_decision(
+            Some("Slack"),
+            1,
             &mut attempted
         ));
     }
