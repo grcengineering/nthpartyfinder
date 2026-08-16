@@ -176,6 +176,11 @@ pub struct Metrics {
     /// Wall time of report export itself (P0.4) — multi-MB embedded-data HTML at thousands of
     /// relationships had performance data nowhere until this counter.
     pub report_export: Metric,
+    /// A domain whose subdomain/CT *enumeration* was skipped at depth >=2 because it is a
+    /// common-denominator infrastructure/CMS root (P4.8). Its thousands of subdomains are the
+    /// platform's own sprawl, not the customer's nth-parties; the domain stays a recorded leaf
+    /// edge, only its enumeration fan-out is gated. Each hit is one avoided hyperscaler explosion.
+    pub fanout_gate_skip: Metric,
 }
 
 impl Metrics {
@@ -223,6 +228,7 @@ impl Metrics {
             render_retry_rescued: Metric::new(),
             report_dedup: Metric::new(),
             report_export: Metric::new(),
+            fanout_gate_skip: Metric::new(),
         }
     }
 
@@ -247,7 +253,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 42] {
+    fn all(&self) -> [(&'static str, &Metric); 43] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -294,6 +300,7 @@ impl Metrics {
             ("render.retry_rescued", &self.render_retry_rescued),
             ("report.dedup", &self.report_dedup),
             ("report.export", &self.report_export),
+            ("fanout.gate_skip", &self.fanout_gate_skip),
         ]
     }
 
@@ -858,7 +865,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 42);
+        assert_eq!(snap.rows.len(), 43);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed
