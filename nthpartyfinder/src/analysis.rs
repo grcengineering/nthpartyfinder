@@ -560,6 +560,24 @@ pub fn should_stop_at_common_denominator(max_depth: Option<u32>, base_domain: &s
     max_depth.is_none() && is_common_denominator(base_domain)
 }
 
+/// P4.8: whether to GATE (skip) subdomain/CT *enumeration* for a domain at this recursion depth
+/// because it is a common-denominator infrastructure/CMS root (AWS, Cloudflare, wordpress.org-
+/// class). Such a root's thousands of subdomains are the platform's own sprawl, not the customer's
+/// nth-parties — enumerating them is the dominant deep-scan cost (single infra apexes fanned out to
+/// 5,000–10,000 subdomains in the 2026-08-15 validation scan; 279k subdomains, 9.15h wall) for
+/// near-zero attribution value.
+///
+/// This gates only the ENUMERATION fan-out, not the relationship: the parent→infra edge was
+/// already recorded before this domain is processed, so the infra root stays a leaf edge (recall of
+/// the relationship preserved). Only going *deeper through* the infra root is stopped — exactly
+/// what `should_stop_at_common_denominator` does for unbounded scans, extended to bounded (max-
+/// depth-set) scans where it currently does nothing. Never gates depth 1 (the scan root itself is
+/// always fully enumerated); the roadmap scopes the gate to depth ≥2, where a discovered vendor
+/// that happens to be infra would otherwise explode the frontier.
+pub fn should_gate_infra_enumeration(current_depth: u32, base_domain: &str) -> bool {
+    current_depth >= 2 && is_common_denominator(base_domain)
+}
+
 // coverage(off): thin logging wrapper over SubprocessorAnalyzer::analyze_domain_with_logging
 // which performs real HTTP requests and browser scraping; branch outcomes depend on external
 // service responses. Branches: non-empty result (lines 221-228), empty result (229-235),
@@ -1232,18 +1250,28 @@ pub async fn discover_nth_parties(
         // regression.
         let apex = domain_utils::extract_base_domain(domain);
         let is_apex = apex == domain;
-        let subfinder_for_join = if is_apex && scan_dedup.claim_subfinder(&apex).await {
-            subdomain_discovery
-        } else {
-            if subdomain_discovery.is_some() {
-                crate::perf::METRICS.subfinder_apex_skip.hit();
-            }
-            None
-        };
-        let ct_for_join = if is_apex && scan_dedup.claim_ct(&apex).await {
+        // P4.8: gate subdomain/CT enumeration for common-denominator infra roots at depth >=2.
+        // Their subdomain sprawl is the platform's, not the customer's nth-parties — the edge to
+        // the infra root is already recorded (leaf preserved), only the fan-out is skipped. Counted
+        // once per gated domain that actually had enumeration to skip; distinct from the apex-dedup
+        // skips below (which fire when the apex was already enumerated this scan).
+        let infra_gated = should_gate_infra_enumeration(current_depth, &apex);
+        if infra_gated && (subdomain_discovery.is_some() || ct_discovery.is_some()) {
+            crate::perf::METRICS.fanout_gate_skip.hit();
+        }
+        let subfinder_for_join =
+            if !infra_gated && is_apex && scan_dedup.claim_subfinder(&apex).await {
+                subdomain_discovery
+            } else {
+                if subdomain_discovery.is_some() && !infra_gated {
+                    crate::perf::METRICS.subfinder_apex_skip.hit();
+                }
+                None
+            };
+        let ct_for_join = if !infra_gated && is_apex && scan_dedup.claim_ct(&apex).await {
             ct_discovery
         } else {
-            if ct_discovery.is_some() {
+            if ct_discovery.is_some() && !infra_gated {
                 crate::perf::METRICS.ct_apex_skip.hit();
             }
             None
@@ -3494,5 +3522,34 @@ mod tests {
         // With max_depth (even if common denominator) → don't stop (depth controls recursion)
         assert!(!should_stop_at_common_denominator(Some(3), "google.com"));
         assert!(!should_stop_at_common_denominator(Some(5), "stripe.com"));
+    }
+
+    // ── P4.8 infra-enumeration gate ────────────────────────────────────
+
+    #[test]
+    fn test_should_gate_infra_enumeration_depth_and_classification() {
+        // Depth >=2 AND infra → gate the enumeration fan-out.
+        assert!(should_gate_infra_enumeration(2, "amazonaws.com"));
+        assert!(should_gate_infra_enumeration(3, "cloudflare.com"));
+        assert!(should_gate_infra_enumeration(4, "akamai.com"));
+
+        // Depth 1 (the scan root and, per this codebase's 1-indexing, the root pass) is NEVER
+        // gated — the root is always fully enumerated even if it were infra.
+        assert!(!should_gate_infra_enumeration(1, "amazonaws.com"));
+        assert!(!should_gate_infra_enumeration(0, "cloudflare.com"));
+
+        // A real vendor (non-infra) is never gated at any depth — its subdomains ARE candidate
+        // nth-parties, so recall must be preserved.
+        assert!(!should_gate_infra_enumeration(2, "stripe.com"));
+        assert!(!should_gate_infra_enumeration(3, "datadog.com"));
+        assert!(!should_gate_infra_enumeration(5, "sendgrid.net"));
+    }
+
+    #[test]
+    fn test_should_gate_infra_enumeration_is_depth_gated_not_blanket() {
+        // The same infra root: gated at depth 2+, fully enumerated at depth 1. This is the exact
+        // difference from should_stop_at_common_denominator, which only fires for unbounded scans.
+        assert!(!should_gate_infra_enumeration(1, "googleapis.com"));
+        assert!(should_gate_infra_enumeration(2, "googleapis.com"));
     }
 }
