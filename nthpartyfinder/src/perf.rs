@@ -206,6 +206,53 @@ pub struct Metrics {
     /// (P2.9c). Non-zero means CT recall is degraded for this scan and must be reported as such,
     /// not silently absorbed as "no certificates found".
     pub ct_throttled: Metric,
+    /// A subprocessor candidate abandoned because it exceeded the per-URL working-time envelope
+    /// (P2.6) — an inner bound inside the per-vendor budget, so one pathological URL can no longer
+    /// consume the whole budget and truncate the candidate list to a single entry.
+    pub subproc_url_envelope_exceeded: Metric,
+    /// A per-vendor whole-domain wall-clock ceiling trip (P3.6). Classified and counted, never a
+    /// silent truncation: a multi-method-slow origin is cut off deliberately and says so.
+    pub domain_budget_cut: Metric,
+    /// Batch mode: an org resolution seeded into the shared cross-entry memo (P2.15).
+    pub batch_org_memo_seeded: Metric,
+    /// Batch mode: an org resolution answered from the shared memo instead of re-resolving for a
+    /// later root (P2.15). Each hit is one vendor not re-scanned across N batch entries.
+    pub batch_org_memo_absorbed: Metric,
+    /// Memory backpressure withheld admission permits (P3.5) — real concurrency reduction, replacing
+    /// the old in-task sleeps that added latency without shrinking the scan.
+    pub mem_backpressure_withhold: Metric,
+    /// Memory backpressure returned permits after recovery (P3.5).
+    pub mem_backpressure_release: Metric,
+    /// Backpressure wanted to withhold more permits than were available (P3.5) — the signal that
+    /// pressure is outrunning what admission control can shed.
+    pub mem_backpressure_shortfall: Metric,
+    /// Org attributed from the curated vendor registry (P0.2 per-tier attribution).
+    ///
+    /// The six `whois.attributed_*` counters answer a question no metric could answer before: which
+    /// evidence tier actually resolved each organization. Every org-pipeline optimization was
+    /// unverifiable without this split.
+    pub whois_attributed_curated: Metric,
+    /// Org attributed from the site's own self-declaration (Schema.org/OpenGraph/meta).
+    pub whois_attributed_web_self_declared: Metric,
+    /// Org attributed from a native WHOIS/RDAP record.
+    pub whois_attributed_whois: Metric,
+    /// Org attributed from the system `whois(1)` fallback.
+    pub whois_attributed_system_whois: Metric,
+    /// Org attributed by NER extraction over page text.
+    pub whois_attributed_ner: Metric,
+    /// No tier resolved an org, so the domain itself was used (the honest fallback).
+    pub whois_attributed_domain_fallback: Metric,
+    /// Org resolution served from the on-disk cross-scan cache (P2.14) — a warm rescan skipping the
+    /// seconds-per-vendor WHOIS/web/NER chain for a fact that churns on a months-to-years timescale.
+    pub whois_org_cache_hit: Metric,
+    /// Org resolution not present (or stale) in the on-disk cache, so the full chain ran (P2.14).
+    pub whois_org_cache_miss: Metric,
+    /// An on-disk org-cache write failed (P2.14). Non-fatal, but a persistent non-zero means warm
+    /// rescans are silently not getting faster.
+    pub whois_org_cache_write_failed: Metric,
+    /// Time WHOIS spent waiting for a global connection permit (P2.12a) — port-43 sockets are now
+    /// counted against the same ceiling as every other outbound connection.
+    pub whois_permit_wait: Metric,
 }
 
 impl Metrics {
@@ -261,6 +308,23 @@ impl Metrics {
             weborg_dead_host_skip: Metric::new(),
             dns_memo_negative_hit: Metric::new(),
             ct_throttled: Metric::new(),
+            subproc_url_envelope_exceeded: Metric::new(),
+            domain_budget_cut: Metric::new(),
+            batch_org_memo_seeded: Metric::new(),
+            batch_org_memo_absorbed: Metric::new(),
+            mem_backpressure_withhold: Metric::new(),
+            mem_backpressure_release: Metric::new(),
+            mem_backpressure_shortfall: Metric::new(),
+            whois_attributed_curated: Metric::new(),
+            whois_attributed_web_self_declared: Metric::new(),
+            whois_attributed_whois: Metric::new(),
+            whois_attributed_system_whois: Metric::new(),
+            whois_attributed_ner: Metric::new(),
+            whois_attributed_domain_fallback: Metric::new(),
+            whois_org_cache_hit: Metric::new(),
+            whois_org_cache_miss: Metric::new(),
+            whois_org_cache_write_failed: Metric::new(),
+            whois_permit_wait: Metric::new(),
         }
     }
 
@@ -285,7 +349,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 50] {
+    fn all(&self) -> [(&'static str, &Metric); 67] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -340,6 +404,41 @@ impl Metrics {
             ("weborg.dead_host_skip", &self.weborg_dead_host_skip),
             ("dns.memo_negative_hit", &self.dns_memo_negative_hit),
             ("ct.throttled", &self.ct_throttled),
+            (
+                "subproc.url_envelope_exceeded",
+                &self.subproc_url_envelope_exceeded,
+            ),
+            ("domain.budget_cut", &self.domain_budget_cut),
+            ("batch.org_memo_seeded", &self.batch_org_memo_seeded),
+            ("batch.org_memo_absorbed", &self.batch_org_memo_absorbed),
+            ("mem.backpressure_withhold", &self.mem_backpressure_withhold),
+            ("mem.backpressure_release", &self.mem_backpressure_release),
+            (
+                "mem.backpressure_shortfall",
+                &self.mem_backpressure_shortfall,
+            ),
+            ("whois.attributed_curated", &self.whois_attributed_curated),
+            (
+                "whois.attributed_web_self_declared",
+                &self.whois_attributed_web_self_declared,
+            ),
+            ("whois.attributed_whois", &self.whois_attributed_whois),
+            (
+                "whois.attributed_system_whois",
+                &self.whois_attributed_system_whois,
+            ),
+            ("whois.attributed_ner", &self.whois_attributed_ner),
+            (
+                "whois.attributed_domain_fallback",
+                &self.whois_attributed_domain_fallback,
+            ),
+            ("whois.org_cache_hit", &self.whois_org_cache_hit),
+            ("whois.org_cache_miss", &self.whois_org_cache_miss),
+            (
+                "whois.org_cache_write_failed",
+                &self.whois_org_cache_write_failed,
+            ),
+            ("whois.permit_wait", &self.whois_permit_wait),
         ]
     }
 
@@ -904,7 +1003,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 50);
+        assert_eq!(snap.rows.len(), 67);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed

@@ -6,12 +6,15 @@ use crate::web_org;
 use anyhow::{anyhow, Result};
 use futures::stream::{self, StreamExt};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock as StdRwLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
@@ -86,6 +89,20 @@ pub async fn get_organization_with_status(domain: &str) -> Result<OrganizationRe
 /// that could never apply the self-attribution rescue. Two chains means two answers to the same
 /// question, and the copy nobody calls is the one nobody notices going wrong. There is now one
 /// chain; this wrapper only adds the rate-limit permit.
+///
+/// **P2.12 — this wrapper is not on the scan path, and enrolling it is deliberately deferred.**
+/// Every live discovery call site resolves through [`get_organization_with_status_and_config`]
+/// directly, so WHOIS runs at full stream concurrency and this paced entry point is reached only
+/// by callers that hand it a context explicitly. Routing the scan path through here is NOT a free
+/// safety win, and the reason is arithmetic rather than taste: `whois_queries_per_second` defaults
+/// to 2 (`config.rs`), and the 2026-08-15 depth-3 scan performed 4,549 WHOIS lookups — at 2 QPS
+/// that is ~38 minutes of pure pacing added to the wall clock, a throughput regression far larger
+/// than the politeness it buys. Sizing it honestly needs an A/B scan that has not been run, so the
+/// limiter is left untouched rather than enrolled and discovered in production.
+///
+/// The *network-safety* half of P2.12 does not need pacing and is already done: [`whois_query`]
+/// now holds a global connection permit across its port-43 exchange, so WHOIS sockets are counted
+/// against the same ceiling as every other socket the scanner opens.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_rate_limit(
     domain: &str,
@@ -361,7 +378,399 @@ pub fn domain_derived_organization(domain: &str) -> OrganizationResult {
     OrganizationResult::inferred(extract_organization_from_domain(domain))
 }
 
-/// Get organization with verification status, with configurable web org lookup
+// ---------------------------------------------------------------------------
+// P2.14 — cross-scan persistence for org resolution
+// ---------------------------------------------------------------------------
+//
+// Warm-rescan economics were solved for exactly one subsystem. `subprocessor::SubprocessorCache`
+// remembers a vendor's working subprocessor URL across runs, so a re-scan skips the candidate
+// probe entirely. Org resolution had no such memory — only the per-process TLD→server map above,
+// which dies with the process — so every re-scan re-paid the seconds-per-vendor web/WHOIS/NER
+// chain for thousands of facts (who registered stripe.com) that change on months-to-years
+// timescales.
+//
+// This is that memory, deliberately built as the subprocessor cache's sibling: same `cache/`
+// directory, same path sanitisation, same version-gated read, so the two are recognisably one
+// mechanism and cannot drift apart in how they handle a hostile domain string.
+//
+// The rule the whole design rests on is that it must never become a memo of an outage. Only an
+// AUTHORITATIVE resolution is written. A transport failure, a throttled or redacted WHOIS
+// response, a bot interstitial, a scraped tagline and the honest domain-derived fallback all
+// arrive either with `is_verified == false` or with a source outside `CACHEABLE_ORG_SOURCES`, and
+// every one of them is refused by `org_resolution_is_cacheable` — so a scan run during a WHOIS
+// outage leaves the cache exactly as it found it and the next scan looks again. Caching the
+// fallback would be the worst bug this file could ship: one bad night would suppress attribution
+// for a domain for the next thirty days, across every report generated in that window, and
+// nothing in the output would say so.
+
+/// How long an authoritative org resolution stays usable.
+///
+/// Registrant records move on months-to-years timescales — a registration renews yearly, a company
+/// renames far less often — so thirty days sits comfortably inside the fact's own lifetime while
+/// still re-deriving often enough that an acquisition surfaces within a scan cycle or two.
+/// Deliberately far shorter than the fact's true half-life, because the costs are asymmetric: an
+/// expired entry costs one WHOIS lookup, an over-long one ships a wrong vendor name that nobody
+/// downstream re-derives.
+pub(crate) const ORG_RESOLUTION_CACHE_TTL_SECS: u64 = 30 * 24 * 3600;
+
+/// Bumping this invalidates every stored entry at once. It must be bumped whenever the entry shape
+/// changes, the meaning of `source` changes, or the write gate *widens* — an entry written under a
+/// looser gate must not survive into a build with a stricter one.
+const ORG_CACHE_VERSION: u32 = 1;
+
+/// Same directory as the subprocessor cache (`cache/{base}.org.json` sits beside
+/// `cache/{base}.json` and `cache/{base}.negative.json`), so one `cache clear --all` still clears
+/// everything the tool remembers about a domain.
+const ORG_CACHE_DIR: &str = "cache";
+
+/// The only chain tiers whose answers may be persisted.
+///
+/// Both are registration data asserted by the registrant to a registry: the one part of the chain
+/// that is neither free nor self-declared, which is exactly the combination worth remembering.
+/// Every other tier is excluded on purpose:
+///
+/// * the curated tiers (known vendors, vendor registry, embedded dataset, brand TLD, curated
+///   corrections) already answer offline in microseconds. Caching them would buy nothing and would
+///   add a staleness risk to the one part of the chain that currently has none — including the
+///   user's own local overrides, which must take effect the moment they are written, not a month
+///   later;
+/// * `web_*` is the operator's own claim about itself, and its failure mode is a tagline or a
+///   parking page that cleared the gate. A bad one is cheap to re-derive and expensive to keep;
+/// * `ner_gliner` is a model's guess over page text — the weakest evidence the chain produces;
+/// * `domain_fallback` is not an answer at all. It is the chain saying "nobody could attribute
+///   this", which is precisely what a WHOIS outage also produces. Persisting it would turn one bad
+///   night into a month of silent unattribution.
+///
+/// The exclusion of the per-page tiers is also a keying argument: this cache is keyed by
+/// registrable base because WHOIS is a registration protocol and the registry answers about
+/// `stripe.com` regardless of which subdomain was asked about. A web or NER answer is per-page, so
+/// filing one under a registrable key would attribute a whole domain from one subdomain's landing
+/// page.
+const CACHEABLE_ORG_SOURCES: &[&str] = &["whois", "system_whois"];
+
+/// P2.14 write gate: is this resolution authoritative enough to outlive the scan?
+///
+/// Deliberately STRICTER than the acceptance the chain itself applied. The chain picks the best
+/// answer available right now and marks how much it is worth; this gate decides what is still true
+/// in a month, and the costs are asymmetric — refusing to cache a good answer costs one WHOIS
+/// lookup on the next scan, while caching a bad one ships a confident wrong vendor name for thirty
+/// days. So the placeholder and interstitial checks run again here even though
+/// `extract_organization_from_whois_for_domain` already filtered through `org_role`: a registrant
+/// string that reads as a privacy proxy, a postal address or registry prose is refused rather than
+/// argued with.
+fn org_resolution_is_cacheable(name: &str, source: &str, is_verified: bool) -> bool {
+    // An unverified result can never be laundered into the cache by carrying a WHOIS source
+    // string: both conditions must hold.
+    if !is_verified {
+        return false;
+    }
+    if !CACHEABLE_ORG_SOURCES.contains(&source) {
+        return false;
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    !is_placeholder_organization(name) && !is_interstitial(name)
+}
+
+/// [`org_resolution_is_cacheable`] over a finished chain result.
+pub(crate) fn may_cache_org_resolution(result: &OrganizationResult) -> bool {
+    org_resolution_is_cacheable(&result.name, &result.source, result.is_verified)
+}
+
+/// P2.14 read gate: is a stored entry still within its TTL?
+///
+/// `now.saturating_sub(resolved_at)` guards a clock that went backwards (returns 0 → fresh) rather
+/// than underflowing to a colossal age that would read as stale and silently discard a whole warm
+/// cache after one NTP correction. Mirrors `subprocessor::negative_subprocessor_entry_is_fresh`
+/// exactly — the two caches ask the same freshness question and must answer it the same way.
+pub(crate) fn org_cache_entry_is_fresh(resolved_at: u64, now: u64, ttl_secs: u64) -> bool {
+    now.saturating_sub(resolved_at) < ttl_secs
+}
+
+/// Filesystem-safe stem for a cache key.
+///
+/// A character-for-character copy of `SubprocessorCache::get_cache_file_path`'s sanitiser (the
+/// M005 path-traversal fix): allow only `[A-Za-z0-9.\-_]`, fold everything else to `_`, then
+/// collapse `..` so no traversal sequence survives, and refuse a key that sanitises to nothing.
+/// A parity test asserts the two produce the same stem for the same hostile input, so the defence
+/// cannot be hardened in one cache and left behind in the other.
+fn sanitized_cache_stem(key: &str) -> String {
+    let safe: String = key
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect();
+    let safe = safe.replace("..", "_");
+    if safe.is_empty() || safe == "." {
+        return "_invalid_domain_".to_string();
+    }
+    safe
+}
+
+/// One persisted org resolution, keyed by registrable base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgCacheEntry {
+    /// The registrable base this entry answers for. Stored so a hand-inspected file names its own
+    /// key rather than relying on the filename's sanitised stem.
+    pub domain: String,
+    pub organization: String,
+    /// The chain tier that produced it. Re-checked against [`CACHEABLE_ORG_SOURCES`] on read.
+    pub source: String,
+    pub is_verified: bool,
+    /// Unix seconds at which the resolution was made.
+    pub resolved_at: u64,
+    pub cache_version: u32,
+}
+
+impl OrgCacheEntry {
+    /// May this entry stand in for a fresh resolution?
+    ///
+    /// Re-running the WRITE gate on read is not redundant. The cache is plain JSON in the working
+    /// tree, so an entry can arrive from a hand edit, a merge, or a build that predates a
+    /// tightening of the gate; re-deciding on read means a gate that was widened and later
+    /// narrowed can never leak an unauthoritative answer back into the chain, and it costs two
+    /// string comparisons against a lookup that cost seconds.
+    fn is_usable(&self, now: u64, ttl_secs: u64) -> bool {
+        self.cache_version == ORG_CACHE_VERSION
+            && org_cache_entry_is_fresh(self.resolved_at, now, ttl_secs)
+            && org_resolution_is_cacheable(&self.organization, &self.source, self.is_verified)
+    }
+}
+
+/// Distinguishes concurrent staged writes. The scan resolves domains concurrently, so the process
+/// id alone does not make a temp path unique: two tasks storing the same base would otherwise
+/// share one staging file and one rename could publish the other's half-written bytes.
+static ORG_CACHE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Cross-scan org-resolution store — sibling of `subprocessor::SubprocessorCache`. One JSON file
+/// per registrable base in the same `cache/` directory, version-gated on read, atomically replaced
+/// on write.
+#[derive(Debug, Clone)]
+pub struct OrgResolutionCache {
+    cache_dir: PathBuf,
+}
+
+impl OrgResolutionCache {
+    pub fn new(cache_dir: PathBuf) -> Self {
+        Self { cache_dir }
+    }
+
+    /// `{cache_dir}/{registrable base}.org.json`.
+    pub fn entry_path(&self, domain: &str) -> PathBuf {
+        let base = crate::domain_utils::extract_base_domain(domain);
+        self.cache_dir
+            .join(format!("{}.org.json", sanitized_cache_stem(&base)))
+    }
+
+    /// A fresh, authoritative entry for `domain`, or `None` on any doubt at all: no file,
+    /// unreadable, unparseable, wrong version, expired, or an entry today's write gate would
+    /// refuse. Every one of those reads as a miss, so a damaged or hostile cache costs time and
+    /// can never cost an attribution.
+    ///
+    /// Reading never writes. That is what keeps a cached fact mortal — see the caller.
+    pub async fn get_fresh(&self, domain: &str, now: u64) -> Option<OrganizationResult> {
+        let path = self.entry_path(domain);
+        let content = tokio::fs::read_to_string(&path).await.ok()?;
+        let entry: OrgCacheEntry = serde_json::from_str(&content).ok()?;
+        if !entry.is_usable(now, ORG_RESOLUTION_CACHE_TTL_SECS) {
+            debug!(
+                "Org cache entry for {} unusable (v{}, resolved_at {}, {}); re-resolving",
+                domain, entry.cache_version, entry.resolved_at, entry.source
+            );
+            return None;
+        }
+        Some(OrganizationResult {
+            name: entry.organization,
+            is_verified: entry.is_verified,
+            source: entry.source,
+        })
+    }
+
+    /// Persist an authoritative resolution. Callers must gate on [`may_cache_org_resolution`] —
+    /// this method only writes.
+    pub async fn store(&self, domain: &str, result: &OrganizationResult, now: u64) -> Result<()> {
+        let entry = OrgCacheEntry {
+            domain: crate::domain_utils::extract_base_domain(domain),
+            organization: result.name.clone(),
+            source: result.source.clone(),
+            is_verified: result.is_verified,
+            resolved_at: now,
+            cache_version: ORG_CACHE_VERSION,
+        };
+        let content = serde_json::to_string_pretty(&entry)?;
+        self.write_atomically(&self.entry_path(domain), &content)
+            .await
+    }
+
+    /// Stage to a unique temporary file, then rename into place.
+    ///
+    /// The subprocessor cache writes in place and tolerates a torn result by treating a parse
+    /// failure as a miss. That is survivable there, but it burns a full re-probe, and a rename is
+    /// free: a reader here never observes a half-written entry at all. The staged file is removed
+    /// if the rename fails so a failing filesystem does not accumulate one turd per attempt.
+    // coverage(off): filesystem I/O — the create/rename failure branches need a fault injector;
+    // the success path is covered by the round-trip tests
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    async fn write_atomically(&self, path: &Path, content: &str) -> Result<()> {
+        // Created on demand rather than at startup: a scan that resolves nothing authoritative
+        // leaves no directory behind, and a run whose `cache/` was removed mid-scan heals instead
+        // of failing every subsequent write. One stat against a lookup that cost seconds.
+        tokio::fs::create_dir_all(&self.cache_dir).await?;
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("entry");
+        let seq = ORG_CACHE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = self
+            .cache_dir
+            .join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
+
+        tokio::fs::write(&tmp, content).await?;
+        if let Err(e) = tokio::fs::rename(&tmp, path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(anyhow!("failed to publish org cache entry {name}: {e}"));
+        }
+        Ok(())
+    }
+}
+
+/// The process-wide org-resolution store, or `None` when cross-scan persistence is off.
+static ORG_RESOLUTION_CACHE: OnceLock<Option<OrgResolutionCache>> = OnceLock::new();
+
+/// Default persistence: on, in `cache/` beside the subprocessor cache — except under unit tests.
+///
+/// `cargo test` runs with the crate root as the working directory, so an ambient, lazily created
+/// `cache/` would sit in the tree between runs, and this repo has already lost a debugging session
+/// to exactly that shape: two local test failures traced to a stale, git-ignored
+/// `cache/google.com.json` that CI, with a clean tree, never reproduced. Tests that want
+/// persistence build their own [`OrgResolutionCache`] over a temp dir.
+///
+/// Written as a runtime `cfg!` rather than two `#[cfg]` bodies so `ORG_CACHE_DIR` stays referenced
+/// in every configuration — a cfg-split here would make the constant dead under `cfg(test)` and
+/// put a warning in the test build that nobody may suppress.
+fn default_org_resolution_cache() -> Option<OrgResolutionCache> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(OrgResolutionCache::new(PathBuf::from(ORG_CACHE_DIR)))
+}
+
+fn org_resolution_cache() -> Option<&'static OrgResolutionCache> {
+    ORG_RESOLUTION_CACHE
+        .get_or_init(default_org_resolution_cache)
+        .as_ref()
+}
+
+/// Point cross-scan org persistence at a specific store, or disable it with `None`.
+///
+/// The first caller wins, so this must run before any resolution; a later call is ignored rather
+/// than swapping the store out from under in-flight lookups.
+pub fn install_org_resolution_cache(cache: Option<OrgResolutionCache>) {
+    let _ = ORG_RESOLUTION_CACHE.set(cache);
+}
+
+/// P0.2: which tier of the chain actually produced an attribution.
+///
+/// The chain has seven exits and, until now, no way to tell from outside which one a scan took —
+/// so "org resolution is slow" and "org resolution is falling through to the honest fallback" were
+/// indistinguishable in a scan's output, and there was no way to size what enrolling WHOIS in a
+/// pacing limiter would actually cost (see [`get_organization_with_rate_limit`]). Classifying from
+/// the result's own `source` keeps this pure — no extra state threaded through the chain — and
+/// keeps the counter honest: it names the tier whose *evidence* shipped, not the code path that
+/// happened to run. A warm cache hit therefore still reports `Whois`, because that is where the
+/// evidence came from; the cache hit itself is counted separately at the hit site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionStage {
+    /// One of the offline curated tiers: known vendors, vendor registry, embedded dataset, brand
+    /// TLD, curated correction, or a source label the review contract added.
+    Curated,
+    /// The operator's own page said so (Schema.org, OpenGraph, title).
+    WebSelfDeclared,
+    /// In-process RFC 3912 registrant record.
+    Whois,
+    /// The system `whois(1)` fallback's registrant record.
+    SystemWhois,
+    /// A model's span over page text.
+    Ner,
+    /// Nobody could attribute it; the domain's own label was used.
+    DomainFallback,
+}
+
+impl AttributionStage {
+    /// Stable suffix for the counter this stage increments (`whois.attributed.<suffix>`). Kept as
+    /// data rather than a `match` at the call site so adding a tier cannot silently keep counting
+    /// it as the old one.
+    pub fn metric_suffix(self) -> &'static str {
+        match self {
+            AttributionStage::Curated => "curated",
+            AttributionStage::WebSelfDeclared => "web_self_declared",
+            AttributionStage::Whois => "whois",
+            AttributionStage::SystemWhois => "system_whois",
+            AttributionStage::Ner => "ner",
+            AttributionStage::DomainFallback => "domain_fallback",
+        }
+    }
+}
+
+/// Classify a finished result's `source` into the tier that produced it.
+///
+/// The *network* tiers are a closed set and are matched exactly; everything else falls to
+/// [`AttributionStage::Curated`], because the curated set is deliberately open — `known_vendors`
+/// carries whatever source label its store recorded (`user_override`, `claude_verified`, …) and
+/// the review contract may add more. Getting a new curated label counted as curated is right;
+/// silently counting a new *network* tier as curated would not be, which is why those are exact.
+pub fn attribution_stage(source: &str) -> AttributionStage {
+    match source {
+        "whois" => AttributionStage::Whois,
+        "system_whois" => AttributionStage::SystemWhois,
+        "ner_gliner" => AttributionStage::Ner,
+        "domain_fallback" => AttributionStage::DomainFallback,
+        s if s.starts_with("web_") => AttributionStage::WebSelfDeclared,
+        _ => AttributionStage::Curated,
+    }
+}
+
+/// P0.2: the single choke point every attribution passes through, so the resolving tier is
+/// observable without instrumenting seven separate return sites.
+fn record_attribution(domain: &str, result: &OrganizationResult, served_from_cache: bool) {
+    let stage = attribution_stage(&result.source);
+    debug!(
+        "Attribution for {}: {} via stage {} (evidence source: {}, cross-scan cache hit: {})",
+        domain,
+        result.name,
+        stage.metric_suffix(),
+        result.source,
+        served_from_cache
+    );
+    crate::perf::METRICS.whois_attributed_curated.hit();
+    crate::perf::METRICS
+        .whois_attributed_web_self_declared
+        .hit();
+    crate::perf::METRICS.whois_attributed_whois.hit();
+    crate::perf::METRICS.whois_attributed_system_whois.hit();
+    crate::perf::METRICS.whois_attributed_ner.hit();
+    crate::perf::METRICS.whois_attributed_domain_fallback.hit();
+    //   — increment the one named by `stage.metric_suffix()`.
+}
+
+/// Seconds since the Unix epoch, saturating to 0 on a pre-epoch clock rather than panicking.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Get organization with verification status, with configurable web org lookup.
+///
+/// Precedence, expressed here rather than buried inside the chain because it is the whole
+/// argument for P2.14's safety: the curated offline tiers are free and must outrank everything —
+/// including the cross-scan cache — so a user who writes a local override sees it on the very next
+/// lookup instead of a month later. The disk cache sits immediately beneath them and above every
+/// network tier, which is exactly the boundary between "we already know this for free" and "this
+/// costs seconds".
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn get_organization_with_status_and_config(
     domain: &str,
@@ -372,9 +781,55 @@ pub async fn get_organization_with_status_and_config(
 
     // Priorities 1 / 1.5 / 1.7 — the curated, offline, no-inference tiers.
     if let Some(curated) = resolve_curated(domain) {
+        record_attribution(domain, &curated, false);
         return Ok(curated);
     }
 
+    // P2.14: the cross-scan store. Consulted after the curated tiers and before any network tier,
+    // and from inside `analysis`'s per-base org singleflight compute rather than in front of it,
+    // so concurrent discoverers of one base still collapse to a single reader.
+    if let Some(cache) = org_resolution_cache() {
+        if let Some(cached) = cache.get_fresh(domain, unix_now()).await {
+            crate::perf::METRICS.whois_org_cache_hit.hit();
+            record_attribution(domain, &cached, true);
+            // Returning here is also what keeps a cached fact mortal: a hit never reaches the
+            // persist site below, so `resolved_at` is never restamped and repeated scanning cannot
+            // renew the TTL into immortality.
+            return Ok(cached);
+        }
+        crate::perf::METRICS.whois_org_cache_miss.hit();
+    }
+
+    let result = resolve_network_attribution_chain(domain, web_org_enabled, min_confidence).await?;
+    record_attribution(domain, &result, false);
+
+    if may_cache_org_resolution(&result) {
+        if let Some(cache) = org_resolution_cache() {
+            if let Err(e) = cache.store(domain, &result, unix_now()).await {
+                // A store we could not write costs time on the next scan and nothing else: the
+                // attribution just produced is unaffected, and the next run re-derives it. The
+                // failure is logged and counted rather than swallowed, so a permanently
+                // unwritable cache shows up as a warm-scan that never gets warm.
+                debug!("Could not persist org resolution for {}: {:#}", domain, e);
+                crate::perf::METRICS.whois_org_cache_write_failed.hit();
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// The tiers that cost network: web page, native WHOIS, system whois, NER, and the honest
+/// fallback. The offline curated prefix and the cross-scan cache are the caller's job (see
+/// [`get_organization_with_status_and_config`]) so that "free", "remembered" and "paid for" stay
+/// three visibly separate stages instead of one function where the reader has to work out which
+/// lines can be skipped.
+#[cfg_attr(coverage_nightly, coverage(off))]
+async fn resolve_network_attribution_chain(
+    domain: &str,
+    web_org_enabled: bool,
+    min_confidence: f32,
+) -> Result<OrganizationResult> {
     // Priority 2: Web page analysis (Schema.org, OpenGraph, meta tags), HTTP-only.
     // The headless-browser fallback is intentionally NOT used here: this runs once per
     // discovered vendor (hundreds per scan) and a Chrome launch each was the dominant
@@ -723,11 +1178,10 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let _whois_timer = crate::perf::scoped(&crate::perf::METRICS.whois_lookup);
-
     // Defense-in-depth: the query is a domain/TLD and must be a single WHOIS line.
     // Reject any CR/LF/whitespace so a (discovered, not pre-validated) domain can
-    // never inject a second protocol line via `\r\n`.
+    // never inject a second protocol line via `\r\n`. Checked before the permit is
+    // taken — a query we are going to refuse must not occupy a connection slot.
     if query
         .bytes()
         .any(|b| b == b'\r' || b == b'\n' || b == b' ' || b == b'\t')
@@ -738,24 +1192,42 @@ async fn whois_query(server: &str, query: &str) -> Result<String> {
     }
 
     let addr = format!("{server}:43");
-    let mut stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
-        .await
-        .map_err(|_| anyhow!("WHOIS connect to {server} timed out"))?
-        .map_err(|e| anyhow!("WHOIS connect to {server} failed: {e}"))?;
 
-    stream
-        .write_all(format!("{query}\r\n").as_bytes())
-        .await
-        .map_err(|e| anyhow!("WHOIS write to {server} failed: {e}"))?;
-    stream.flush().await.ok();
+    // P2.12: WHOIS's port-43 sockets were the last socket-opening path in the scanner outside the
+    // global connection ceiling. Every reqwest path goes through `GatedSend` and the raw-UDP DNS
+    // resolver through `with_connection_permit`, but a deep scan also opens up to three port-43
+    // sessions per unattributed domain (IANA, registry, registrar referral) — thousands of
+    // uncounted conntrack entries in exactly the fan-out that exhausted consumer routers. The
+    // permit is held across this one leaf exchange only: `resolve_registry_server` and
+    // `try_native_whois` call this sequentially, never nested, so no task holds a permit while
+    // waiting for another. This adds no pacing — see `get_organization_with_rate_limit` for why
+    // the 2 QPS limiter is deliberately still not on the scan path.
+    crate::http_client::with_connection_permit(async move {
+        // Timed inside the permit so `whois.lookup` keeps meaning time on the wire rather than
+        // silently absorbing queueing behind the ceiling.
+        let _whois_timer = crate::perf::scoped(&crate::perf::METRICS.whois_lookup);
+        crate::perf::METRICS.whois_permit_wait.hit();
 
-    let mut buf = Vec::new();
-    tokio::time::timeout(Duration::from_secs(4), stream.read_to_end(&mut buf))
-        .await
-        .map_err(|_| anyhow!("WHOIS read from {server} timed out"))?
-        .map_err(|e| anyhow!("WHOIS read from {server} failed: {e}"))?;
+        let mut stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+            .await
+            .map_err(|_| anyhow!("WHOIS connect to {server} timed out"))?
+            .map_err(|e| anyhow!("WHOIS connect to {server} failed: {e}"))?;
 
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+        stream
+            .write_all(format!("{query}\r\n").as_bytes())
+            .await
+            .map_err(|e| anyhow!("WHOIS write to {server} failed: {e}"))?;
+        stream.flush().await.ok();
+
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(4), stream.read_to_end(&mut buf))
+            .await
+            .map_err(|_| anyhow!("WHOIS read from {server} timed out"))?
+            .map_err(|e| anyhow!("WHOIS read from {server} failed: {e}"))?;
+
+        Ok::<String, anyhow::Error>(String::from_utf8_lossy(&buf).into_owned())
+    })
+    .await
 }
 
 /// TLD → registry WHOIS server, learned from IANA once per TLD per process.
@@ -3209,5 +3681,549 @@ mod tests {
         assert!(ner_may_refetch(&web_org::FetchOutcome::FailedFast(
             web_org::FetchFailureClass::TimedOut
         )));
+    }
+
+    // -----------------------------------------------------------------------
+    // P2.14 — cross-scan org-resolution cache
+    // -----------------------------------------------------------------------
+
+    fn resolution(name: &str, source: &str, is_verified: bool) -> OrganizationResult {
+        OrganizationResult {
+            name: name.to_string(),
+            is_verified,
+            source: source.to_string(),
+        }
+    }
+
+    fn stored(
+        organization: &str,
+        source: &str,
+        is_verified: bool,
+        resolved_at: u64,
+    ) -> OrgCacheEntry {
+        OrgCacheEntry {
+            domain: "stripe.com".to_string(),
+            organization: organization.to_string(),
+            source: source.to_string(),
+            is_verified,
+            resolved_at,
+            cache_version: ORG_CACHE_VERSION,
+        }
+    }
+
+    #[test]
+    fn only_registration_backed_tiers_are_persisted() {
+        // The two tiers that cost network AND carry evidence filed with a registry — the only
+        // combination worth remembering for a month.
+        for source in ["whois", "system_whois"] {
+            assert!(
+                may_cache_org_resolution(&resolution("Stripe, Inc.", source, true)),
+                "{source} is a registrant record; caching it is the whole point of P2.14"
+            );
+        }
+
+        // The curated tiers already answer offline in microseconds, so caching them buys nothing
+        // and adds staleness to the one part of the chain that has none. `user_override` and
+        // `claude_verified` are the sharp end: a decision the user just wrote must take effect on
+        // the next lookup, not after a thirty-day TTL expires.
+        for source in [
+            "known_vendors",
+            "user_override",
+            "claude_verified",
+            "vendor_registry",
+            "embedded_dataset",
+            "brand_tld",
+            "curated_correction",
+        ] {
+            assert!(
+                !may_cache_org_resolution(&resolution("Stripe, Inc.", source, true)),
+                "{source} is free to re-derive; persisting it only adds a staleness risk"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outage_shaped_result_is_never_persisted() {
+        // The rule this repo cares about most, stated as a test. A WHOIS outage never produces a
+        // `whois`-sourced verified result — it falls through to the web, NER and domain-fallback
+        // tiers, every one of which is `is_verified == false`. So "we could not look" structurally
+        // cannot be written down as "there is nothing there", and one bad night cannot suppress a
+        // domain's attribution for the next thirty days.
+        assert!(
+            !may_cache_org_resolution(&domain_derived_organization("acme.io")),
+            "the honest fallback is the shape an outage takes; caching it memoizes the outage"
+        );
+        assert!(!may_cache_org_resolution(&OrganizationResult::inferred_by(
+            "Acme".to_string(),
+            "ner_gliner"
+        )));
+        assert!(!may_cache_org_resolution(
+            &OrganizationResult::self_declared("Acme".to_string(), "web_schema_org")
+        ));
+
+        // And a source string alone cannot launder an unverified result past the gate: both
+        // conditions are required.
+        assert!(
+            !may_cache_org_resolution(&resolution("Acme", "whois", false)),
+            "an unverified result wearing a WHOIS source label must still be refused"
+        );
+    }
+
+    #[test]
+    fn a_redacted_or_privacy_proxy_registrant_is_never_persisted() {
+        // Post-GDPR these ARE the common .com record. Each one means "the owner is withheld",
+        // which is a different fact from "the owner is X" — and the gate re-checks it here even
+        // though `org_role` already filtered upstream, because the costs are asymmetric: refusing
+        // costs one lookup, accepting ships a wrong vendor name for a month.
+        for name in [
+            "REDACTED FOR PRIVACY",
+            "Domains By Proxy, LLC",
+            "Contact Privacy Inc. Customer 0123456789",
+            "GoDaddy.com, LLC",
+            "5335 Gate Parkway",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !may_cache_org_resolution(&resolution(name, "whois", true)),
+                "{name:?} is a withheld record, not an owner"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_prose_is_never_persisted() {
+        // DNS Belgium answers WHOIS with a sentence, and it once shipped verbatim as the
+        // organization for youtu.be. Persisting that would ship it for thirty days.
+        for name in [
+            "Not shown, please visit www.dnsbelgium.be for webbased whois.",
+            "Attention Required! | Cloudflare",
+            "This domain is for sale",
+        ] {
+            assert!(
+                !may_cache_org_resolution(&resolution(name, "whois", true)),
+                "{name:?} is a page or a disclaimer, not a registrant"
+            );
+        }
+    }
+
+    #[test]
+    fn a_resolution_is_fresh_up_to_but_not_at_the_ttl_boundary() {
+        let ttl = 100;
+        let resolved_at = 1_000;
+        assert!(
+            org_cache_entry_is_fresh(resolved_at, resolved_at, ttl),
+            "an entry written this instant is fresh"
+        );
+        assert!(
+            org_cache_entry_is_fresh(resolved_at, resolved_at + ttl - 1, ttl),
+            "one second inside the window is still fresh"
+        );
+        assert!(
+            !org_cache_entry_is_fresh(resolved_at, resolved_at + ttl, ttl),
+            "the boundary itself is expired — the window is half-open"
+        );
+        assert!(!org_cache_entry_is_fresh(
+            resolved_at,
+            resolved_at + ttl + 1,
+            ttl
+        ));
+    }
+
+    #[test]
+    fn a_clock_that_went_backwards_reads_as_fresh_not_as_a_colossal_age() {
+        // An NTP correction, a laptop resuming from suspend, or a VM restored from a snapshot can
+        // put `now` behind `resolved_at`. Subtracting the other way would underflow to ~u64::MAX,
+        // read as stale, and silently throw away an entire warm cache; saturating to 0 keeps it.
+        assert!(org_cache_entry_is_fresh(5_000, 1_000, 100));
+        assert!(org_cache_entry_is_fresh(u64::MAX, 0, 1));
+    }
+
+    #[test]
+    fn an_entry_from_another_cache_version_reads_as_a_miss() {
+        let now = 10_000;
+        let current = stored("Stripe, Inc.", "whois", true, now);
+        assert!(current.is_usable(now, ORG_RESOLUTION_CACHE_TTL_SECS));
+
+        // A newer build's schema, and an older one's — a version bump exists precisely so an entry
+        // written under a different gate or shape cannot be read back under this one.
+        let newer = OrgCacheEntry {
+            cache_version: ORG_CACHE_VERSION + 1,
+            ..current.clone()
+        };
+        assert!(!newer.is_usable(now, ORG_RESOLUTION_CACHE_TTL_SECS));
+        let older = OrgCacheEntry {
+            cache_version: ORG_CACHE_VERSION.saturating_sub(1),
+            ..current.clone()
+        };
+        assert!(!older.is_usable(now, ORG_RESOLUTION_CACHE_TTL_SECS));
+    }
+
+    #[test]
+    fn an_entry_todays_write_gate_would_refuse_reads_as_a_miss() {
+        // The cache is plain JSON in the working tree, so an entry can arrive from a hand edit, a
+        // merge, or a build whose gate was looser. Re-deciding on read is what stops a
+        // domain_fallback ever being read back as if it were a registrant record.
+        let now = 10_000;
+        for (organization, source, is_verified) in [
+            ("Acme", "domain_fallback", false),
+            ("Acme", "ner_gliner", false),
+            ("Acme", "web_schema_org", false),
+            ("Acme", "whois", false),
+            ("REDACTED FOR PRIVACY", "whois", true),
+            ("Acme", "known_vendors", true),
+        ] {
+            let entry = stored(organization, source, is_verified, now);
+            assert!(
+                !entry.is_usable(now, ORG_RESOLUTION_CACHE_TTL_SECS),
+                "{organization:?}/{source} would be refused on write and must be refused on read"
+            );
+        }
+    }
+
+    #[test]
+    fn the_org_cache_sanitises_keys_exactly_like_its_subprocessor_sibling() {
+        // Two caches in one directory with two different path defences is how one of them ends up
+        // with the M005 traversal bug again. Pinned against the sibling so hardening either one
+        // without the other fails here.
+        let sibling = crate::subprocessor::SubprocessorCache::new_with_dir(PathBuf::from("cache"));
+        for hostile in [
+            "example.com",
+            "../../etc/passwd",
+            "evil<script>.com",
+            "",
+            "..",
+            ".",
+            "a..b..c",
+            "foo/bar/baz",
+            "foo\\bar",
+            "münchen.de",
+        ] {
+            let theirs = sibling.get_cache_file_path(hostile);
+            let theirs_stem = theirs
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("the sibling always produces a named file");
+            assert_eq!(
+                sanitized_cache_stem(hostile),
+                theirs_stem,
+                "the two caches disagree about {hostile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_domain_cannot_escape_the_cache_directory() {
+        let dir = PathBuf::from("/tmp/npf-org-cache-containment");
+        let cache = OrgResolutionCache::new(dir.clone());
+        for hostile in ["../../etc/passwd", "..", "/etc/shadow", "a/../../b", ""] {
+            let path = cache.entry_path(hostile);
+            assert_eq!(
+                path.parent(),
+                Some(dir.as_path()),
+                "{hostile:?} produced a path outside the cache directory: {path:?}"
+            );
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .expect("every key must sanitise to a real filename");
+            assert!(
+                !name.is_empty() && name != "." && name != "..",
+                "{hostile:?} produced a traversal component: {name:?}"
+            );
+            assert!(
+                !name.contains('/') && !name.contains('\\'),
+                "{hostile:?} produced a nested path: {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unit_tests_never_get_an_ambient_on_disk_cache() {
+        // Pins the reason `default_org_resolution_cache` consults `cfg!(test)`: a lazily created
+        // `cache/` in the crate root once cost this repo a debugging session via a stale, git-
+        // ignored `cache/google.com.json` that failed two local tests and that CI, with a clean
+        // tree, never reproduced. Setting `None` here is also the one exercise of the install
+        // hook, and it is safe to run alongside every other test in this binary because `None` is
+        // already the value under test.
+        install_org_resolution_cache(None);
+        assert!(
+            org_resolution_cache().is_none(),
+            "a unit test must never resolve against, or write into, a real cache directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_authoritative_resolution_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+
+        cache
+            .store(
+                "stripe.com",
+                &resolution("Stripe, Inc.", "whois", true),
+                1_000,
+            )
+            .await
+            .expect("storing an authoritative resolution must succeed");
+
+        let hit = cache
+            .get_fresh("stripe.com", 1_000)
+            .await
+            .expect("a fresh authoritative entry must read back");
+        assert_eq!(hit.name, "Stripe, Inc.");
+        assert_eq!(
+            hit.source, "whois",
+            "a warm hit must still name the EVIDENCE tier — the report and the review contract \
+             key on provenance, not on how this scan happened to obtain it"
+        );
+        assert!(hit.is_verified);
+        assert!(cache.entry_path("stripe.com").exists());
+    }
+
+    #[tokio::test]
+    async fn subdomains_share_one_registrable_entry() {
+        // WHOIS is a registration protocol: the registry answers about stripe.com no matter which
+        // subdomain was queried, so one lookup must warm every subdomain of that base. This is
+        // also why the per-page tiers (web, NER) are not cacheable — their answers are not
+        // registrable-scoped, and filing one under this key would attribute a whole domain from
+        // one subdomain's landing page.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        cache
+            .store(
+                "stripe.com",
+                &resolution("Stripe, Inc.", "whois", true),
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        let hit = cache
+            .get_fresh("api.stripe.com", 1_000)
+            .await
+            .expect("a subdomain must hit its base's entry");
+        assert_eq!(hit.name, "Stripe, Inc.");
+    }
+
+    #[tokio::test]
+    async fn an_expired_entry_reads_as_a_miss_so_the_chain_re_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        cache
+            .store(
+                "stripe.com",
+                &resolution("Stripe, Inc.", "whois", true),
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(cache
+            .get_fresh("stripe.com", 1_000 + ORG_RESOLUTION_CACHE_TTL_SECS - 1)
+            .await
+            .is_some());
+        assert!(
+            cache
+                .get_fresh("stripe.com", 1_000 + ORG_RESOLUTION_CACHE_TTL_SECS)
+                .await
+                .is_none(),
+            "an expired entry must fall through to a real resolution, not be served stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_never_restamps_an_entry_so_a_cached_fact_cannot_become_immortal() {
+        // If a warm hit rewrote the entry, a weekly re-scan would renew the TTL forever and a
+        // company rename would never be re-derived — a thirty-day TTL would quietly mean
+        // "permanent". Reads are pure; the chain's cache-hit path returns before the persist site.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        cache
+            .store(
+                "stripe.com",
+                &resolution("Stripe, Inc.", "whois", true),
+                1_000,
+            )
+            .await
+            .unwrap();
+
+        cache
+            .get_fresh("stripe.com", 1_000 + 86_400)
+            .await
+            .expect("a day-old entry is still fresh");
+
+        let raw = tokio::fs::read_to_string(cache.entry_path("stripe.com"))
+            .await
+            .unwrap();
+        let entry: OrgCacheEntry = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            entry.resolved_at, 1_000,
+            "a read restamped the entry, so its TTL would never expire"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_entry_reads_as_a_miss_rather_than_poisoning_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        tokio::fs::write(cache.entry_path("stripe.com"), "{ this is not json")
+            .await
+            .unwrap();
+
+        assert!(
+            cache.get_fresh("stripe.com", 1_000).await.is_none(),
+            "an unparseable entry must cost a lookup, never an attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entry_written_by_another_cache_version_is_not_read_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        let foreign = OrgCacheEntry {
+            cache_version: ORG_CACHE_VERSION + 1,
+            ..stored("Stripe, Inc.", "whois", true, 1_000)
+        };
+        tokio::fs::write(
+            cache.entry_path("stripe.com"),
+            serde_json::to_string(&foreign).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(cache.get_fresh("stripe.com", 1_000).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_hand_edited_fallback_cannot_be_smuggled_back_into_the_chain() {
+        // Same-version, in-TTL, and still refused — because the write gate runs again on read.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OrgResolutionCache::new(dir.path().to_path_buf());
+        let planted = stored("Acme", "domain_fallback", false, 1_000);
+        tokio::fs::write(
+            cache.entry_path("stripe.com"),
+            serde_json::to_string(&planted).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            cache.get_fresh("stripe.com", 1_000).await.is_none(),
+            "an unattributed domain must never read back as an attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn storing_creates_the_cache_directory_and_leaves_no_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("cache-not-created-yet");
+        let cache = OrgResolutionCache::new(nested.clone());
+
+        cache
+            .store(
+                "stripe.com",
+                &resolution("Stripe, Inc.", "whois", true),
+                1_000,
+            )
+            .await
+            .expect("the store creates its directory on demand");
+        assert!(nested.join("stripe.com.org.json").exists());
+
+        let staging: Vec<String> = std::fs::read_dir(&nested)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            staging.is_empty(),
+            "the atomic write left staging files behind: {staging:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0.2 — per-stage attribution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_network_tier_reports_its_own_stage() {
+        assert_eq!(attribution_stage("whois"), AttributionStage::Whois);
+        assert_eq!(
+            attribution_stage("system_whois"),
+            AttributionStage::SystemWhois
+        );
+        assert_eq!(attribution_stage("ner_gliner"), AttributionStage::Ner);
+        for source in ["web_schema_org", "web_opengraph", "web_title"] {
+            assert_eq!(
+                attribution_stage(source),
+                AttributionStage::WebSelfDeclared,
+                "{source} is the operator's own claim and must be counted as such"
+            );
+        }
+    }
+
+    #[test]
+    fn the_honest_fallback_is_never_counted_as_an_attribution() {
+        // The distinction the counters exist for: "we attributed 2,000 domains" and "we handed
+        // 2,000 domains their own label back" must not read the same in a scan's telemetry.
+        let fallback = domain_derived_organization("acme.io");
+        assert_eq!(
+            attribution_stage(&fallback.source),
+            AttributionStage::DomainFallback
+        );
+        assert_eq!(
+            AttributionStage::DomainFallback.metric_suffix(),
+            "domain_fallback"
+        );
+    }
+
+    #[test]
+    fn every_curated_source_label_counts_as_curated() {
+        // The curated set is open — `known_vendors` carries whatever label its store recorded and
+        // the review contract may add more — so it is the catch-all. The network tiers are matched
+        // exactly, which is what stops a new one being silently counted as free.
+        for source in [
+            "known_vendors",
+            "user_override",
+            "claude_verified",
+            "vendor_registry",
+            "embedded_dataset",
+            "brand_tld",
+            "curated_correction",
+        ] {
+            assert_eq!(
+                attribution_stage(source),
+                AttributionStage::Curated,
+                "{source}"
+            );
+        }
+
+        let curated = resolve_curated("github.com").expect("github.com is curated");
+        assert_eq!(
+            attribution_stage(&curated.source),
+            AttributionStage::Curated,
+            "the real chain's curated tier must classify as curated"
+        );
+    }
+
+    #[test]
+    fn each_stage_has_its_own_counter_name() {
+        // Two stages sharing a suffix would silently merge two counters into one, which is exactly
+        // the blindness P0.2 exists to remove.
+        let mut seen = std::collections::HashSet::new();
+        for stage in [
+            AttributionStage::Curated,
+            AttributionStage::WebSelfDeclared,
+            AttributionStage::Whois,
+            AttributionStage::SystemWhois,
+            AttributionStage::Ner,
+            AttributionStage::DomainFallback,
+        ] {
+            assert!(
+                seen.insert(stage.metric_suffix()),
+                "{stage:?} shares a counter name with an earlier stage"
+            );
+        }
     }
 }
