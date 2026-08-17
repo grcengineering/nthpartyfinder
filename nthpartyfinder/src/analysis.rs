@@ -610,6 +610,125 @@ pub fn should_gate_infra_enumeration(current_depth: u32, base_domain: &str) -> b
     current_depth >= 2 && is_common_denominator(base_domain)
 }
 
+/// P3.6: the whole-domain working-time ceiling.
+///
+/// Every discovery method already carries its own budget (subprocessor 20s of working time,
+/// CT 30s, web traffic 15s, SaaS 10s per probe, subfinder 300s), but none of them compose: a
+/// domain that is slow on *several* methods pays their sum, and the serial preamble — TXT, the
+/// `_dmarc` probe, the recursive SPF chain — and the org-resolution chain sit on top of that
+/// sum. The 2026-08-15 depth-3 validation scan measured a 93s worst case for a single origin
+/// this way, with no mechanism anywhere that could see the total.
+///
+/// 90s sits deliberately between the two observations: a healthy-but-slow domain at depth ≥2
+/// spends roughly 45s (a ~30s join behind a ~5s preamble and a ~10s org resolution), so the body
+/// of the distribution is untouched and only the 93s-class tail is clipped.
+pub const DOMAIN_WORK_CEILING: Duration = Duration::from_secs(90);
+
+/// P3.6: how long the [`await_work_deadline`] watchdog waits before re-reading the clock when
+/// the remaining budget rounds to almost nothing. Without a floor, a domain whose queue time is
+/// growing at wall-clock rate (every permit taken, nothing progressing) would re-arm a
+/// zero-length timer in a tight loop.
+const WORK_DEADLINE_MIN_TICK: Duration = Duration::from_millis(50);
+
+/// P3.6: a single domain's working-time clock — wall time minus the time it spent *queued*.
+///
+/// The distinction is the whole point. `browser.permit_wait` averaged 201.6s across 1,113
+/// acquisitions on the 2026-08-15 depth-3 scan, so a budget measured on the wall clock reports
+/// how contended the scan is, not how much work the domain did: recall would quietly collapse
+/// on exactly the busy scans where it matters, and identically-configured runs would diverge.
+/// `subprocessor::analyze_domain_with_full_options` already subtracts its `browser_wait_nanos`
+/// for this reason; this is the same contract raised from one method to the whole domain.
+///
+/// What it credits today is the P3.1 admission permit — the one queue this layer can see and
+/// measure. A render blocked on `browser_pool`'s permits is invisible from here, so the ceiling is
+/// deliberately set far above any single method's own budget rather than pretending to a precision
+/// it does not have; each render-using method already subtracts its own browser wait one layer
+/// down. Any further queue this file learns to observe is one `credit_queue` call away, and
+/// [`await_work_deadline`] re-reads the clock so a late credit extends the deadline rather than
+/// being spent by it.
+pub struct DomainWorkClock {
+    started: std::time::Instant,
+    queued_nanos: std::sync::atomic::AtomicU64,
+}
+
+impl DomainWorkClock {
+    /// Start a clock for one domain's unit of work.
+    pub fn start() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            queued_nanos: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Credit time this domain spent waiting in a queue rather than working. Mirrors
+    /// `subprocessor::credit_browser_wait`.
+    ///
+    /// Saturating, not wrapping: a wrapped total would read as *near-zero* queue time and
+    /// would therefore make the ceiling fire early on precisely the most-starved domain — the
+    /// opposite of what the subtraction exists to do.
+    pub fn credit_queue(&self, waited: Duration) {
+        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+        let _ = self.queued_nanos.fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| Some(current.saturating_add(nanos)),
+        );
+    }
+
+    /// Wall time since the unit started.
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Queue time credited so far, which the ceiling subtracts from [`Self::elapsed`].
+    pub fn queued(&self) -> Duration {
+        Duration::from_nanos(self.queued_nanos.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn decide(&self, current_depth: u32, ceiling: Duration) -> DomainCeiling {
+        domain_ceiling_decision(current_depth, self.elapsed(), self.queued(), ceiling)
+    }
+}
+
+/// P3.6: the outcome of the whole-domain ceiling.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DomainCeiling {
+    /// The ceiling does not apply to this unit — the scan root's own layer, or a ceiling the
+    /// operator has disabled. Nothing is ever cut.
+    Exempt,
+    /// Inside the budget; the wrapped value is the working time still available.
+    Within(Duration),
+    /// The budget is spent. Methods still running are cut, classified and counted; methods that
+    /// already answered keep everything they returned.
+    Exhausted,
+}
+
+/// P3.6: pure decision for the whole-domain ceiling.
+///
+/// Depth 1 is exempt for the same reason `should_gate_infra_enumeration` never gates it and
+/// `subprocessor_skip_decision` never skips it: the scan root is the one domain whose
+/// enumeration the entire report is built on, and it is also the run that most legitimately
+/// takes minutes (subfinder against a large apex). Truncating it to save time on the tail would
+/// trade the headline result for the thing the ceiling exists to protect.
+pub fn domain_ceiling_decision(
+    current_depth: u32,
+    elapsed: Duration,
+    queued: Duration,
+    ceiling: Duration,
+) -> DomainCeiling {
+    if ceiling.is_zero() || current_depth <= 1 {
+        return DomainCeiling::Exempt;
+    }
+    // Saturating: a clock can be credited more queue time than has elapsed (two waits recorded
+    // from concurrent sub-steps), and that must read as "all of it was queue", never as a
+    // negative that panics or wraps into a huge budget.
+    let working = elapsed.saturating_sub(queued);
+    match ceiling.checked_sub(working) {
+        Some(remaining) if !remaining.is_zero() => DomainCeiling::Within(remaining),
+        _ => DomainCeiling::Exhausted,
+    }
+}
+
 // coverage(off): thin logging wrapper over SubprocessorAnalyzer::analyze_domain_with_logging
 // which performs real HTTP requests and browser scraping; branch outcomes depend on external
 // service responses. Branches: non-empty result (lines 221-228), empty result (229-235),
@@ -992,15 +1111,172 @@ async fn run_webtraffic_phase(
     convert_web_traffic_results(web_traffic_results)
 }
 
-// coverage(off): I/O-only orchestration shell after DI extraction. All pure logic extracted to:
-// add_base_domain_if_subdomain, convert_subprocessor_domains, filter_subfinder_results,
-// filter_confirmed_tenants, convert_ct_results, convert_web_traffic_results,
-// compute_buffer_size, compute_progress_position, should_checkpoint, compute_pressure_delay_ms.
-// Remaining code is: DNS-over-HTTPS calls, subfinder/SaaS/CT/web I/O, checkpoint file writes,
-// tokio mutex locks, and progress logger calls — no testable branching logic.
+/// P3.6: resolve once the domain's *working* budget is spent.
+///
+/// Re-reads the clock each pass rather than arming one absolute deadline, so queue time credited
+/// while the watchdog waits pushes the deadline out instead of being spent by it. That is what
+/// keeps the ceiling a measure of work: an absolute deadline computed up front would degrade back
+/// into a wall clock the moment the domain started queueing. Nothing credits the clock mid-join
+/// today, so this normally costs exactly one sleep — the loop is what makes it stay correct when
+/// something does.
+async fn await_work_deadline(clock: &DomainWorkClock, current_depth: u32, ceiling: Duration) {
+    loop {
+        match clock.decide(current_depth, ceiling) {
+            DomainCeiling::Within(remaining) => {
+                tokio::time::sleep(remaining.max(WORK_DEADLINE_MIN_TICK)).await;
+            }
+            // Unreachable from the join (an exempt unit is given no budget at all), but resolve
+            // to "never fire" rather than "fire now" so a future caller that hands this an exempt
+            // depth cannot silently truncate the scan root.
+            DomainCeiling::Exempt => std::future::pending::<()>().await,
+            DomainCeiling::Exhausted => return,
+        }
+    }
+}
+
+/// P3.6: run one discovery phase under the domain's shared ceiling.
+///
+/// All five arms of the join race the SAME clock, so this is one whole-domain ceiling rather than
+/// five per-method ones — but each arm is cut independently, so a method that already answered
+/// keeps every vendor it found. Cutting the join as a unit (a `timeout` around `tokio::join!`)
+/// would have discarded the finished arms' results too, converting a slow domain into an empty one.
+///
+/// `biased` is load-bearing: the phase is polled first, so a disabled method (which returns an
+/// empty Vec on its first poll) always wins the race and is never reported as starved, and a phase
+/// that completes in the same wakeup as the deadline is counted as a result rather than a cut.
+///
+/// A cut drops the phase future, which cancels it. That is safe for every arm: the subfinder child
+/// is spawned with `kill_on_drop(true)` and deregistered from the PID registry on drop, and the
+/// render sites move their browser permit *into* `spawn_blocking`, so the blocking task runs to
+/// completion and drops its `TabGuard` normally rather than orphaning Chrome.
+async fn phase_within_domain_budget<F>(
+    phase: F,
+    budget: Option<(&DomainWorkClock, u32, Duration)>,
+    coverage: &crate::coverage::PhaseCoverage,
+    method: &str,
+    domain: &str,
+    logger: &Arc<AnalysisLogger>,
+) -> Vec<dns::VendorDomain>
+where
+    F: std::future::Future<Output = Vec<dns::VendorDomain>>,
+{
+    let Some((clock, current_depth, ceiling)) = budget else {
+        return phase.await;
+    };
+    tokio::select! {
+        biased;
+        found = phase => found,
+        _ = await_work_deadline(clock, current_depth, ceiling) => {
+            crate::perf::METRICS.domain_budget_cut.hit();
+            // Classified, not silently truncated. `record_failure` is the same call every phase
+            // error path makes, and it is the difference that matters here: an empty Vec from a
+            // cut phase is byte-identical to "this domain genuinely has nothing", and without
+            // this the scan summary would print SUCCESS over the loss — the RC-1 collapse that
+            // cost chargify.com all 28 of its rows while the scan-wide total went UP.
+            coverage.record_failure();
+            let queued = clock.queued();
+            logger.warn(&format!(
+                "DOMAIN_BUDGET_EXHAUSTED: cut {} discovery for {} after {:.1}s of working time \
+                 ({:.1}s queued for permits, excluded) — this method was starved, not empty. \
+                 The domain's other methods keep everything they already returned.",
+                method,
+                domain,
+                clock.elapsed().saturating_sub(queued).as_secs_f64(),
+                queued.as_secs_f64(),
+            ));
+            Vec::new()
+        }
+    }
+}
+
+// coverage(off): argument-forwarding shell — starts the scan root's P3.6 clock and delegates.
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_arguments)]
 pub async fn discover_nth_parties(
+    domain: &str,
+    max_depth: Option<u32>,
+    discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
+    processed_domains: Arc<Mutex<HashMap<String, u32>>>,
+    subprocessor_attempted_orgs: Arc<Mutex<HashMap<String, u32>>>,
+    scan_dedup: Arc<ScanDedup>,
+    semaphore: Arc<Semaphore>,
+    current_depth: u32,
+    root_customer_domain: &str,
+    root_customer_organization: &str,
+    verification_logger: &verification_logger::VerificationFailureLogger,
+    dns_pool: Arc<dns::DnsServerPool>,
+    recursive_semaphore: Arc<Semaphore>,
+    args: &Args,
+    logger: Arc<AnalysisLogger>,
+    subprocessor_analyzer: Option<&Arc<subprocessor::SubprocessorAnalyzer>>,
+    subprocessor_enabled: bool,
+    web_org_enabled: bool,
+    web_org_min_confidence: f32,
+    analysis_config: &AnalysisConfig,
+    subdomain_discovery: Option<&SubfinderDiscovery>,
+    saas_tenant_discovery: Option<&SaasTenantDiscovery>,
+    ct_discovery: Option<&CtLogDiscovery>,
+    web_traffic_discovery: Option<&WebTrafficDiscovery>,
+    checkpoint: Arc<Mutex<Checkpoint>>,
+    checkpoint_output_dir: &str,
+    result_sink: Arc<Mutex<ResultSink>>,
+    memory_pressure_level: Arc<std::sync::atomic::AtomicU8>,
+) -> Result<()> {
+    // P3.6: the scan entry point owns a fresh clock. Every other caller reaches the body through
+    // `process_vendor_domain`, which starts its clock *before* acquiring the admission permit so
+    // the wait for that permit is credited as queue rather than charged as work.
+    let clock = DomainWorkClock::start();
+    discover_nth_parties_with_clock(
+        &clock,
+        domain,
+        max_depth,
+        discovered_vendors,
+        processed_domains,
+        subprocessor_attempted_orgs,
+        scan_dedup,
+        semaphore,
+        current_depth,
+        root_customer_domain,
+        root_customer_organization,
+        verification_logger,
+        dns_pool,
+        recursive_semaphore,
+        args,
+        logger,
+        subprocessor_analyzer,
+        subprocessor_enabled,
+        web_org_enabled,
+        web_org_min_confidence,
+        analysis_config,
+        subdomain_discovery,
+        saas_tenant_discovery,
+        ct_discovery,
+        web_traffic_discovery,
+        checkpoint,
+        checkpoint_output_dir,
+        result_sink,
+        memory_pressure_level,
+    )
+    .await
+}
+
+/// The body of [`discover_nth_parties`], carrying the caller's P3.6 work clock.
+///
+/// Split out rather than adding a parameter to the public entry point so the whole-domain ceiling
+/// can span BOTH halves of one vendor unit — the org resolution in `process_vendor_domain` and the
+/// discovery join here — without a signature change rippling into `app.rs`. The clock stops being
+/// consulted once the per-vendor fan-out starts: each child begins its own unit, so the ceiling
+/// bounds one domain's own methods and never the subtree beneath it.
+// coverage(off): I/O-only orchestration shell after DI extraction. All pure logic extracted to:
+// add_base_domain_if_subdomain, convert_subprocessor_domains, filter_subfinder_results,
+// filter_confirmed_tenants, convert_ct_results, convert_web_traffic_results,
+// compute_buffer_size, compute_progress_position, should_checkpoint, compute_pressure_delay_ms,
+// domain_ceiling_decision. Remaining code is: DNS-over-HTTPS calls, subfinder/SaaS/CT/web I/O,
+// checkpoint file writes, tokio mutex locks, and progress logger calls — no testable branching.
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::too_many_arguments)]
+async fn discover_nth_parties_with_clock(
+    clock: &DomainWorkClock,
     domain: &str,
     max_depth: Option<u32>,
     discovered_vendors: Arc<Mutex<HashMap<String, String>>>,
@@ -1319,33 +1595,82 @@ pub async fn discover_nth_parties(
             None
         };
 
+        // P3.6: the whole-domain ceiling. Every per-method budget already shipped, but none of them
+        // compose — a domain slow on several methods pays their sum on top of the serial DNS
+        // preamble and the org resolution the caller already spent out of this same clock. One
+        // ceiling now spans all of it. `None` means exempt (the scan root), in which case the arms
+        // run exactly as they did before, with no timer and no select.
+        let domain_budget = match clock.decide(current_depth, DOMAIN_WORK_CEILING) {
+            DomainCeiling::Exempt => None,
+            DomainCeiling::Within(_) | DomainCeiling::Exhausted => {
+                Some((clock, current_depth, DOMAIN_WORK_CEILING))
+            }
+        };
+        // The budget wrapper sits INSIDE `timed_async` so a cut phase still records the time it
+        // burned before being cut. Excluding it would quietly shrink the phase metric that names
+        // the slow arm — the one number a reader needs to understand why the ceiling fired.
         let discovery_started = std::time::Instant::now();
         let (sp, sf, st, ct_v, wt) = tokio::join!(
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_subproc,
-                run_subprocessor_phase(
+                phase_within_domain_budget(
+                    run_subprocessor_phase(
+                        domain,
+                        subprocessor_analyzer,
+                        subprocessor_enabled,
+                        verification_logger,
+                        &logger,
+                    ),
+                    domain_budget,
+                    &crate::coverage::SCAN_COVERAGE.subprocessor,
+                    "subprocessor",
                     domain,
-                    subprocessor_analyzer,
-                    subprocessor_enabled,
-                    verification_logger,
                     &logger,
                 ),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_subfinder,
-                run_subfinder_phase(domain, subfinder_for_join, &dns_pool, &logger),
+                phase_within_domain_budget(
+                    run_subfinder_phase(domain, subfinder_for_join, &dns_pool, &logger),
+                    domain_budget,
+                    &crate::coverage::SCAN_COVERAGE.subfinder,
+                    "subfinder",
+                    domain,
+                    &logger,
+                ),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_saas,
-                run_saas_phase(domain, saas_for_join, &logger),
+                phase_within_domain_budget(
+                    run_saas_phase(domain, saas_for_join, &logger),
+                    domain_budget,
+                    &crate::coverage::SCAN_COVERAGE.saas,
+                    "SaaS tenant",
+                    domain,
+                    &logger,
+                ),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_ct,
-                run_ct_phase(domain, ct_for_join, &logger),
+                phase_within_domain_budget(
+                    run_ct_phase(domain, ct_for_join, &logger),
+                    domain_budget,
+                    &crate::coverage::SCAN_COVERAGE.ct,
+                    "CT log",
+                    domain,
+                    &logger,
+                ),
             ),
             crate::perf::timed_async(
                 &crate::perf::METRICS.phase_webtraffic,
-                run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+                phase_within_domain_budget(
+                    run_webtraffic_phase(domain, web_traffic_discovery, &logger),
+                    domain_budget,
+                    &crate::coverage::SCAN_COVERAGE.webtraffic,
+                    "web traffic",
+                    domain,
+                    &logger,
+                ),
             ),
         );
         crate::perf::METRICS
@@ -1759,7 +2084,15 @@ pub async fn process_vendor_domain(
     // permits of their own. Released-before-descent makes that impossible by construction.
     //
     // Fail-open on a closed semaphore: a scan that has begun shutting down must not wedge here.
+    //
+    // P3.6: the whole-domain clock starts BEFORE the acquire, and the wait is then credited back as
+    // queue time. That ordering is the point — this is the queue the P3.1 comment above measured at
+    // a 201.6s mean, so a ceiling that charged it as work would fire on every domain of a busy scan
+    // and cut recall in proportion to how loaded the machine was. The clock spans this vendor's org
+    // resolution and, via `discover_nth_parties_with_clock`, its five discovery methods.
+    let clock = DomainWorkClock::start();
     let _local_work_permit = semaphore.clone().acquire_owned().await.ok();
+    clock.credit_queue(clock.elapsed());
 
     // Input guard (mirrors the output-time gate in finalize::finalize_report). A non-registrable
     // host — an org name, an email, a wayback-wrapped URL, an IP fragment — must never enter the
@@ -1912,7 +2245,10 @@ pub async fn process_vendor_domain(
     // children without occupying a slot those children need.
     drop(_local_work_permit);
 
-    if let Err(e) = discover_nth_parties(
+    if let Err(e) = discover_nth_parties_with_clock(
+        // P3.6: the SAME clock the org resolution above ran under, so the ceiling covers this
+        // vendor's whole unit rather than restarting per half.
+        &clock,
         &lookup_domain,
         max_depth,
         discovered_vendors.clone(),
@@ -3657,5 +3993,232 @@ mod tests {
         // difference from should_stop_at_common_denominator, which only fires for unbounded scans.
         assert!(!should_gate_infra_enumeration(1, "googleapis.com"));
         assert!(should_gate_infra_enumeration(2, "googleapis.com"));
+    }
+
+    // ── P3.6 whole-domain working-time ceiling ─────────────────────────
+
+    #[test]
+    fn test_domain_ceiling_never_truncates_the_scan_root() {
+        // The root's own enumeration is what the whole report is built on, and it is also the run
+        // that most legitimately takes minutes. No amount of elapsed time may cut it.
+        assert_eq!(
+            domain_ceiling_decision(
+                1,
+                Duration::from_secs(3600),
+                Duration::ZERO,
+                DOMAIN_WORK_CEILING
+            ),
+            DomainCeiling::Exempt
+        );
+        assert_eq!(
+            domain_ceiling_decision(
+                0,
+                Duration::from_secs(3600),
+                Duration::ZERO,
+                DOMAIN_WORK_CEILING
+            ),
+            DomainCeiling::Exempt
+        );
+    }
+
+    #[test]
+    fn test_domain_ceiling_zero_disables_enforcement() {
+        // A zero ceiling is the off switch, and it must be off at every depth — not "expires
+        // immediately", which would truncate every method of every domain in the scan.
+        assert_eq!(
+            domain_ceiling_decision(7, Duration::from_secs(600), Duration::ZERO, Duration::ZERO),
+            DomainCeiling::Exempt
+        );
+    }
+
+    #[test]
+    fn test_domain_ceiling_measures_work_not_queue_depth() {
+        // The load-bearing property: identical wall-clock, opposite verdicts, decided purely by
+        // how much of that wall clock was spent queued. Without the subtraction the ceiling would
+        // fire in proportion to how busy the machine is and recall would depend on scan
+        // concurrency — the failure mode `browser_wait_nanos` exists to prevent one layer down.
+        let elapsed = Duration::from_secs(200);
+        assert_eq!(
+            domain_ceiling_decision(
+                2,
+                elapsed,
+                Duration::from_secs(190),
+                Duration::from_secs(90)
+            ),
+            DomainCeiling::Within(Duration::from_secs(80))
+        );
+        assert_eq!(
+            domain_ceiling_decision(2, elapsed, Duration::ZERO, Duration::from_secs(90)),
+            DomainCeiling::Exhausted
+        );
+    }
+
+    #[test]
+    fn test_domain_ceiling_boundary_is_exhausted_exactly_at_the_ceiling() {
+        let ceiling = Duration::from_secs(90);
+        // One nanosecond of budget left is still budget — the phase gets polled.
+        assert_eq!(
+            domain_ceiling_decision(
+                2,
+                ceiling - Duration::from_nanos(1),
+                Duration::ZERO,
+                ceiling
+            ),
+            DomainCeiling::Within(Duration::from_nanos(1))
+        );
+        // Exactly spent is spent; a zero-length remaining budget must not be reported as Within,
+        // or the watchdog would arm a zero timer and busy-loop instead of cutting.
+        assert_eq!(
+            domain_ceiling_decision(2, ceiling, Duration::ZERO, ceiling),
+            DomainCeiling::Exhausted
+        );
+        assert_eq!(
+            domain_ceiling_decision(2, ceiling + Duration::from_secs(1), Duration::ZERO, ceiling),
+            DomainCeiling::Exhausted
+        );
+    }
+
+    #[test]
+    fn test_domain_ceiling_saturates_when_credited_queue_exceeds_elapsed() {
+        // Two concurrent sub-steps can each credit their own wait, so credited queue time can
+        // exceed the unit's wall clock. That must read as "all of it was queue" and leave the full
+        // budget, never underflow.
+        assert_eq!(
+            domain_ceiling_decision(
+                3,
+                Duration::from_secs(10),
+                Duration::from_secs(45),
+                Duration::from_secs(90)
+            ),
+            DomainCeiling::Within(Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn test_domain_ceiling_enforced_from_depth_two_onwards() {
+        // Depth 2 is the first layer the ceiling applies to — the same boundary P4.8's
+        // enumeration gate uses, so the two mechanisms carve the root out identically.
+        let spent = Duration::from_secs(120);
+        assert_eq!(
+            domain_ceiling_decision(1, spent, Duration::ZERO, DOMAIN_WORK_CEILING),
+            DomainCeiling::Exempt
+        );
+        for depth in 2..=6 {
+            assert_eq!(
+                domain_ceiling_decision(depth, spent, Duration::ZERO, DOMAIN_WORK_CEILING),
+                DomainCeiling::Exhausted,
+                "depth {} must be enforced",
+                depth
+            );
+        }
+    }
+
+    #[test]
+    fn test_work_clock_credit_is_subtracted_from_the_budget() {
+        let clock = DomainWorkClock::start();
+        clock.credit_queue(Duration::from_secs(3600));
+        assert_eq!(clock.queued(), Duration::from_secs(3600));
+        // The clock has been alive for microseconds of test time, all of it covered by the
+        // credited hour, so the domain must still hold every bit of its budget.
+        assert_eq!(
+            clock.decide(3, DOMAIN_WORK_CEILING),
+            DomainCeiling::Within(DOMAIN_WORK_CEILING)
+        );
+    }
+
+    #[test]
+    fn test_work_clock_queue_credit_saturates_instead_of_wrapping() {
+        let clock = DomainWorkClock::start();
+        clock.credit_queue(Duration::MAX);
+        clock.credit_queue(Duration::MAX);
+        // A wrapped total would read as near-zero queue time, so the ceiling would fire earliest
+        // on the most-starved domain — the exact inversion of what the subtraction is for.
+        assert_eq!(clock.queued(), Duration::from_nanos(u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn test_phase_within_domain_budget_cuts_a_starved_phase_but_keeps_a_ready_one() {
+        let clock = DomainWorkClock::start();
+        let coverage = crate::coverage::PhaseCoverage::default();
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let tiny = Duration::from_millis(20);
+
+        // A method that cannot answer inside the budget yields nothing rather than blocking the
+        // domain forever.
+        let cut = phase_within_domain_budget(
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                make_vendor_domains(3)
+            },
+            Some((&clock, 3, tiny)),
+            &coverage,
+            "test",
+            "example.com",
+            &logger,
+        )
+        .await;
+        assert!(
+            cut.is_empty(),
+            "a starved phase must not return partial results"
+        );
+
+        // The budget is now spent, yet a method that is already ready still wins: `biased` polls
+        // the phase first, which is what keeps a disabled method (an instant empty Vec) from being
+        // reported as starved, and keeps a phase that lands on the deadline's own wakeup.
+        let kept = phase_within_domain_budget(
+            async { make_vendor_domains(2) },
+            Some((&clock, 3, tiny)),
+            &coverage,
+            "test",
+            "example.com",
+            &logger,
+        )
+        .await;
+        assert_eq!(kept.len(), 2, "a ready phase must keep everything it found");
+    }
+
+    #[tokio::test]
+    async fn test_phase_within_domain_budget_never_truncates_the_scan_root() {
+        // Even handed an already-blown budget, depth 1 waits for the real answer. The exemption
+        // has to hold at the enforcement site, not only in the pure decision.
+        let clock = DomainWorkClock::start();
+        let coverage = crate::coverage::PhaseCoverage::default();
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+
+        let kept = phase_within_domain_budget(
+            async {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                make_vendor_domains(4)
+            },
+            Some((&clock, 1, Duration::from_nanos(1))),
+            &coverage,
+            "test",
+            "root.example.com",
+            &logger,
+        )
+        .await;
+        assert_eq!(kept.len(), 4, "the scan root's own layer must never be cut");
+    }
+
+    #[tokio::test]
+    async fn test_phase_within_domain_budget_without_a_budget_runs_to_completion() {
+        // The exempt path takes no timer and no select at all, so this pins the behaviour the
+        // depth-1 hot path relies on: identical to calling the phase directly.
+        let coverage = crate::coverage::PhaseCoverage::default();
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+
+        let kept = phase_within_domain_budget(
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                make_vendor_domains(5)
+            },
+            None,
+            &coverage,
+            "test",
+            "example.com",
+            &logger,
+        )
+        .await;
+        assert_eq!(kept.len(), 5);
     }
 }

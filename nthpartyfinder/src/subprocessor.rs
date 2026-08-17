@@ -364,6 +364,133 @@ fn should_reuse_settled_dom(settled_dom_len: usize, static_html_len: usize) -> b
     settled_dom_len > static_html_len
 }
 
+/// P2.6: how much of the per-vendor budget a SINGLE candidate URL may spend on its own work.
+///
+/// `MAX_ANALYSIS_TIME` (20s) is checked only at the top of the candidate loop, so once a URL had
+/// been entered it ran to completion however long that took. One futile SPA that chained a
+/// trust-center strategy, an auto-discovery pass and a headless render overshot the whole vendor
+/// budget by itself, and the loop then broke at the first candidate — so the vendor's real
+/// subprocessor page, sitting at position 2 or 3 of the list, was never probed at all. The
+/// truncation itself has been classified and counted since 1.6.1 (SUBPROC_BUDGET_EXHAUSTED); the
+/// rows were still gone.
+///
+/// Twelve seconds against a twenty-second budget: room for one page that needs a render to finish
+/// and answer, while a URL that has already spent that long cannot go on to *begin* another render
+/// stage on top of it. This is an INNER bound only — the vendor budget, its break, and its
+/// classification are untouched, and nothing here ever extends them.
+const MAX_URL_WORKING_TIME: Duration = Duration::from_secs(12);
+
+/// P2.6: has one candidate URL overrun its slice of the per-vendor budget?
+///
+/// Working time only. The time this URL spent queued for a headless-Chrome permit is subtracted
+/// for exactly the reason `MAX_ANALYSIS_TIME` subtracts it: a wall-clock envelope measures how
+/// contended the browser pool is, so a vendor whose trust centre needs rendering would be
+/// abandoned precisely when the scan is busy. Recall must not depend on scan concurrency.
+///
+/// Strictly greater, matching the vendor-budget check at the head of the candidate loop — a URL
+/// that has used exactly its envelope has not yet overrun it.
+fn url_envelope_overrun(elapsed: Duration, browser_wait: Duration, envelope: Duration) -> bool {
+    elapsed.saturating_sub(browser_wait) > envelope
+}
+
+/// P2.6: one candidate URL's own working-time envelope inside the per-vendor budget.
+///
+/// `browser_wait` is the vendor-wide cumulative permit-queue counter, so the envelope snapshots it
+/// on entry and only ever subtracts the delta *this* URL added. Reading the raw total would hand
+/// every later candidate a credit earned by an earlier one — a vendor whose first candidate queued
+/// 40s for Chrome would then have granted candidates two onward an unbounded envelope, which is
+/// the opposite of what this bound exists to do.
+struct UrlWorkEnvelope<'a> {
+    started: std::time::Instant,
+    browser_wait: Option<&'a std::sync::atomic::AtomicU64>,
+    browser_wait_at_start: u64,
+    limit: Duration,
+}
+
+impl<'a> UrlWorkEnvelope<'a> {
+    fn start(browser_wait: Option<&'a std::sync::atomic::AtomicU64>, limit: Duration) -> Self {
+        let browser_wait_at_start = browser_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        Self {
+            started: std::time::Instant::now(),
+            browser_wait,
+            browser_wait_at_start,
+            limit,
+        }
+    }
+
+    /// Permit-queue time accumulated since this URL started — never the vendor-wide total.
+    fn queued(&self) -> Duration {
+        let now = self
+            .browser_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        Duration::from_nanos(now.saturating_sub(self.browser_wait_at_start))
+    }
+
+    fn working_elapsed(&self) -> Duration {
+        self.started.elapsed().saturating_sub(self.queued())
+    }
+
+    fn overrun(&self) -> bool {
+        url_envelope_overrun(self.started.elapsed(), self.queued(), self.limit)
+    }
+}
+
+/// P2.6 marker: identifies the error a per-URL envelope overrun returns so the candidate loop can
+/// tell "we stopped looking here" apart from "this path is not there". Keyed on the message for
+/// the same reason [`is_transport_dead_error`] is — everything below returns `anyhow::Error`, so
+/// the message is the only discriminator that survives the call.
+const URL_ENVELOPE_MARKER: &str = "SUBPROC_URL_ENVELOPE_EXCEEDED";
+
+/// P2.6: did this scrape stop because its envelope ran out, rather than because the page answered
+/// or the path was missing? An abandoned candidate proves nothing about the domain, so the caller
+/// must treat it like a transport failure and refuse to memoize absence from it.
+fn is_url_envelope_error(e: &anyhow::Error) -> bool {
+    e.to_string().contains(URL_ENVELOPE_MARKER)
+}
+
+/// P2.6: abandon this candidate if it has overrun its envelope, naming the stage it was about to
+/// begin so a `-v` log says which one ate the time.
+///
+/// `Ok(())` when there is no envelope at all — every non-production caller (tests, one-off scrapes,
+/// the wrapper below) passes `None` and is bounded by nothing, exactly as before.
+fn check_url_envelope(
+    envelope: Option<&UrlWorkEnvelope<'_>>,
+    url: &str,
+    next_stage: &str,
+) -> Result<()> {
+    let Some(envelope) = envelope else {
+        return Ok(());
+    };
+    if !envelope.overrun() {
+        return Ok(());
+    }
+    crate::perf::METRICS.subproc_url_envelope_exceeded.hit();
+    //
+    // info!, not warn!: the same reasoning the vendor-budget branch records for its
+    // results-already-found case. Abandoning a slow candidate is the ordinary, healthy outcome
+    // this bound exists to produce, and warning on every one of them would train the reader to
+    // ignore the loud line that matters — a vendor that ended up with nothing at all, which the
+    // candidate loop does still raise at warn level.
+    tracing::info!(
+        "Abandoning {} before {} after {:.1}s of working time ({:.1}s queued for a browser, \
+         excluded) — its envelope is spent, the remaining candidates keep theirs",
+        url,
+        next_stage,
+        envelope.working_elapsed().as_secs_f64(),
+        envelope.queued().as_secs_f64()
+    );
+    Err(anyhow::anyhow!(
+        "{}: {} abandoned before {} after {:.1}s of working time",
+        URL_ENVELOPE_MARKER,
+        url,
+        next_stage,
+        envelope.working_elapsed().as_secs_f64()
+    ))
+}
+
 /// P2.7: how long a proven "no subprocessor page here" verdict stays authoritative. Domain
 /// ownership and legal-page layout churn on months-to-years timescales, so a warm rescan inside
 /// this window can safely skip the full candidate probe. Ten days keeps a weekly re-scan cheap
@@ -375,17 +502,24 @@ pub(crate) const NEGATIVE_SUBPROCESSOR_CACHE_TTL_SECS: u64 = 10 * 24 * 3600;
 ///
 /// Only when the full candidate loop genuinely completed to a real absence — it yielded nothing,
 /// it was **not** cut short by the per-vendor time budget (a starved loop looked at a fraction of
-/// the candidates), and **no transport-level failure** occurred (an unreachable host or browser
-/// outage means "we could not look", never "there is nothing here"). This is the write-direction
-/// twin of [`cached_urls_are_provably_stale`]'s discipline: absence is only provable when every
-/// candidate was actually reached and every one came back cleanly empty. A budgeted or
-/// outage-truncated pass must fall through and re-probe next scan, exactly as today.
+/// the candidates), **no transport-level failure** occurred (an unreachable host or browser outage
+/// means "we could not look", never "there is nothing here"), and **no candidate was abandoned
+/// part-way** by its P2.6 working-time envelope. This is the write-direction twin of
+/// [`cached_urls_are_provably_stale`]'s discipline: absence is only provable when every candidate
+/// was actually reached and every one came back cleanly empty. A budgeted, outage-truncated or
+/// envelope-abandoned pass must fall through and re-probe next scan, exactly as today.
+///
+/// `envelope_abandoned` is deliberately its own parameter rather than folded into
+/// `any_transport_error`. They block the write for the same reason but are different events, and
+/// the loop reports them separately — collapsing them would make the log say a host was
+/// unreachable when in fact it answered and we walked away.
 pub(crate) fn may_record_subprocessor_absence(
     yielded_any: bool,
     budget_exhausted: bool,
     any_transport_error: bool,
+    envelope_abandoned: bool,
 ) -> bool {
-    !yielded_any && !budget_exhausted && !any_transport_error
+    !yielded_any && !budget_exhausted && !any_transport_error && !envelope_abandoned
 }
 
 /// P2.7 read gate: is a stored negative-cache entry still authoritative for skipping the probe?
@@ -1874,6 +2008,10 @@ impl SubprocessorAnalyzer {
         // empty pass may record absence.
         let mut budget_exhausted = false;
         let mut any_transport_error = false;
+        // P2.6: at least one candidate was walked away from mid-probe when its working-time
+        // envelope ran out. Same standing as `any_transport_error` for the negative-cache write:
+        // we stopped looking, which is never proof there was nothing to find.
+        let mut envelope_abandoned = false;
 
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Stop once every source category has yielded a result.
@@ -1977,13 +2115,21 @@ impl SubprocessorAnalyzer {
                 ctx.http_limiter.acquire(domain).await;
             }
             let request_start = std::time::Instant::now();
+            // P2.6: this candidate's own share of the budget, restarted per URL. The outer budget
+            // bounds the whole loop and is what makes truncation visible; this inner one is what
+            // stops a single futile SPA from spending that budget before the vendor's real page at
+            // position 2+ has been probed even once. The two are independent by design — neither
+            // relaxes the other.
+            let url_envelope =
+                UrlWorkEnvelope::start(Some(&browser_wait_nanos), MAX_URL_WORKING_TIME);
             match self
-                .scrape_subprocessor_page_with_retry(
+                .scrape_subprocessor_page_within_envelope(
                     url,
                     logger,
                     domain,
                     None,
                     Some(&browser_wait_nanos),
+                    Some(&url_envelope),
                 )
                 .await
             {
@@ -2022,6 +2168,12 @@ impl SubprocessorAnalyzer {
                 }
                 Err(e) => {
                     debug!("Failed to scrape {}: {}", url, e);
+                    // P2.6: an abandoned candidate is an unfinished look, not a verdict on the
+                    // path. Deliberately NOT a `dead_hosts` entry either — the host answered, we
+                    // walked away from it, and its sibling paths are still worth a probe.
+                    if is_url_envelope_error(&e) {
+                        envelope_abandoned = true;
+                    }
                     // P2.5: a transport-level failure means the host is unreachable, not that
                     // this path is missing — mark the host so its remaining candidates are skipped.
                     if is_transport_dead_error(&e) {
@@ -2048,12 +2200,32 @@ impl SubprocessorAnalyzer {
 
         if per_source.is_empty() {
             debug!("No subprocessor pages found for domain: {}", domain);
+            // P2.6: nothing answered AND we walked away from at least one candidate part-way. The
+            // budget branch above already reports its own starved-vendor case, so this only speaks
+            // for the passes it never saw — without it, an envelope-shortened vendor reports as a
+            // clean empty result, which is the RC-1 collapse in miniature.
+            if envelope_abandoned && !budget_exhausted {
+                crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                tracing::warn!(
+                    "{}: {} yielded no subprocessors and at least one candidate was abandoned \
+                     mid-probe when its {}s working-time envelope ran out. Recall for this vendor \
+                     is incomplete — it was starved, not empty.",
+                    URL_ENVELOPE_MARKER,
+                    domain,
+                    MAX_URL_WORKING_TIME.as_secs()
+                );
+            }
             // P2.7: record a provable absence so a warm rescan skips the whole probe. Only when
-            // the loop ran to completion (not budget-truncated) and reached every host (no
-            // transport failure) — an outage-truncated pass falls through unrecorded and re-probes
-            // next scan. Same "an outage must never memoize as absence" discipline as the positive
-            // cache's stale-clear guard.
-            if may_record_subprocessor_absence(false, budget_exhausted, any_transport_error) {
+            // the loop ran to completion (not budget-truncated), reached every host (no transport
+            // failure) and finished every candidate it entered (nothing abandoned by P2.6) — any
+            // other pass falls through unrecorded and re-probes next scan. Same "an outage must
+            // never memoize as absence" discipline as the positive cache's stale-clear guard.
+            if may_record_subprocessor_absence(
+                false,
+                budget_exhausted,
+                any_transport_error,
+                envelope_abandoned,
+            ) {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -2196,57 +2368,102 @@ impl SubprocessorAnalyzer {
             _ => {}
         }
 
-        // Add high-priority patterns discovered through research first
-        // Skip trust.{domain} patterns when domain already IS a trust subdomain
-        // to avoid nonsense URLs like https://trust.trust.vanta.com/subprocessors
+        // ====================================================================
+        // P2.8: THE PROBED WINDOW — ordered by MEASURED hit rate, not authoring order
+        // ====================================================================
+        // Only the first `MAX_URLS_TO_TEST` (25) candidates are ever probed, so slot order IS the
+        // recall budget. It used to be authoring order: a pattern's position recorded when someone
+        // happened to add it. Tallying `working_subprocessor_urls` across the 187 on-disk cache
+        // files — 181 domains that actually yielded a page, 189 working URLs — gives what the
+        // patterns are really worth ({d} = the domain, www./trust. as written):
+        //
+        //     114  trust.{d}/subprocessors
+        //      38  {d}/legal/subprocessors
+        //       8  {d}/subprocessors
+        //       8  trust.{d}/                       (bare trust host, lists inline)
+        //       2  www.{d}/legal/service-providers  (Stripe)
+        //       2  www.{d}/en/trust/subprocessors/  (Zoom)
+        //       2  {d}/sub-processors
+        //       1  each of: www.{d}/sub-processors · {d}/privacy/subprocessors ·
+        //          {d}/privacy/subprocessors.html · {d}/subprocessors.html ·
+        //          www.{d}/legal/sub-processors · www.{d}/policies/subprocessors/ (Canva) ·
+        //          www.{d}/trust/privacy/subprocessors-list (DocuSign) ·
+        //          www.{d}/en-gb/trust-security/privacy/customer-due-diligence/ (Sage)
+        //
+        // Two patterns account for 152 of 189. They were already at slots 0 and 2, but slots 3-5
+        // were spent on 2-hit variants while `{d}/subprocessors` (8) waited at slot 6 and every
+        // 1-hit pattern sat outside the probed window entirely.
+        //
+        // Read the tally honestly before re-tuning from it: it can only count patterns that were
+        // INSIDE the probed prefix, so it measures "which of the candidates we probed won", never
+        // "which pattern is best". A winner buried in the tail would be invisible to it, and its
+        // zero is not evidence of failure. That is why the tail below is demoted rather than
+        // deleted, and why deletions are justified structurally (a broken host expression, a
+        // hard-coded year, a vendor's own comment saying the product is defunct) and never by a
+        // zero hit count. To re-tune: re-run the tally over `cache/*.json` after a deep scan. Do
+        // NOT re-tune by lowering `MAX_URLS_TO_TEST` — that is a recall lever, not a ranking one.
+        //
+        // Curated special cases (apple/google/microsoft/… in the match above) and the
+        // trust-subdomain block stay ahead of all of this: they are knowledge, not guesses.
+        //
+        // The trust. host cluster leads because it carries 122 of the 189 hits, and when the host
+        // does not exist at all P2.5's dead-host skip retires the rest of the cluster on the first
+        // transport failure — so leading with it costs one connect attempt, not several.
         if !is_trust_subdomain {
-            urls.push(format!("https://trust.{}/subprocessors", domain));
-            urls.push(format!("https://trust.{}", domain));
+            urls.push(format!("https://trust.{}/subprocessors", base_domain));
+            urls.push(format!("https://trust.{}", base_domain));
         }
         urls.extend(vec![
+            // Ranked head. `base_domain` rather than `domain` so a `www.example.com` input yields
+            // `example.com` + `www.example.com` instead of the `www.www.example.com` the raw
+            // `domain` spelling produced — a slot spent on a host that cannot resolve.
+            format!("https://{}/legal/subprocessors", base_domain), // 38 — Klaviyo shape
+            format!("https://{}/subprocessors", base_domain),       // 8
+            format!("https://www.{}/subprocessors", base_domain),
+            format!("https://www.{}/legal/subprocessors", base_domain),
+            format!("https://{}/sub-processors", base_domain), // 2
+            format!("https://www.{}/sub-processors", base_domain), // 1
+            format!("https://www.{}/legal/service-providers", base_domain), // 2 — Stripe
+            format!("https://{}/legal/service-providers", base_domain),
+            format!("https://www.{}/en/trust/subprocessors/", base_domain), // 2 — Zoom
+            format!("https://{}/legal/sub-processors", base_domain),
+            format!("https://www.{}/legal/sub-processors", base_domain), // 1
+            format!("https://{}/privacy/subprocessors", base_domain),    // 1
+            format!("https://www.{}/privacy/subprocessors", base_domain),
+            format!("https://{}/policies/subprocessors/", base_domain),
+            format!("https://www.{}/policies/subprocessors/", base_domain), // 1 — Canva
+            format!("https://{}/subprocessors.html", base_domain),          // 1
+            format!("https://www.{}/subprocessors.html", base_domain),
+            format!("https://{}/privacy/subprocessors.html", base_domain), // 1
+            format!("https://www.{}/privacy/subprocessors.html", base_domain),
+            format!("https://{}/trust/privacy/subprocessors-list", base_domain),
+            format!(
+                "https://www.{}/trust/privacy/subprocessors-list",
+                base_domain
+            ), // 1 — DocuSign
+            // ====================================================================
+            // DEMOTED TAIL — zero measured hits, kept because unprobed is not disproved
+            // ====================================================================
+            // Everything from here down sits outside the 25-slot window for a plain domain, and is
+            // only reached when the ranked head above fails to satisfy a source category early.
+            // That is the point: these are guesses that have never had the chance to win, not
+            // patterns that lost.
 
-            // WORKING PATTERNS: Discovered through research and web searches
-            format!("https://{}/legal/subprocessors", domain),         // Klaviyo: https://klaviyo.com/legal/subprocessors
-            format!("https://{}/legal/service-providers", domain),      // Stripe: https://stripe.com/legal/service-providers
-            format!("https://www.{}/legal/service-providers", domain),  // Stripe variant
-            format!("https://www.{}/en/trust/subprocessors/", domain),  // Zoom: redirects but pattern seen
-
-            // Direct subprocessor pages (keep early for common patterns)
-            format!("https://{}/subprocessors", domain),
-            format!("https://{}/sub-processors", domain),
-            format!("https://www.{}/subprocessors", domain),
-            format!("https://www.{}/sub-processors", domain),
             // HTML file extensions (e.g., adobe.com/privacy/sub-processors.html)
-            format!("https://{}/subprocessors.html", domain),
             format!("https://{}/sub-processors.html", domain),
-            format!("https://www.{}/subprocessors.html", domain),
             format!("https://www.{}/sub-processors.html", domain),
-
             // Legal/Privacy section patterns
-            format!("https://{}/legal/subprocessors", domain),
-            format!("https://www.{}/legal/subprocessors", domain),
-            format!("https://{}/legal/sub-processors", domain),
-            format!("https://www.{}/legal/sub-processors", domain),
-            format!("https://{}/privacy/subprocessors", domain),
-            format!("https://www.{}/privacy/subprocessors", domain),
-            // HTML file extensions for legal/privacy sections (e.g., adobe.com/privacy/sub-processors.html)
             format!("https://{}/legal/subprocessors.html", domain),
             format!("https://www.{}/legal/subprocessors.html", domain),
-            format!("https://{}/privacy/sub-processors.html", domain),  // Adobe pattern
+            format!("https://{}/privacy/sub-processors.html", domain), // Adobe pattern
             format!("https://www.{}/privacy/sub-processors.html", domain),
-            format!("https://{}/privacy/subprocessors.html", domain),
-            format!("https://www.{}/privacy/subprocessors.html", domain),
-
             // Policy section patterns
             format!("https://{}/policies/subprocessors", domain),
             format!("https://www.{}/policies/subprocessors", domain),
-            format!("https://{}/policies/subprocessors/", domain),  // Canva pattern with trailing slash
-            format!("https://www.{}/policies/subprocessors/", domain),
-            format!("https://{}/policies/sub-processor-list", domain),  // OpenAI pattern
+            format!("https://{}/policies/sub-processor-list", domain), // OpenAI pattern
             format!("https://www.{}/policies/sub-processor-list", domain),
             format!("https://{}/policy/subprocessors", domain),
             format!("https://www.{}/policy/subprocessors", domain),
-
             // Trust/Security center patterns
             format!("https://{}/trust/subprocessors", domain),
             format!("https://www.{}/trust/subprocessors", domain),
@@ -2255,62 +2472,74 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/security/subprocessors", domain),
             format!("https://{}/trust-center/subprocessors", domain),
             format!("https://www.{}/trust-center/subprocessors", domain),
-
-            // NEW: Combined trust/privacy patterns (DocuSign)
-            format!("https://{}/trust/privacy/subprocessors-list", domain),
-            format!("https://www.{}/trust/privacy/subprocessors-list", domain),
+            // (DocuSign's /trust/privacy/subprocessors-list promoted into the ranked head above)
 
             // NEW: Subdomain patterns found in Perplexity data
-            format!("https://workspace.{}/terms/subprocessors/", domain),  // Google Workspace
-            format!("https://legal.{}/sub-processors-page", domain),  // HubSpot
-            format!("https://go.{}/fwlink/p/?linkid=2096306", domain),  // Microsoft redirect
-            format!("https://compliance.{}/en/services/{}", base_domain, base_domain),  // Heroku/Salesforce
-            format!("https://subprocessor.{}-legal.com/subprocessorlist.html", base_domain),  // Dropbox
-
-            // NEW: Company-specific patterns
-            format!("https://www.{}/{}-subprocessors/", domain, base_domain),  // JAMF pattern
+            format!("https://workspace.{}/terms/subprocessors/", domain), // Google Workspace
+            format!("https://legal.{}/sub-processors-page", domain),      // HubSpot
+            format!("https://go.{}/fwlink/p/?linkid=2096306", domain),    // Microsoft redirect
+            format!(
+                "https://compliance.{}/en/services/{}",
+                base_domain, base_domain
+            ), // Heroku/Salesforce
+            format!(
+                "https://subprocessor.{}-legal.com/subprocessorlist.html",
+                base_domain
+            ), // Dropbox
+            // P2.8 deleted: `www.{d}/{base_domain}-subprocessors/` interpolated the whole domain
+            // where the company LABEL belongs, so the JAMF pattern it was modelled on generated
+            // `www.jamf.com/jamf.com-subprocessors/` and could never match. The correct
+            // label-based spelling already exists further down (F001 domain-specific patterns),
+            // and jamf.com itself is a curated special case.
 
             // NEW: Enterprise/business section patterns (Apple)
-            format!("https://www.{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf", domain),
-            format!("https://{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf", domain),
-
+            format!(
+                "https://www.{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf",
+                domain
+            ),
+            format!(
+                "https://{}/legal/enterprise/data-transfer-agreements/subprocessors_us.pdf",
+                domain
+            ),
             // NEW: Localized patterns (Sage)
-            format!("https://www.{}/en-gb/trust-security/privacy/customer-due-diligence/", domain),
-            format!("https://{}/en-gb/trust-security/privacy/customer-due-diligence/", domain),
-            format!("https://www.{}/en-us/trust-security/privacy/customer-due-diligence/", domain),
-
+            format!(
+                "https://www.{}/en-gb/trust-security/privacy/customer-due-diligence/",
+                domain
+            ),
+            format!(
+                "https://{}/en-gb/trust-security/privacy/customer-due-diligence/",
+                domain
+            ),
+            format!(
+                "https://www.{}/en-us/trust-security/privacy/customer-due-diligence/",
+                domain
+            ),
             // Company/About section patterns
             format!("https://{}/company/subprocessors", domain),
             format!("https://www.{}/company/subprocessors", domain),
             format!("https://{}/about/subprocessors", domain),
             format!("https://www.{}/about/subprocessors", domain),
-
             // GDPR-specific patterns
             format!("https://{}/gdpr/subprocessors", domain),
             format!("https://www.{}/gdpr/subprocessors", domain),
             format!("https://{}/data-protection/subprocessors", domain),
             format!("https://www.{}/data-protection/subprocessors", domain),
-
             // DPA (Data Processing Agreement) patterns
             format!("https://{}/dpa/subprocessors", domain),
             format!("https://www.{}/dpa/subprocessors", domain),
-
             // Vendor/Third-party patterns
             format!("https://{}/vendors", domain),
             format!("https://www.{}/vendors", domain),
             format!("https://{}/third-party-vendors", domain),
             format!("https://www.{}/third-party-vendors", domain),
-
             // F001: Third-party/services patterns
             format!("https://{}/third-party/subprocessors", domain),
             format!("https://www.{}/third-party/subprocessors", domain),
             format!("https://{}/third-party-services", domain),
             format!("https://www.{}/third-party-services", domain),
-
             // F001: Compliance section patterns
             format!("https://{}/compliance/subprocessors", domain),
             format!("https://www.{}/compliance/subprocessors", domain),
-
             // F001: Data processing/security patterns
             format!("https://{}/data-processing/subprocessors", domain),
             format!("https://www.{}/data-processing/subprocessors", domain),
@@ -2318,35 +2547,42 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/data-security/subprocessors", domain),
             format!("https://{}/data-sub-processors", domain),
             format!("https://www.{}/data-sub-processors", domain),
-
             // F001: Domain-specific patterns (e.g., /slack-subprocessors for slack.com)
-            format!("https://{}/{}-subprocessors", domain, base_domain.split('.').next().unwrap_or(base_domain)),
-            format!("https://www.{}/{}-subprocessors", domain, base_domain.split('.').next().unwrap_or(base_domain)),
-
+            format!(
+                "https://{}/{}-subprocessors",
+                domain,
+                base_domain.split('.').next().unwrap_or(base_domain)
+            ),
+            format!(
+                "https://www.{}/{}-subprocessors",
+                domain,
+                base_domain.split('.').next().unwrap_or(base_domain)
+            ),
             // NEW: Terms section patterns
             format!("https://{}/terms/subprocessors", domain),
             format!("https://www.{}/terms/subprocessors", domain),
             format!("https://{}/terms/subprocessors/", domain),
             format!("https://www.{}/terms/subprocessors/", domain),
-
-            // NEW: CDN and asset-based patterns (for companies that host subprocessor lists on CDNs)
-            format!("https://content-management-files.{}/assets/subprocessors", base_domain),
-            format!("https://assets.{}/subprocessors/list", base_domain),
-            format!("https://cdn.{}/legal/subprocessors", base_domain),
+            // P2.8 deleted: three invented CDN hosts (`content-management-files.{d}`,
+            // `assets.{d}/subprocessors/list`, `cdn.{d}/legal/subprocessors`). A CDN hostname is
+            // chosen per vendor and does not generalise — these were one company's asset host
+            // spelled as if it were a convention, and each one cost a DNS lookup on every domain.
 
             // NEW: PDF document patterns (many companies use PDFs)
-            format!("https://www.{}/content/dam/legal/documents/Subprocessor-List-2024.pdf", base_domain),
-            format!("https://www.{}/content/dam/legal/documents/Subprocessor-List-2023.pdf", base_domain),
-            format!("https://www.{}/content/dam/cc/en/legal/documents/Subprocessor-List-2024-December.pdf", base_domain),
-            format!("https://www.{}/content/dam/cc/en/legal/documents/Subprocessor-List-2023-December.pdf", base_domain),
+            // P2.8 deleted alongside these: four `content/dam/…/Subprocessor-List-{2023,2024}.pdf`
+            // spellings. They are Adobe's AEM asset path generalised to every domain AND carry a
+            // literal year, so they were guaranteed-stale by construction — a candidate that
+            // cannot match next January is not a pattern, it is a countdown.
             format!("https://{}/legal/documents/subprocessors.pdf", base_domain),
-            format!("https://www.{}/legal/documents/subprocessors.pdf", base_domain),
+            format!(
+                "https://www.{}/legal/documents/subprocessors.pdf",
+                base_domain
+            ),
             format!("https://{}/assets/legal/subprocessor-list.pdf", base_domain),
-            format!("https://www.{}/assets/legal/subprocessor-list.pdf", base_domain),
-
-            // (Legal subdomain patterns moved to front)
-            format!("https://www.{}/en/trust/subprocessors/", base_domain),
-
+            format!(
+                "https://www.{}/assets/legal/subprocessor-list.pdf",
+                base_domain
+            ),
             // F001: Additional security and compliance URL patterns
             format!("https://{}/security/sub-processors", domain),
             format!("https://www.{}/security/sub-processors", domain),
@@ -2354,7 +2590,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/security/vendors", domain),
             format!("https://{}/security/third-party", domain),
             format!("https://www.{}/security/third-party", domain),
-
             // F001: Trust center with various path variations
             format!("https://{}/trust-center/sub-processors", domain),
             format!("https://www.{}/trust-center/sub-processors", domain),
@@ -2364,7 +2599,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/trust-center/third-party", domain),
             format!("https://{}/trustcenter/subprocessors", domain),
             format!("https://www.{}/trustcenter/subprocessors", domain),
-
             // F001: Trust subdomain patterns (popular pattern)
             // Note: these are skipped when domain already starts with trust. (see is_trust_subdomain guard below)
 
@@ -2377,7 +2611,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/compliance/third-party-vendors", domain),
             format!("https://{}/compliance/data-processors", domain),
             format!("https://www.{}/compliance/data-processors", domain),
-
             // F001: GDPR-specific page variations
             format!("https://{}/gdpr/sub-processors", domain),
             format!("https://www.{}/gdpr/sub-processors", domain),
@@ -2387,7 +2620,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/gdpr/third-party", domain),
             format!("https://{}/gdpr/data-processors", domain),
             format!("https://www.{}/gdpr/data-processors", domain),
-
             // F001: Privacy section variations
             format!("https://{}/privacy/sub-processors", domain),
             format!("https://www.{}/privacy/sub-processors", domain),
@@ -2399,7 +2631,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/privacy/data-processors", domain),
             format!("https://{}/privacy-policy/subprocessors", domain),
             format!("https://www.{}/privacy-policy/subprocessors", domain),
-
             // F001: Legal section variations (sub-processors with hyphen)
             format!("https://{}/legal/third-party", domain),
             format!("https://www.{}/legal/third-party", domain),
@@ -2409,7 +2640,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/legal/data-processors", domain),
             format!("https://{}/legal/third-party-vendors", domain),
             format!("https://www.{}/legal/third-party-vendors", domain),
-
             // F001: About section variations
             format!("https://{}/about/security", domain),
             format!("https://www.{}/about/security", domain),
@@ -2419,15 +2649,16 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/about/compliance", domain),
             format!("https://{}/about/privacy", domain),
             format!("https://www.{}/about/privacy", domain),
-
             // F001: DPA/Agreement section variations
             format!("https://{}/dpa/sub-processors", domain),
             format!("https://www.{}/dpa/sub-processors", domain),
             format!("https://{}/data-processing-agreement/subprocessors", domain),
-            format!("https://www.{}/data-processing-agreement/subprocessors", domain),
-            format!("https://{}/dpa", domain),  // Sometimes DPA page lists subprocessors inline
+            format!(
+                "https://www.{}/data-processing-agreement/subprocessors",
+                domain
+            ),
+            format!("https://{}/dpa", domain), // Sometimes DPA page lists subprocessors inline
             format!("https://www.{}/dpa", domain),
-
             // F001: Resources/docs section patterns
             format!("https://{}/resources/subprocessors", domain),
             format!("https://www.{}/resources/subprocessors", domain),
@@ -2435,34 +2666,30 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/docs/subprocessors", domain),
             format!("https://{}/documentation/subprocessors", domain),
             format!("https://www.{}/documentation/subprocessors", domain),
-            format!("https://docs.{}/subprocessors", base_domain),  // docs subdomain
+            format!("https://docs.{}/subprocessors", base_domain), // docs subdomain
             format!("https://docs.{}/legal/subprocessors", base_domain),
-
             // F001: Help center patterns
             format!("https://help.{}/subprocessors", base_domain),
             format!("https://help.{}/legal/subprocessors", base_domain),
             format!("https://support.{}/subprocessors", base_domain),
             format!("https://support.{}/legal/subprocessors", base_domain),
-
             // F001: Info/information section patterns
             format!("https://{}/info/subprocessors", domain),
             format!("https://www.{}/info/subprocessors", domain),
             format!("https://{}/information/subprocessors", domain),
             format!("https://www.{}/information/subprocessors", domain),
-
             // F001: Service providers variations (like Stripe uses)
             format!("https://{}/service-providers", domain),
             format!("https://www.{}/service-providers", domain),
-            format!("https://{}/legal/service-providers", domain),  // Already exists but adding www
+            // (`{d}/legal/service-providers` promoted into the ranked head above; the copy that
+            // sat here, mislabelled "adding www", was a byte-identical repeat of it)
             format!("https://{}/privacy/service-providers", domain),
             format!("https://www.{}/privacy/service-providers", domain),
-
             // F001: Partners/vendors pages that may list subprocessors
             format!("https://{}/partners/subprocessors", domain),
             format!("https://www.{}/partners/subprocessors", domain),
             format!("https://{}/technology-partners", domain),
             format!("https://www.{}/technology-partners", domain),
-
             // F001: Enterprise section patterns
             format!("https://{}/enterprise/subprocessors", domain),
             format!("https://www.{}/enterprise/subprocessors", domain),
@@ -2470,7 +2697,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/enterprise/security", domain),
             format!("https://{}/enterprise/compliance", domain),
             format!("https://www.{}/enterprise/compliance", domain),
-
             // F001: Processor list variations
             format!("https://{}/processor-list", domain),
             format!("https://www.{}/processor-list", domain),
@@ -2478,7 +2704,6 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/processors", domain),
             format!("https://{}/data-processor-list", domain),
             format!("https://www.{}/data-processor-list", domain),
-
             // F001: Additional PDF patterns with more year/date variations
             format!("https://{}/legal/subprocessors.pdf", domain),
             format!("https://www.{}/legal/subprocessors.pdf", domain),
@@ -2488,10 +2713,11 @@ impl SubprocessorAnalyzer {
             format!("https://www.{}/legal/sub-processors.pdf", domain),
             format!("https://{}/content/dam/legal/subprocessors.pdf", domain),
             format!("https://www.{}/content/dam/legal/subprocessors.pdf", domain),
-
-            // F001: Sitemap and robots patterns for discovery
-            format!("https://{}/sitemap.xml", domain),
-            format!("https://www.{}/sitemap.xml", domain),
+            // P2.8 deleted: `{d}/sitemap.xml` and its www twin. Provably dead rather than merely
+            // unlucky — a sitemap is served as application/xml, which this scraper's content-type
+            // gate rejects outright before any extraction runs, so the only outcome either
+            // candidate could ever produce is an "Invalid content type" error. Mining a sitemap
+            // for subprocessor links is a real idea, but it needs a parser, not a probe slot.
 
             // F001: Trailing slash variations for existing patterns
             format!("https://{}/legal/subprocessors/", domain),
@@ -2607,9 +2833,9 @@ impl SubprocessorAnalyzer {
             format!("https://{}.thoropass.com/trust", company_name),
             format!("https://{}.thoropass.com/subprocessors", company_name),
             format!("https://trust.thoropass.com/{}/subprocessors", company_name),
-            // Legacy Laika patterns (Thoropass was formerly Laika)
-            format!("https://{}.heylaika.com/trust/subprocessors", company_name),
-            format!("https://{}.laika.com/trust/subprocessors", company_name),
+            // P2.8 deleted: the legacy `{company}.heylaika.com` / `{company}.laika.com` spellings.
+            // Laika became Thoropass and the tenant hosts went with it; the six thoropass.com
+            // candidates directly above are the live form of the same guess.
         ]);
 
         // SafeBase Trust Center patterns
@@ -2653,7 +2879,11 @@ impl SubprocessorAnalyzer {
                 company_name
             ),
             format!("https://{}.onetrust.com/subprocessors", company_name),
-            format!("https://privacyportal.{}.com/subprocessors", company_name), // OneTrust privacy portal pattern
+            // P2.8 deleted: `privacyportal.{company}.com`. It welded a hard-coded `.com` onto the
+            // company LABEL, so scanning `acme.co.uk` or `acme.io` aimed a probe at
+            // `privacyportal.acme.com` — a domain belonging to whoever actually registered it.
+            // Same class as the invented `s.com` mapping this file warns about elsewhere: a
+            // synthesised domain that then receives live traffic.
             format!(
                 "https://privacyportal-{}.onetrust.com/subprocessors",
                 company_name
@@ -2661,15 +2891,16 @@ impl SubprocessorAnalyzer {
         ]);
 
         // Conveyor Trust Center patterns
-        // Conveyor trust hubs: https://[company].trusthub.io (defunct, redirects to conveyor.com)
         // Custom domains: trust.{domain} is already covered by generic URL patterns above
         // Conveyor detection happens via probe_conveyor() when window.VENDOR_REPORT is found
-        urls.extend(vec![
-            format!("https://{}.trusthub.io/subprocessors", company_name),
-            format!("https://{}.trusthub.io/sub-processors", company_name),
-            format!("https://{}.trusthub.io/vendors", company_name),
-            format!("https://{}.conveyor.com/trust/subprocessors", company_name),
-        ]);
+        //
+        // P2.8 deleted: the three `{company}.trusthub.io` candidates. The comment that stood here
+        // already recorded trusthub.io as defunct and redirecting to conveyor.com — three probe
+        // slots kept alive by a note explaining they could not work.
+        urls.extend(vec![format!(
+            "https://{}.conveyor.com/trust/subprocessors",
+            company_name
+        )]);
 
         // Scytale Trust Center patterns
         urls.extend(vec![
@@ -2728,6 +2959,15 @@ impl SubprocessorAnalyzer {
             format!("https://trust.delve.com/{}/subprocessors", company_name),
         ]);
 
+        // P2.8: a repeated candidate costs a probe slot the second time round. The candidate loop
+        // dedupes by SOURCE CATEGORY, never by URL, so `{d}/legal/subprocessors` — listed twice,
+        // once under "working patterns" and again under "legal section" — spent two of the 25
+        // slots fetching one page. The curated special cases collide with the generic patterns the
+        // same way: `vanta.com` emitted `trust.vanta.com/subprocessors` from its match arm and
+        // again from the generic `trust.{d}` rule. Order-preserving, so the ranking above survives
+        // exactly as written and the first (highest-ranked) spelling is the one that is kept.
+        let mut seen = std::collections::HashSet::with_capacity(urls.len());
+        urls.retain(|url| seen.insert(url.clone()));
         urls
     }
 
@@ -2745,19 +2985,51 @@ impl SubprocessorAnalyzer {
     }
 
     /// Scrape a single subprocessor page with configurable retry and backoff
-    // coverage(off) justified: makes live HTTP requests with retry/backoff to external URLs
+    // coverage(off) justified: thin delegation to the envelope-aware body below
     #[cfg_attr(coverage_nightly, coverage(off))]
     /// `browser_wait_nanos`, when supplied, accumulates the time this scrape spent blocked in
     /// the global headless-Chrome permit queue. A caller enforcing a per-vendor time budget
     /// subtracts it so the budget bounds this vendor's own work rather than how many other
     /// vendors happened to want a browser at the same moment.
+    ///
+    /// Unbounded by design: a caller with no candidate list behind it (a one-off scrape, a test)
+    /// has nothing to protect from a slow page, so it gets the pre-P2.6 behaviour unchanged.
     pub async fn scrape_subprocessor_page_with_retry(
+        &self,
+        url: &str,
+        logger: Option<&dyn LogFailure>,
+        source_domain: &str,
+        rate_limit_ctx: Option<&RateLimitContext>,
+        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
+    ) -> Result<Vec<SubprocessorDomain>> {
+        self.scrape_subprocessor_page_within_envelope(
+            url,
+            logger,
+            source_domain,
+            rate_limit_ctx,
+            browser_wait_nanos,
+            None,
+        )
+        .await
+    }
+
+    /// Scrape one candidate URL under an optional P2.6 per-URL working-time envelope.
+    // coverage(off) justified: makes live HTTP requests with retry/backoff to external URLs
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    /// `envelope`, when supplied, is checked at each stage boundary below and abandons the URL
+    /// once it has overrun — see [`MAX_URL_WORKING_TIME`]. It bounds how many stages one candidate
+    /// may BEGIN, not how long an in-flight one may run: a headless render is 28-35s of blocking
+    /// work with no cancellation point, so a single render that overruns is still the browser
+    /// layer's own timeout to bound (TF-RENDER-DEADLINE). What this does buy is that the render is
+    /// then the LAST thing that candidate does, instead of the first of several.
+    async fn scrape_subprocessor_page_within_envelope(
         &self,
         url: &str,
         _logger: Option<&dyn LogFailure>,
         source_domain: &str,
         rate_limit_ctx: Option<&RateLimitContext>,
         browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
+        envelope: Option<&UrlWorkEnvelope<'_>>,
     ) -> Result<Vec<SubprocessorDomain>> {
         // Consumed by the headless-render paths, which are compiled out under cfg(test) and
         // cfg(coverage) — those builds never launch Chrome, so nothing can be credited.
@@ -2878,6 +3150,18 @@ impl SubprocessorAnalyzer {
                 .await;
         }
 
+        // P2.6, first envelope boundary. Everything above is one fetch of a static page;
+        // everything below can start a trust-center strategy, an auto-discovery pass or a headless
+        // render, which is where the minutes go.
+        //
+        // The retry loop above is deliberately NOT gated. Abandoning between HTTP attempts would
+        // return this envelope error instead of the "All N HTTP attempts failed" message P2.5 keys
+        // its dead-host skip on, so the host would never be marked dead and every later candidate
+        // on it would re-pay the full connect timeout — the envelope is per-URL and restarts, so
+        // that cost would be paid again and again. A transport failure must be allowed to classify
+        // itself.
+        check_url_envelope(envelope, url, "trust-center analysis")?;
+
         // ================================================================
         // Vanta Trust Center: Detect and fetch via GraphQL API
         // ================================================================
@@ -2924,6 +3208,9 @@ impl SubprocessorAnalyzer {
                         "Found cached trust center strategy for {}, executing",
                         source_domain
                     );
+                    // P2.6: a cached strategy is several live HTTP calls (paginated APIs replay
+                    // one request per page), not a cheap lookup.
+                    check_url_envelope(envelope, url, "cached trust-center strategy")?;
                     match crate::trust_center::executor::execute_strategy(
                         strategy,
                         &self.client,
@@ -2963,6 +3250,8 @@ impl SubprocessorAnalyzer {
                     "SPA detected for {}, running trust center auto-discovery",
                     source_domain
                 );
+                // P2.6: auto-discovery fetches and probes candidate APIs before any render.
+                check_url_envelope(envelope, url, "trust-center auto-discovery")?;
                 match crate::trust_center::discovery::discover_strategy(url, &content).await {
                     Ok(Some(strategy)) => {
                         debug!(
@@ -3030,6 +3319,11 @@ impl SubprocessorAnalyzer {
                 //    trust centers (e.g. Vanta) whose data never lands in static
                 //    HTML and whose query is built at runtime (so it can't be
                 //    statically reconstructed for replay).
+                //
+                //    P2.6: the expensive boundary. A URL that arrived here having already spent
+                //    its envelope on the strategy and discovery passes above is exactly the
+                //    pathological candidate that used to eat the whole vendor budget alone.
+                check_url_envelope(envelope, url, "trust-center render-capture")?;
                 match crate::trust_center::discovery::discover_and_extract_via_render(
                     url,
                     source_domain,
@@ -3106,6 +3400,10 @@ impl SubprocessorAnalyzer {
                 dom
             } else if crate::trust_center::discovery::is_likely_spa(&content) {
                 debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
+                // P2.6: the second render of the same candidate. P2.1 already removed it whenever
+                // the capture pass produced a usable DOM; this catches the case where it did not —
+                // a page that burned a full render capturing nothing does not get to burn another.
+                check_url_envelope(envelope, url, "SPA fallback render")?;
                 let url_for_browser = url.to_string();
                 crate::perf::METRICS.subproc_spa_render.hit();
                 match tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
@@ -7671,34 +7969,350 @@ mod tests {
     #[test]
     fn negative_cache_records_absence_only_on_a_full_clean_empty_pass() {
         // The one case that proves absence: the whole candidate loop ran, every host was reached,
-        // and nothing came back. Only then may a warm rescan trust "no page here" and skip probing.
+        // every candidate it entered was finished, and nothing came back. Only then may a warm
+        // rescan trust "no page here" and skip probing.
         assert!(
-            may_record_subprocessor_absence(false, false, false),
+            may_record_subprocessor_absence(false, false, false, false),
             "a full loop that reached every candidate and found nothing proves absence"
         );
 
         // Any success means there IS a page — never record absence.
-        assert!(!may_record_subprocessor_absence(true, false, false));
+        assert!(!may_record_subprocessor_absence(true, false, false, false));
 
         // Budget-truncated: the loop looked at only a prefix of the candidates, so the vendor's
         // real page could sit in the unprobed tail. Recording absence here would cache a false
         // "nothing" that a warm rescan then trusts — exactly the recall trap the budget guard warns
         // about elsewhere. Must fall through and re-probe.
         assert!(
-            !may_record_subprocessor_absence(false, true, false),
+            !may_record_subprocessor_absence(false, true, false, false),
             "a budget-truncated pass examined only a prefix — absence is unproven"
         );
 
         // Transport failure: a host was unreachable (blackhole / browser outage). An outage must
         // never memoize as absence — the same discipline as the positive cache's stale-clear guard.
         assert!(
-            !may_record_subprocessor_absence(false, false, true),
+            !may_record_subprocessor_absence(false, false, true, false),
             "an unreachable host means we could not look, not that there is nothing"
         );
 
+        // P2.6 envelope abandonment: the host answered, the loop entered the candidate, and we
+        // walked away part-way through because its working-time envelope ran out. Nothing about
+        // that candidate was ever decided — caching absence from it would memoize our own
+        // impatience as a fact about the vendor.
+        assert!(
+            !may_record_subprocessor_absence(false, false, false, true),
+            "a candidate abandoned mid-probe is an unfinished look, not a proven absence"
+        );
+
         // Belt-and-suspenders: any blocking condition suppresses the write.
-        assert!(!may_record_subprocessor_absence(false, true, true));
-        assert!(!may_record_subprocessor_absence(true, true, true));
+        assert!(!may_record_subprocessor_absence(false, true, true, false));
+        assert!(!may_record_subprocessor_absence(false, true, false, true));
+        assert!(!may_record_subprocessor_absence(true, true, true, true));
+    }
+
+    // ── P2.6 per-URL working-time envelope ─────────────────────────────
+
+    /// Build an envelope that already started `age` ago, so boundary behaviour is asserted
+    /// against arithmetic rather than raced against a real clock.
+    fn envelope_aged(
+        age: Duration,
+        limit: Duration,
+        browser_wait: Option<&std::sync::atomic::AtomicU64>,
+        browser_wait_at_start: u64,
+    ) -> UrlWorkEnvelope<'_> {
+        UrlWorkEnvelope {
+            started: std::time::Instant::now() - age,
+            browser_wait,
+            browser_wait_at_start,
+            limit,
+        }
+    }
+
+    #[test]
+    fn a_url_overruns_its_envelope_only_once_its_own_working_time_passes_the_limit() {
+        let limit = Duration::from_secs(12);
+        // Under, exactly at, and over. Strictly greater, matching the vendor-budget check at the
+        // head of the candidate loop — spending exactly the envelope is not yet an overrun.
+        assert!(!url_envelope_overrun(
+            Duration::from_secs(11),
+            Duration::ZERO,
+            limit
+        ));
+        assert!(!url_envelope_overrun(limit, Duration::ZERO, limit));
+        assert!(!url_envelope_overrun(
+            Duration::from_millis(12_001),
+            Duration::from_millis(1),
+            limit
+        ));
+        assert!(url_envelope_overrun(
+            Duration::from_millis(12_001),
+            Duration::ZERO,
+            limit
+        ));
+        assert!(url_envelope_overrun(
+            Duration::from_secs(45),
+            Duration::ZERO,
+            limit
+        ));
+    }
+
+    #[test]
+    fn browser_queue_time_never_counts_against_a_urls_envelope() {
+        let limit = Duration::from_secs(12);
+        // The regression this guards is the one MAX_ANALYSIS_TIME already learned: a vendor whose
+        // trust centre needs rendering would be abandoned precisely when the scan is busy enough
+        // that everything queues, so recall would track pool contention instead of the vendor.
+        // 40s wall, 35s of it spent waiting for a permit, is 5s of actual work.
+        assert!(!url_envelope_overrun(
+            Duration::from_secs(40),
+            Duration::from_secs(35),
+            limit
+        ));
+        // The same 40s with only 20s queued really has done 20s of work.
+        assert!(url_envelope_overrun(
+            Duration::from_secs(40),
+            Duration::from_secs(20),
+            limit
+        ));
+        // A queue credit larger than the elapsed time (clocks read from two sources) saturates to
+        // zero working time rather than underflowing into an enormous one.
+        assert!(!url_envelope_overrun(
+            Duration::from_secs(5),
+            Duration::from_secs(500),
+            limit
+        ));
+    }
+
+    #[test]
+    fn an_envelope_counts_only_the_queue_time_its_own_url_added() {
+        let limit = Duration::from_secs(12);
+        // The counter is vendor-wide and cumulative: by the time candidate 4 starts it may already
+        // hold a minute of queueing earned by candidates 1-3. Reading the raw total would hand
+        // this URL that whole minute as credit and leave it effectively unbounded — the exact
+        // opposite of what the envelope exists to do.
+        let vendor_wide = std::sync::atomic::AtomicU64::new(
+            u64::try_from(Duration::from_secs(60).as_nanos()).unwrap(),
+        );
+        let inherited = envelope_aged(
+            Duration::from_secs(30),
+            limit,
+            Some(&vendor_wide),
+            u64::try_from(Duration::from_secs(60).as_nanos()).unwrap(),
+        );
+        assert_eq!(
+            inherited.queued(),
+            Duration::ZERO,
+            "queue time earned before this URL started is not this URL's credit"
+        );
+        assert!(
+            inherited.overrun(),
+            "30s of work must overrun a 12s envelope no matter what earlier candidates queued for"
+        );
+
+        // Queue time this URL really did add is credited: the counter advances by 25s while the
+        // URL is in flight, so 30s wall is 5s of work and the envelope still has room.
+        vendor_wide.fetch_add(
+            u64::try_from(Duration::from_secs(25).as_nanos()).unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(inherited.queued(), Duration::from_secs(25));
+        assert!(!inherited.overrun());
+    }
+
+    #[test]
+    fn an_overrun_candidate_is_abandoned_with_an_error_the_loop_can_recognise() {
+        let spent = envelope_aged(Duration::from_secs(30), Duration::from_secs(12), None, 0);
+        let err = check_url_envelope(Some(&spent), "https://acme.com/subprocessors", "SPA render")
+            .expect_err("a spent envelope must abandon the candidate");
+
+        // The candidate loop keys on the message to tell "we stopped looking" apart from "this
+        // path is not there", so the marker and the URL both have to survive the round trip.
+        assert!(
+            is_url_envelope_error(&err),
+            "abandonment must be recognisable: {err}"
+        );
+        assert!(err.to_string().contains("https://acme.com/subprocessors"));
+        assert!(err.to_string().contains("SPA render"));
+
+        // And it must NOT be mistaken for a dead host: the host answered, so P2.5 must keep
+        // probing its sibling paths rather than retiring the whole cluster.
+        assert!(
+            !is_transport_dead_error(&err),
+            "abandoning a URL says nothing about the host's reachability"
+        );
+    }
+
+    #[test]
+    fn a_candidate_with_time_left_and_a_caller_with_no_envelope_both_proceed() {
+        // Time left: the stage runs, exactly as before P2.6.
+        let fresh = envelope_aged(Duration::from_secs(1), Duration::from_secs(12), None, 0);
+        assert!(check_url_envelope(Some(&fresh), "https://acme.com/x", "render").is_ok());
+
+        // No envelope at all: every non-production caller (tests, one-off scrapes, the public
+        // wrapper) passes None and stays unbounded. A bound that leaked into those paths would
+        // silently truncate a deliberate single-URL scrape.
+        assert!(check_url_envelope(None, "https://acme.com/x", "render").is_ok());
+
+        // A candidate the loop has only just entered gets its whole envelope, however long the
+        // vendor has already spent queueing for browsers — `start` snapshots both clocks at entry
+        // precisely so an earlier candidate's 90s in the permit queue carries no credit into it.
+        let vendor_wide = std::sync::atomic::AtomicU64::new(
+            u64::try_from(Duration::from_secs(90).as_nanos()).unwrap(),
+        );
+        let just_started = UrlWorkEnvelope::start(Some(&vendor_wide), MAX_URL_WORKING_TIME);
+        assert_eq!(just_started.queued(), Duration::ZERO);
+        assert!(!just_started.overrun());
+        assert!(check_url_envelope(Some(&just_started), "https://acme.com/y", "render").is_ok());
+    }
+
+    #[test]
+    fn the_url_envelope_stays_inside_the_vendor_budget_it_subdivides() {
+        // The envelope is an INNER bound: a value at or above the vendor budget would make it
+        // decorative, and one at or below zero would abandon every candidate before it started.
+        assert!(MAX_URL_WORKING_TIME > Duration::ZERO);
+        assert!(
+            MAX_URL_WORKING_TIME < Duration::from_secs(20),
+            "the per-URL envelope must be strictly smaller than MAX_ANALYSIS_TIME (20s), or it can \
+             never bind before the vendor budget does"
+        );
+    }
+
+    // ── P2.8 candidate ranking ─────────────────────────────────────────
+
+    #[test]
+    fn the_measured_winners_occupy_the_probed_window() {
+        // MAX_URLS_TO_TEST is 25 and lives in the caller; the whole point of the ranking is that
+        // the patterns which actually work sit inside that prefix. Ordered exactly as the cache
+        // tally ranks them: trust.{d}/subprocessors (114 hits), {d}/legal/subprocessors (38),
+        // {d}/subprocessors (8), trust.{d} (8).
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("acme.com");
+        let probed = &urls[..urls.len().min(25)];
+
+        let rank = |needle: &str| {
+            probed
+                .iter()
+                .position(|u| u == needle)
+                .unwrap_or_else(|| panic!("{needle} must be inside the probed window: {probed:?}"))
+        };
+        let trust = rank("https://trust.acme.com/subprocessors");
+        let legal = rank("https://acme.com/legal/subprocessors");
+        let root = rank("https://acme.com/subprocessors");
+        let bare_trust = rank("https://trust.acme.com");
+        assert!(
+            trust < legal && legal < root,
+            "measured order must be trust.{{d}}/subprocessors < {{d}}/legal/subprocessors < \
+             {{d}}/subprocessors, got {trust} / {legal} / {root}"
+        );
+        assert!(bare_trust < root);
+
+        // The one-hit patterns are the ones authoring order used to strand outside the window.
+        for one_hit in [
+            "https://www.acme.com/legal/service-providers",
+            "https://www.acme.com/en/trust/subprocessors/",
+            "https://acme.com/sub-processors",
+            "https://acme.com/privacy/subprocessors",
+            "https://www.acme.com/policies/subprocessors/",
+            "https://acme.com/subprocessors.html",
+        ] {
+            rank(one_hit);
+        }
+    }
+
+    #[test]
+    fn curated_special_cases_still_outrank_every_generated_guess() {
+        // These are knowledge, not patterns — a human confirmed each one against the vendor's
+        // live page. Ranking by measured hit rate must never demote them below a guess.
+        let analyzer = make_test_analyzer();
+        for (domain, curated) in [
+            (
+                "docusign.com",
+                "https://www.docusign.com/trust/privacy/subprocessors-list",
+            ),
+            (
+                "atlassian.com",
+                "https://www.atlassian.com/legal/sub-processors",
+            ),
+            (
+                "dropbox.com",
+                "https://subprocessor.dropbox-legal.com/subprocessorlist.html",
+            ),
+            (
+                "google.com",
+                "https://workspace.google.com/terms/subprocessors/",
+            ),
+            ("canva.com", "https://www.canva.com/policies/subprocessors/"),
+        ] {
+            let urls = analyzer.generate_subprocessor_urls(domain);
+            assert_eq!(
+                urls.first().map(String::as_str),
+                Some(curated),
+                "{domain}'s curated page must be the very first candidate probed"
+            );
+        }
+
+        // A trust subdomain keeps its own page first — the pre-existing contract that stops
+        // trust.vanta.com being probed as trust.trust.vanta.com.
+        let vanta = analyzer.generate_subprocessor_urls("trust.vanta.com");
+        assert_eq!(vanta[0], "https://trust.vanta.com/subprocessors");
+        assert!(!vanta.iter().any(|u| u.contains("trust.trust.")));
+    }
+
+    #[test]
+    fn a_candidate_never_appears_twice_and_so_never_spends_two_probe_slots() {
+        // The candidate loop dedupes by source category, not by URL, so a repeat cost a real
+        // fetch. `{d}/legal/subprocessors` was listed twice and vanta.com's curated trust page
+        // collided with the generic `trust.{d}` rule — both inside the 25 probed slots.
+        let analyzer = make_test_analyzer();
+        for domain in [
+            "acme.com",
+            "vanta.com",
+            "trust.vanta.com",
+            "www.example.com",
+        ] {
+            let urls = analyzer.generate_subprocessor_urls(domain);
+            let mut seen = std::collections::HashSet::new();
+            let dupes: Vec<&String> = urls.iter().filter(|u| !seen.insert(*u)).collect();
+            assert!(
+                dupes.is_empty(),
+                "{domain} generated repeated candidates: {dupes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ranking_did_not_shrink_the_candidate_list_below_its_probed_window() {
+        // Ranking is not a recall lever: reordering and pruning provably-dead spellings must still
+        // leave far more candidates than the 25 the loop can reach, so the tail remains available
+        // when the head fails to satisfy a source category.
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("acme.com");
+        assert!(
+            urls.len() > 100,
+            "candidate list collapsed to {} entries",
+            urls.len()
+        );
+        assert!(urls.iter().all(|u| u.starts_with("https://")));
+    }
+
+    #[test]
+    fn deleted_candidates_stay_deleted() {
+        // Each of these was removed for a structural reason, not a low hit count, and each would
+        // silently come back if someone re-added the pattern family it belonged to:
+        //   - privacyportal.{company}.com welds a hard-coded .com onto the company LABEL, so
+        //     scanning acme.co.uk aimed live traffic at a stranger's acme.com host;
+        //   - the Subprocessor-List-2023/2024 PDFs carry a literal year;
+        //   - sitemap.xml is served as application/xml, which the content-type gate rejects
+        //     before extraction ever runs, so it can only ever return an error;
+        //   - trusthub.io was already documented in this file as defunct.
+        let analyzer = make_test_analyzer();
+        let urls = analyzer.generate_subprocessor_urls("acme.co.uk").join("\n");
+        assert!(!urls.contains("privacyportal.acme.com"));
+        assert!(!urls.contains("Subprocessor-List-2024"));
+        assert!(!urls.contains("Subprocessor-List-2023"));
+        assert!(!urls.contains("sitemap.xml"));
+        assert!(!urls.contains("trusthub.io"));
+        assert!(!urls.contains("heylaika.com"));
     }
 
     #[test]
