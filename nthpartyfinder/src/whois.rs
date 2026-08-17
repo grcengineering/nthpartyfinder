@@ -744,15 +744,29 @@ fn record_attribution(domain: &str, result: &OrganizationResult, served_from_cac
         result.source,
         served_from_cache
     );
-    crate::perf::METRICS.whois_attributed_curated.hit();
-    crate::perf::METRICS
-        .whois_attributed_web_self_declared
-        .hit();
-    crate::perf::METRICS.whois_attributed_whois.hit();
-    crate::perf::METRICS.whois_attributed_system_whois.hit();
-    crate::perf::METRICS.whois_attributed_ner.hit();
-    crate::perf::METRICS.whois_attributed_domain_fallback.hit();
-    //   — increment the one named by `stage.metric_suffix()`.
+    // Exactly ONE tier counter per attribution — the tier that actually resolved it. A bulk
+    // wiring pass once incremented all six here, which made every counter equal the total
+    // resolution count: plausible-looking telemetry that answers nothing, because the whole point
+    // of P0.2 is the SPLIT between tiers. The mapping lives in `stage_metric` so a test can pin
+    // each stage to its counter by pointer identity (see the postmortem of 2026-08-17).
+    stage_metric(stage).hit();
+}
+
+/// The one counter a given attribution stage increments. Kept as a total function returning the
+/// metric (rather than incrementing inline) so the stage→counter mapping is testable by pointer
+/// identity — race-free under parallel tests, since nothing needs to read counter VALUES to prove
+/// the split is wired correctly.
+fn stage_metric(stage: AttributionStage) -> &'static crate::perf::Metric {
+    match stage {
+        AttributionStage::Curated => &crate::perf::METRICS.whois_attributed_curated,
+        AttributionStage::WebSelfDeclared => {
+            &crate::perf::METRICS.whois_attributed_web_self_declared
+        }
+        AttributionStage::Whois => &crate::perf::METRICS.whois_attributed_whois,
+        AttributionStage::SystemWhois => &crate::perf::METRICS.whois_attributed_system_whois,
+        AttributionStage::Ner => &crate::perf::METRICS.whois_attributed_ner,
+        AttributionStage::DomainFallback => &crate::perf::METRICS.whois_attributed_domain_fallback,
+    }
 }
 
 /// Seconds since the Unix epoch, saturating to 0 on a pre-epoch clock rather than panicking.
@@ -1872,6 +1886,48 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_attribution_stage_increments_exactly_its_own_counter() {
+        // Regression test for the 2026-08-17 telemetry defect: a bulk wiring pass turned the
+        // six-counter specification into six unconditional increments, so every tier reported the
+        // total resolution count and the P0.2 split answered nothing. Pinning the stage→counter
+        // mapping by POINTER identity proves the split is wired one-to-one without reading counter
+        // values — which would race against parallel tests that resolve real orgs.
+        use crate::perf::METRICS;
+        let cases: [(AttributionStage, &'static crate::perf::Metric); 6] = [
+            (AttributionStage::Curated, &METRICS.whois_attributed_curated),
+            (
+                AttributionStage::WebSelfDeclared,
+                &METRICS.whois_attributed_web_self_declared,
+            ),
+            (AttributionStage::Whois, &METRICS.whois_attributed_whois),
+            (
+                AttributionStage::SystemWhois,
+                &METRICS.whois_attributed_system_whois,
+            ),
+            (AttributionStage::Ner, &METRICS.whois_attributed_ner),
+            (
+                AttributionStage::DomainFallback,
+                &METRICS.whois_attributed_domain_fallback,
+            ),
+        ];
+        for (stage, expected) in cases {
+            assert!(
+                std::ptr::eq(stage_metric(stage), expected),
+                "stage {:?} must map to its own counter, no other",
+                stage
+            );
+        }
+        // And the mapping is injective: six stages, six distinct counters.
+        let mut seen: Vec<*const crate::perf::Metric> = cases
+            .iter()
+            .map(|(s, _)| stage_metric(*s) as *const _)
+            .collect();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 6, "no two stages may share a counter");
+    }
 
     #[test]
     fn a_brand_tld_attributes_every_domain_beneath_it() {
