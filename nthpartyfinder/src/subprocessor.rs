@@ -348,6 +348,22 @@ fn cached_urls_are_provably_stale(yielded_any: bool, any_source_errored: bool) -
     !yielded_any && !any_source_errored
 }
 
+/// P2.1: may the settled DOM already captured by the trust-center render-capture pass stand in for
+/// the SPA fallback's own headless render?
+///
+/// A single futile candidate URL used to be rendered up to four times in series — network capture,
+/// a blind capture retry, this SPA DOM render, and the headless re-render inside it — at roughly
+/// 28-35s apiece. The capture pass holds the page in a live, exclusively-held tab and can read the
+/// DOM for free, so the third render is pure duplication whenever that DOM is usable.
+///
+/// "Usable" is deliberately the *same* bar the SPA fallback applies to its own render output:
+/// strictly larger than the static HTML. A capture whose DOM did not beat the static shell proves
+/// nothing about what a longer fixed settle would have produced, so it falls through and the
+/// render still happens — the fast path may only be taken on evidence, never on absence of it.
+fn should_reuse_settled_dom(settled_dom_len: usize, static_html_len: usize) -> bool {
+    settled_dom_len > static_html_len
+}
+
 /// P2.7: how long a proven "no subprocessor page here" verdict stays authoritative. Domain
 /// ownership and legal-page layout churn on months-to-years timescales, so a warm rescan inside
 /// this window can safely skip the full candidate probe. Ten days keeps a weekly re-scan cheap
@@ -2884,6 +2900,12 @@ impl SubprocessorAnalyzer {
         // ================================================================
         // Trust Center Strategy: Check cached strategy or auto-discover
         // ================================================================
+        // P2.1(c): the DOM the render-capture pass below already settled, carried forward so the
+        // SPA fallback further down does not navigate to this same URL a second time purely to
+        // read it. Stays `None` on every path that did not actually render.
+        #[cfg(all(not(test), not(coverage)))]
+        let mut prerendered_dom: Option<String> = None;
+
         #[cfg(all(not(test), not(coverage)))]
         {
             // Check for a cached trust center strategy first
@@ -3014,30 +3036,40 @@ impl SubprocessorAnalyzer {
                 )
                 .await
                 {
-                    Ok(Some((vendors, strategy))) if !vendors.is_empty() => {
-                        debug!(
-                            "Render-capture extracted {} vendors for {}",
-                            vendors.len(),
-                            source_domain
-                        );
-                        // Cache the RenderedNetworkCapture strategy for future runs.
-                        let cache = self.cache.write().await;
-                        if let Ok(mut entry) = cache
-                            .get_cached_entry(source_domain)
-                            .await
-                            .ok_or_else(|| anyhow::anyhow!("no cache entry"))
-                        {
-                            entry.trust_center_strategy = Some(strategy);
-                            let cache_file = cache.get_cache_file_path(source_domain);
-                            let _ = tokio::fs::write(
-                                &cache_file,
-                                serde_json::to_string_pretty(&entry).unwrap_or_default(),
-                            )
-                            .await;
+                    Ok(discovery) => {
+                        let crate::trust_center::discovery::RenderDiscovery {
+                            vendors,
+                            strategy,
+                            settled_dom,
+                        } = discovery;
+                        // Kept even when this pass found nothing — a futile candidate URL is
+                        // exactly the case where the SPA fallback below was about to re-render it.
+                        prerendered_dom = settled_dom;
+                        if !vendors.is_empty() {
+                            debug!(
+                                "Render-capture extracted {} vendors for {}",
+                                vendors.len(),
+                                source_domain
+                            );
+                            // Cache the RenderedNetworkCapture strategy for future runs.
+                            if let Some(strategy) = strategy {
+                                let cache = self.cache.write().await;
+                                if let Ok(mut entry) = cache
+                                    .get_cached_entry(source_domain)
+                                    .await
+                                    .ok_or_else(|| anyhow::anyhow!("no cache entry"))
+                                {
+                                    entry.trust_center_strategy = Some(strategy);
+                                    let cache_file = cache.get_cache_file_path(source_domain);
+                                    let _ = tokio::fs::write(
+                                        &cache_file,
+                                        serde_json::to_string_pretty(&entry).unwrap_or_default(),
+                                    )
+                                    .await;
+                                }
+                            }
+                            return Ok(vendors);
                         }
-                        return Ok(vendors);
-                    }
-                    Ok(_) => {
                         debug!(
                             "Render-capture found no subprocessors for {}",
                             source_domain
@@ -3056,8 +3088,23 @@ impl SubprocessorAnalyzer {
         // skeleton and all content is rendered by JavaScript.
         #[cfg(all(not(test), not(coverage)))]
         let content = {
-            let is_spa = crate::trust_center::discovery::is_likely_spa(&content);
-            if is_spa {
+            // P2.1(c): the render-capture pass above already had this page live in a tab and read
+            // its settled DOM. Re-navigating here was the last of up to four serial renders of a
+            // single candidate URL. Computed into a binding first so `content` is not still
+            // borrowed by the `filter` closure when the fallback arms below move it.
+            let reusable_dom = prerendered_dom
+                .take()
+                .filter(|dom| should_reuse_settled_dom(dom.len(), content.len()));
+            if let Some(dom) = reusable_dom {
+                debug!(
+                    "Reusing settled DOM ({} chars) captured during render-capture for {} — \
+                     skipping the duplicate headless render",
+                    dom.len(),
+                    source_domain
+                );
+                crate::perf::METRICS.render_dom_reused.hit();
+                dom
+            } else if crate::trust_center::discovery::is_likely_spa(&content) {
                 debug!("SPA content detected for {} — attempting headless browser rendering for subprocessor extraction", source_domain);
                 let url_for_browser = url.to_string();
                 crate::perf::METRICS.subproc_spa_render.hit();
@@ -7595,6 +7642,28 @@ mod tests {
         // Having results at all rules out staleness regardless of a partial error.
         assert!(!cached_urls_are_provably_stale(true, false));
         assert!(!cached_urls_are_provably_stale(true, true));
+    }
+
+    // ── P2.1 settled-DOM reuse ─────────────────────────────────────────
+
+    #[test]
+    fn a_settled_dom_that_beat_the_static_shell_replaces_the_second_render() {
+        // The case this exists for: an SPA shell whose scripts hydrated a real DOM during the
+        // render-capture. Rendering the same URL again to observe the same thing was pure cost.
+        assert!(should_reuse_settled_dom(180_000, 4_000));
+        assert!(should_reuse_settled_dom(4_001, 4_000));
+    }
+
+    #[test]
+    fn a_settled_dom_no_bigger_than_the_static_html_does_not_suppress_the_render() {
+        // Same bar the SPA fallback applies to its own render output. A capture whose DOM did not
+        // beat the static shell proves nothing about what a longer settle would have produced, so
+        // the render must still happen — the fast path is taken on evidence, never on its absence.
+        assert!(!should_reuse_settled_dom(4_000, 4_000));
+        assert!(!should_reuse_settled_dom(3_999, 4_000));
+        // A render that failed outright and yielded an empty string can never win.
+        assert!(!should_reuse_settled_dom(0, 4_000));
+        assert!(!should_reuse_settled_dom(0, 0));
     }
 
     // ── P2.7 negative subprocessor cache ───────────────────────────────

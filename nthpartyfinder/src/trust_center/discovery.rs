@@ -7,8 +7,9 @@ use anyhow::Result;
 
 #[cfg(not(coverage))]
 use std::sync::{Arc, Mutex};
-#[cfg(not(coverage))]
 use std::time::Duration;
+#[cfg(not(coverage))]
+use std::time::Instant;
 use tracing::debug;
 
 use super::{
@@ -150,11 +151,43 @@ pub async fn discover_strategy(
     Ok(None)
 }
 
-/// Maximum number of ~1s wait/scroll rounds during render-capture. Bounds the
-/// worst case while giving the (often late-arriving) subprocessor report payload
-/// time to load.
+/// P2.3: the render-capture used to be a fixed 2s settle followed by up to eighteen 1s
+/// wait/scroll rounds that only gave up after six consecutive rounds captured nothing. That put
+/// an ~8s floor under every page that fetches no subprocessor JSON at all — the *common* case,
+/// because marketing sites catch-all-200 every candidate path we probe. The wait is now adaptive;
+/// this constant is the old worst case (2s + 18 rounds) preserved exactly as a hard cap, so no
+/// page that used to be waited out is now cut short.
+const TRUST_CENTER_CAPTURE_HARD_CAP: Duration = Duration::from_millis(20_000);
+
+/// Floor before the idle rule may fire. A capture polled immediately after `wait_until_navigated`
+/// can momentarily show nothing in flight and no activity — not because the page is done, but
+/// because its scripts have not issued their first request yet. Exiting there would render an SPA
+/// and capture none of its API traffic.
+const TRUST_CENTER_CAPTURE_MIN_WAIT: Duration = Duration::from_millis(800);
+
+/// Quiet period that ends the capture. Deliberately wider than the web-traffic capture's 800ms
+/// window: this handler fetches each JSON body through its own retry ladder, so a body can land in
+/// the collected set more than a second after the network event that announced it.
+const TRUST_CENTER_CAPTURE_IDLE_WINDOW: Duration = Duration::from_millis(1_500);
+
+/// Total-silence escape hatch for an in-flight counter left non-zero by a redirect chain or a
+/// WebSocket, neither of which need emit a matching `loadingFinished`. Sized to the old
+/// six-stagnant-round give-up so a genuinely slow page gets the same patience it used to.
+const TRUST_CENTER_CAPTURE_STALL_WINDOW: Duration = Duration::from_millis(6_000);
+
+/// Grace granted after the subprocessor array first appears, for the pagination calls that trail
+/// it. The old loop spent two 1s rounds here; keeping the same budget keeps paginated trust
+/// centers whole.
+const SUBPROCESSOR_PAGINATION_GRACE: Duration = Duration::from_millis(2_000);
+
+/// How often the scroll/pagination pass re-runs inside the poll loop — the old per-round cadence.
 #[cfg(not(coverage))]
-const MAX_WAIT_ROUNDS: usize = 18;
+const PAGINATION_INTERVAL: Duration = Duration::from_millis(1_000);
+
+/// Poll granularity of the adaptive wait. Fine enough that the idle window, not the polling, sets
+/// the exit latency.
+#[cfg(not(coverage))]
+const CAPTURE_POLL: Duration = Duration::from_millis(50);
 
 /// Hard caps on what a single (potentially hostile) page may make us accumulate
 /// while capturing its network JSON: a response-count ceiling and an aggregate
@@ -187,16 +220,217 @@ const PAGINATION_JS: &str = r#"(function(){
   return clicked;
 })()"#;
 
+/// P2.3: URL fragments that mark a response as telemetry, consent, session-replay or
+/// feature-flag traffic rather than page data.
+///
+/// These fire continuously — a beacon every couple of seconds is normal — and the old capture
+/// predicate matched any URL containing `/api/`, so each beacon landed in the collected set and
+/// reset the stagnation counter. A page with no subprocessor data at all was therefore held open
+/// to the full cap by its own analytics. None of these hosts has ever carried a subprocessor
+/// array, and this capture feeds subprocessor extraction only, so excluding them costs no recall.
+const ANALYTICS_URL_MARKERS: &[&str] = &[
+    "google-analytics.com",
+    "googletagmanager.com",
+    "analytics.google.com",
+    "doubleclick.net",
+    "segment.io",
+    "segment.com",
+    "mixpanel.com",
+    "amplitude.com",
+    "heapanalytics.com",
+    "fullstory.com",
+    "hotjar.com",
+    "hotjar.io",
+    "clarity.ms",
+    "posthog.com",
+    "sentry.io",
+    "bugsnag.com",
+    "datadoghq.com",
+    "newrelic.com",
+    "nr-data.net",
+    "intercom.io",
+    "hs-analytics.net",
+    "hubspot.com",
+    "pendo.io",
+    "launchdarkly.com",
+    "statsig.com",
+    "cookielaw.org",
+    "onetrust.com",
+    "/collect",
+    "/beacon",
+    "/telemetry",
+];
+
+/// Whether a URL is one of the telemetry/consent endpoints in [`ANALYTICS_URL_MARKERS`].
+pub(crate) fn is_analytics_beacon(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ANALYTICS_URL_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Whether a network response should be collected as candidate subprocessor JSON.
+///
+/// The `/api/` substring is kept because real trust-center APIs do serve JSON under a wrong or
+/// missing `Content-Type`; it is the analytics exclusion, not a narrower positive test, that stops
+/// beacons from being treated as page data (P2.3).
+pub(crate) fn is_capturable_json(mime: &str, url: &str, status: u32) -> bool {
+    if !(200..300).contains(&status) {
+        return false;
+    }
+    if is_analytics_beacon(url) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    mime.contains("json") || lower.contains("graphql") || lower.contains("/api/")
+}
+
+/// P2.3: the pure exit decision for the adaptive render-capture wait, evaluated once per poll.
+///
+/// Precedence matters and is deliberate:
+/// 1. `elapsed >= hard_cap` — the pre-P2.3 worst case, never exceeded.
+/// 2. `at_response_cap` — the hostile-page response ceiling; more waiting cannot collect more.
+/// 3. subprocessors already captured — stay exactly [`SUBPROCESSOR_PAGINATION_GRACE`] longer for
+///    the pagination calls that trail the first page, then stop. This branch deliberately
+///    *ignores* the idle rule: a paginated trust center goes quiet between page fetches, and
+///    exiting on that quiet is how pages 2..n get lost.
+/// 4. otherwise the shared network-idle rule from the web-traffic capture — stop once nothing is
+///    in flight and the network has been quiet for the idle window (or dead silent for the stall
+///    window, which covers an in-flight counter stranded by a redirect chain or WebSocket).
+pub(crate) fn should_exit_trust_center_capture(
+    elapsed: Duration,
+    at_response_cap: bool,
+    pending: bool,
+    quiet: Duration,
+    since_subprocessors: Option<Duration>,
+) -> bool {
+    if elapsed >= TRUST_CENTER_CAPTURE_HARD_CAP {
+        return true;
+    }
+    if at_response_cap {
+        return true;
+    }
+    if let Some(age) = since_subprocessors {
+        return age >= SUBPROCESSOR_PAGINATION_GRACE;
+    }
+    crate::discovery::web_traffic::should_exit_network_idle(
+        elapsed,
+        TRUST_CENTER_CAPTURE_MIN_WAIT,
+        TRUST_CENTER_CAPTURE_HARD_CAP,
+        TRUST_CENTER_CAPTURE_IDLE_WINDOW,
+        TRUST_CENTER_CAPTURE_STALL_WINDOW,
+        pending,
+        quiet,
+    )
+}
+
+/// One headless render's yield: the JSON its scripts fetched, plus the DOM as it stood when the
+/// capture stopped.
+///
+/// P2.1(b): the settled DOM is taken while the tab is still alive and exclusively held, because
+/// the subprocessor path used to navigate to the *same URL in a second browser tab* purely to read
+/// that DOM. Carrying it out of this render is what lets that second render be skipped.
+#[derive(Debug, Default)]
+pub(crate) struct RenderCapture {
+    pub(crate) responses: Vec<InterceptedResponse>,
+    /// `None` when the DOM could not be read (a `getContent` failure is not worth failing the
+    /// capture over — the JSON is the primary product and the caller still has its own render as
+    /// a fallback).
+    pub(crate) settled_dom: Option<String>,
+}
+
+/// P2.1(a): whether a second full render of the same URL is justified.
+///
+/// The retry was added because the headless render is mildly racy — the large report response can
+/// arrive late or be read mid-stream — and it used to fire whenever the first capture produced no
+/// subprocessor array. That condition is true for *every* futile candidate URL, and futile
+/// candidates are the common case, so the retry doubled the render cost of the dominant path. The
+/// `render.retry_rescued` counter was added to settle it empirically and came back **zero across a
+/// 9.15h depth-3 scan (22,482 relationships)**: not one retry ever rescued an array the first
+/// capture missed. So a clean capture that simply found no subprocessor array is now taken at its
+/// word as a legitimate negative.
+///
+/// What still earns a retry is the evidence of an actually *racy* attempt: the capture returned an
+/// error, collected nothing at all, or collected a body that begins like JSON and does not parse —
+/// the fingerprint of the partial `getResponseBody` read the in-handler retry ladder exists to
+/// absorb but can still lose on a large payload.
+pub(crate) fn should_retry_capture(
+    transport_error: bool,
+    response_count: usize,
+    has_subprocessor_array: bool,
+    truncated_body: bool,
+) -> bool {
+    if has_subprocessor_array {
+        return false;
+    }
+    transport_error || response_count == 0 || truncated_body
+}
+
+/// Whether a body looks like a JSON payload that was read mid-stream: it starts like JSON but does
+/// not parse. A complete non-JSON payload (an HTML error page served from an `/api/` path, say)
+/// fails the parse too, which is why the "starts like JSON" half is load-bearing — without it
+/// every catch-all-200 HTML shell would read as truncated and re-trigger the render we just removed.
+pub(crate) fn body_is_truncated_json(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed).is_err()
+}
+
+/// Whether any captured body bears the truncation fingerprint described on
+/// [`body_is_truncated_json`].
+pub(crate) fn responses_look_truncated(responses: &[InterceptedResponse]) -> bool {
+    responses.iter().any(|r| body_is_truncated_json(&r.body))
+}
+
+/// Which of two capture attempts to hand back when neither found a subprocessor array: the one
+/// that saw more responses, and on a tie the one that also came back with a settled DOM. The DOM
+/// is what lets the caller skip its own render, so an empty-handed capture holding one is worth
+/// strictly more than an identical capture without.
+pub(crate) fn prefer_retry_capture(
+    first_len: usize,
+    first_has_dom: bool,
+    retry_len: usize,
+    retry_has_dom: bool,
+) -> bool {
+    if retry_len != first_len {
+        return retry_len > first_len;
+    }
+    retry_has_dom && !first_has_dom
+}
+
+/// Stamp the P2.3 activity clock. A poisoned lock is ignored rather than propagated: the clock
+/// only decides when to stop waiting, so a lost stamp costs a longer wait, never a lost response.
+#[cfg(not(coverage))]
+fn mark_activity(clock: &Mutex<Instant>) {
+    if let Ok(mut t) = clock.lock() {
+        *t = Instant::now();
+    }
+}
+
 // cfg(not(coverage)): launches headless Chrome to render an SPA and capture the
 // JSON its own scripts fetch — requires a browser, so coverage-off.
 #[cfg(not(coverage))]
-async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResponse>> {
+async fn capture_network_json_responses(url: &str) -> Result<RenderCapture> {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     let responses = Arc::new(Mutex::new(Vec::<InterceptedResponse>::new()));
     let responses_clone = responses.clone();
     let url_owned = url.to_string();
 
+    // P2.3 activity clock. `in_flight` counts network requests; `body_fetches` counts response
+    // bodies the handler is still reading. Both must be zero before the idle rule may fire — the
+    // body read runs its own retry ladder well after `loadingFinished`, and tearing the tab down
+    // mid-ladder would drop exactly the large late payload the whole capture exists for.
+    let in_flight = Arc::new(AtomicI64::new(0));
+    let body_fetches = Arc::new(AtomicI64::new(0));
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let in_flight_evt = in_flight.clone();
+    let last_activity_evt = last_activity.clone();
+    let body_fetches_handler = body_fetches.clone();
+    let last_activity_handler = last_activity.clone();
+
     // headless_chrome operations are blocking, run in a blocking thread
-    let handle = tokio::task::spawn_blocking(move || -> Result<Vec<InterceptedResponse>> {
+    let handle = tokio::task::spawn_blocking(move || -> Result<RenderCapture> {
         // Declared before the guard so tab close and Chrome recycling are measured.
         let mut render_timer =
             crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_trustcenter);
@@ -210,15 +444,15 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
             "trust_center_capture",
             Box::new(move |event_params, fetch_body| {
                 let resp = &event_params.response;
-                let mime = &resp.mime_type;
                 let resp_url = &resp.url;
-                let status = resp.status;
 
-                let is_json = mime.contains("json")
-                    || resp_url.contains("graphql")
-                    || resp_url.contains("/api/");
-
-                if is_json && (200..300).contains(&status) {
+                if is_capturable_json(&resp.mime_type, resp_url, resp.status) {
+                    // Reading the body is real work on this page's behalf, so it counts as
+                    // activity for the idle rule — both while it runs and each time an attempt
+                    // completes. Without this the quiet clock would keep ticking through a
+                    // multi-second body read and the poll loop could stop the capture while the
+                    // payload was still being pulled.
+                    body_fetches_handler.fetch_add(1, Ordering::SeqCst);
                     // Fetch the body, retrying briefly until it parses as complete
                     // JSON. `getResponseBody` can return early/partial right after
                     // ResponseReceived for large payloads (e.g. Vanta's ~74 KB
@@ -227,6 +461,7 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
                     let mut body: Option<String> = None;
                     for attempt in 0..4u64 {
                         std::thread::sleep(Duration::from_millis(120 + 140 * attempt));
+                        mark_activity(&last_activity_handler);
                         if let Ok(b) = fetch_body() {
                             let complete =
                                 serde_json::from_str::<serde_json::Value>(&b.body).is_ok();
@@ -257,55 +492,120 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
                             }
                         }
                     }
+                    mark_activity(&last_activity_handler);
+                    body_fetches_handler.fetch_sub(1, Ordering::SeqCst);
                 }
             }),
         )
         .map_err(|e| anyhow::anyhow!("Failed to register response handler: {}", e))?;
+
+        // Activity listener for the adaptive wait. The counter is bumped for *every* request so it
+        // stays balanced (a `loadingFinished` carries only a request id, so a beacon's completion
+        // is indistinguishable from a real one and must not be filtered on one side only); it is
+        // the activity *clock* that ignores analytics beacons, which is what stops a page whose
+        // only remaining traffic is telemetry from being held open to the hard cap.
+        let activity_listener = tab
+            .add_event_listener(std::sync::Arc::new(
+                move |event: &headless_chrome::protocol::cdp::types::Event| {
+                    use headless_chrome::protocol::cdp::types::Event;
+                    match event {
+                        Event::NetworkRequestWillBeSent(e) => {
+                            in_flight_evt.fetch_add(1, Ordering::SeqCst);
+                            if !is_analytics_beacon(&e.params.request.url) {
+                                mark_activity(&last_activity_evt);
+                            }
+                        }
+                        Event::NetworkLoadingFinished(_) | Event::NetworkLoadingFailed(_) => {
+                            in_flight_evt.fetch_sub(1, Ordering::SeqCst);
+                            mark_activity(&last_activity_evt);
+                        }
+                        _ => {}
+                    }
+                },
+            ))
+            .map_err(|e| anyhow::anyhow!("Failed to add network activity listener: {}", e))?;
 
         // Navigate and wait for the page + first round of API calls.
         tab.navigate_to(&url_owned)
             .map_err(|e| anyhow::anyhow!("Navigation failed: {}", e))?;
         tab.wait_until_navigated()
             .map_err(|e| anyhow::anyhow!("Page load failed: {}", e))?;
-        std::thread::sleep(Duration::from_millis(2000));
 
-        // Content-aware wait: the subprocessor report payload can arrive a few
-        // seconds after first paint, and scrolling fires pagination calls. Keep
-        // scrolling/clicking and waiting until a captured response actually yields
-        // a subprocessor array, then a couple of extra rounds for any remaining
-        // pages — or give up after a hard timeout / sustained silence. Bounded.
-        let mut got_subs_round: Option<usize> = None;
-        let mut last_len = 0usize;
-        let mut stagnant_rounds = 0usize;
-        for round in 0..MAX_WAIT_ROUNDS {
-            let _ = tab.evaluate(PAGINATION_JS, false);
-            std::thread::sleep(Duration::from_millis(1000));
-            let snapshot = responses
+        // P2.3 adaptive wait, replacing a fixed 2s settle plus 1s-granularity rounds. Scroll and
+        // click pagination on the old cadence, but decide when to stop on the shared network-idle
+        // rule instead of a stagnation counter, so a page that fetches nothing costs ~2s rather
+        // than the old ~8s floor. Everything the old loop protected is preserved:
+        // `SUBPROCESSOR_PAGINATION_GRACE` still trails the first subprocessor array, the response
+        // ceiling still short-circuits, and the hard cap is the old worst case exactly.
+        let started = Instant::now();
+        let mut last_pagination: Option<Instant> = None;
+        let mut subs_seen_at: Option<Instant> = None;
+        let mut checked_len = 0usize;
+        let mut at_response_cap = false;
+        loop {
+            // `None` on the first iteration so the scroll/click pass runs immediately, as the old
+            // loop's round 0 did. Computed rather than seeded with `now - interval` because
+            // `Instant` subtraction panics on an instant earlier than the clock's origin.
+            let pagination_due = match last_pagination {
+                Some(t) => t.elapsed() >= PAGINATION_INTERVAL,
+                None => true,
+            };
+            if pagination_due {
+                let clicked = tab
+                    .evaluate(PAGINATION_JS, false)
+                    .ok()
+                    .and_then(|obj| obj.value)
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                last_pagination = Some(Instant::now());
+                // A click that fired a request needs a moment to show up as in-flight traffic;
+                // treating the click itself as activity keeps the idle rule from exiting in that
+                // gap and losing the page it just asked for. A pass that clicked nothing has
+                // triggered nothing, so it deliberately does not stamp the clock — that is what
+                // lets a page with no pagination controls exit promptly.
+                if clicked > 0 {
+                    mark_activity(&last_activity);
+                }
+
+                // Re-deriving this parses every captured body, so it runs on the pagination
+                // cadence and only when something new actually landed — not on every 50ms poll.
+                let snapshot = responses
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                at_response_cap = snapshot.len() >= MAX_CAPTURED_RESPONSES;
+                if subs_seen_at.is_none()
+                    && snapshot.len() != checked_len
+                    && responses_contain_subprocessor_array(&snapshot)
+                {
+                    subs_seen_at = Some(Instant::now());
+                    debug!("Subprocessor array captured after {:?}", started.elapsed());
+                }
+                checked_len = snapshot.len();
+            }
+
+            let quiet = last_activity
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
-            if snapshot.len() >= MAX_CAPTURED_RESPONSES {
+                .map(|t| t.elapsed())
+                .unwrap_or(Duration::ZERO);
+            let pending =
+                in_flight.load(Ordering::SeqCst) > 0 || body_fetches.load(Ordering::SeqCst) > 0;
+            if should_exit_trust_center_capture(
+                started.elapsed(),
+                at_response_cap,
+                pending,
+                quiet,
+                subs_seen_at.map(|t| t.elapsed()),
+            ) {
                 break;
             }
-            if got_subs_round.is_none() && responses_contain_subprocessor_array(&snapshot) {
-                got_subs_round = Some(round);
-                debug!("Subprocessor array captured at wait round {}", round);
-            }
-            match got_subs_round {
-                // Have the data: a couple more rounds for pagination, then stop.
-                Some(r) if round >= r + 2 => break,
-                // Still waiting and nothing new for a while → likely no
-                // subprocessors on this page; give up rather than wait the cap.
-                None if snapshot.len() == last_len => {
-                    stagnant_rounds += 1;
-                    if stagnant_rounds >= 6 {
-                        break;
-                    }
-                }
-                _ => stagnant_rounds = 0,
-            }
-            last_len = snapshot.len();
+            std::thread::sleep(CAPTURE_POLL);
         }
+        let _ = tab.remove_event_listener(&activity_listener);
+
+        // P2.1(b): read the settled DOM here, while the tab is still alive and exclusively held.
+        // The subprocessor path used to navigate a second tab to this same URL just to obtain it.
+        let settled_dom = tab.get_content().ok();
 
         // Deregister and collect results. Recover from a poisoned lock rather
         // than panicking; the accumulated responses remain valid.
@@ -314,21 +614,28 @@ async fn capture_network_json_responses(url: &str) -> Result<Vec<InterceptedResp
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        Ok(collected)
+        Ok(RenderCapture {
+            responses: collected,
+            settled_dom,
+        })
     });
 
-    let collected = handle
+    let capture = handle
         .await
         .map_err(|e| anyhow::anyhow!("Blocking task panicked: {}", e))??;
 
-    debug!("Captured {} JSON responses from {}", collected.len(), url);
-    Ok(collected)
+    debug!(
+        "Captured {} JSON responses from {}",
+        capture.responses.len(),
+        url
+    );
+    Ok(capture)
 }
 
 #[cfg(coverage)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-async fn capture_network_json_responses(_url: &str) -> Result<Vec<InterceptedResponse>> {
-    Ok(Vec::new())
+async fn capture_network_json_responses(_url: &str) -> Result<RenderCapture> {
+    Ok(RenderCapture::default())
 }
 
 /// Extract subprocessor records directly from captured JSON API responses.
@@ -512,37 +819,60 @@ pub(crate) fn responses_contain_subprocessor_array(responses: &[InterceptedRespo
     })
 }
 
-/// Capture network JSON, retrying once if the subprocessor payload didn't land.
-/// The headless render is mildly racy (the large report response can arrive late
-/// or be fetched mid-stream), so a single content-checked retry sharply improves
-/// reliability without hammering the site.
+/// Capture network JSON, retrying once only when the first attempt shows evidence of having been
+/// raced — see [`should_retry_capture`] for why "found no subprocessor array" is no longer such
+/// evidence.
+///
+/// A capture error is not propagated on the first attempt: the whole point of retrying a
+/// transport failure is that the second attempt may succeed, so the error is only surfaced if the
+/// retry fails too.
 #[cfg(not(coverage))]
-async fn capture_with_retry(url: &str) -> Result<Vec<InterceptedResponse>> {
-    let responses = capture_network_json_responses(url).await?;
-    if responses_contain_subprocessor_array(&responses) {
-        return Ok(responses);
+async fn capture_with_retry(url: &str) -> Result<RenderCapture> {
+    let first = capture_network_json_responses(url).await;
+    let (transport_error, capture) = match first {
+        Ok(c) => (false, c),
+        Err(e) => {
+            debug!("First capture for {} failed: {:#}", url, e);
+            (true, RenderCapture::default())
+        }
+    };
+
+    let had_subs = responses_contain_subprocessor_array(&capture.responses);
+    if !should_retry_capture(
+        transport_error,
+        capture.responses.len(),
+        had_subs,
+        responses_look_truncated(&capture.responses),
+    ) {
+        return Ok(capture);
     }
-    debug!(
-        "First capture for {} had no subprocessor array; retrying once",
-        url
-    );
+
+    debug!("First capture for {} looked raced; retrying once", url);
+    crate::perf::METRICS.render_capture_retried.hit();
     let retry = capture_network_json_responses(url).await?;
-    if responses_contain_subprocessor_array(&retry) {
-        // P2.1 prerequisite: the retry rescued a subprocessor array the first capture missed.
-        // A scan-wide non-zero here is what justifies keeping the second render; a zero is the
-        // evidence that the retry is pure waste on futile SPAs and P2.1 can gate it away.
+    if responses_contain_subprocessor_array(&retry.responses) {
+        // The retry rescued a subprocessor array the first capture missed. A scan-wide non-zero
+        // here is what would justify widening the retry gate again; the zero measured across a
+        // 9.15h depth-3 scan is what narrowed it to the raced cases in the first place.
         crate::perf::METRICS.render_retry_rescued.hit();
-        Ok(retry)
-    } else {
-        // Neither capture found subprocessors — return the larger set so the
-        // caller still sees whatever was there (extraction will honestly yield
-        // empty if it isn't a subprocessor array).
-        Ok(if retry.len() > responses.len() {
+        return Ok(retry);
+    }
+
+    // Neither capture found subprocessors — return whichever attempt is worth more so the caller
+    // still sees whatever was there (extraction will honestly yield empty if it isn't a
+    // subprocessor array).
+    Ok(
+        if prefer_retry_capture(
+            capture.responses.len(),
+            capture.settled_dom.is_some(),
+            retry.responses.len(),
+            retry.settled_dom.is_some(),
+        ) {
             retry
         } else {
-            responses
-        })
-    }
+            capture
+        },
+    )
 }
 
 /// Extract using the cache hint first, falling back to *all* responses when the
@@ -596,9 +926,9 @@ pub(crate) async fn render_capture_and_extract(
     source_domain: &str,
     url_substring: Option<&str>,
 ) -> Result<Vec<SubprocessorDomain>> {
-    let responses = capture_with_retry(url).await?;
+    let capture = capture_with_retry(url).await?;
     Ok(extract_with_hint_fallback(
-        &responses,
+        &capture.responses,
         source_domain,
         url_substring,
     ))
@@ -614,19 +944,39 @@ pub(crate) async fn render_capture_and_extract(
     Ok(Vec::new())
 }
 
+/// What a discover-and-extract render pass produced.
+///
+/// P2.1(c): `settled_dom` is carried out even on the failure paths — especially on the failure
+/// paths. A futile candidate URL is precisely the case where this render found nothing *and* the
+/// caller was about to render the same URL again just to read its DOM.
+#[derive(Debug, Default)]
+pub(crate) struct RenderDiscovery {
+    pub(crate) vendors: Vec<SubprocessorDomain>,
+    /// `Some` only when `vendors` is non-empty — a strategy is only worth caching if it produced
+    /// something.
+    pub(crate) strategy: Option<TrustCenterStrategy>,
+    pub(crate) settled_dom: Option<String>,
+}
+
 /// Discover-and-extract for SPA subprocessor pages: render the page, capture the
-/// JSON its scripts fetch, and extract subprocessors directly. Returns both the
-/// extracted vendors (used immediately — no second browser launch) and a
-/// cacheable [`StrategyType::RenderedNetworkCapture`] strategy for future runs.
+/// JSON its scripts fetch, and extract subprocessors directly. Returns the
+/// extracted vendors (used immediately — no second browser launch), a
+/// cacheable [`StrategyType::RenderedNetworkCapture`] strategy for future runs, and the DOM as it
+/// stood when the capture settled.
 #[cfg(not(coverage))]
 pub(crate) async fn discover_and_extract_via_render(
     url: &str,
     source_domain: &str,
-) -> Result<Option<(Vec<SubprocessorDomain>, TrustCenterStrategy)>> {
-    let responses = capture_with_retry(url).await?;
+) -> Result<RenderDiscovery> {
+    let capture = capture_with_retry(url).await?;
+    let responses = capture.responses;
+    let settled_dom = capture.settled_dom;
     if responses.is_empty() {
         debug!("No JSON responses captured from {}", url);
-        return Ok(None);
+        return Ok(RenderDiscovery {
+            settled_dom,
+            ..RenderDiscovery::default()
+        });
     }
 
     let vendors = extract_subprocessors_from_responses(&responses, source_domain, None);
@@ -636,7 +986,10 @@ pub(crate) async fn discover_and_extract_via_render(
             responses.len(),
             source_domain
         );
-        return Ok(None);
+        return Ok(RenderDiscovery {
+            settled_dom,
+            ..RenderDiscovery::default()
+        });
     }
 
     // Record which response/operation actually contributed data, as a soft cache
@@ -674,7 +1027,11 @@ pub(crate) async fn discover_and_extract_via_render(
         vendors.len(),
         source_domain
     );
-    Ok(Some((vendors, strategy)))
+    Ok(RenderDiscovery {
+        vendors,
+        strategy: Some(strategy),
+        settled_dom,
+    })
 }
 
 #[cfg(coverage)]
@@ -682,8 +1039,8 @@ pub(crate) async fn discover_and_extract_via_render(
 pub(crate) async fn discover_and_extract_via_render(
     _url: &str,
     _source_domain: &str,
-) -> Result<Option<(Vec<SubprocessorDomain>, TrustCenterStrategy)>> {
-    Ok(None)
+) -> Result<RenderDiscovery> {
+    Ok(RenderDiscovery::default())
 }
 
 /// Probe 2: Discover strategies by scanning HTML for embedded data patterns.
@@ -3011,10 +3368,10 @@ mod tests {
     #[ignore = "live network + headless Chrome"]
     async fn live_vanta_render_capture() {
         let url = "https://trust.vanta.com/subprocessors";
-        let (vendors, strategy) = discover_and_extract_via_render(url, "vanta.com")
+        let discovery = discover_and_extract_via_render(url, "vanta.com")
             .await
-            .expect("render-capture should not error")
-            .expect("should discover the subprocessor list");
+            .expect("render-capture should not error");
+        let vendors = discovery.vendors;
         eprintln!("Vanta subprocessors extracted: {}", vendors.len());
         for v in &vendors {
             eprintln!("  {} | {}", v.domain, v.raw_record);
@@ -3026,10 +3383,19 @@ mod tests {
             "expected the full Vanta subprocessor list (~42), got {}",
             vendors.len()
         );
+        let strategy = discovery
+            .strategy
+            .expect("a successful discovery must yield a cacheable strategy");
         assert!(matches!(
             strategy.strategy_type,
             StrategyType::RenderedNetworkCapture { .. }
         ));
+        // P2.1(b): the settled DOM must come back with the capture — it is what lets the
+        // subprocessor path skip its own render of this same URL.
+        assert!(
+            discovery.settled_dom.is_some_and(|dom| !dom.is_empty()),
+            "render-capture must carry out the settled DOM"
+        );
     }
 
     // --- probe_json_script_tags: array with name field but no name detected ---
@@ -3584,5 +3950,294 @@ mod tests {
             candidates.is_empty(),
             "High-score but no name field should be skipped"
         );
+    }
+
+    // --- P2.1: capture-retry gating ---
+
+    fn resp(body: &str) -> InterceptedResponse {
+        InterceptedResponse {
+            url: "https://trust.example.com/api/report".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn clean_empty_capture_does_not_earn_a_second_render() {
+        // The whole point of P2.1: a capture that ran fine and simply found no subprocessor array
+        // is a legitimate negative, not a race. This is the common case (marketing sites
+        // catch-all-200 every candidate path) and it must cost exactly one render.
+        assert!(!should_retry_capture(false, 12, false, false));
+    }
+
+    #[test]
+    fn racy_captures_still_earn_a_second_render() {
+        // A transport error produced no evidence at all.
+        assert!(should_retry_capture(true, 0, false, false));
+        // Zero captured responses from a page we rendered: nothing was observed, so nothing was
+        // ruled out.
+        assert!(should_retry_capture(false, 0, false, false));
+        // A body read mid-stream is exactly the race the retry was written for.
+        assert!(should_retry_capture(false, 7, false, true));
+    }
+
+    #[test]
+    fn a_captured_subprocessor_array_ends_the_capture_however_it_arrived() {
+        // Success outranks every racy signal — re-rendering could only lose ground.
+        assert!(!should_retry_capture(false, 3, true, false));
+        assert!(!should_retry_capture(true, 0, true, false));
+        assert!(!should_retry_capture(false, 3, true, true));
+        assert!(!should_retry_capture(false, 0, true, false));
+    }
+
+    #[test]
+    fn truncation_is_distinguished_from_a_complete_non_json_body() {
+        // Starts like JSON, does not parse → read mid-stream.
+        assert!(body_is_truncated_json(r#"{"data":{"subprocessors":[{"na"#));
+        assert!(body_is_truncated_json("  [ {\"name\": \"Acme\""));
+        // Complete JSON.
+        assert!(!body_is_truncated_json(r#"{"data":{"subprocessors":[]}}"#));
+        assert!(!body_is_truncated_json("[]"));
+        // A catch-all-200 HTML shell served from an `/api/` path parses as neither, but it is
+        // *complete* — treating it as truncated would resurrect the render P2.1 removed.
+        assert!(!body_is_truncated_json("<!DOCTYPE html><html></html>"));
+        assert!(!body_is_truncated_json("Not Found"));
+        assert!(!body_is_truncated_json(""));
+    }
+
+    #[test]
+    fn responses_look_truncated_flags_any_partial_body() {
+        assert!(!responses_look_truncated(&[]));
+        assert!(!responses_look_truncated(&[
+            resp(r#"{"ok":true}"#),
+            resp("<html></html>")
+        ]));
+        assert!(responses_look_truncated(&[
+            resp(r#"{"ok":true}"#),
+            resp(r#"{"items":[{"name":"Ac"#)
+        ]));
+    }
+
+    #[test]
+    fn retry_is_preferred_only_when_it_is_actually_worth_more() {
+        // More responses wins.
+        assert!(prefer_retry_capture(2, true, 5, false));
+        // Fewer responses loses, even holding a DOM.
+        assert!(!prefer_retry_capture(5, false, 2, true));
+        // Tie broken by the DOM, which is what lets the caller skip its own render.
+        assert!(prefer_retry_capture(3, false, 3, true));
+        assert!(!prefer_retry_capture(3, true, 3, false));
+        assert!(!prefer_retry_capture(3, true, 3, true));
+        assert!(!prefer_retry_capture(0, false, 0, false));
+    }
+
+    // --- P2.3: capture-window predicates ---
+
+    #[test]
+    fn analytics_beacons_are_not_captured_as_page_json() {
+        // Each of these used to be collected purely because its URL contains `/api/`, and each
+        // reset the stagnation counter that decided when to stop waiting.
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://api.segment.io/v1/t",
+            200
+        ));
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://www.google-analytics.com/collect?v=2",
+            200
+        ));
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://app.posthog.com/api/e/",
+            200
+        ));
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://cdn.cookielaw.org/consent/abc/en.json",
+            200
+        ));
+        // Case-insensitively, since CDP reports the URL as the page wrote it.
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://API.SEGMENT.IO/v1/t",
+            200
+        ));
+    }
+
+    #[test]
+    fn real_trust_center_traffic_is_still_captured() {
+        assert!(is_capturable_json(
+            "application/json",
+            "https://trust.example.com/graphql",
+            200
+        ));
+        assert!(is_capturable_json(
+            "application/json; charset=utf-8",
+            "https://trust.example.com/v1/report",
+            200
+        ));
+        // Kept deliberately: real trust-center APIs do serve JSON under a wrong Content-Type.
+        assert!(is_capturable_json(
+            "text/plain",
+            "https://trust.example.com/api/subprocessors",
+            200
+        ));
+        // Non-2xx is not page data.
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://trust.example.com/graphql",
+            500
+        ));
+        assert!(!is_capturable_json(
+            "application/json",
+            "https://trust.example.com/graphql",
+            302
+        ));
+        // Neither a JSON mime nor a JSON-ish path.
+        assert!(!is_capturable_json(
+            "text/html",
+            "https://trust.example.com/subprocessors",
+            200
+        ));
+    }
+
+    #[test]
+    fn capture_never_outlives_the_pre_p23_worst_case() {
+        // The hard cap outranks everything, including work still in flight.
+        assert!(should_exit_trust_center_capture(
+            TRUST_CENTER_CAPTURE_HARD_CAP,
+            false,
+            true,
+            Duration::ZERO,
+            None,
+        ));
+        assert!(should_exit_trust_center_capture(
+            TRUST_CENTER_CAPTURE_HARD_CAP,
+            false,
+            true,
+            Duration::ZERO,
+            Some(Duration::ZERO),
+        ));
+        assert!(!should_exit_trust_center_capture(
+            TRUST_CENTER_CAPTURE_HARD_CAP - Duration::from_millis(1),
+            false,
+            true,
+            Duration::ZERO,
+            None,
+        ));
+    }
+
+    #[test]
+    fn the_response_ceiling_stops_the_capture_immediately() {
+        // More waiting cannot collect more, so this outranks the minimum wait.
+        assert!(should_exit_trust_center_capture(
+            Duration::from_millis(10),
+            true,
+            true,
+            Duration::ZERO,
+            None,
+        ));
+    }
+
+    #[test]
+    fn a_page_with_no_json_traffic_exits_far_below_the_old_eight_second_floor() {
+        // The regression this item exists to kill: 2s fixed settle + six 1s stagnant rounds.
+        let old_floor = Duration::from_millis(8_000);
+        let exit_at = TRUST_CENTER_CAPTURE_MIN_WAIT + TRUST_CENTER_CAPTURE_IDLE_WINDOW;
+        assert!(
+            exit_at < old_floor,
+            "adaptive exit {exit_at:?} must beat the old {old_floor:?} floor"
+        );
+        assert!(should_exit_trust_center_capture(
+            exit_at,
+            false,
+            false,
+            TRUST_CENTER_CAPTURE_IDLE_WINDOW,
+            None,
+        ));
+    }
+
+    #[test]
+    fn idle_exit_respects_the_minimum_wait_and_the_idle_boundary() {
+        // Below the floor an SPA has not necessarily issued its first request yet, so a quiet
+        // network proves nothing.
+        assert!(!should_exit_trust_center_capture(
+            TRUST_CENTER_CAPTURE_MIN_WAIT - Duration::from_millis(1),
+            false,
+            false,
+            Duration::from_millis(9_999),
+            None,
+        ));
+        // One millisecond either side of the idle window.
+        assert!(!should_exit_trust_center_capture(
+            Duration::from_millis(3_000),
+            false,
+            false,
+            TRUST_CENTER_CAPTURE_IDLE_WINDOW - Duration::from_millis(1),
+            None,
+        ));
+        assert!(should_exit_trust_center_capture(
+            Duration::from_millis(3_000),
+            false,
+            false,
+            TRUST_CENTER_CAPTURE_IDLE_WINDOW,
+            None,
+        ));
+    }
+
+    #[test]
+    fn work_in_flight_holds_the_capture_open_until_total_silence() {
+        // Nothing is idle while a request — or a body read — is still outstanding.
+        assert!(!should_exit_trust_center_capture(
+            Duration::from_millis(3_000),
+            false,
+            true,
+            TRUST_CENTER_CAPTURE_IDLE_WINDOW,
+            None,
+        ));
+        assert!(!should_exit_trust_center_capture(
+            Duration::from_millis(6_000),
+            false,
+            true,
+            TRUST_CENTER_CAPTURE_STALL_WINDOW - Duration::from_millis(1),
+            None,
+        ));
+        // …unless the counter was stranded by a redirect chain or WebSocket and the page has gone
+        // completely silent, which the stall window exists to escape.
+        assert!(should_exit_trust_center_capture(
+            Duration::from_millis(6_000),
+            false,
+            true,
+            TRUST_CENTER_CAPTURE_STALL_WINDOW,
+            None,
+        ));
+    }
+
+    #[test]
+    fn pagination_grace_survives_a_quiet_network() {
+        // A paginated trust center goes silent between page fetches. Exiting on that silence is
+        // how pages 2..n get lost, so once the array is seen the idle rule is deliberately mute.
+        assert!(!should_exit_trust_center_capture(
+            Duration::from_millis(5_000),
+            false,
+            false,
+            Duration::from_millis(4_000),
+            Some(SUBPROCESSOR_PAGINATION_GRACE - Duration::from_millis(1)),
+        ));
+        assert!(should_exit_trust_center_capture(
+            Duration::from_millis(5_000),
+            false,
+            false,
+            Duration::ZERO,
+            Some(SUBPROCESSOR_PAGINATION_GRACE),
+        ));
+        // And the grace is not cut short by traffic still in flight either.
+        assert!(should_exit_trust_center_capture(
+            Duration::from_millis(5_000),
+            false,
+            true,
+            Duration::ZERO,
+            Some(SUBPROCESSOR_PAGINATION_GRACE + Duration::from_millis(500)),
+        ));
     }
 }

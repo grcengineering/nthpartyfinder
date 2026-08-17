@@ -50,6 +50,172 @@ fn record_type_label_map_json() -> String {
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Separator for the multi-source cells a merged edge produces. Matches the one
+/// `deduplicate_results` already uses when it concatenates evidence, so a reader
+/// (or a spreadsheet split) sees one convention across the whole report.
+const EVIDENCE_JOIN: &str = " | ";
+
+/// One discovery that produced an edge: which source found it and the raw record
+/// it emitted. A merged edge carries a list of these rather than a winner —
+/// collapsing rows is only allowed to cost the reader repetition, never
+/// provenance, and "reported honestly" is the property this tool sells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeEvidence {
+    pub record_type: RecordType,
+    pub record: String,
+    pub evidence: String,
+}
+
+/// One parent→child relationship with every discovery that found it.
+///
+/// TF-EDGEDEDUP: DNS, web traffic and CT each emit their own row for the same
+/// pair — `deduplicate_results` only collapses rows that also share a record
+/// type, so a 2026-07-17 census still found 207 rows that were the same
+/// relationship said three ways, and the 2026-08-15 scan shipped 22,482 rows.
+/// The reader cannot tell "22,482 relationships" from "22,482 sightings".
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergedEdge {
+    pub nth_party_domain: String,
+    pub nth_party_organization: String,
+    pub nth_party_layer: u32,
+    pub nth_party_customer_domain: String,
+    pub nth_party_customer_organization: String,
+    pub root_customer_domain: String,
+    pub root_customer_organization: String,
+    /// Every (source, raw record) that produced this edge, sorted canonically so
+    /// two runs of the same scan render identical reports.
+    pub evidence: Vec<EdgeEvidence>,
+}
+
+impl MergedEdge {
+    /// The source to show where a surface has room for exactly one (the mermaid
+    /// edge style, the table an edge is filed under). `evidence` is sorted in
+    /// [`RecordType::all_variants`] order, so this is the same source every run
+    /// even though discovery finishes in nondeterministic order.
+    ///
+    /// Indexing is safe: [`merge_edge_evidence`] seeds `evidence` with the row
+    /// that created the edge, so it is never empty.
+    pub fn primary_record_type(&self) -> &RecordType {
+        &self.evidence[0].record_type
+    }
+
+    /// Hierarchy strings of every source that found this edge.
+    pub fn joined_record_types(&self) -> String {
+        self.join_field(|e| e.record_type.as_hierarchy_string())
+    }
+
+    /// Friendly source labels, for surfaces read by people rather than parsers.
+    pub fn joined_source_labels(&self) -> String {
+        self.join_field(|e| e.record_type.discovery_source_label().to_string())
+    }
+
+    /// Raw records, positionally aligned with [`Self::joined_record_types`] — the
+    /// i-th record is what the i-th source emitted, which is what makes the
+    /// single-row rendering lossless rather than merely shorter.
+    pub fn joined_records(&self) -> String {
+        self.join_field(|e| e.record.clone())
+    }
+
+    /// Evidence strings, positionally aligned with [`Self::joined_record_types`].
+    pub fn joined_evidence(&self) -> String {
+        self.join_field(|e| e.evidence.clone())
+    }
+
+    fn join_field(&self, f: impl Fn(&EdgeEvidence) -> String) -> String {
+        self.evidence
+            .iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .join(EVIDENCE_JOIN)
+    }
+}
+
+/// Position of a record type in the canonical variant order, so merged evidence
+/// sorts the same way the report's discovery-source filter lists sources.
+fn record_type_rank(record_type: &RecordType) -> usize {
+    RecordType::all_variants()
+        .iter()
+        .position(|v| v == record_type)
+        .unwrap_or(usize::MAX)
+}
+
+/// Collapse rows into one edge per (source domain, target domain), carrying every
+/// contributing discovery.
+///
+/// Pure: no I/O, no clock, no globals — the report surfaces call it and render
+/// what comes back, so the collapse rule is testable without writing a file.
+///
+/// Two rules are inherited rather than invented. The layer is the MINIMUM of the
+/// inputs, matching `deduplicate_results`: an edge's honest layer is the
+/// shallowest path that reaches it, and taking whichever arrived first was
+/// nondeterministic across runs. The organization names are taken from the first
+/// row seen because `finalize::reconcile_org_per_domain` has already forced one
+/// name per domain across the whole report — if that ever stops being true, this
+/// picks a name silently and needs revisiting.
+pub fn merge_edge_evidence(relationships: &[VendorRelationship]) -> Vec<MergedEdge> {
+    let mut index: HashMap<(String, String), usize> = HashMap::new();
+    let mut merged: Vec<MergedEdge> = Vec::new();
+
+    for r in relationships {
+        // Case-fold the key: a domain echoed back as the page wrote it ("CDN.Example.com")
+        // is the same edge as the lowercased one, and splitting them is precisely the
+        // duplication this function exists to remove.
+        let key = (
+            r.nth_party_customer_domain.to_ascii_lowercase(),
+            r.nth_party_domain.to_ascii_lowercase(),
+        );
+        let entry = EdgeEvidence {
+            record_type: r.nth_party_record_type.clone(),
+            record: r.nth_party_record.clone(),
+            evidence: r.evidence.clone(),
+        };
+
+        if let Some(&i) = index.get(&key) {
+            let edge = &mut merged[i];
+            edge.nth_party_layer = edge.nth_party_layer.min(r.nth_party_layer);
+            // Identical triples cannot survive `deduplicate_results`, but export is
+            // also called on raw slices (tests, --no-dedup paths); an exact repeat is
+            // a sighting we already recorded, not a second source.
+            if !edge.evidence.contains(&entry) {
+                edge.evidence.push(entry);
+            }
+        } else {
+            index.insert(key, merged.len());
+            merged.push(MergedEdge {
+                nth_party_domain: r.nth_party_domain.clone(),
+                nth_party_organization: r.nth_party_organization.clone(),
+                nth_party_layer: r.nth_party_layer,
+                nth_party_customer_domain: r.nth_party_customer_domain.clone(),
+                nth_party_customer_organization: r.nth_party_customer_organization.clone(),
+                root_customer_domain: r.root_customer_domain.clone(),
+                root_customer_organization: r.root_customer_organization.clone(),
+                evidence: vec![entry],
+            });
+        }
+    }
+
+    // Discovery runs concurrently, so the order rows arrive in is not stable between
+    // two scans of the same target. Sort each edge's evidence on its own content so
+    // the rendered report is diffable run over run.
+    for edge in &mut merged {
+        edge.evidence.sort_by_key(evidence_sort_key);
+    }
+
+    merged
+}
+
+/// Total order over evidence entries: canonical source order first, then the
+/// record and evidence text so two entries from the same source still sort
+/// deterministically.
+fn evidence_sort_key(entry: &EdgeEvidence) -> (usize, String, String, String) {
+    (
+        record_type_rank(&entry.record_type),
+        entry.record_type.as_hierarchy_string(),
+        entry.record.clone(),
+        entry.evidence.clone(),
+    )
+}
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
@@ -60,6 +226,12 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
 
     let file = File::create(output_path)?;
     let mut wtr = Writer::from_writer(file);
+
+    // TF-EDGEDEDUP: one row per edge, not per sighting. The record/type/evidence
+    // cells hold every contributing discovery, positionally aligned, so nothing
+    // the per-sighting rows carried is dropped — the count column tells the reader
+    // how many discoveries a row stands for.
+    let merged = merge_edge_evidence(relationships);
 
     // Write CSV headers
     wtr.write_record([
@@ -73,34 +245,40 @@ pub fn export_csv(relationships: &[VendorRelationship], output_path: &str) -> Re
         "Nth Party Record",
         "Nth Party Record Type",
         "Evidence",
+        "Discovery Source Count",
     ])?;
 
     // Write data rows
-    for relationship in relationships {
+    for edge in &merged {
         wtr.write_record([
-            &relationship.root_customer_domain,
-            &relationship.root_customer_organization,
-            &relationship.nth_party_domain,
-            &relationship.nth_party_organization,
-            &relationship.nth_party_layer.to_string(),
-            &relationship.nth_party_customer_domain,
-            &relationship.nth_party_customer_organization,
-            &relationship.nth_party_record,
-            &relationship.nth_party_record_type.as_hierarchy_string(),
-            &relationship.evidence,
+            &edge.root_customer_domain,
+            &edge.root_customer_organization,
+            &edge.nth_party_domain,
+            &edge.nth_party_organization,
+            &edge.nth_party_layer.to_string(),
+            &edge.nth_party_customer_domain,
+            &edge.nth_party_customer_organization,
+            &edge.joined_records(),
+            &edge.joined_record_types(),
+            &edge.joined_evidence(),
+            &edge.evidence.len().to_string(),
         ])?;
     }
 
     wtr.flush()?;
     info!(
-        "Successfully exported {} relationships to CSV: {}",
+        "Successfully exported {} relationships ({} merged edges) to CSV: {}",
         relationships.len(),
+        merged.len(),
         output_path
     );
 
     Ok(())
 }
 
+/// Deliberately NOT merged (TF-EDGEDEDUP): the JSON export is the machine-readable
+/// artifact other tools diff and re-ingest, so it stays one object per discovery.
+/// The collapse belongs to the surfaces a person reads.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_json(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
@@ -246,6 +424,13 @@ pub fn print_analysis_summary(relationships: &[VendorRelationship]) {
 
     println!("\n=== Analysis Summary ===");
     println!("Total vendor relationships found: {}", relationships.len());
+    // TF-EDGEDEDUP: the raw count above is sightings. Say how many distinct
+    // relationships that actually is, so the headline number is not read as
+    // "this many vendors" when three sources found the same one.
+    println!(
+        "Distinct vendor edges (evidence merged): {}",
+        merge_edge_evidence(relationships).len()
+    );
     println!("Maximum depth reached: {} layers", max_depth);
     println!("Unique vendor domains: {}", unique_domains.len());
     println!("Unique vendor organizations: {}", unique_orgs.len());
@@ -277,6 +462,12 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     }
 
     let mut content = String::new();
+
+    // TF-EDGEDEDUP: every row-level section below renders MERGED edges — one row
+    // per (customer domain, vendor domain), carrying each source that found it.
+    // The summary counts stay on the raw rows so this report and the JSON export
+    // still describe the same scan.
+    let merged = merge_edge_evidence(relationships);
 
     // Get root domain for the report
     let root_domain = &relationships[0].root_customer_domain;
@@ -320,6 +511,10 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
         relationships.len()
     ));
     content.push_str(&format!(
+        "- **Distinct vendor edges (evidence merged):** {}\n",
+        merged.len()
+    ));
+    content.push_str(&format!(
         "- **Maximum depth reached:** {} layers\n",
         max_depth
     ));
@@ -334,6 +529,9 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
 
     // Breakdown by record type
     content.push_str("### Breakdown by Record Type\n\n");
+    content.push_str(
+        "Counts are discoveries, not edges — one relationship found by three sources counts three times here and appears once in the tables below.\n\n",
+    );
     for (record_type, count) in &type_counts {
         content.push_str(&format!("- **{}:** {} relationships\n", record_type, count));
     }
@@ -364,29 +562,32 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
         root_node, root_domain, root_organization
     ));
 
-    // Process relationships by layer
+    // Process merged edges by layer. Drawing one arrow per sighting stacked three
+    // identical arrows between the same two nodes; the graph is about who talks to
+    // whom, so it draws the edge once and names its sources in the label.
     for layer in 1..=max_depth {
-        let layer_relationships: Vec<_> = relationships
+        let layer_edges: Vec<_> = merged
             .iter()
-            .filter(|r| r.nth_party_layer == layer)
+            .filter(|e| e.nth_party_layer == layer)
             .collect();
 
-        for rel in layer_relationships {
-            let vendor_node = sanitize_mermaid_id(&rel.nth_party_domain);
-            let customer_node = sanitize_mermaid_id(&rel.nth_party_customer_domain);
+        for edge in layer_edges {
+            let vendor_node = sanitize_mermaid_id(&edge.nth_party_domain);
+            let customer_node = sanitize_mermaid_id(&edge.nth_party_customer_domain);
 
             // Add vendor node if not already added
             if !nodes.contains(&vendor_node) {
                 nodes.insert(vendor_node.clone());
                 let node_label = format!(
                     "{}<br/>({})",
-                    rel.nth_party_domain, rel.nth_party_organization
+                    edge.nth_party_domain, edge.nth_party_organization
                 );
                 content.push_str(&format!("    {}[\"{}\"]\\n", vendor_node, node_label));
             }
 
             // Add edge with record type styling
-            let edge_style = match rel.nth_party_record_type.as_hierarchy_string().as_str() {
+            let primary_type = edge.primary_record_type().as_hierarchy_string();
+            let edge_style = match primary_type.as_str() {
                 "DNS::TXT::SPF" => "-.->",
                 "DNS::TXT::VERIFICATION" => "-->",
                 "DNS::SUBDOMAIN" => "==>",
@@ -395,11 +596,7 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
                 _ => "-->",
             };
 
-            let edge_label = format!(
-                "{}|{}",
-                rel.nth_party_record_type.as_hierarchy_string(),
-                rel.nth_party_layer
-            );
+            let edge_label = format!("{}|{}", edge.joined_record_types(), edge.nth_party_layer);
             edges.push(format!(
                 "    {} {} {}[\"{}\"]",
                 customer_node, edge_style, vendor_node, edge_label
@@ -437,111 +634,121 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     // Detailed tables
     content.push_str("## Detailed Relationships\n\n");
 
-    // Group by record type
-    let mut spf_relationships = Vec::new();
-    let mut verification_relationships = Vec::new();
-    let mut web_traffic_relationships = Vec::new();
-    let mut other_relationships = Vec::new();
+    // Group merged edges by their PRIMARY source, so an edge appears in exactly one
+    // table. Filing by every source would put a DNS+web-traffic edge in two tables
+    // and re-create the repetition the merge just removed; the "Sources" column
+    // carries the rest.
+    let mut spf_edges = Vec::new();
+    let mut verification_edges = Vec::new();
+    let mut web_traffic_edges = Vec::new();
+    let mut other_edges = Vec::new();
 
-    for rel in relationships {
-        match rel.nth_party_record_type.as_hierarchy_string().as_str() {
-            "DNS::TXT::SPF" => spf_relationships.push(rel),
-            "DNS::TXT::VERIFICATION" => verification_relationships.push(rel),
+    for edge in &merged {
+        match edge.primary_record_type().as_hierarchy_string().as_str() {
+            "DNS::TXT::SPF" => spf_edges.push(edge),
+            "DNS::TXT::VERIFICATION" => verification_edges.push(edge),
             "DISCOVERY::WEBPAGE_SOURCE" | "DISCOVERY::WEBPAGE_NETWORK" => {
-                web_traffic_relationships.push(rel)
+                web_traffic_edges.push(edge)
             }
-            _ => other_relationships.push(rel),
+            _ => other_edges.push(edge),
         }
     }
 
     // SPF Relationships table
-    if !spf_relationships.is_empty() {
+    if !spf_edges.is_empty() {
         content.push_str("### Email Service Providers (SPF)\n\n");
         content.push_str("These vendors can send emails on behalf of your domain:\n\n");
-        content.push_str("| Vendor | Organization | Layer | Customer | SPF Record |\n");
-        content.push_str("|--------|--------------|-------|----------|------------|\n");
+        content.push_str("| Vendor | Organization | Layer | Customer | SPF Record | Sources |\n");
+        content.push_str("|--------|--------------|-------|----------|------------|---------|\n");
 
-        for rel in &spf_relationships {
+        for edge in &spf_edges {
             content.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
-                escape_markdown(&rel.nth_party_domain),
-                escape_markdown(&rel.nth_party_organization),
-                rel.nth_party_layer,
-                escape_markdown(&rel.nth_party_customer_domain),
-                escape_markdown(&rel.nth_party_record)
+                "| {} | {} | {} | {} | {} | {} |\n",
+                escape_markdown(&edge.nth_party_domain),
+                escape_markdown(&edge.nth_party_organization),
+                edge.nth_party_layer,
+                escape_markdown(&edge.nth_party_customer_domain),
+                escape_markdown(&edge.joined_records()),
+                escape_markdown(&edge.joined_source_labels())
             ));
         }
         content.push('\n');
     }
 
     // Verification Relationships table
-    if !verification_relationships.is_empty() {
+    if !verification_edges.is_empty() {
         content.push_str("### Integrated Services (Domain Verification)\n\n");
         content.push_str(
             "These vendors have verified domain ownership and likely have integrations:\n\n",
         );
-        content.push_str("| Vendor | Organization | Layer | Customer | Verification Record |\n");
-        content.push_str("|--------|--------------|-------|----------|--------------------|\n");
+        content.push_str(
+            "| Vendor | Organization | Layer | Customer | Verification Record | Sources |\n",
+        );
+        content.push_str(
+            "|--------|--------------|-------|----------|--------------------|---------|\n",
+        );
 
-        for rel in &verification_relationships {
+        for edge in &verification_edges {
             content.push_str(&format!(
-                "| {} | {} | {} | {} | {} |\n",
-                escape_markdown(&rel.nth_party_domain),
-                escape_markdown(&rel.nth_party_organization),
-                rel.nth_party_layer,
-                escape_markdown(&rel.nth_party_customer_domain),
-                escape_markdown(&rel.nth_party_record)
+                "| {} | {} | {} | {} | {} | {} |\n",
+                escape_markdown(&edge.nth_party_domain),
+                escape_markdown(&edge.nth_party_organization),
+                edge.nth_party_layer,
+                escape_markdown(&edge.nth_party_customer_domain),
+                escape_markdown(&edge.joined_records()),
+                escape_markdown(&edge.joined_source_labels())
             ));
         }
         content.push('\n');
     }
 
     // Webpage discovery relationships table
-    if !web_traffic_relationships.is_empty() {
+    if !web_traffic_edges.is_empty() {
         content.push_str("### Webpage Discovery\n\n");
         content.push_str("These vendors were discovered through webpage source analysis or runtime network request capture:\n\n");
         content.push_str(
-            "| Vendor | Organization | Layer | Discovery Method | Customer | Evidence |\n",
+            "| Vendor | Organization | Layer | Discovery Method | Customer | Evidence | Sources |\n",
         );
         content.push_str(
-            "|--------|--------------|-------|-----------------|----------|----------|\n",
+            "|--------|--------------|-------|-----------------|----------|----------|---------|\n",
         );
 
-        for rel in &web_traffic_relationships {
-            let method =
-                if rel.nth_party_record_type.as_hierarchy_string() == "DISCOVERY::WEBPAGE_SOURCE" {
-                    "Webpage Source"
-                } else {
-                    "Webpage Network Requests"
-                };
+        for edge in &web_traffic_edges {
+            let primary = edge.primary_record_type().as_hierarchy_string();
+            let method = if primary == "DISCOVERY::WEBPAGE_SOURCE" {
+                "Webpage Source"
+            } else {
+                "Webpage Network Requests"
+            };
             content.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} |\n",
-                escape_markdown(&rel.nth_party_domain),
-                escape_markdown(&rel.nth_party_organization),
-                rel.nth_party_layer,
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                escape_markdown(&edge.nth_party_domain),
+                escape_markdown(&edge.nth_party_organization),
+                edge.nth_party_layer,
                 method,
-                escape_markdown(&rel.nth_party_customer_domain),
-                escape_markdown(&rel.nth_party_record)
+                escape_markdown(&edge.nth_party_customer_domain),
+                escape_markdown(&edge.joined_records()),
+                escape_markdown(&edge.joined_source_labels())
             ));
         }
         content.push('\n');
     }
 
     // Other relationships
-    if !other_relationships.is_empty() {
+    if !other_edges.is_empty() {
         content.push_str("### Other Relationships\n\n");
         content.push_str("| Vendor | Organization | Layer | Type | Customer | Record |\n");
         content.push_str("|--------|--------------|-------|------|----------|--------|\n");
 
-        for rel in &other_relationships {
+        for edge in &other_edges {
             content.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
-                escape_markdown(&rel.nth_party_domain),
-                escape_markdown(&rel.nth_party_organization),
-                rel.nth_party_layer,
-                escape_markdown(&rel.nth_party_record_type.as_hierarchy_string()),
-                escape_markdown(&rel.nth_party_customer_domain),
-                escape_markdown(&rel.nth_party_record)
+                escape_markdown(&edge.nth_party_domain),
+                escape_markdown(&edge.nth_party_organization),
+                edge.nth_party_layer,
+                escape_markdown(&edge.joined_record_types()),
+                escape_markdown(&edge.nth_party_customer_domain),
+                escape_markdown(&edge.joined_records())
             ));
         }
         content.push('\n');
@@ -570,8 +777,9 @@ pub fn export_markdown(relationships: &[VendorRelationship], output_path: &str) 
     // Write to file
     std::fs::write(output_path, content)?;
     info!(
-        "Successfully exported {} relationships to Markdown: {}",
+        "Successfully exported {} relationships ({} merged edges) to Markdown: {}",
         relationships.len(),
+        merged.len(),
         output_path
     );
 
@@ -641,6 +849,16 @@ struct HtmlSummary {
     generated_at: String,
 }
 
+/// Deliberately NOT merged yet (TF-EDGEDEDUP). The HTML table and the embedded
+/// `relationships_json` are coupled BY INDEX — `report.html` renders rows with
+/// `openEvidenceModal({{ loop.index0 }})` and the modal reads
+/// `window.graphData.relationships[i]`. Handing the table a merged list while the
+/// JSON stays per-sighting silently shifts every evidence modal onto the wrong
+/// record, and merging the JSON instead would change the array the Svelte graph
+/// bundle consumes and give each row a single `data-type` when several sources
+/// found it — re-opening the discovery-source filter drift that `present_discovery_sources`
+/// exists to prevent. Collapsing this surface needs the template change described
+/// alongside this work; it cannot be done from the exporter alone.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
     debug!(
@@ -1633,5 +1851,481 @@ mod tests {
         assert!(json_path.exists());
         assert!(md_path.exists());
         assert!(html_path.exists());
+    }
+
+    // ── TF-EDGEDEDUP: merging duplicate edge evidence at export ──────────
+
+    /// Full control over both endpoints and the per-sighting payload, which
+    /// `make_vendor` (fixed customer, derived record) cannot express.
+    fn sighting(
+        customer: &str,
+        vendor: &str,
+        layer: u32,
+        rt: RecordType,
+        record: &str,
+        evidence: &str,
+    ) -> VendorRelationship {
+        VendorRelationship::new(
+            vendor.to_string(),
+            format!("{} Inc", vendor),
+            layer,
+            customer.to_string(),
+            format!("{} Inc", customer),
+            record.to_string(),
+            rt,
+            "root.com".to_string(),
+            "Root Inc".to_string(),
+            evidence.to_string(),
+        )
+    }
+
+    /// The headline case: DNS, web traffic and a CT log each found the same
+    /// parent→child pair, and the report used to say it three times.
+    #[test]
+    fn merge_edge_evidence_collapses_one_edge_found_by_three_sources() {
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "v=spf1 include:vendor.com",
+                "spf lookup",
+            ),
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::WebTrafficNetwork,
+                "https://vendor.com/tag.js",
+                "network request",
+            ),
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "cert CN=vendor.com",
+                "crt.sh entry",
+            ),
+        ];
+
+        let merged = merge_edge_evidence(&rels);
+
+        assert_eq!(merged.len(), 1, "one relationship must render as one edge");
+        assert_eq!(merged[0].evidence.len(), 3, "all three sources survive");
+        assert_eq!(merged[0].nth_party_domain, "vendor.com");
+        assert_eq!(merged[0].nth_party_customer_domain, "acme.com");
+    }
+
+    /// Merging is only acceptable if it is lossless: every (source, record,
+    /// evidence) triple that went in must come back out, unchanged.
+    #[test]
+    fn merge_edge_evidence_preserves_every_source_record_and_evidence() {
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "spf-record",
+                "spf evidence",
+            ),
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::TrustCenterApi,
+                "trust-record",
+                "trust evidence",
+            ),
+            sighting(
+                "acme.com",
+                "other.com",
+                3,
+                RecordType::DnsMx,
+                "mx-record",
+                "mx evidence",
+            ),
+        ];
+
+        let merged = merge_edge_evidence(&rels);
+
+        let mut got: Vec<(String, String, String)> = merged
+            .iter()
+            .flat_map(|e| {
+                e.evidence.iter().map(|ev| {
+                    (
+                        ev.record_type.as_hierarchy_string(),
+                        ev.record.clone(),
+                        ev.evidence.clone(),
+                    )
+                })
+            })
+            .collect();
+        let mut want: Vec<(String, String, String)> = rels
+            .iter()
+            .map(|r| {
+                (
+                    r.nth_party_record_type.as_hierarchy_string(),
+                    r.nth_party_record.clone(),
+                    r.evidence.clone(),
+                )
+            })
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "no discovery may be dropped by the merge");
+    }
+
+    #[test]
+    fn merge_edge_evidence_keeps_distinct_edges_apart() {
+        let rels = vec![
+            // Same vendor, different parents — two genuinely different edges.
+            sighting("a.com", "vendor.com", 2, RecordType::DnsTxtSpf, "r1", "e1"),
+            sighting("b.com", "vendor.com", 2, RecordType::DnsTxtSpf, "r2", "e2"),
+            // Same parent, different vendors — also two edges.
+            sighting("a.com", "other.com", 2, RecordType::DnsTxtSpf, "r3", "e3"),
+        ];
+
+        let merged = merge_edge_evidence(&rels);
+
+        assert_eq!(merged.len(), 3);
+        assert!(
+            merged.iter().all(|e| e.evidence.len() == 1),
+            "distinct edges must not pool each other's evidence"
+        );
+    }
+
+    /// Same rule `deduplicate_results` already established: an edge's honest layer
+    /// is the shallowest path that reaches it, not whichever row arrived first.
+    #[test]
+    fn merge_edge_evidence_keeps_minimum_layer() {
+        let deep_first = vec![
+            sighting("a.com", "v.com", 5, RecordType::DnsTxtSpf, "r1", "e1"),
+            sighting("a.com", "v.com", 2, RecordType::CtLogDiscovery, "r2", "e2"),
+        ];
+        let shallow_first = vec![
+            sighting("a.com", "v.com", 2, RecordType::CtLogDiscovery, "r2", "e2"),
+            sighting("a.com", "v.com", 5, RecordType::DnsTxtSpf, "r1", "e1"),
+        ];
+
+        assert_eq!(merge_edge_evidence(&deep_first)[0].nth_party_layer, 2);
+        assert_eq!(merge_edge_evidence(&shallow_first)[0].nth_party_layer, 2);
+    }
+
+    /// Discovery finishes in nondeterministic order, so the same scan must not
+    /// produce two different-looking reports.
+    #[test]
+    fn merge_edge_evidence_is_independent_of_input_order() {
+        let a = sighting(
+            "a.com",
+            "v.com",
+            2,
+            RecordType::WebTrafficNetwork,
+            "r-net",
+            "e-net",
+        );
+        let b = sighting("a.com", "v.com", 2, RecordType::DnsTxtSpf, "r-spf", "e-spf");
+        let c = sighting(
+            "a.com",
+            "v.com",
+            2,
+            RecordType::CtLogDiscovery,
+            "r-ct",
+            "e-ct",
+        );
+
+        let one = merge_edge_evidence(&[a.clone(), b.clone(), c.clone()]);
+        let two = merge_edge_evidence(&[c, a, b]);
+
+        assert_eq!(one[0].evidence, two[0].evidence);
+        // Canonical `all_variants` order: SPF (DNS) before CT log before web traffic.
+        let order: Vec<String> = one[0]
+            .evidence
+            .iter()
+            .map(|e| e.record_type.as_hierarchy_string())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "DNS::TXT::SPF",
+                "DISCOVERY::CT_LOG",
+                "DISCOVERY::WEBPAGE_NETWORK",
+            ]
+        );
+    }
+
+    /// The one source a surface shows when it has room for one must be stable and
+    /// canonical, not "whichever thread finished first".
+    #[test]
+    fn merge_edge_evidence_primary_source_is_canonically_first() {
+        let rels = vec![
+            sighting(
+                "a.com",
+                "v.com",
+                2,
+                RecordType::WebTrafficSource,
+                "r-src",
+                "e-src",
+            ),
+            sighting("a.com", "v.com", 2, RecordType::DnsTxtSpf, "r-spf", "e-spf"),
+        ];
+        let merged = merge_edge_evidence(&rels);
+        assert_eq!(
+            merged[0].primary_record_type().as_hierarchy_string(),
+            "DNS::TXT::SPF"
+        );
+    }
+
+    /// A domain echoed back with the casing a page used is the same edge; splitting
+    /// on case would re-create the duplicate rows this function removes.
+    #[test]
+    fn merge_edge_evidence_folds_case_variant_domains() {
+        let rels = vec![
+            sighting(
+                "Acme.com",
+                "Vendor.COM",
+                2,
+                RecordType::DnsTxtSpf,
+                "r1",
+                "e1",
+            ),
+            sighting(
+                "acme.com",
+                "vendor.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r2",
+                "e2",
+            ),
+        ];
+        let merged = merge_edge_evidence(&rels);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].evidence.len(), 2);
+        // The first spelling seen is what the report shows; only the key is folded.
+        assert_eq!(merged[0].nth_party_domain, "Vendor.COM");
+    }
+
+    /// An exact repeat is a sighting already recorded, not a second source — it
+    /// must not inflate the evidence list a reader is asked to trust.
+    #[test]
+    fn merge_edge_evidence_ignores_exact_duplicate_sightings() {
+        let one = sighting("a.com", "v.com", 2, RecordType::DnsTxtSpf, "r1", "e1");
+        let merged = merge_edge_evidence(&[one.clone(), one]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].evidence.len(), 1);
+    }
+
+    #[test]
+    fn merge_edge_evidence_empty_input() {
+        assert!(merge_edge_evidence(&[]).is_empty());
+    }
+
+    #[test]
+    fn merged_edge_joined_fields_align_positionally() {
+        let rels = vec![
+            sighting("a.com", "v.com", 2, RecordType::DnsTxtSpf, "r-spf", "e-spf"),
+            sighting(
+                "a.com",
+                "v.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r-ct",
+                "e-ct",
+            ),
+        ];
+        let edge = &merge_edge_evidence(&rels)[0];
+
+        // The i-th type, record and evidence describe the same discovery — that
+        // alignment is what makes a one-row rendering lossless.
+        assert_eq!(
+            edge.joined_record_types(),
+            "DNS::TXT::SPF | DISCOVERY::CT_LOG"
+        );
+        assert_eq!(edge.joined_records(), "r-spf | r-ct");
+        assert_eq!(edge.joined_evidence(), "e-spf | e-ct");
+        assert_eq!(
+            edge.joined_source_labels(),
+            "Email Provider (SPF) | Certificate Transparency Log"
+        );
+    }
+
+    /// The reader-facing payoff: one CSV row per relationship, still carrying every
+    /// source that found it.
+    #[test]
+    fn test_export_csv_writes_one_row_per_edge_with_all_sources() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("merged.csv");
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "r-spf",
+                "e-spf",
+            ),
+            sighting(
+                "acme.com",
+                "dup.com",
+                3,
+                RecordType::WebTrafficNetwork,
+                "r-net",
+                "e-net",
+            ),
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r-ct",
+                "e-ct",
+            ),
+            sighting("acme.com", "solo.com", 2, RecordType::DnsMx, "r-mx", "e-mx"),
+        ];
+
+        export_csv(&rels, path.to_str().unwrap()).unwrap();
+
+        let mut rdr = csv::Reader::from_path(&path).unwrap();
+        let rows: Vec<csv::StringRecord> = rdr.records().map(|r| r.unwrap()).collect();
+        assert_eq!(rows.len(), 2, "three sightings of one edge must be one row");
+
+        let dup = rows
+            .iter()
+            .find(|r| &r[2] == "dup.com")
+            .expect("merged edge present");
+        assert_eq!(&dup[4], "2", "merged row keeps the minimum layer");
+        assert_eq!(
+            &dup[8],
+            "DNS::TXT::SPF | DISCOVERY::CT_LOG | DISCOVERY::WEBPAGE_NETWORK"
+        );
+        assert_eq!(&dup[7], "r-spf | r-ct | r-net");
+        assert_eq!(&dup[9], "e-spf | e-ct | e-net");
+        assert_eq!(
+            &dup[10], "3",
+            "the row says how many discoveries it stands for"
+        );
+
+        let solo = rows
+            .iter()
+            .find(|r| &r[2] == "solo.com")
+            .expect("unmerged edge present");
+        assert_eq!(&solo[10], "1");
+    }
+
+    /// The Markdown tables are the other surface a person reads; the same edge must
+    /// appear on exactly one line there, with its other sources named.
+    #[test]
+    fn test_export_markdown_renders_a_merged_edge_once() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("merged.md");
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "r-spf",
+                "e-spf",
+            ),
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r-ct",
+                "e-ct",
+            ),
+        ];
+
+        export_markdown(&rels, path.to_str().unwrap()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            content.matches("| dup.com |").count(),
+            1,
+            "a merged edge must occupy exactly one table row"
+        );
+        // Filed under its primary (SPF) source, with the CT sighting still named.
+        assert!(content.contains("Email Service Providers"));
+        assert!(content.contains("Certificate Transparency Log"));
+        // Both raw records survive in the one row (the pipe is markdown-escaped).
+        assert!(content.contains("r-spf \\| r-ct"));
+        assert!(content.contains("**Distinct vendor edges (evidence merged):** 1"));
+        assert!(content.contains("**Total vendor relationships found:** 2"));
+    }
+
+    /// The JSON export is the machine-readable artifact; the merge must NOT reach
+    /// it, or diffing two scans stops being possible at sighting granularity.
+    #[test]
+    fn test_export_json_is_not_merged() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("unmerged.json");
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "r-spf",
+                "e-spf",
+            ),
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r-ct",
+                "e-ct",
+            ),
+        ];
+
+        export_json(&rels, path.to_str().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(parsed["relationships"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["summary"]["total_relationships"], 2);
+    }
+
+    /// The embedded JSON the Svelte graph bundle reads (`window.graphData.relationships`)
+    /// is index-coupled to the table rows via `openEvidenceModal(loop.index0)`. Merging
+    /// one side and not the other points every evidence modal at the wrong record, so
+    /// this asserts the HTML surface still emits one entry per sighting until the
+    /// template is changed to consume a merged array.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_export_html_json_still_matches_table_row_count() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coupled.html");
+        let rels = vec![
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::DnsTxtSpf,
+                "r-spf",
+                "e-spf",
+            ),
+            sighting(
+                "acme.com",
+                "dup.com",
+                2,
+                RecordType::CtLogDiscovery,
+                "r-ct",
+                "e-ct",
+            ),
+        ];
+
+        export_html(&rels, path.to_str().unwrap()).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        // One table row per sighting, indices 0..n-1, matching the embedded array.
+        assert!(content.contains("openEvidenceModal(0)"));
+        assert!(content.contains("openEvidenceModal(1)"));
+        assert!(!content.contains("openEvidenceModal(2)"));
+        assert!(content.contains("\"r-spf\""));
+        assert!(content.contains("\"r-ct\""));
     }
 }

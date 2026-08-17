@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::checkpoint;
@@ -518,6 +519,37 @@ pub fn compute_progress_position(index: usize, total_vendors: usize) -> u64 {
 /// Determine whether a periodic checkpoint should be saved.
 pub fn should_checkpoint(processed_count: usize, vendor_count: usize) -> bool {
     processed_count.is_multiple_of(5) || processed_count == vendor_count
+}
+
+/// P3.4: minimum wall-clock gap between periodic checkpoint saves.
+///
+/// The every-5-completions cadence was chosen when a scan meant tens of domains. At depth 3 the
+/// driver completes thousands, so "every 5" fired constantly — and each firing serializes the whole
+/// depth-1 pipeline behind an fsync (see [`should_checkpoint_now`]). Thirty seconds bounds the
+/// re-work a crash can cost to one interval while making the save rare enough that its cost stops
+/// mattering.
+pub const CHECKPOINT_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// P3.4: whether to save a periodic checkpoint *now*, given how long it has been since the last one.
+///
+/// Debouncing by TIME rather than by completion count is what makes the save affordable: a
+/// checkpoint clones the entire `discovered_vendors` + `processed_domains` maps under their mutexes
+/// and then fsyncs, and those are the same mutexes every concurrent org resolution needs. Firing
+/// that every 5 completions turned a durability mechanism into the pipeline's own contention source.
+///
+/// The final completion (`processed_count == vendor_count`) always saves regardless of the interval:
+/// that is the checkpoint a resumed scan actually reads, so skipping it to honour a debounce would
+/// trade real resume fidelity for nothing.
+pub fn should_checkpoint_now(
+    processed_count: usize,
+    vendor_count: usize,
+    since_last_save: Duration,
+    min_interval: Duration,
+) -> bool {
+    if vendor_count > 0 && processed_count == vendor_count {
+        return true;
+    }
+    since_last_save >= min_interval
 }
 
 /// Map memory pressure level to a delay in milliseconds.
@@ -1530,6 +1562,9 @@ pub async fn discover_nth_parties(
 
             let mut processed_count = 0;
             let mut total_relationships_found = 0usize;
+            // P3.4: debounce clock for periodic checkpoint saves. Starts now so the first save waits
+            // out a full interval rather than firing on the first few completions.
+            let mut last_checkpoint_at = std::time::Instant::now();
             let checkpoint_path = Path::new(checkpoint_output_dir);
             while let Some(new_count) = vendor_stream.next().await {
                 if is_interrupted() {
@@ -1588,7 +1623,22 @@ pub async fn discover_nth_parties(
                         "📊 Progress: {}/{} vendors processed, {} relationships found",
                         processed_count, vendor_count, total_relationships_found
                     ));
-                    if current_depth == 1 {
+                }
+                // P3.4: the periodic save is debounced by TIME, not by completion count, and its
+                // serialize+fsync runs on a blocking thread with every mutex already released.
+                // Previously this fired every 5 completions and held the checkpoint lock across an
+                // fsync while the vendor/processed maps were cloned under theirs — so a durability
+                // mechanism became the depth-1 pipeline's own contention source, spiking exactly the
+                // locks every concurrent org resolution needs.
+                if current_depth == 1
+                    && should_checkpoint_now(
+                        processed_count,
+                        vendor_count,
+                        last_checkpoint_at.elapsed(),
+                        CHECKPOINT_MIN_INTERVAL,
+                    )
+                {
+                    let snapshot = {
                         let mut cp = checkpoint.lock().await;
                         let vendors = discovered_vendors.lock().await;
                         cp.discovered_vendors = vendors.clone();
@@ -1601,14 +1651,24 @@ pub async fn discover_nth_parties(
                         cp.results_file = sink.path().to_string_lossy().to_string();
                         drop(sink);
                         cp.current_depth_reached = cp.current_depth_reached.max(current_depth);
-                        if let Err(e) = cp.save(checkpoint_path) {
-                            logger.debug(&format!("Failed to save checkpoint: {}", e));
-                        } else {
-                            logger.debug(&format!(
-                                "Checkpoint saved: {} domains completed",
-                                cp.completed_domains.len()
-                            ));
-                        }
+                        cp.clone()
+                    };
+                    let completed = snapshot.completed_domains.len();
+                    let save_path = checkpoint_path.to_path_buf();
+                    // Awaited rather than fire-and-forget: the caller must still learn whether the
+                    // save failed (silent checkpoint loss is what a resume discovers too late), and
+                    // awaiting keeps two saves from ever racing the same temp file. The win is that
+                    // no mutex is held for the duration, so the rest of the pipeline runs through it.
+                    let saved =
+                        tokio::task::spawn_blocking(move || snapshot.save(&save_path)).await;
+                    last_checkpoint_at = std::time::Instant::now();
+                    match saved {
+                        Ok(Ok(())) => logger.debug(&format!(
+                            "Checkpoint saved: {} domains completed",
+                            completed
+                        )),
+                        Ok(Err(e)) => logger.debug(&format!("Failed to save checkpoint: {}", e)),
+                        Err(e) => logger.debug(&format!("Checkpoint save task failed: {}", e)),
                     }
                 }
             }
@@ -1685,6 +1745,21 @@ pub async fn process_vendor_domain(
         ));
         return;
     }
+
+    // P3.1: real admission control. `semaphore` was constructed, threaded through every signature in
+    // this module, and then never acquired — `rg acquire src/analysis.rs` returned zero hits. Actual
+    // concurrency was therefore the PRODUCT of the nested `buffer_unordered` widths (50 x 30 x 15…),
+    // i.e. thousands of simultaneously-live vendor tasks. That is what drove `browser.permit_wait` to
+    // a 201.6s mean over 1,113 acquisitions on the 2026-08-15 depth-3 scan, and it is why every
+    // per-vendor time budget was really measuring queue depth instead of work.
+    //
+    // The permit is held for this vendor's LOCAL work only and released before the recursive descent
+    // below (the leaf-held-only doctrine already articulated in http_client.rs). Holding it across
+    // the subtree would deadlock: a parent would occupy a permit while waiting on children that need
+    // permits of their own. Released-before-descent makes that impossible by construction.
+    //
+    // Fail-open on a closed semaphore: a scan that has begun shutting down must not wedge here.
+    let _local_work_permit = semaphore.clone().acquire_owned().await.ok();
 
     // Input guard (mirrors the output-time gate in finalize::finalize_report). A non-registrable
     // host — an org name, an email, a wayback-wrapped URL, an IP fragment — must never enter the
@@ -1831,6 +1906,11 @@ pub async fn process_vendor_domain(
     }
 
     let lookup_domain = domain_utils::normalize_for_dns_lookup(&vendor_domain);
+
+    // P3.1: local work is done — release the admission permit BEFORE descending. This is the half of
+    // the leaf-held-only doctrine that prevents deadlock: every parent below is now waiting on
+    // children without occupying a slot those children need.
+    drop(_local_work_permit);
 
     if let Err(e) = discover_nth_parties(
         &lookup_domain,
@@ -3522,6 +3602,32 @@ mod tests {
         // With max_depth (even if common denominator) → don't stop (depth controls recursion)
         assert!(!should_stop_at_common_denominator(Some(3), "google.com"));
         assert!(!should_stop_at_common_denominator(Some(5), "stripe.com"));
+    }
+
+    // ── P3.4 time-debounced checkpointing ──────────────────────────────
+
+    #[test]
+    fn test_should_checkpoint_now_debounces_by_time_but_never_skips_the_final_save() {
+        let iv = Duration::from_secs(30);
+
+        // The save a resumed scan actually reads is the LAST one. It must happen even if the
+        // previous save was moments ago, or a debounce would trade real resume fidelity for nothing.
+        assert!(should_checkpoint_now(10, 10, Duration::ZERO, iv));
+        assert!(should_checkpoint_now(1, 1, Duration::from_millis(1), iv));
+
+        // Mid-scan, inside the interval: skip. This is the whole point — the old every-5-completions
+        // cadence fired constantly at depth 3 and serialized the pipeline behind an fsync.
+        assert!(!should_checkpoint_now(5, 100, Duration::ZERO, iv));
+        assert!(!should_checkpoint_now(50, 100, Duration::from_secs(29), iv));
+
+        // Interval elapsed: save.
+        assert!(should_checkpoint_now(50, 100, Duration::from_secs(30), iv));
+        assert!(should_checkpoint_now(7, 100, Duration::from_secs(120), iv));
+
+        // vendor_count == 0 must not read as "final completion" for a 0-progress scan; only the
+        // elapsed interval can trigger it.
+        assert!(!should_checkpoint_now(0, 0, Duration::ZERO, iv));
+        assert!(should_checkpoint_now(0, 0, Duration::from_secs(31), iv));
     }
 
     // ── P4.8 infra-enumeration gate ────────────────────────────────────

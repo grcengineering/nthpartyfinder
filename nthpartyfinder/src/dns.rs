@@ -191,26 +191,82 @@ pub struct DnsServerPool {
     /// conntrack churn this ladder exists to avoid. Built once on first DoT use; `None` if it fails.
     #[cfg_attr(coverage, allow(dead_code))]
     dot_resolver: tokio::sync::OnceCell<Option<TokioResolver>>,
+    /// The UDP/53 analogue of `dot_resolver`, one slot per configured server so each keeps its own.
+    ///
+    /// Every raw-DNS site in this file used to build a fresh `TokioResolver` — and with it a fresh
+    /// socket and a fresh hickory runtime handle — for a single lookup and then drop it. On the
+    /// root TXT race that happened on essentially every non-memoized lookup, so a deep scan churned
+    /// one short-lived UDP socket per root domain at the consumer forwarder this ladder exists to
+    /// protect. A `None` in a slot means that server's configured address did not parse and the
+    /// tier is skipped for it, exactly as the per-call construction did.
+    #[cfg_attr(coverage, allow(dead_code))]
+    do53_resolvers: Vec<tokio::sync::OnceCell<Option<TokioResolver>>>,
     /// Per-provider failure-log counts backing `log_doh_failure`'s warn-once-then-debug
     /// behavior. Mutex (not atomics) because failures are rare and the critical section
     /// is a HashMap bump with no await inside.
     #[cfg(not(coverage))]
     doh_failure_log: std::sync::Mutex<std::collections::HashMap<String, u64>>,
-    /// Scan-lifetime memo of DNS answers, keyed by `(record kind, domain)`.
+    /// Scan-lifetime memo of DNS lookups, keyed by `(record kind, domain)`.
     ///
     /// The same names are looked up many times in one scan: SPF include chains converge on
     /// a handful of shared targets (`_spf.google.com`, `sendgrid.net`, …), and a vendor seen
     /// at one depth is commonly re-analyzed as a customer at the next. Each repeat used to
     /// re-issue the query, spend a rate-limit token, and wait a full round trip.
     ///
-    /// **Only authoritative answers are stored** — see `remember_answer`. A record set that
-    /// came back from a real resolver (including a genuinely empty one) is a fact about the
-    /// zone and is safe to reuse for the seconds-to-minutes a scan lasts. An empty vector
-    /// produced because every resolver failed is NOT such a fact: caching it would silently
-    /// convert one transient outage into a scan-wide false negative and would bypass the
-    /// `note_throttle` counting that the exit-3 guard depends on (GRC-367).
+    /// **Only facts about the zone are stored** — see [`MemoEntry`] and [`may_memoize_failure`].
+    /// A record set that came back from a real resolver (including a genuinely empty one) is such
+    /// a fact. So is a `DNS_NAME` verdict: the name's own authoritative servers reporting
+    /// SERVFAIL/REFUSED over a transport that demonstrably worked. An empty vector produced
+    /// because every resolver failed is NOT: caching it would silently convert one transient
+    /// outage into a scan-wide false negative and would bypass the `note_throttle` counting that
+    /// the exit-3 guard depends on (GRC-367).
+    ///
+    /// One mutex rather than a shard array, deliberately. The critical section is a single
+    /// `HashMap` probe plus a small `Vec` clone, and every caller that takes it is either about
+    /// to spend milliseconds on the network or has just come back from doing so — so the lock is
+    /// nowhere near the throughput limit even at the subdomain fan-out's concurrency. Sharding
+    /// would buy nothing measurable and would leave the memo with two shapes to keep in step.
     #[cfg(not(coverage))]
-    answer_memo: tokio::sync::Mutex<std::collections::HashMap<(RecordKind, String), Vec<String>>>,
+    answer_memo: tokio::sync::Mutex<std::collections::HashMap<(RecordKind, String), MemoEntry>>,
+}
+
+/// What the scan-lifetime memo remembers about one `(kind, name)`.
+///
+/// The split is the memo's safety story on the read side: serving a remembered failure must not
+/// look like serving a remembered absence. A `DNS_NAME` verdict still has to be counted every time
+/// it is served, or the exit-3 guard and the end-of-scan coverage summary quietly lose sight of a
+/// name the scan never resolved — the memo is allowed to remove the *query*, never the failure's
+/// visibility.
+#[cfg(not(coverage))]
+#[derive(Debug, Clone)]
+enum MemoEntry {
+    /// A resolver answered. An empty vector here is a real answer: the name has no records of
+    /// this kind.
+    Answer(Vec<String>),
+    /// Every provider answered over a working transport and reported SERVFAIL/REFUSED for this
+    /// NAME (`DNS_NAME`). Carries the classified message verbatim so a hit is counted and
+    /// classified exactly as a fresh attempt would have been.
+    NameFailure(String),
+}
+
+/// A TXT lookup's records, plus the CNAME chain the SAME dns-json response already carried.
+///
+/// A resolver cannot answer a TXT query for an aliased name without following the alias, so it
+/// returns the type-5 chain in the answer section alongside the target's type-16 records. The
+/// subdomain fast path used to discard those and then issue a second, separate CNAME query for the
+/// very name it had just resolved — doubling the DNS volume of the highest-volume path in the
+/// program to re-learn something it was already holding.
+#[cfg_attr(coverage, allow(dead_code))]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TxtAnswer {
+    /// The name's TXT records.
+    pub(crate) txt: Vec<String>,
+    /// `Some` when the records came from a dns-json response, which settles the chain
+    /// authoritatively — an empty vector then *proves* the name is not aliased, because an alias
+    /// would have had to appear in the answer section for the TXT records to be there at all.
+    /// `None` when they came from the DoT/UDP-53 ladder, whose extractors read only TXT rdata: the
+    /// chain is then simply unknown and the caller must still ask for it.
+    pub(crate) cname: Option<Vec<String>>,
 }
 
 /// Record kinds the answer memo distinguishes. Keying on the name alone would let a TXT
@@ -583,6 +639,94 @@ fn classify_pair<T, U, E: std::fmt::Display, F: std::fmt::Display>(
     }
 }
 
+/// How a lookup failure whose class we still know should be reported to the adaptive governor.
+///
+/// `DNS_NAME` is the case this exists for. That class is emitted only when a provider returned an
+/// HTTPS response carrying a well-formed dns-json body whose RCODE reports SERVFAIL/REFUSED: the
+/// link is demonstrably healthy and the name's own servers are what failed, so there is nothing
+/// for the controller to back off from. Reading it as congestion costs the whole scan 30% of its
+/// concurrency plus a cooldown — once per broken name — and the root TXT race did exactly that,
+/// because `.ok()` erased the class before anyone could look at it.
+///
+/// Every other class, and an unattributed failure, keep the previous conservative reading. This is
+/// the single-error twin of [`classify_pair`]'s judgement on a TXT+CNAME pair.
+fn failure_outcome_for_governor(err: Option<&str>) -> crate::dns_governor::DnsOutcome {
+    match err {
+        Some(msg) if msg.contains("DNS_NAME") => crate::dns_governor::DnsOutcome::Unrelated,
+        _ => crate::dns_governor::DnsOutcome::Rejected,
+    }
+}
+
+/// One arm of a paired lookup, reduced to what it is entitled to tell the adaptive governor.
+///
+/// An arm served from the memo issued no query, so it may not vouch for the network in either
+/// direction. A remembered *success* masking a live throttle would stop the controller backing off
+/// while the one query we did issue was being rejected; a remembered *failure* would have it back
+/// off over a name we never asked about. `Err("")` is the neutral value: [`classify_pair`] reads it
+/// as neither an answer nor any of the congestion classes, so the live arm decides alone.
+fn governor_view(
+    served_from_memo: bool,
+    result: &Result<Vec<String>>,
+) -> std::result::Result<(), String> {
+    if served_from_memo {
+        return Err(String::new());
+    }
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// May a failed lookup be remembered as a *negative* memo entry — is this failure a durable fact
+/// about the NAME, or a statement about our own reach?
+///
+/// Only `DNS_NAME` qualifies, and the rule it enforces is that an outage must never memoize as
+/// absence. A throttle, a broken endpoint, a timeout or an exhausted FD table all mean "we could
+/// not look"; remembering any of them would convert one transient outage into a scan-wide false
+/// negative and would suppress the per-attempt counting the exit-3 guard reads (GRC-367) — the
+/// exact hazard `answer_memo` was built to refuse. A `DNS_NAME` verdict is the opposite: the
+/// transport worked, we did look, and the answer was that this name's authoritative servers are
+/// broken. That stays true for the seconds-to-minutes a scan lasts, which is why one broken SPF
+/// include referenced by thousands of domains need only be discovered once instead of costing a
+/// full four-provider rotation per referencing domain.
+///
+/// `DNS_NAME` must be the ONLY class present: a message that also carries `DNS_THROTTLE` or
+/// `DNS_ENDPOINT` is not a clean verdict about the name, so it is refused rather than guessed at.
+fn may_memoize_failure(msg: &str) -> bool {
+    msg.contains("DNS_NAME") && !msg.contains("DNS_THROTTLE") && !msg.contains("DNS_ENDPOINT")
+}
+
+/// The CNAME chain a dns-json answer section already carries, as cleaned target names.
+///
+/// Type-5 answers appear in a TXT (or any other type's) response whenever the queried name is an
+/// alias, because the resolver had to follow the chain to answer at all. Reading them here is what
+/// makes the paired CNAME query on the subdomain fast path unnecessary. An empty result is
+/// meaningful — it says the name is not aliased — but only for a response that already passed the
+/// RCODE gate, which is why extraction is separate from the trust decision.
+///
+/// Note this can return a LONGER chain than a dedicated CNAME query would: a CNAME query returns
+/// only the RRset at the queried name (one hop), whereas the followed chain shows every hop to the
+/// final target. For a scanner whose job is naming third parties, more hops is more of the
+/// infrastructure actually in the path, so the extra entries are kept.
+fn cname_chain_from_dns_json(response: &serde_json::Value) -> Vec<String> {
+    response["Answer"]
+        .as_array()
+        .map(|answers| {
+            answers
+                .iter()
+                .filter_map(|answer| {
+                    if answer["type"].as_u64() != Some(5) {
+                        return None;
+                    }
+                    // Same cleaning as `doh_cname_lookup`: dns-json renders targets fully
+                    // qualified, and a non-string `data` is dropped rather than coerced.
+                    Some(answer["data"].as_str()?.trim_end_matches('.').to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Outcome of one direct (hickory) lookup, classified so the shared per-transport breaker counts
 /// only genuine transport failures — never an authoritative empty answer (which is the NORM for
 /// CNAME and must not disable the transport for TXT).
@@ -796,6 +940,12 @@ impl DnsServerPool {
             .build()
             .expect("Failed to create HTTP client for DoH");
 
+        // One resolver slot per configured UDP/53 server; see the field docs.
+        let do53_resolvers: Vec<tokio::sync::OnceCell<Option<TokioResolver>>> = dns_servers
+            .iter()
+            .map(|_| tokio::sync::OnceCell::new())
+            .collect();
+
         Self {
             doh_servers,
             dns_servers,
@@ -820,6 +970,7 @@ impl DnsServerPool {
             do53_health: TransportHealth::default(),
             do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
+            do53_resolvers,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -936,6 +1087,12 @@ impl DnsServerPool {
             .build()
             .expect("Failed to create HTTP client for DoH");
 
+        // One resolver slot per configured UDP/53 server; see the field docs.
+        let do53_resolvers: Vec<tokio::sync::OnceCell<Option<TokioResolver>>> = dns_servers
+            .iter()
+            .map(|_| tokio::sync::OnceCell::new())
+            .collect();
+
         Self {
             doh_servers,
             dns_servers,
@@ -954,6 +1111,7 @@ impl DnsServerPool {
             do53_health: TransportHealth::default(),
             do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
+            do53_resolvers,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -1099,6 +1257,11 @@ impl DnsServerPool {
             .build()
             .expect("Failed to create HTTP client for test DoH");
 
+        let do53_resolvers: Vec<tokio::sync::OnceCell<Option<TokioResolver>>> = dns_servers
+            .iter()
+            .map(|_| tokio::sync::OnceCell::new())
+            .collect();
+
         Self {
             doh_servers,
             dns_servers,
@@ -1118,6 +1281,7 @@ impl DnsServerPool {
             do53_health: TransportHealth::default(),
             do53_budget: Do53Budget::new(),
             dot_resolver: tokio::sync::OnceCell::new(),
+            do53_resolvers,
             #[cfg(not(coverage))]
             doh_failure_log: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(not(coverage))]
@@ -1174,18 +1338,39 @@ impl DnsServerPool {
         Some((index, &self.doh_servers[index]))
     }
 
+    /// Empty-pool-safe UDP/53 rotation that also yields the server's index, because the cached
+    /// resolver for that server lives at the same index (`do53_resolvers`).
     #[cfg(not(coverage))]
-    fn next_dns_server_opt(&self) -> Option<&DnsServerConfig> {
+    fn next_dns_server_indexed(&self) -> Option<(usize, &DnsServerConfig)> {
         if self.dns_servers.is_empty() {
-            None
-        } else {
-            Some(self.next_dns_server())
+            return None;
         }
+        let index = self.current_dns_index.fetch_add(1, Ordering::Relaxed) % self.dns_servers.len();
+        Some((index, &self.dns_servers[index]))
+    }
+
+    /// The reused UDP/53 resolver for `index`, building it on first use.
+    ///
+    /// `None` means this server cannot be used at all — its configured address did not parse — so
+    /// the caller skips the tier for it, exactly as the previous per-call construction did on a
+    /// build failure. The build is memoized either way: a server with a malformed address must not
+    /// re-attempt (and re-log) construction on every lookup.
+    #[cfg(not(coverage))]
+    async fn do53_resolver(
+        &self,
+        index: usize,
+        server: &DnsServerConfig,
+    ) -> Option<&TokioResolver> {
+        self.do53_resolvers
+            .get(index)?
+            .get_or_init(|| async { self.create_dns_resolver(server, false).ok() })
+            .await
+            .as_ref()
     }
 
     // cfg(not(coverage)): performs live HTTPS request to DoH provider — requires network
     #[cfg(not(coverage))]
-    async fn doh_txt_lookup(&self, domain: &str, server: &DohServerConfig) -> Result<Vec<String>> {
+    async fn doh_txt_lookup(&self, domain: &str, server: &DohServerConfig) -> Result<TxtAnswer> {
         debug!("DoH lookup for {} using {}", domain, server.name);
 
         // Create DNS query in wire format
@@ -1281,22 +1466,27 @@ impl DnsServerPool {
             }
         }
 
+        // The alias chain the resolver had to follow to answer at all. Past the RCODE gate above
+        // this response is authoritative, so an EMPTY chain is a positive fact — the name is not
+        // aliased — and the caller may skip the separate CNAME query entirely. See `TxtAnswer`.
+        let cname = cname_chain_from_dns_json(&response);
+
         debug!(
-            "DoH found {} TXT records for {} via {}",
+            "DoH found {} TXT records ({} CNAME hops) for {} via {}",
             records.len(),
+            cname.len(),
             domain,
             server.name
         );
-        Ok(records)
+        Ok(TxtAnswer {
+            txt: records,
+            cname: Some(cname),
+        })
     }
 
     #[cfg(coverage)]
-    async fn doh_txt_lookup(
-        &self,
-        _domain: &str,
-        _server: &DohServerConfig,
-    ) -> Result<Vec<String>> {
-        Ok(vec![])
+    async fn doh_txt_lookup(&self, _domain: &str, _server: &DohServerConfig) -> Result<TxtAnswer> {
+        Ok(TxtAnswer::default())
     }
 
     // cfg(not(coverage)): performs live HTTPS request to DoH provider — requires network
@@ -1445,7 +1635,7 @@ impl DnsServerPool {
     /// error (parse/transport) stops retrying immediately. This is what makes a 429 recover
     /// (rotate to a healthy provider) instead of collapsing into a false-negative empty result.
     #[cfg(not(coverage))]
-    async fn doh_txt_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
+    async fn doh_txt_lookup_resilient(&self, domain: &str) -> Result<TxtAnswer> {
         let attempts = self.resilient_attempts();
         let mut last_err: Option<anyhow::Error> = None;
         for i in 0..attempts {
@@ -1526,8 +1716,8 @@ impl DnsServerPool {
     }
 
     #[cfg(coverage)]
-    async fn doh_txt_lookup_resilient(&self, _domain: &str) -> Result<Vec<String>> {
-        Ok(vec![])
+    async fn doh_txt_lookup_resilient(&self, _domain: &str) -> Result<TxtAnswer> {
+        Ok(TxtAnswer::default())
     }
 
     /// True when a DoH send failed because *this process* ran out of a local resource — chiefly
@@ -1731,6 +1921,12 @@ impl DnsServerPool {
     /// lookups, and threads `dns_failure_counter` so a throttle that survives ALL providers
     /// increments it. A genuine empty answer (no records) still returns empty without
     /// touching the counter.
+    ///
+    /// It also stopped bypassing the scan-lifetime memo, which for the busiest DNS caller in the
+    /// program meant no reuse, no negative caching and no visibility; and it stopped paying a
+    /// separate CNAME query per subdomain, because a dns-json TXT answer already carries the alias
+    /// chain the second query was asking for. The two arms are therefore sequenced rather than
+    /// joined: TXT decides whether CNAME needs a packet at all.
     // cfg(not(coverage)): performs live DNS lookups via DoH and traditional DNS — requires network
     #[cfg(not(coverage))]
     pub async fn get_txt_and_cname_fast(
@@ -1738,34 +1934,80 @@ impl DnsServerPool {
         domain: &str,
         dns_failure_counter: &AtomicUsize,
     ) -> (Vec<String>, Vec<String>) {
+        // Memo before permit, for the reason the root path already states: a remembered verdict
+        // puts no packet on the wire, and spending a rate-limit token on a query we never make
+        // throttles the scan against nothing. This path — `buffer_unordered` over every discovered
+        // subdomain — is the program's highest-volume DNS caller and was the ONLY one that
+        // bypassed the memo entirely, so it neither reused answers nor benefited from the negative
+        // memo that stops one broken shared name costing a four-provider rotation per referrer.
+        let txt_memo = self.recall_memo(RecordKind::Txt, domain).await;
+        let cname_memo = self.recall_memo(RecordKind::Cname, domain).await;
+        if let (Some(txt), Some(cname)) = (&txt_memo, &cname_memo) {
+            // Nothing goes on the wire, so there is no concurrency slot to occupy and no latency
+            // measurement to feed the governor. A remembered failure is still counted, though —
+            // `settle_arm` does that — because the scan really did fail to resolve this name.
+            return (
+                self.settle_arm(Self::memo_as_result(txt), dns_failure_counter),
+                self.settle_arm(Self::memo_as_result(cname), dns_failure_counter),
+            );
+        }
+
         // fix 1: enforce the per-process DNS limiter on this hot path (was bypassed entirely).
         let permit = self.acquire_dns_permit().await;
 
-        let (txt_result, cname_result) =
-            tokio::join!(self.fast_txt_lookup(domain), self.fast_cname_lookup(domain),);
+        // TXT first, because its answer decides whether a CNAME query is needed at all. This is
+        // the P2.10b trade: the common case drops from two queries to one, and the cost is that
+        // the rarer both-arms case is sequential rather than concurrent.
+        let txt_answer = match &txt_memo {
+            Some(entry) => Self::memo_as_result(entry).map(|txt| TxtAnswer { txt, cname: None }),
+            None => self.fast_txt_lookup(domain).await,
+        };
+
+        let cname_result = match &cname_memo {
+            Some(entry) => Self::memo_as_result(entry),
+            // P2.10b: a dns-json TXT answer already carried the alias chain — the resolver had to
+            // follow it to answer — and an empty chain there PROVES the name is not aliased. Only
+            // when that is unavailable (the TXT arm failed, or answered over the DoT/UDP-53 ladder
+            // which reads TXT rdata only) is a second query worth its packet.
+            None => match txt_answer
+                .as_ref()
+                .ok()
+                .and_then(|answer| answer.cname.clone())
+            {
+                Some(chain) => Ok(chain),
+                None => self.fast_cname_lookup(domain).await,
+            },
+        };
+
+        let txt_result = txt_answer.map(|answer| answer.txt);
 
         // Feed the adaptive controller. Either arm answering means the resolver path is alive;
         // only when BOTH fail do we have evidence of congestion, and even then a name the
-        // resolver simply cannot parse is not the network's fault.
-        permit.complete(classify_pair(&txt_result, &cname_result));
+        // resolver simply cannot parse is not the network's fault. Arms served from the memo are
+        // neutralised first — see `governor_view` — because they issued no query and must not
+        // testify about a network they never touched.
+        permit.complete(classify_pair(
+            &governor_view(txt_memo.is_some(), &txt_result),
+            &governor_view(cname_memo.is_some(), &cname_result),
+        ));
+
+        // Remember only what this call actually settled — an answer, or a `DNS_NAME` verdict.
+        // Arms served from the memo are skipped rather than rewritten with their own value.
+        if txt_memo.is_none() {
+            self.remember_arm(RecordKind::Txt, domain, &txt_result)
+                .await;
+        }
+        if cname_memo.is_none() {
+            self.remember_arm(RecordKind::Cname, domain, &cname_result)
+                .await;
+        }
 
         // fix 1: a surviving throttle on EITHER record type increments the failure counter
         // so the exit-3 guard can distinguish "throttled into emptiness" from "genuinely empty".
-        let txt = match txt_result {
-            Ok(records) => records,
-            Err(e) => {
-                self.note_classified_failure(&e.to_string(), dns_failure_counter);
-                Vec::new()
-            }
-        };
-        let cname = match cname_result {
-            Ok(records) => records,
-            Err(e) => {
-                self.note_classified_failure(&e.to_string(), dns_failure_counter);
-                Vec::new()
-            }
-        };
-        (txt, cname)
+        (
+            self.settle_arm(txt_result, dns_failure_counter),
+            self.settle_arm(cname_result, dns_failure_counter),
+        )
     }
 
     #[cfg(coverage)]
@@ -1779,7 +2021,14 @@ impl DnsServerPool {
 
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
-    async fn fast_txt_lookup(&self, domain: &str) -> Result<Vec<String>> {
+    async fn fast_txt_lookup(&self, domain: &str) -> Result<TxtAnswer> {
+        // The DoH arm's failure class, kept for the bottom of the function. A `DNS_NAME` verdict
+        // means a provider ANSWERED and reported SERVFAIL/REFUSED for this name; the ladder
+        // failing afterwards does not turn that into a transport fault, and re-labelling it
+        // `DNS_ENDPOINT` (which is what used to happen) both told the governor a healthy link was
+        // congested and made the name ineligible for the negative memo.
+        let mut doh_failure: Option<String> = None;
+
         // fix 1: resilient lookup rotates/backs off past a throttling provider instead of
         // letting a single 429 collapse into a false-negative empty. A surviving throttle
         // propagates as a DNS_THROTTLE error so the caller can count it.
@@ -1801,9 +2050,9 @@ impl DnsServerPool {
                 // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
                 // no records) — is final: skip the fallback ladder entirely. On the high-volume
                 // subdomain fan-out this saves a lookup per recordless name.
-                Ok(Ok(records)) => {
+                Ok(Ok(answer)) => {
                     self.doh_health.record_success();
-                    return Ok(records);
+                    return Ok(answer);
                 }
                 // All providers failed (throttled or broken endpoint) — descend the ladder, but if
                 // it yields no authoritative result either, surface the failure rather than a silent
@@ -1824,13 +2073,33 @@ impl DnsServerPool {
                         );
                     }
                     match self.laddered_direct(domain, RecordKind::Txt).await {
-                        DirectOutcome::Answered(records) => return Ok(records),
+                        // A ladder answer settles the records but NOT the alias chain: the
+                        // DoT/UDP-53 extractors read TXT rdata only. `cname: None` is what tells
+                        // the caller it still has to ask.
+                        DirectOutcome::Answered(records) => {
+                            return Ok(TxtAnswer {
+                                txt: records,
+                                cname: None,
+                            })
+                        }
                         // Empty or TransportFailed: surface the DoH throttle `e` (already classified
                         // and counted) instead of masking it with a fallback empty.
                         _ => return Err(e),
                     }
                 }
-                _ => {
+                Ok(Err(e)) => {
+                    // Keep the class. This arm catches `DNS_NAME` — the name's own servers failed
+                    // it over a working transport — and the bottom of the function must re-emit
+                    // that verdict rather than the generic transport-failure one.
+                    doh_failure = Some(e.to_string());
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
+                    }
+                }
+                Err(_elapsed) => {
                     // The per-provider failures were already recorded inside the resilient
                     // rotation, which is the only layer that knows WHICH upstream failed. Recording
                     // again here would double-count and could trip the breaker on a single
@@ -1850,12 +2119,35 @@ impl DnsServerPool {
         // could resolve the name, surface a classified failure so the caller counts it — otherwise a
         // tripped breaker turns every unresolved lookup into a silent, uncounted empty (RC-3).
         match self.laddered_direct(domain, RecordKind::Txt).await {
-            DirectOutcome::Answered(records) => Ok(records),
-            DirectOutcome::Empty => Ok(vec![]),
-            DirectOutcome::TransportFailed => Err(anyhow::anyhow!(
-                "DNS_ENDPOINT: no DNS transport could resolve TXT for {}",
-                domain
-            )),
+            DirectOutcome::Answered(records) => Ok(TxtAnswer {
+                txt: records,
+                cname: None,
+            }),
+            // A DoH provider's authoritative NAME verdict outranks a records-less ladder result.
+            // Preserving it only on `TransportFailed` left this hole: when the ladder produced no
+            // records, the SERVFAIL verdict was dropped and the caller received a clean empty —
+            // the name was never counted and never entered the negative memo, so every referencing
+            // domain re-paid the full four-provider rotation. That is the silent-absence failure
+            // this module exists to prevent, so the verdict is re-emitted here too. An authoritative
+            // ladder answer that carries actual RECORDS still wins (the `Answered` arm above).
+            DirectOutcome::Empty => match doh_failure {
+                Some(msg) if may_memoize_failure(&msg) => Err(anyhow::anyhow!("{}", msg)),
+                _ => Ok(TxtAnswer {
+                    txt: vec![],
+                    cname: None,
+                }),
+            },
+            DirectOutcome::TransportFailed => Err(match doh_failure {
+                // A DoH provider already told us this NAME is broken. The ladder failing after it
+                // does not make that a transport problem, and mislabelling it would make the
+                // governor throttle a healthy link once per broken name — and would keep the name
+                // out of the negative memo, so every referencing domain re-pays the rotation.
+                Some(msg) if may_memoize_failure(&msg) => anyhow::anyhow!("{}", msg),
+                _ => anyhow::anyhow!(
+                    "DNS_ENDPOINT: no DNS transport could resolve TXT for {}",
+                    domain
+                ),
+            }),
         }
     }
 
@@ -1925,11 +2217,13 @@ impl DnsServerPool {
         // willing to emit, not a reaction to what failed. Skipping here costs one name's recall;
         // not skipping is what got the WAN IP throttled for ~2h08m on 2026-07-29.
         if self.admit_do53_query() {
-            if let Some(server) = self.next_dns_server_opt() {
-                if let Ok(resolver) = self.create_dns_resolver(server, false) {
+            if let Some((index, server)) = self.next_dns_server_indexed() {
+                // Reused, not rebuilt: a fresh resolver per lookup means a fresh socket per lookup
+                // at the very forwarder this tier is trying not to overwhelm.
+                if let Some(resolver) = self.do53_resolver(index, server).await {
                     let outcome = match kind {
-                        RecordKind::Txt => direct_txt_outcome(&resolver, domain, 2000).await,
-                        RecordKind::Cname => direct_cname_outcome(&resolver, domain, 2000).await,
+                        RecordKind::Txt => direct_txt_outcome(resolver, domain, 2000).await,
+                        RecordKind::Cname => direct_cname_outcome(resolver, domain, 2000).await,
                     };
                     match outcome {
                         DirectOutcome::Answered(records) => {
@@ -1967,13 +2261,17 @@ impl DnsServerPool {
     }
 
     #[cfg(coverage)]
-    async fn fast_txt_lookup(&self, _domain: &str) -> Result<Vec<String>> {
-        Ok(vec![])
+    async fn fast_txt_lookup(&self, _domain: &str) -> Result<TxtAnswer> {
+        Ok(TxtAnswer::default())
     }
 
     // cfg(not(coverage)): performs live DNS lookup — requires network
     #[cfg(not(coverage))]
     async fn fast_cname_lookup(&self, domain: &str) -> Result<Vec<String>> {
+        // Mirrors `fast_txt_lookup`: keep the DoH arm's failure class so a `DNS_NAME` verdict is
+        // not re-emitted as a transport failure at the bottom of the ladder.
+        let mut doh_failure: Option<String> = None;
+
         // fix 1: resilient CNAME lookup (rotate + backoff) instead of a single direct call.
         // Tier 1 — DoH (443), health-gated and shared with TXT via self.doh_health: skip DoH and
         // descend the DoT→UDP/53 ladder when DoH is blocked/unavailable, re-probing periodically.
@@ -2014,7 +2312,17 @@ impl DnsServerPool {
                         _ => return Err(e),
                     }
                 }
-                _ => {
+                Ok(Err(e)) => {
+                    // Keep the class — see `fast_txt_lookup`. This arm catches `DNS_NAME`.
+                    doh_failure = Some(e.to_string());
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
+                        warn_transport_unavailable(
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                        );
+                    }
+                }
+                Err(_elapsed) => {
                     // The per-provider failures were already recorded inside the resilient
                     // rotation, which is the only layer that knows WHICH upstream failed. Recording
                     // again here would double-count and could trip the breaker on a single
@@ -2035,11 +2343,21 @@ impl DnsServerPool {
         // tripped breaker turns every unresolved lookup into a silent, uncounted empty (RC-3).
         match self.laddered_direct(domain, RecordKind::Cname).await {
             DirectOutcome::Answered(records) => Ok(records),
-            DirectOutcome::Empty => Ok(vec![]),
-            DirectOutcome::TransportFailed => Err(anyhow::anyhow!(
-                "DNS_ENDPOINT: no DNS transport could resolve CNAME for {}",
-                domain
-            )),
+            // Same reasoning as the TXT path: a records-less ladder result must not erase a DoH
+            // provider's authoritative NAME verdict, or the failure goes uncounted and unmemoized.
+            DirectOutcome::Empty => match doh_failure {
+                Some(msg) if may_memoize_failure(&msg) => Err(anyhow::anyhow!("{}", msg)),
+                _ => Ok(vec![]),
+            },
+            DirectOutcome::TransportFailed => Err(match doh_failure {
+                // A DoH provider already answered "this NAME is broken" over a working transport;
+                // the ladder failing afterwards does not reclassify that as our network's fault.
+                Some(msg) if may_memoize_failure(&msg) => anyhow::anyhow!("{}", msg),
+                _ => anyhow::anyhow!(
+                    "DNS_ENDPOINT: no DNS transport could resolve CNAME for {}",
+                    domain
+                ),
+            }),
         }
     }
 
@@ -2053,11 +2371,18 @@ impl DnsServerPool {
 // themselves compiled out under coverage.
 #[cfg(not(coverage))]
 impl DnsServerPool {
-    /// A previously-seen authoritative answer for `(kind, domain)`, if any.
-    async fn recall_answer(&self, kind: RecordKind, domain: &str) -> Option<Vec<String>> {
+    /// A previously-settled verdict for `(kind, domain)`, if any — an answer or a remembered
+    /// `DNS_NAME` failure.
+    async fn recall_memo(&self, kind: RecordKind, domain: &str) -> Option<MemoEntry> {
         let memo = self.answer_memo.lock().await;
         let hit = memo.get(&(kind, domain.to_string())).cloned();
         if hit.is_some() {
+            // A negative hit is counted on its OWN counter as well as the shared memo counter:
+            // folding it into `dns.memo_hit` alone understated how much of the saving comes from
+            // not re-rotating four providers over a name that is simply broken.
+            if matches!(hit, Some(MemoEntry::NameFailure(_))) {
+                crate::perf::METRICS.dns_memo_negative_hit.hit();
+            }
             crate::perf::METRICS.dns_memo_hit.hit();
         }
         hit
@@ -2070,7 +2395,67 @@ impl DnsServerPool {
     /// obliged to count it toward the DNS-failure guard rather than memoize it.
     async fn remember_answer(&self, kind: RecordKind, domain: &str, records: &[String]) {
         let mut memo = self.answer_memo.lock().await;
-        memo.insert((kind, domain.to_string()), records.to_vec());
+        memo.insert(
+            (kind, domain.to_string()),
+            MemoEntry::Answer(records.to_vec()),
+        );
+    }
+
+    /// Record that this NAME's own authoritative servers failed it, so the rest of the scan can
+    /// stop paying a full provider rotation to rediscover the same broken name.
+    ///
+    /// The write is gated on [`may_memoize_failure`], not on the caller's judgement: any class
+    /// other than a clean `DNS_NAME` is silently ignored here rather than trusted, because the
+    /// cost of getting this wrong is a scan-wide false negative rather than a slow scan.
+    async fn remember_name_failure(&self, kind: RecordKind, domain: &str, msg: &str) {
+        if !may_memoize_failure(msg) {
+            return;
+        }
+        let mut memo = self.answer_memo.lock().await;
+        memo.insert(
+            (kind, domain.to_string()),
+            MemoEntry::NameFailure(msg.to_string()),
+        );
+    }
+
+    /// A memo entry as the lookup result it stands in for.
+    ///
+    /// Returning the remembered *error* rather than an empty vector is what keeps a memo hit
+    /// indistinguishable from a fresh attempt to everything downstream: it is still counted by
+    /// `note_classified_failure`, and `classify_pair` still reads it as `Unrelated` — never as
+    /// congestion — so a shared broken name cannot throttle a healthy scan just because it is now
+    /// cheap to look up.
+    fn memo_as_result(entry: &MemoEntry) -> Result<Vec<String>> {
+        match entry {
+            MemoEntry::Answer(records) => Ok(records.clone()),
+            MemoEntry::NameFailure(msg) => Err(anyhow::anyhow!("{}", msg)),
+        }
+    }
+
+    /// Remember whatever one arm of a lookup proved, if anything durable. An answer is a fact
+    /// about the zone; a `DNS_NAME` verdict is a fact about the zone's own servers; everything
+    /// else is a statement about our reach and is deliberately forgotten.
+    async fn remember_arm(&self, kind: RecordKind, domain: &str, result: &Result<Vec<String>>) {
+        match result {
+            Ok(records) => self.remember_answer(kind, domain, records).await,
+            Err(e) => {
+                self.remember_name_failure(kind, domain, &e.to_string())
+                    .await
+            }
+        }
+    }
+
+    /// Reduce one arm's result to the records it should report, counting a classified failure on
+    /// the way. Factored out so the memoized and live paths cannot drift apart on the "a surviving
+    /// failure must never become a silent empty" contract (GRC-367).
+    fn settle_arm(&self, result: Result<Vec<String>>, counter: &AtomicUsize) -> Vec<String> {
+        match result {
+            Ok(records) => records,
+            Err(e) => {
+                self.note_classified_failure(&e.to_string(), counter);
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -2093,6 +2478,20 @@ pub async fn get_txt_records_with_pool_tracked(
     get_txt_records_with_rate_limit(domain, dns_pool, None, Some(dns_failure_counter)).await
 }
 
+/// Outcome of the root TXT race, carrying the DoH arm's failure CLASS when neither arm answered.
+///
+/// The class is the whole point of the type. `.ok()` used to erase it before anything downstream
+/// could look, so a name whose own servers SERVFAIL — not the network's problem at all — was
+/// reported to the adaptive governor as congestion and to the memo as unmemoizable, once per
+/// referencing domain. See [`failure_outcome_for_governor`] and [`may_memoize_failure`].
+#[cfg(not(coverage))]
+enum RootRaceOutcome {
+    /// A resolver answered. An empty vector is a real answer.
+    Records(Vec<String>),
+    /// Neither arm produced records; carries the DoH arm's classified message when it had one.
+    Failed(Option<String>),
+}
+
 // cfg(not(coverage)): performs live DNS lookups racing DoH and traditional DNS — requires network
 #[cfg(not(coverage))]
 pub async fn get_txt_records_with_rate_limit(
@@ -2104,13 +2503,32 @@ pub async fn get_txt_records_with_rate_limit(
     // A memo hit sends no packet, so it is checked before any permit is taken: rate limits
     // exist to pace outbound queries, and charging a token for a query we don't make would
     // throttle the scan against nothing.
-    if let Some(records) = dns_pool.recall_answer(RecordKind::Txt, domain).await {
-        debug!(
-            "TXT memo hit for {}: {} records (no query issued)",
-            domain,
-            records.len()
-        );
-        return Ok(records);
+    match dns_pool.recall_memo(RecordKind::Txt, domain).await {
+        Some(MemoEntry::Answer(records)) => {
+            debug!(
+                "TXT memo hit for {}: {} records (no query issued)",
+                domain,
+                records.len()
+            );
+            return Ok(records);
+        }
+        // This name's own authoritative servers already failed it over a working transport, and
+        // that verdict does not change inside one scan. Report it exactly as a fresh attempt
+        // would have — the choke-point counters fire, the caller still gets an empty set and
+        // continues — but without re-rotating every DoH provider. An SPF include referenced by
+        // thousands of domains is discovered broken once, not once per referrer.
+        Some(MemoEntry::NameFailure(msg)) => {
+            debug!(
+                "TXT negative memo hit for {}: {} (no query issued)",
+                domain, msg
+            );
+            dns_pool.note_name_failure();
+            if let Some(counter) = dns_failure_counter {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(vec![]);
+        }
+        None => {}
     }
 
     // Past the memo: this call will put a packet on the wire. Time the whole resolution,
@@ -2139,10 +2557,18 @@ pub async fn get_txt_records_with_rate_limit(
         // GRC-367: resilient lookup retries/rotates DoH providers on throttle (429/5xx)
         // instead of collapsing a throttle into an empty (false-negative) answer.
         // An authoritative empty answer (HTTP 2xx, RCODE NOERROR/NXDOMAIN, no records) is
-        // a REAL answer: return Some(vec![]) so the caller doesn't fall through to the
+        // a REAL answer: return Ok(vec![]) so the caller doesn't fall through to the
         // system resolver and emit a spurious "All DNS resolution failed" warning for
         // every domain that genuinely has no TXT records.
-        dns_pool.doh_txt_lookup_resilient(domain).await.ok()
+        //
+        // The failure MESSAGE is carried out of the race rather than dropped by `.ok()`. Without
+        // the class, a SERVFAIL name is indistinguishable from a throttle, and every one of them
+        // told the governor the network was congested — see `failure_outcome_for_governor`.
+        dns_pool
+            .doh_txt_lookup_resilient(domain)
+            .await
+            .map(|answer| answer.txt)
+            .map_err(|e| e.to_string())
     };
 
     // Spawn traditional DNS lookup (UDP). DNS-only/DoH-only configs are legal —
@@ -2153,26 +2579,45 @@ pub async fn get_txt_records_with_rate_limit(
         if !hickory_resolvable(domain) {
             return None;
         }
-        let dns_server = dns_pool.next_dns_server_opt()?;
-        let resolver = match dns_pool.create_dns_resolver(dns_server, false) {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        match crate::http_client::with_connection_permit(resolver.txt_lookup(domain)).await {
-            Ok(txt_lookup) => {
-                // 0.26: iterate answer Records and render each record's RData.
-                let records: Vec<String> = txt_lookup
-                    .answers()
-                    .iter()
-                    .map(|r| r.data.to_string())
-                    .collect();
-                if records.is_empty() {
-                    None
-                } else {
-                    Some(records)
-                }
+        // This arm was the last raw UDP/53 emission point in the program that consulted neither
+        // the budget nor the breaker, and it fired on essentially every non-memoized root lookup —
+        // exactly the unbudgeted plain-port traffic shape that got the WAN IP throttled upstream
+        // for ~2h08m on 2026-07-29. Admission is now the same single decision the ladder's tier-3
+        // uses (`admit_do53_query` consumes a token, so it is called once per intended query);
+        // a refusal simply leaves this arm of the race silent, which the DoH arm already covers.
+        if !dns_pool.admit_do53_query() {
+            return None;
+        }
+        let (index, dns_server) = dns_pool.next_dns_server_indexed()?;
+        let resolver = dns_pool.do53_resolver(index, dns_server).await?;
+        // Classified rather than collapsed: `direct_txt_outcome` separates an authoritative empty
+        // (the transport works) from a timeout/connection failure (it does not), so this arm can
+        // finally feed the shared UDP/53 breaker instead of leaving it blind to the busiest
+        // plain-port path in the scan. The 2000ms inner budget matches the ladder's tier 3.
+        match direct_txt_outcome(resolver, domain, 2000).await {
+            DirectOutcome::Answered(records) => {
+                dns_pool.do53_health.record_success();
+                Some(records)
             }
-            Err(_) => None,
+            // An authoritative "no TXT here" proves the transport works, but it must not win the
+            // race: the DoH arm can still answer, and the old behavior of declining on empty is
+            // what lets a slower-but-answering DoH provider supply the memoized record set.
+            DirectOutcome::Empty => {
+                dns_pool.do53_health.record_success();
+                None
+            }
+            DirectOutcome::TransportFailed => {
+                if dns_pool
+                    .do53_health
+                    .record_failure_unless_congested(dns_pool.governor())
+                {
+                    warn_transport_unavailable(
+                        "Direct DNS (UDP/53)",
+                        "the DoH arm of the root lookup race carries these names",
+                    );
+                }
+                None
+            }
         }
     };
 
@@ -2187,28 +2632,34 @@ pub async fn get_txt_records_with_rate_limit(
             tokio::select! {
                 biased;
                 result = &mut doh_fut => {
-                    if let Some(records) = result {
-                        info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
-                        return Some(records);
+                    match result {
+                        Ok(records) => {
+                            info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
+                            RootRaceOutcome::Records(records)
+                        }
+                        Err(msg) => {
+                            // DoH failed — wait for DNS
+                            if let Some(records) = (&mut dns_fut).await {
+                                debug!("DNS successful: Found {} TXT records for {} (UDP)", records.len(), domain);
+                                return RootRaceOutcome::Records(records);
+                            }
+                            RootRaceOutcome::Failed(Some(msg))
+                        }
                     }
-                    // DoH failed — wait for DNS
-                    if let Some(records) = (&mut dns_fut).await {
-                        debug!("DNS successful: Found {} TXT records for {} (UDP)", records.len(), domain);
-                        return Some(records);
-                    }
-                    None
                 }
                 result = &mut dns_fut => {
                     if let Some(records) = result {
                         debug!("DNS successful: Found {} TXT records for {} (UDP)", records.len(), domain);
-                        return Some(records);
+                        return RootRaceOutcome::Records(records);
                     }
-                    // DNS failed — wait for DoH
-                    if let Some(records) = (&mut doh_fut).await {
-                        info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
-                        return Some(records);
+                    // DNS declined — wait for DoH
+                    match (&mut doh_fut).await {
+                        Ok(records) => {
+                            info!("DoH successful: Found {} TXT records for {}", records.len(), domain);
+                            RootRaceOutcome::Records(records)
+                        }
+                        Err(msg) => RootRaceOutcome::Failed(Some(msg)),
                     }
-                    None
                 }
             }
         }
@@ -2216,20 +2667,28 @@ pub async fn get_txt_records_with_rate_limit(
 
     // Tell the adaptive controller how the network behaved. A resolver answering — even with an
     // empty answer — is a healthy latency sample; the overall timeout firing is congestion
-    // evidence; both arms declining without a timeout is a resolver-level failure.
+    // evidence; both arms declining without a timeout is a resolver-level failure whose CLASS
+    // decides whether it was the network's fault at all.
     permit.complete(match &race_result {
-        Ok(Some(_)) => crate::dns_governor::DnsOutcome::Answered,
-        Ok(None) => crate::dns_governor::DnsOutcome::Rejected,
+        Ok(RootRaceOutcome::Records(_)) => crate::dns_governor::DnsOutcome::Answered,
+        Ok(RootRaceOutcome::Failed(msg)) => failure_outcome_for_governor(msg.as_deref()),
         Err(_) => crate::dns_governor::DnsOutcome::TimedOut,
     });
 
-    if let Ok(Some(records)) = race_result {
-        // A resolver answered. Empty counts: "this name has no TXT records" is an answer.
-        dns_pool
-            .remember_answer(RecordKind::Txt, domain, &records)
-            .await;
-        return Ok(records);
-    }
+    // Kept past the race so the total-failure branch below can decide whether what went wrong is
+    // a durable fact about this NAME (memoizable) or about our reach (never memoizable).
+    let doh_failure = match race_result {
+        Ok(RootRaceOutcome::Records(records)) => {
+            // A resolver answered. Empty counts: "this name has no TXT records" is an answer.
+            dns_pool
+                .remember_answer(RecordKind::Txt, domain, &records)
+                .await;
+            return Ok(records);
+        }
+        Ok(RootRaceOutcome::Failed(msg)) => msg,
+        // The overall timeout fired, so no arm ever reported a class.
+        Err(_) => None,
+    };
 
     // Names hickory cannot parse (mid-label underscore, e.g. `spf_s2.oraclecloud.com`)
     // would fail the system resolver with a misleading "Label contains invalid characters"
@@ -2263,9 +2722,19 @@ pub async fn get_txt_records_with_rate_limit(
             if let Some(counter) = dns_failure_counter {
                 counter.fetch_add(1, Ordering::Relaxed);
             }
-            // Deliberately NOT memoized: no resolver answered, so this empty vector is a
-            // degradation marker. Memoizing it would turn a transient failure into a
-            // scan-wide false negative and would suppress the counting above on retries.
+            // The empty vector is deliberately NOT memoized: no resolver answered, so it is a
+            // degradation marker. Memoizing it would turn a transient failure into a scan-wide
+            // false negative and would suppress the counting above on retries.
+            //
+            // The DoH arm's VERDICT can still be memoized, but only if it was a clean `DNS_NAME`
+            // — the name's own servers answering "broken" over a transport that worked. The gate
+            // lives in `remember_name_failure`, so a throttle, a broken endpoint or a timeout
+            // reaching here writes nothing: an outage must never memoize as absence.
+            if let Some(msg) = doh_failure.as_deref() {
+                dns_pool
+                    .remember_name_failure(RecordKind::Txt, domain, msg)
+                    .await;
+            }
             Ok(vec![])
         }
     }
@@ -2342,14 +2811,32 @@ pub async fn get_cname_records_with_rate_limit(
     dns_failure_counter: Option<&AtomicUsize>,
 ) -> Result<Vec<String>> {
     // Checked before the permit for the same reason as the TXT path: a memo hit issues no
-    // query, so it must not consume rate-limit budget.
-    if let Some(records) = dns_pool.recall_answer(RecordKind::Cname, domain).await {
-        debug!(
-            "CNAME memo hit for {}: {} records (no query issued)",
-            domain,
-            records.len()
-        );
-        return Ok(records);
+    // query, so it must not consume rate-limit budget. The subdomain fast path now writes the
+    // chain it derives from a TXT answer here too, so a later explicit CNAME lookup of a name
+    // that path already resolved is free.
+    match dns_pool.recall_memo(RecordKind::Cname, domain).await {
+        Some(MemoEntry::Answer(records)) => {
+            debug!(
+                "CNAME memo hit for {}: {} records (no query issued)",
+                domain,
+                records.len()
+            );
+            return Ok(records);
+        }
+        // The memo removes the query, never the failure's visibility: `note_name_failure` is
+        // exactly what a fresh rotation would have hit at the choke point. The explicit
+        // `dns_failure_counter` is deliberately NOT bumped here, because the live CNAME path
+        // below only bumps it for throttles/broken endpoints — a memo hit must account for a
+        // name failure the same way an attempt does, not more.
+        Some(MemoEntry::NameFailure(msg)) => {
+            debug!(
+                "CNAME negative memo hit for {}: {} (no query issued)",
+                domain, msg
+            );
+            dns_pool.note_name_failure();
+            return Ok(vec![]);
+        }
+        None => {}
     }
 
     // Apply rate limiting if configured
@@ -2427,7 +2914,18 @@ pub async fn get_cname_records_with_rate_limit(
         }
         // Non-throttle error (parse/transport) or overall timeout: not a throttle, treat as a
         // normal no-CNAME outcome (unchanged from prior behavior for these cases).
-        _ => Ok(vec![]),
+        other => {
+            // A clean `DNS_NAME` verdict is the one failure here that is a durable fact about the
+            // NAME rather than about our reach, so it is worth remembering — the same broken name
+            // referenced by many domains then costs one rotation instead of one per referrer. The
+            // gate in `remember_name_failure` refuses every other class, timeouts included.
+            if let Ok(Err(e)) = &other {
+                dns_pool
+                    .remember_name_failure(RecordKind::Cname, domain, &e.to_string())
+                    .await;
+            }
+            Ok(vec![])
+        }
     }
 }
 
@@ -3493,6 +3991,257 @@ mod tests {
             classify_pair(&throttled, &throttled),
             DnsOutcome::Rejected,
             "a genuine throttle must still be Rejected so the governor backs off"
+        );
+    }
+
+    /// The single-error twin of the pair rule, for the root TXT race. `.ok()` used to erase the
+    /// class here, so every SERVFAIL name cost the whole scan 30% of its concurrency.
+    #[rstest]
+    #[case::name_failure(
+        Some("DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example"),
+        crate::dns_governor::DnsOutcome::Unrelated
+    )]
+    #[case::throttle(
+        Some("DNS_THROTTLE: DoH provider X returned HTTP 429 for a.example"),
+        crate::dns_governor::DnsOutcome::Rejected
+    )]
+    #[case::broken_endpoint(
+        Some("DNS_ENDPOINT: DoH provider X returned HTTP 400 for a.example"),
+        crate::dns_governor::DnsOutcome::Rejected
+    )]
+    #[case::unclassified(
+        Some("no DoH servers configured for TXT lookup of a.example"),
+        crate::dns_governor::DnsOutcome::Rejected
+    )]
+    #[case::no_class_at_all(None, crate::dns_governor::DnsOutcome::Rejected)]
+    fn governor_verdict_turns_on_the_failure_class(
+        #[case] err: Option<&str>,
+        #[case] expected: crate::dns_governor::DnsOutcome,
+    ) {
+        assert_eq!(
+            failure_outcome_for_governor(err),
+            expected,
+            "the governor's reading of {err:?} must follow the class, not the fact of failure"
+        );
+    }
+
+    /// A memo replay must not testify about a network it never touched — in either direction.
+    #[test]
+    fn a_memoized_arm_never_speaks_for_the_network() {
+        use crate::dns_governor::DnsOutcome;
+
+        let answered: Result<Vec<String>> = Ok(vec!["v=spf1 -all".to_string()]);
+        let throttled: Result<Vec<String>> =
+            Err(anyhow::anyhow!("DNS_THROTTLE: provider returned 429"));
+
+        // The regression this exists for: one arm replayed from the memo, the other genuinely
+        // throttled. Reading the replay as an answer would leave the governor at full concurrency
+        // while the only query actually issued was being rejected.
+        assert_eq!(
+            classify_pair(
+                &governor_view(true, &answered),
+                &governor_view(false, &throttled),
+            ),
+            DnsOutcome::Rejected,
+            "a remembered success must not mask a live throttle"
+        );
+
+        // And the mirror: a remembered failure must not make the controller back off over a name
+        // no packet was sent for.
+        let name_failure: Result<Vec<String>> =
+            Err(anyhow::anyhow!("DNS_NAME: provider returned DNS RCODE 2"));
+        assert_eq!(
+            classify_pair(
+                &governor_view(true, &name_failure),
+                &governor_view(false, &answered),
+            ),
+            DnsOutcome::Answered,
+            "a live answer decides alone when the other arm came from the memo"
+        );
+
+        // A live arm is passed through unchanged, so the existing pair rules still apply.
+        assert_eq!(
+            classify_pair(
+                &governor_view(false, &name_failure),
+                &governor_view(false, &name_failure),
+            ),
+            DnsOutcome::Unrelated,
+            "two live name failures stay Unrelated — the link is healthy"
+        );
+    }
+
+    // ── The negative memo's write gate ───────────────────────────────────────────────
+    //
+    // One rule, stated once: an outage must never memoize as absence. A throttle or a transport
+    // failure means "we could not look", never "there is nothing there" — memoizing either would
+    // turn one transient outage into a scan-wide false negative and would suppress the per-attempt
+    // counting the exit-3 guard reads (GRC-367).
+
+    #[rstest]
+    // The ONLY memoizable class: a provider returned a well-formed dns-json body over a working
+    // transport, reporting that this name's own authoritative servers failed it.
+    #[case::servfail(
+        "DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example",
+        true
+    )]
+    #[case::refused(
+        "DNS_NAME: DoH provider X returned DNS RCODE 5 for broken.example",
+        true
+    )]
+    // "We could not look" — every one of these must be forgotten.
+    #[case::throttle("DNS_THROTTLE: DoH provider X returned HTTP 429 for a.example", false)]
+    #[case::broken_endpoint("DNS_ENDPOINT: DoH provider X returned HTTP 400 for a.example", false)]
+    #[case::no_transport(
+        "DNS_ENDPOINT: no DNS transport could resolve TXT for a.example",
+        false
+    )]
+    #[case::timeout("error sending request: operation timed out", false)]
+    #[case::local_fd_exhaustion("error sending request: Too many open files (os error 24)", false)]
+    #[case::no_providers("no DoH servers configured for TXT lookup of a.example", false)]
+    #[case::empty("", false)]
+    // Mixed messages are refused rather than guessed at: a message carrying both tags is not a
+    // clean verdict about the name, and the safe direction is to re-query.
+    #[case::name_and_throttle("DNS_NAME … DNS_THROTTLE …", false)]
+    #[case::name_and_endpoint("DNS_NAME … DNS_ENDPOINT …", false)]
+    fn only_a_clean_name_verdict_may_be_memoized_as_absence(
+        #[case] msg: &str,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            may_memoize_failure(msg),
+            expected,
+            "may_memoize_failure({msg:?}) must be {expected}: remembering a failure that was \
+             about our reach rather than about the zone is how one outage becomes a scan-wide \
+             false negative"
+        );
+    }
+
+    /// The write gate is enforced at the memo, not left to the caller's discipline — so a caller
+    /// that hands it the wrong class writes nothing rather than poisoning the scan.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn memo_stores_an_authoritative_empty_but_refuses_an_outage() {
+        let pool = DnsServerPool::with_test_urls(vec![]);
+
+        // An authoritative empty IS a fact about the zone: the name has no records of this kind.
+        pool.remember_answer(RecordKind::Txt, "norecords.example", &[])
+            .await;
+        assert!(
+            matches!(
+                pool.recall_memo(RecordKind::Txt, "norecords.example").await,
+                Some(MemoEntry::Answer(ref records)) if records.is_empty()
+            ),
+            "an authoritative empty must be reusable — it is an answer, not a degradation marker"
+        );
+
+        // A throttle is not. It means we could not look.
+        pool.remember_name_failure(
+            RecordKind::Txt,
+            "throttled.example",
+            "DNS_THROTTLE: DoH provider X returned HTTP 429 for throttled.example",
+        )
+        .await;
+        assert!(
+            pool.recall_memo(RecordKind::Txt, "throttled.example")
+                .await
+                .is_none(),
+            "a throttle must leave NO memo entry: the next lookup has to re-attempt and re-count"
+        );
+
+        // A name verdict is, and it comes back as a failure — not as an absence — so the caller
+        // still counts it and the governor still reads it as Unrelated.
+        let verdict = "DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example";
+        pool.remember_name_failure(RecordKind::Txt, "broken.example", verdict)
+            .await;
+        let recalled = pool
+            .recall_memo(RecordKind::Txt, "broken.example")
+            .await
+            .expect("a clean name verdict is memoized");
+        assert!(matches!(recalled, MemoEntry::NameFailure(ref m) if m == verdict));
+        let as_result = DnsServerPool::memo_as_result(&recalled);
+        assert!(
+            as_result.is_err(),
+            "a remembered name failure must be served as a FAILURE, never as an empty answer — \
+             otherwise the exit-3 guard stops seeing a name the scan never resolved"
+        );
+        assert_eq!(
+            failure_outcome_for_governor(Some(&as_result.unwrap_err().to_string())),
+            crate::dns_governor::DnsOutcome::Unrelated,
+            "and serving it must not tell the governor a healthy link is congested"
+        );
+    }
+
+    // ── CNAME-from-TXT extraction (P2.10b) ───────────────────────────────────────────
+
+    #[test]
+    fn cname_chain_is_read_out_of_a_txt_answer_section() {
+        // A real dns-json TXT answer for an aliased name: the resolver had to follow the alias, so
+        // the chain precedes the target's TXT records in the same answer section.
+        let aliased = serde_json::json!({
+            "Status": 0,
+            "Question": [{"name": "www.example.com", "type": 16}],
+            "Answer": [
+                {"name": "www.example.com", "type": 5, "TTL": 300, "data": "edge.cdn.net."},
+                {"name": "edge.cdn.net", "type": 16, "TTL": 300, "data": "\"v=spf1 -all\""}
+            ]
+        });
+        assert_eq!(
+            cname_chain_from_dns_json(&aliased),
+            vec!["edge.cdn.net".to_string()],
+            "the alias must be extracted and its trailing dot trimmed, exactly as a dedicated \
+             CNAME lookup would have rendered it"
+        );
+
+        // The no-CNAME case is the one that carries information: an authoritative answer with no
+        // type-5 records PROVES the name is not aliased, which is what lets the fast path drop
+        // its paired query rather than merely defer it.
+        let plain = serde_json::json!({
+            "Status": 0,
+            "Answer": [
+                {"name": "example.com", "type": 16, "TTL": 300, "data": "\"v=spf1 -all\""}
+            ]
+        });
+        assert!(
+            cname_chain_from_dns_json(&plain).is_empty(),
+            "a TXT-only answer section means no alias"
+        );
+
+        // NXDOMAIN / NODATA shapes carry no Answer key at all.
+        let no_answer_key = serde_json::json!({"Status": 3});
+        assert!(cname_chain_from_dns_json(&no_answer_key).is_empty());
+        let null_answer = serde_json::json!({"Status": 0, "Answer": serde_json::Value::Null});
+        assert!(cname_chain_from_dns_json(&null_answer).is_empty());
+
+        // A multi-hop chain keeps every hop, in resolution order. A dedicated CNAME query returns
+        // only the first hop; the followed chain names more of the infrastructure actually in the
+        // path, which for this scanner is the point.
+        let chained = serde_json::json!({
+            "Status": 0,
+            "Answer": [
+                {"name": "www.example.com", "type": 5, "data": "a.cdn.net."},
+                {"name": "a.cdn.net", "type": 5, "data": "b.cdn.net."},
+                {"name": "b.cdn.net", "type": 1, "data": "1.2.3.4"},
+                {"name": "b.cdn.net", "type": 16, "data": "\"unrelated\""}
+            ]
+        });
+        assert_eq!(
+            cname_chain_from_dns_json(&chained),
+            vec!["a.cdn.net".to_string(), "b.cdn.net".to_string()],
+            "every alias hop is kept, and A/TXT answers in the same section are ignored"
+        );
+
+        // Malformed entries are skipped rather than stringified into junk vendor names.
+        let malformed = serde_json::json!({
+            "Status": 0,
+            "Answer": [
+                {"name": "x.example.com", "type": 5, "data": 42},
+                {"name": "x.example.com", "type": 5, "data": "good.cdn.net."}
+            ]
+        });
+        assert_eq!(
+            cname_chain_from_dns_json(&malformed),
+            vec!["good.cdn.net".to_string()],
+            "a non-string data field must be dropped, not coerced"
         );
     }
 
@@ -5007,7 +5756,8 @@ mod tests {
         let records = pool
             .doh_txt_lookup("example.com", doh_server)
             .await
-            .unwrap();
+            .unwrap()
+            .txt;
 
         assert_eq!(records.len(), 1);
         assert!(records[0].contains("spf1"));
@@ -5043,7 +5793,11 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_txt_lookup("multi.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_txt_lookup("multi.com", doh_server)
+            .await
+            .unwrap()
+            .txt;
 
         assert_eq!(records.len(), 3);
     }
@@ -5070,7 +5824,11 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_txt_lookup("empty.com", doh_server).await.unwrap();
+        let records = pool
+            .doh_txt_lookup("empty.com", doh_server)
+            .await
+            .unwrap()
+            .txt;
 
         assert!(records.is_empty());
     }
@@ -5106,11 +5864,18 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let records = pool.doh_txt_lookup("mix.com", doh_server).await.unwrap();
+        let answer = pool.doh_txt_lookup("mix.com", doh_server).await.unwrap();
 
         // Should only have the TXT record, not the A record
-        assert_eq!(records.len(), 1);
-        assert!(records[0].contains("spf1"));
+        assert_eq!(answer.txt.len(), 1);
+        assert!(answer.txt[0].contains("spf1"));
+        // …and the A record must not be mistaken for an alias hop either: only type 5 counts.
+        assert_eq!(
+            answer.cname,
+            Some(vec![]),
+            "an authoritative answer with no type-5 records proves the name is NOT aliased, \
+             which is what lets the fast path skip its paired CNAME query"
+        );
     }
 
     // --- doh_cname_lookup tests ---
@@ -5337,16 +6102,29 @@ mod tests {
 
     // --- get_txt_and_cname_fast tests ---
 
+    // P2.10b: the CNAME chain rides along in the TXT response, so the fast path issues ONE query
+    // for an aliased name where it used to issue two. The mock expectations are the assertion —
+    // `expect(1)` on TXT and `expect(0)` on a fully working CNAME endpoint, both verified when the
+    // server drops — so a regression that reinstates the paired query fails here rather than
+    // silently doubling the busiest DNS path in the program.
     #[tokio::test]
     #[cfg(not(coverage))]
-    async fn test_get_txt_and_cname_fast() {
+    async fn test_get_txt_and_cname_fast_derives_cname_from_the_txt_response() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
-        // TXT response
-        let txt_response = build_doh_txt_response("fast.com", &["v=spf1 ~all"]);
+        // A real dns-json TXT answer for an ALIASED name: the resolver had to follow the alias to
+        // answer, so the chain is in the answer section ahead of the target's TXT records.
+        let txt_response = serde_json::json!({
+            "Status": 0,
+            "Question": [{"name": "fast.com", "type": 16}],
+            "Answer": [
+                {"name": "fast.com", "type": 5, "TTL": 300, "data": "cdn.fast.com."},
+                {"name": "cdn.fast.com", "type": 16, "TTL": 300, "data": "\"v=spf1 ~all\""}
+            ]
+        });
         Mock::given(method("GET"))
             .and(path("/dns-query"))
             .and(query_param("name", "fast.com"))
@@ -5356,20 +6134,23 @@ mod tests {
                     .set_body_json(txt_response)
                     .insert_header("content-type", "application/dns-json"),
             )
+            .expect(1)
             .mount(&server)
             .await;
 
-        // CNAME response
-        let cname_response = build_doh_cname_response("fast.com", &["cdn.fast.com"]);
+        // A perfectly good CNAME endpoint that must never be reached. `expect(0)` is verified on
+        // drop, so a regression that reinstates the paired query fails this test rather than
+        // quietly doubling the fast path's DNS volume again.
         Mock::given(method("GET"))
             .and(path("/dns-query"))
             .and(query_param("name", "fast.com"))
             .and(query_param("type", "CNAME"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(cname_response)
+                    .set_body_json(build_doh_cname_response("fast.com", &["cdn.fast.com"]))
                     .insert_header("content-type", "application/dns-json"),
             )
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -5378,12 +6159,157 @@ mod tests {
         let (txt_records, cname_records) = pool.get_txt_and_cname_fast("fast.com", &counter).await;
 
         assert!(!txt_records.is_empty());
-        assert!(!cname_records.is_empty());
+        assert_eq!(
+            cname_records,
+            vec!["cdn.fast.com".to_string()],
+            "the alias must be read out of the TXT response, with no CNAME query issued"
+        );
         // A successful lookup must NOT register a DNS failure.
         assert_eq!(
             counter.load(Ordering::Relaxed),
             0,
             "successful fast lookup must not increment the failure counter"
+        );
+    }
+
+    // The other half of the same contract: a TXT answer with no type-5 records PROVES the name is
+    // not aliased, so the CNAME query is skipped there too and the caller gets an honest empty.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_txt_and_cname_fast_skips_cname_query_for_an_unaliased_name() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "plain.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(build_doh_txt_response("plain.com", &["v=spf1 ~all"]))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let counter = AtomicUsize::new(0);
+        let (txt_records, cname_records) = pool.get_txt_and_cname_fast("plain.com", &counter).await;
+
+        assert_eq!(txt_records.len(), 1);
+        assert!(
+            cname_records.is_empty(),
+            "an answer carrying no type-5 records means the name is not aliased"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "a proven absence of aliasing is not a DNS failure"
+        );
+    }
+
+    // The memo must serve the fast path too — it was the one high-volume caller that bypassed it.
+    // `expect(1)` fails the test on drop if the second call puts a second query on the wire.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_txt_and_cname_fast_second_lookup_is_served_from_the_memo() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .and(query_param("name", "repeat.com"))
+            .and(query_param("type", "TXT"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(build_doh_txt_response("repeat.com", &["v=spf1 ~all"]))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let counter = AtomicUsize::new(0);
+        let first = pool.get_txt_and_cname_fast("repeat.com", &counter).await;
+        let second = pool.get_txt_and_cname_fast("repeat.com", &counter).await;
+
+        assert_eq!(
+            first, second,
+            "the memo must reproduce the first lookup's answer verbatim"
+        );
+        assert_eq!(first.0.len(), 1);
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "a memo hit on a successful answer is not a failure"
+        );
+    }
+
+    // The negative memo, end to end on the fast path: a name whose own servers SERVFAIL is
+    // rotated over once, then remembered — but it is still COUNTED on every hit, because the memo
+    // may remove the query and never the failure's visibility.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_get_txt_and_cname_fast_memoizes_a_name_failure_but_keeps_counting_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // HTTP 200 carrying a well-formed dns-json body whose RCODE is SERVFAIL: the transport
+        // demonstrably works, this NAME is broken. That is the only class the memo may keep.
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "Status": 2,
+                        "Question": [{"name": "broken.example", "type": 16}]
+                    }))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let counter = AtomicUsize::new(0);
+
+        let (txt, cname) = pool
+            .get_txt_and_cname_fast("broken.example", &counter)
+            .await;
+        assert!(txt.is_empty() && cname.is_empty());
+        let after_first = counter.load(Ordering::Relaxed);
+        assert!(
+            after_first >= 1,
+            "a name failure must be counted, never silently emptied"
+        );
+        let requests_after_first = server
+            .received_requests()
+            .await
+            .expect("the mock server records requests")
+            .len();
+
+        let (txt, cname) = pool
+            .get_txt_and_cname_fast("broken.example", &counter)
+            .await;
+        assert!(txt.is_empty() && cname.is_empty());
+        assert!(
+            counter.load(Ordering::Relaxed) > after_first,
+            "a negative memo HIT must still count: the scan really did fail to resolve this name, \
+             and the exit-3 guard and coverage summary must keep seeing it"
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("the mock server records requests")
+                .len(),
+            requests_after_first,
+            "the second lookup must issue NO query — this is the saving a shared broken SPF \
+             include is supposed to produce across the thousands of domains referencing it"
         );
     }
 
@@ -5735,7 +6661,14 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let result = pool.fast_txt_lookup("fast-txt.com").await.unwrap();
 
-        assert!(!result.is_empty());
+        assert!(!result.txt.is_empty());
+        // A DoH answer settles the alias chain too, which is what the caller keys the
+        // drop-the-paired-CNAME-query decision on.
+        assert_eq!(
+            result.cname,
+            Some(vec![]),
+            "a dns-json answer must report the chain (here: not aliased), not leave it unknown"
+        );
     }
 
     #[tokio::test]
@@ -5764,6 +6697,55 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("DNS_THROTTLE"),
             "surfaced error must be tagged DNS_THROTTLE"
+        );
+    }
+
+    /// A SERVFAIL name must keep its class all the way out of the fast path.
+    ///
+    /// It used to be relabelled `DNS_ENDPOINT` by the bottom of the ladder, which had two costs:
+    /// the governor read a broken domain as a congested network and cut scan-wide concurrency for
+    /// it, and the name could never enter the negative memo — so every one of the (potentially
+    /// thousands of) domains referencing a shared broken name re-paid the full provider rotation.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn test_fast_txt_lookup_keeps_the_name_class_when_the_ladder_also_fails() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // HTTP 200 with a well-formed dns-json body reporting SERVFAIL: the transport worked, the
+        // NAME did not. The test UDP fallback (127.0.0.1:53) then fails, as in the sibling test.
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({
+                        "Status": 2,
+                        "Question": [{"name": "servfail.invalid", "type": 16}]
+                    }))
+                    .insert_header("content-type", "application/dns-json"),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
+        let err = pool
+            .fast_txt_lookup("servfail.invalid")
+            .await
+            .expect_err("no transport resolved the name, so this must be a failure")
+            .to_string();
+
+        assert!(
+            err.contains("DNS_NAME"),
+            "the name verdict must survive the ladder, got: {err}"
+        );
+        assert!(
+            !err.contains("DNS_ENDPOINT"),
+            "re-labelling it DNS_ENDPOINT is the regression: it makes the governor throttle a \
+             healthy link and locks the name out of the negative memo. Got: {err}"
+        );
+        assert!(
+            may_memoize_failure(&err),
+            "and the surfaced class must be one the memo will actually accept"
         );
     }
 
@@ -5871,7 +6853,8 @@ mod tests {
         let records = pool
             .doh_txt_lookup("escaped.com", doh_server)
             .await
-            .unwrap();
+            .unwrap()
+            .txt;
 
         assert_eq!(records.len(), 1);
         // The unescape function should handle \_ -> _
@@ -6541,7 +7524,7 @@ mod tests {
             "resilient lookup must rotate past the 429 provider to a healthy one"
         );
         assert!(
-            !result.unwrap().is_empty(),
+            !result.unwrap().txt.is_empty(),
             "rotation to the healthy provider must return TXT records, not a false-negative empty"
         );
     }
@@ -7089,7 +8072,8 @@ mod tests {
         let records = pool
             .doh_txt_lookup("nxdomain.example", &doh_server)
             .await
-            .expect("NXDOMAIN (RCODE 3) is a genuine absence and must be Ok, not an error");
+            .expect("NXDOMAIN (RCODE 3) is a genuine absence and must be Ok, not an error")
+            .txt;
 
         assert!(
             records.is_empty(),
@@ -7143,7 +8127,7 @@ mod tests {
             result.is_ok(),
             "resilient lookup must rotate past the 400 (DNS_ENDPOINT) provider to a healthy one"
         );
-        let records = result.unwrap();
+        let records = result.unwrap().txt;
         assert_eq!(
             records.len(),
             1,
@@ -7380,13 +8364,17 @@ mod tests {
         pool.remember_answer(RecordKind::Txt, "collide.com", &["txt-answer".to_string()])
             .await;
 
-        assert_eq!(
-            pool.recall_answer(RecordKind::Txt, "collide.com").await,
-            Some(vec!["txt-answer".to_string()])
+        assert!(
+            matches!(
+                pool.recall_memo(RecordKind::Txt, "collide.com").await,
+                Some(MemoEntry::Answer(ref records)) if records == &["txt-answer".to_string()]
+            ),
+            "the TXT answer must come back verbatim under its own kind"
         );
-        assert_eq!(
-            pool.recall_answer(RecordKind::Cname, "collide.com").await,
-            None,
+        assert!(
+            pool.recall_memo(RecordKind::Cname, "collide.com")
+                .await
+                .is_none(),
             "a TXT answer must never satisfy a CNAME query"
         );
     }
