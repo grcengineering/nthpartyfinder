@@ -12,14 +12,29 @@
 //! Entrust's, and Meta's, is now discontinued) — join the rotation only when their API
 //! credentials are configured via env (`NTHPARTYFINDER_MERKLEMAP_TOKEN`;
 //! `NTHPARTYFINDER_CENSYS_PAT` + `NTHPARTYFINDER_CENSYS_ORG_ID`).
+//!
+//! Two bounds keep this phase honest, because CT is the one source that answers with other
+//! people's data:
+//!
+//! * **Only currently-valid certificates are asked for** (`exclude=expired`). The full history of
+//!   a well-known domain is a multi-megabyte payload, and a lapsed certificate attests a
+//!   relationship that has, by definition, lapsed too.
+//! * **Co-tenancy on a shared certificate is not a vendor relationship.** Every SAN used to seed
+//!   recursion, so one multi-tenant certificate could fan the scan out across dozens of unrelated
+//!   strangers — an accuracy defect, not just a cost one, and under the shipped
+//!   `strategy = "unlimited"` nothing bounded it. See [`SHARED_CERT_SAN_BASE_LIMIT`].
+//!
+//! And, mirroring the DNS failure-visibility contract (GRC-367), a provider that *refuses* to
+//! answer is never allowed to look like a domain with no certificates: a 429 is classified,
+//! counted, warned about once, and reported as degraded coverage — see [`ProviderThrottle`].
 
 use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-use tracing::{debug, info};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{debug, info, warn};
 
 use crate::domain_utils;
 use crate::http_client::GatedSend;
@@ -51,6 +66,48 @@ const CENSYS_PAT_ENV: &str = "NTHPARTYFINDER_CENSYS_PAT";
 /// Env var carrying the Censys Organization ID (`X-Organization-ID` header). Both this
 /// and the PAT must be set for the Censys provider to join the rotation.
 const CENSYS_ORG_ENV: &str = "NTHPARTYFINDER_CENSYS_ORG_ID";
+
+/// Past this many distinct SAN base domains, one certificate stops being read as one
+/// organisation's certificate and starts being read as *shared* infrastructure.
+///
+/// This is not a drop threshold, and the distinction is the whole design. Legitimate single-org
+/// certificate families routinely carry far more than twenty genuinely-owned base domains —
+/// Google's ccTLD bundle, Wikimedia's project bundle, Automattic's property bundle — so a wide SAN
+/// list is evidence of *breadth*, never on its own evidence of co-tenancy. Dropping those wholesale
+/// would delete true relationships to fix a false-positive problem, which is a worse trade than the
+/// one it replaces.
+///
+/// So crossing this line only raises the burden of proof: past it, a SAN must be corroborated by a
+/// second, independently-issued certificate before it may seed recursion (see [`admit_san_bases`]),
+/// and if nothing at all is corroborated the whole set is kept rather than the phase returning
+/// nothing. Twenty sits above the size of an ordinary per-service certificate (apex + www + a
+/// handful of subdomains, all of which collapse to one base) and well below the multi-tenant
+/// bundles this exists to notice.
+const SHARED_CERT_SAN_BASE_LIMIT: usize = 20;
+
+/// How long a provider stays out of the rotation after a 429 that carried no usable `Retry-After`.
+const CT_COOLDOWN_DEFAULT_SECS: u64 = 60;
+
+/// Floor on an honoured `Retry-After`. A provider that answers 429 with `0` is telling us nothing
+/// useful; backing off for at least this long keeps a wide fan-out from walking straight back into
+/// the same refusal on the next domain.
+const CT_COOLDOWN_MIN_SECS: u64 = 5;
+
+/// Ceiling on an honoured `Retry-After`. A single header must not be able to remove a provider from
+/// the rotation for the remainder of a deep scan — if the provider is still throttling when the
+/// ceiling expires it simply answers 429 again and the cooldown restarts, which costs one request
+/// and keeps the backoff observable, rather than silently disabling a source for hours.
+const CT_COOLDOWN_MAX_SECS: u64 = 300;
+
+const _: () = {
+    // `throttle_cooldown` clamps into this range; an out-of-order edit would panic at runtime
+    // instead of failing here, on a path that only executes once a provider is already refusing us.
+    assert!(
+        CT_COOLDOWN_MIN_SECS <= CT_COOLDOWN_DEFAULT_SECS
+            && CT_COOLDOWN_DEFAULT_SECS <= CT_COOLDOWN_MAX_SECS,
+        "the CT cooldown bounds must stay ordered: min <= default <= max"
+    );
+};
 
 /// Response from crt.sh API
 #[derive(Debug, Deserialize)]
@@ -231,9 +288,253 @@ enum CtFetchError {
     /// Recoverable: fail over to the next provider; degrade to an empty answer if none
     /// remain (a reachable-but-unhelpful provider is not a scan-fatal condition).
     Soft(String),
+    /// Provider refused service with HTTP 429. Split out of `Soft` because the two mean opposite
+    /// things about the answer: a 5xx says the provider is broken, a 429 says *we* are asking too
+    /// often — the certificates are there, we were told to come back later. Collapsing that into an
+    /// empty result was a silent recall loss (TF-RATELIMIT), so it carries the honoured backoff and
+    /// is counted and reported rather than failed over in silence.
+    Throttled { cooldown: Duration },
     /// Provider could not be reached at all (transport / connection / timeout). If every
     /// provider is unreachable this propagates as a hard error so the phase logs it.
     Transport(anyhow::Error),
+}
+
+/// What an empty CT answer actually *means*.
+///
+/// The whole point of the type is that `Authoritative` and `ThrottledEmpty` produce byte-identical
+/// results — zero vendors — and must never be reported identically. One is a fact about the domain;
+/// the other is our own recall loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtOutcome {
+    /// A provider answered. Zero certificates here is a fact about the domain.
+    Authoritative,
+    /// No provider could be reached at all — the caller propagates the transport error so the phase
+    /// logs it with the real error kind.
+    Unreachable,
+    /// No provider answered and at least one refused us with a 429 (or was still inside the
+    /// `Retry-After` cooldown from an earlier one). Empty here is OUR recall loss.
+    ThrottledEmpty,
+    /// No provider answered, none throttled: every one was reachable but unusable (5xx, or a body
+    /// that would not parse).
+    UnusableEmpty,
+}
+
+/// Classify one exhausted provider rotation.
+///
+/// Precedence is deliberate. `answered` wins outright: if a sibling provider gave us certificates
+/// the phase is not degraded, however loudly another provider complained on the way. Below that,
+/// unreachable outranks throttled because the caller already has a real error to propagate and
+/// count for that case, and double-recording it would inflate the degradation counts.
+fn classify_ct_outcome(
+    answered: bool,
+    any_throttled: bool,
+    any_transport_error: bool,
+) -> CtOutcome {
+    if answered {
+        CtOutcome::Authoritative
+    } else if any_transport_error {
+        CtOutcome::Unreachable
+    } else if any_throttled {
+        CtOutcome::ThrottledEmpty
+    } else {
+        CtOutcome::UnusableEmpty
+    }
+}
+
+/// Honour a `Retry-After` header value, bounded by [`CT_COOLDOWN_MIN_SECS`] and
+/// [`CT_COOLDOWN_MAX_SECS`]; an absent or unusable header falls back to
+/// [`CT_COOLDOWN_DEFAULT_SECS`].
+///
+/// Only the delta-seconds form is parsed. RFC 9110 also permits an HTTP-date, but none of the four
+/// CT providers has been observed sending one, and mis-parsing a date into a nonsense number of
+/// seconds would be worse than not parsing it at all — an unrecognised value falls back to the
+/// default cooldown, so the scan still backs off either way.
+fn throttle_cooldown(retry_after: Option<&str>) -> Duration {
+    let secs = retry_after
+        .and_then(parse_retry_after_secs)
+        .unwrap_or(CT_COOLDOWN_DEFAULT_SECS)
+        .clamp(CT_COOLDOWN_MIN_SECS, CT_COOLDOWN_MAX_SECS);
+    Duration::from_secs(secs)
+}
+
+/// The delta-seconds form of `Retry-After`, or `None` for anything else (an HTTP-date, a negative
+/// or fractional value, a proxy's prose). `None` is not "no backoff" — see [`throttle_cooldown`].
+fn parse_retry_after_secs(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+/// Wall-clock millis since the Unix epoch.
+///
+/// The cooldown deadline is compared across concurrent per-domain tasks that never share a start
+/// instant, so it is stored as an absolute wall-clock instant rather than an `Instant` offset.
+#[cfg_attr(coverage_nightly, coverage(off))] // coverage: reads the system clock — the cooldown logic itself takes `now_ms` as a parameter so it is tested deterministically
+fn now_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// One provider's throttle state.
+///
+/// This is the CT-side of the discipline `dns.rs` applies to DoH providers — classify the refusal,
+/// count it, warn about it exactly once — for the one CT failure that used to disappear entirely.
+/// Deliberately NOT a rate limiter: a preemptive pacing gate over CT queries was built, measured
+/// (0/17 → 1/51 completions, because crt.sh *hangs* rather than 429s and the gate held permits
+/// until timeout) and reverted (ISC-510). Nothing here fires until a provider has actually answered
+/// 429; then, and only then, we take it at its word.
+#[derive(Debug, Default)]
+struct ProviderThrottle {
+    /// Unix-epoch millis before which this provider must not be queried again. Zero = usable.
+    cooldown_until_ms: AtomicU64,
+    /// Whether this provider's throttle has already been reported, so a deep scan warns once per
+    /// provider instead of once per domain.
+    warned: AtomicBool,
+}
+
+impl ProviderThrottle {
+    /// May this provider be queried at `now_ms`?
+    fn is_usable_at(&self, now_ms: u64) -> bool {
+        now_ms >= self.cooldown_until_ms.load(Ordering::Relaxed)
+    }
+
+    /// Hold this provider out of the rotation until `now_ms + cooldown`, and report whether this is
+    /// the first throttle seen from it (the caller warns only then).
+    ///
+    /// `fetch_max` rather than `store`: two concurrent domains can be refused at once, and the
+    /// shorter of two overlapping backoffs must never shorten the longer one.
+    fn begin_cooldown(&self, now_ms: u64, cooldown: Duration) -> bool {
+        self.cooldown_until_ms.fetch_max(
+            now_ms.saturating_add(cooldown.as_millis() as u64),
+            Ordering::Relaxed,
+        );
+        !self.warned.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// The `(SAN as written, its base domain)` pairs of one certificate, deduplicated by base domain
+/// and in first-seen order.
+///
+/// A certificate lists `example.com`, `www.example.com` and `*.example.com` as three SANs and one
+/// relationship; the shared-certificate cap counts *relationships*, so collapsing to base domains
+/// first is what makes the threshold mean anything.
+fn cert_san_bases(name_value: &str) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for line in name_value.lines() {
+        let san = line.trim().to_lowercase();
+        if san.is_empty() {
+            continue;
+        }
+        let base = domain_utils::extract_base_domain(&san);
+        if seen.insert(base.clone()) {
+            out.push((san, base));
+        }
+    }
+    out
+}
+
+/// Base domains attested by a second, independently-issued certificate.
+///
+/// This is the corroboration signal the shared-certificate cap spends: appearing once, next to our
+/// target, on one wide bundle is exactly what co-tenancy looks like, while a genuinely related
+/// domain tends to be re-attested as certificates are reissued and rebundled over time.
+///
+/// Certificates are deduplicated on their SAN set first, because crt.sh lists a precertificate AND
+/// its final certificate as separate rows with distinct IDs and identical names. Counting rows
+/// would make every base domain trivially "corroborated" by its own precertificate, which is not a
+/// second source at all — it is the same certificate logged twice.
+fn corroborated_bases<'a>(certs: &[Vec<&'a str>]) -> HashSet<&'a str> {
+    let mut distinct_certs: HashSet<Vec<&str>> = HashSet::new();
+    let mut seen_once: HashSet<&'a str> = HashSet::new();
+    let mut corroborated: HashSet<&'a str> = HashSet::new();
+
+    for bases in certs {
+        let mut fingerprint = bases.clone();
+        fingerprint.sort_unstable();
+        if !distinct_certs.insert(fingerprint) {
+            continue;
+        }
+        for &base in bases {
+            if !seen_once.insert(base) {
+                corroborated.insert(base);
+            }
+        }
+    }
+    corroborated
+}
+
+/// Which of one certificate's SAN base domains may seed recursion, in input order.
+///
+/// Under [`SHARED_CERT_SAN_BASE_LIMIT`] every SAN is admitted: an ordinary certificate's SAN list
+/// *is* the relationship set, and second-guessing it would cost real recall for nothing.
+///
+/// Over the limit the certificate is wide enough to be shared infrastructure, so admission narrows
+/// to the base domains a second certificate also attests — the co-tenants of one bundle drop out,
+/// the members of a genuine multi-domain family (which recur across reissues and rebundles) stay.
+///
+/// The one thing this must never do is take none. If nothing is corroborated there is no second
+/// certificate to compare against, which means the evidence needed to call the certificate *shared*
+/// does not exist either — a stable single-org bundle that is simply reissued verbatim looks
+/// exactly like this. Dropping the whole set there would turn a fan-out bound into a total recall
+/// loss for that domain, so the wide set is kept and the bound simply does not fire.
+fn admit_san_bases<'a>(bases: &[&'a str], corroborated: &HashSet<&'a str>) -> Vec<&'a str> {
+    if bases.len() <= SHARED_CERT_SAN_BASE_LIMIT {
+        return bases.to_vec();
+    }
+    let admitted: Vec<&'a str> = bases
+        .iter()
+        .copied()
+        .filter(|base| corroborated.contains(*base))
+        .collect();
+    if admitted.is_empty() {
+        return bases.to_vec();
+    }
+    admitted
+}
+
+/// The crt.sh query URL. `%.` is crt.sh's wildcard prefix (all subdomains of `domain`).
+///
+/// `exclude=expired` is load-bearing, not a tidy-up: without it crt.sh serves the domain's entire
+/// certificate history, which for a well-known domain is a multi-megabyte JSON body parsed in full
+/// to extract the same names over and over. An expired certificate also attests a relationship that
+/// has itself expired — reporting it as a current nth-party is a claim the evidence does not
+/// support. Filtering server-side means the payload never crosses the wire at all.
+fn crtsh_query_url(base_url: &str, domain: &str) -> String {
+    format!(
+        "{}/?q=%.{}&output=json&exclude=expired",
+        base_url,
+        urlencoding::encode(domain)
+    )
+}
+
+/// Classify a provider's non-2xx response, or `None` when it was a success.
+///
+/// One place decides what a status code means so the four providers cannot drift apart on it — a
+/// 429 from Cert Spotter is the same event as a 429 from crt.sh and must not be swallowed just
+/// because it arrived on a different code path.
+fn non_success_error(
+    provider: &str,
+    domain: &str,
+    response: &reqwest::Response,
+) -> Option<CtFetchError> {
+    let status = response.status();
+    if status.is_success() {
+        return None;
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok());
+        return Some(CtFetchError::Throttled {
+            cooldown: throttle_cooldown(retry_after),
+        });
+    }
+    Some(CtFetchError::Soft(format!(
+        "{} returned status {} for {}",
+        provider, status, domain
+    )))
 }
 
 /// One CT log source in the round-robin rotation.
@@ -283,6 +584,14 @@ pub struct CtLogDiscovery {
     extra_providers: Vec<CtProvider>,
     /// Process-shared round-robin cursor across providers.
     cursor: AtomicUsize,
+    /// Per-provider throttle state, indexed exactly as `providers()` orders them: crt.sh at 0, then
+    /// `extra_providers` in construction order. Kept parallel rather than inside `CtProvider`
+    /// because `providers()` hands out clones per call, and a cooldown that is cloned away is no
+    /// cooldown at all.
+    throttle: Vec<ProviderThrottle>,
+    /// How many 429s this instance has been served across all providers — the "count" leg of the
+    /// classify/count/warn-once contract `dns.rs::note_throttle` sets for DNS.
+    throttles_seen: AtomicU64,
 }
 
 impl CtLogDiscovery {
@@ -325,11 +634,24 @@ impl CtLogDiscovery {
         base_url: String,
         extra_providers: Vec<CtProvider>,
     ) -> Self {
-        let client = crate::http_client::hardened_builder()
+        // `doh_builder`, not `hardened_builder`, and the distinction is host-count — exactly the
+        // one its own doc comment draws. `POOL_MAX_IDLE_PER_HOST = 0` exists because discovery
+        // clients visit an ever-growing host set, so a per-host idle pool grows with the scan. CT
+        // does the opposite: at most four fixed hosts (crt.sh, Cert Spotter, MerkleMap, Censys) no
+        // matter how deep the scan goes, for a hard ceiling of 4 x 2 = 8 idle sockets — negligible
+        // against the 128 in-flight ceiling and unable to scale with the fan-out. Meanwhile the
+        // cost of zero pooling here is exactly the handshake amplification that const documents and
+        // accepts for DoH: effectively every CT query is a fresh TCP+TLS handshake to one host.
+        let client = crate::http_client::doh_builder()
             .timeout(timeout)
             .user_agent(crate::http_client::USER_AGENT)
             .build()
             .unwrap_or_default();
+
+        // One slot per provider, in `providers()` order: crt.sh, then the extras.
+        let throttle = (0..=extra_providers.len())
+            .map(|_| ProviderThrottle::default())
+            .collect();
 
         Self {
             client,
@@ -337,6 +659,8 @@ impl CtLogDiscovery {
             base_url,
             extra_providers,
             cursor: AtomicUsize::new(0),
+            throttle,
+            throttles_seen: AtomicU64::new(0),
         }
     }
 
@@ -365,47 +689,73 @@ impl CtLogDiscovery {
         let entries = self.fetch_entries_round_robin(domain).await?;
         debug!("Found {} certificate entries for {}", entries.len(), domain);
 
-        for entry in entries {
-            // Extract domains from SAN (name_value)
-            if let Some(name_value) = &entry.name_value {
-                for san in name_value.lines() {
-                    let san = san.trim().to_lowercase();
-                    if san.is_empty() {
-                        continue;
-                    }
+        // Every certificate's SAN set is extracted before any of them is mined, because the
+        // shared-certificate cap asks a question no single certificate can answer about itself:
+        // is this base domain re-attested somewhere else, or does it appear exactly once, beside
+        // ours, on one wide bundle?
+        let per_cert_sans: Vec<Vec<(String, String)>> = entries
+            .iter()
+            .map(|e| {
+                e.name_value
+                    .as_deref()
+                    .map(cert_san_bases)
+                    .unwrap_or_default()
+            })
+            .collect();
+        let per_cert_bases: Vec<Vec<&str>> = per_cert_sans
+            .iter()
+            .map(|sans| sans.iter().map(|(_, base)| base.as_str()).collect())
+            .collect();
+        let corroborated = corroborated_bases(&per_cert_bases);
 
-                    // Extract base domain
-                    let san_base = domain_utils::extract_base_domain(&san);
+        for ((entry, sans), bases) in entries.iter().zip(&per_cert_sans).zip(&per_cert_bases) {
+            // Extract domains from SAN (name_value). The admission decision is made per
+            // certificate, over its full SAN breadth — before the self/infrastructure filters
+            // below — because it classifies the *certificate*, not the subset we would have kept
+            // from it.
+            let admitted: HashSet<&str> =
+                admit_san_bases(bases, &corroborated).into_iter().collect();
 
-                    // Skip if same as target domain
-                    if san_base == base_domain {
-                        continue;
-                    }
+            for (san, san_base) in sans {
+                // Co-tenancy on a shared certificate is not a vendor relationship.
+                if !admitted.contains(san_base.as_str()) {
+                    debug!(
+                        "Skipping SAN {} on a {}-name shared certificate for {}: no second certificate attests it",
+                        san_base,
+                        bases.len(),
+                        domain
+                    );
+                    continue;
+                }
 
-                    // Skip common CDN/infrastructure domains that aren't meaningful vendors
-                    if Self::is_infrastructure_domain(&san_base) {
-                        continue;
-                    }
+                // Skip if same as target domain
+                if *san_base == base_domain {
+                    continue;
+                }
 
-                    // Only add if not seen before
-                    if seen_domains.insert(san_base.clone()) {
-                        let issuer = entry.issuer_name.as_deref().unwrap_or("Unknown CA");
-                        let cert_id = entry.id;
+                // Skip common CDN/infrastructure domains that aren't meaningful vendors
+                if Self::is_infrastructure_domain(san_base) {
+                    continue;
+                }
 
-                        results.push(CtDiscoveryResult {
-                            domain: san_base.clone(),
-                            source: format!("Certificate SAN (crt.sh ID: {})", cert_id),
-                            certificate_info: format!(
-                                "SAN: {} | Issuer: {} | Certificate ID: {}",
-                                san, issuer, cert_id
-                            ),
-                        });
+                // Only add if not seen before
+                if seen_domains.insert(san_base.clone()) {
+                    let issuer = entry.issuer_name.as_deref().unwrap_or("Unknown CA");
+                    let cert_id = entry.id;
 
-                        debug!(
-                            "Found vendor {} from CT log certificate {}",
-                            san_base, cert_id
-                        );
-                    }
+                    results.push(CtDiscoveryResult {
+                        domain: san_base.clone(),
+                        source: format!("Certificate SAN (crt.sh ID: {})", cert_id),
+                        certificate_info: format!(
+                            "SAN: {} | Issuer: {} | Certificate ID: {}",
+                            san, issuer, cert_id
+                        ),
+                    });
+
+                    debug!(
+                        "Found vendor {} from CT log certificate {}",
+                        san_base, cert_id
+                    );
                 }
             }
 
@@ -447,6 +797,12 @@ impl CtLogDiscovery {
     /// entries — possibly empty. If every provider fails, a reachable-but-unhelpful
     /// response degrades to an empty answer while a total transport failure propagates
     /// as a hard error (so the phase logs it with the real error kind).
+    ///
+    /// The one case that may NOT degrade in silence is a throttle. A provider that answered 429 —
+    /// or one we are deliberately not asking because it is still inside the `Retry-After` window it
+    /// gave us — has told us the certificates exist and we may not have them yet. That empty is
+    /// recorded as degraded CT coverage, so the summary can tell it apart from a domain that
+    /// genuinely has no certificates (TF-RATELIMIT).
     #[cfg_attr(coverage_nightly, coverage(off))]
     async fn fetch_entries_round_robin(&self, domain: &str) -> Result<Vec<CrtShEntry>> {
         let providers = self.providers();
@@ -455,11 +811,37 @@ impl CtLogDiscovery {
         // spreading load off any single aggregator.
         let start = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
         let mut transport_err = None;
+        let mut any_throttled = false;
+        let mut answer = None;
 
         for offset in 0..n {
-            let provider = &providers[(start + offset) % n];
+            let idx = (start + offset) % n;
+            let provider = &providers[idx];
+
+            // Honour a cooldown this provider asked for on an earlier domain. This is the ONLY
+            // pacing in the CT path and it is strictly reactive: nothing here delays a request the
+            // provider has not already refused. (A preemptive per-provider rate gate was built,
+            // measured at 0/17 -> 1/51 CT completions because crt.sh hangs rather than 429s, and
+            // reverted — ISC-510. Do not reintroduce one.)
+            if !self.throttle[idx].is_usable_at(now_epoch_millis()) {
+                any_throttled = true;
+                debug!(
+                    "CT provider {} still cooling down after a 429; skipping it for {}",
+                    provider.name(),
+                    domain
+                );
+                continue;
+            }
+
             match self.fetch_provider(provider, domain).await {
-                Ok(entries) => return Ok(entries),
+                Ok(entries) => {
+                    answer = Some(entries);
+                    break;
+                }
+                Err(CtFetchError::Throttled { cooldown }) => {
+                    any_throttled = true;
+                    self.note_throttle(idx, provider.name(), domain, cooldown);
+                }
                 Err(CtFetchError::Soft(msg)) => {
                     debug!(
                         "CT provider {} unavailable for {} (failing over): {}",
@@ -480,12 +862,54 @@ impl CtLogDiscovery {
             }
         }
 
-        match transport_err {
-            // Nothing was reachable — surface the real error kind rather than a silent empty.
-            Some(e) => Err(e),
-            // Every provider responded but unhelpfully (429/5xx/parse) — treat as "no certs".
-            None => Ok(Vec::new()),
+        if classify_ct_outcome(answer.is_some(), any_throttled, transport_err.is_some())
+            == CtOutcome::ThrottledEmpty
+        {
+            // TF-CT-THROTTLE-WORDING: a distinct `SCAN_COVERAGE.ct.record_throttled()` outcome.
+            // `record_failure` marks the phase degraded, which is the load-bearing half, but it
+            // reads in the summary as "CT-log discovery failed" when the truthful sentence is
+            // "CT-log discovery was rate-limited" — a different remedy for the reader.
+            crate::coverage::SCAN_COVERAGE.ct.record_failure();
         }
+
+        match answer {
+            Some(entries) => Ok(entries),
+            // Nothing was reachable — surface the real error kind rather than a silent empty.
+            None => match transport_err {
+                Some(e) => Err(e),
+                // Every provider responded but unhelpfully (429/5xx/parse) — treat as "no certs",
+                // now with the throttled case recorded as degraded above rather than lost.
+                None => Ok(Vec::new()),
+            },
+        }
+    }
+
+    /// Classify, count, and warn-once about one provider's 429, then hold it out of the rotation
+    /// for as long as it asked for.
+    ///
+    /// The three legs mirror `dns.rs`'s treatment of a throttled DoH provider: the refusal is
+    /// counted at a single choke point so it cannot be double-counted by a caller, and warned about
+    /// once per provider rather than once per domain — a deep scan hitting crt.sh's limit would
+    /// otherwise print thousands of identical lines and teach the reader to ignore them.
+    #[cfg_attr(coverage_nightly, coverage(off))] // coverage: wall-clock cooldown bookkeeping; the decisions are `ProviderThrottle` and `throttle_cooldown`, both unit-tested directly
+    fn note_throttle(&self, idx: usize, name: &str, domain: &str, cooldown: Duration) {
+        self.throttles_seen.fetch_add(1, Ordering::Relaxed);
+        crate::perf::METRICS.ct_throttled.hit();
+        if self.throttle[idx].begin_cooldown(now_epoch_millis(), cooldown) {
+            warn!(
+                "CT_THROTTLE: provider {} returned HTTP 429 for {} — holding it out of the rotation for {}s",
+                name,
+                domain,
+                cooldown.as_secs()
+            );
+        }
+    }
+
+    /// How many 429s this instance has been served. The count is what the throttle tests assert on;
+    /// production visibility is the degraded-coverage record in `fetch_entries_round_robin`.
+    #[cfg(test)]
+    pub(crate) fn throttles_seen(&self) -> u64 {
+        self.throttles_seen.load(Ordering::Relaxed)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -518,11 +942,7 @@ impl CtLogDiscovery {
         base_url: &str,
         domain: &str,
     ) -> std::result::Result<Vec<CrtShEntry>, CtFetchError> {
-        let url = format!(
-            "{}/?q=%.{}&output=json",
-            base_url,
-            urlencoding::encode(domain)
-        );
+        let url = crtsh_query_url(base_url, domain);
         debug!("Querying crt.sh: {}", url);
 
         let response = self
@@ -533,12 +953,8 @@ impl CtLogDiscovery {
             .await
             .map_err(|e| CtFetchError::Transport(e.into()))?;
 
-        if !response.status().is_success() {
-            return Err(CtFetchError::Soft(format!(
-                "crt.sh returned status {} for {}",
-                response.status(),
-                domain
-            )));
+        if let Some(err) = non_success_error("crt.sh", domain, &response) {
+            return Err(err);
         }
 
         let text = response
@@ -586,12 +1002,8 @@ impl CtLogDiscovery {
             .await
             .map_err(|e| CtFetchError::Transport(e.into()))?;
 
-        if !response.status().is_success() {
-            return Err(CtFetchError::Soft(format!(
-                "Cert Spotter returned status {} for {}",
-                response.status(),
-                domain
-            )));
+        if let Some(err) = non_success_error("Cert Spotter", domain, &response) {
+            return Err(err);
         }
 
         let text = response
@@ -640,12 +1052,8 @@ impl CtLogDiscovery {
             .await
             .map_err(|e| CtFetchError::Transport(e.into()))?;
 
-        if !response.status().is_success() {
-            return Err(CtFetchError::Soft(format!(
-                "MerkleMap returned status {} for {}",
-                response.status(),
-                domain
-            )));
+        if let Some(err) = non_success_error("MerkleMap", domain, &response) {
+            return Err(err);
         }
 
         let text = response
@@ -704,12 +1112,8 @@ impl CtLogDiscovery {
             .await
             .map_err(|e| CtFetchError::Transport(e.into()))?;
 
-        if !response.status().is_success() {
-            return Err(CtFetchError::Soft(format!(
-                "Censys returned status {} for {}",
-                response.status(),
-                domain
-            )));
+        if let Some(err) = non_success_error("Censys", domain, &response) {
+            return Err(err);
         }
 
         let text = response
@@ -748,6 +1152,17 @@ impl CtLogDiscovery {
             Ok(entries) => Ok(entries),
             Err(CtFetchError::Soft(msg)) => {
                 tracing::warn!("{}", msg);
+                Ok(Vec::new())
+            }
+            // A throttle degrades to empty here only because this shim predates the round-robin and
+            // exists to pin the historical crt.sh HTTP contract; the production path counts it and
+            // records degraded coverage (see `fetch_entries_round_robin`).
+            Err(CtFetchError::Throttled { cooldown }) => {
+                tracing::warn!(
+                    "CT_THROTTLE: crt.sh returned HTTP 429 for {} (cooldown {}s)",
+                    domain,
+                    cooldown.as_secs()
+                );
                 Ok(Vec::new())
             }
             Err(CtFetchError::Transport(e)) => Err(e),
@@ -1945,5 +2360,365 @@ mod tests {
             "expected failover to Censys to surface vendor-z.io, got {:?}",
             results.iter().map(|r| &r.domain).collect::<Vec<_>>()
         );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // P2.9: expired-certificate exclusion, the shared-certificate SAN
+    // cap, and the 429 cooldown
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn crtsh_is_asked_only_for_currently_valid_certificates() {
+        let url = crtsh_query_url("https://crt.sh", "example.com");
+        assert!(
+            url.contains("exclude=expired"),
+            "without exclude=expired crt.sh serves the domain's ENTIRE certificate history — \
+             megabytes of JSON parsed to re-extract the same names, and lapsed certificates \
+             attesting relationships that have themselves lapsed: {url}"
+        );
+        // The rest of the contract: losing the wildcard prefix silently drops every subdomain from
+        // the answer, and losing output=json makes crt.sh reply with HTML that will never parse.
+        assert!(url.starts_with("https://crt.sh/?q=%.example.com"), "{url}");
+        assert!(url.contains("output=json"), "{url}");
+    }
+
+    #[test]
+    fn crtsh_query_url_encodes_the_domain_it_is_given() {
+        let url = crtsh_query_url("https://crt.sh", "ex ample.com");
+        assert!(
+            !url.contains("ex ample.com"),
+            "an unencoded domain would break the query string: {url}"
+        );
+    }
+
+    #[test]
+    fn cert_san_bases_collapses_one_certificate_to_one_row_per_relationship() {
+        // apex + wildcard + www are three SANs and ONE relationship. The shared-certificate cap
+        // counts relationships, so a certificate that lists a dozen spellings of its own name must
+        // not read as a wide multi-tenant bundle.
+        let sans =
+            cert_san_bases("Example.com\n  \n*.example.com\nwww.EXAMPLE.com\napi.vendor.io\n\n");
+        let bases: Vec<&str> = sans.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(bases, vec!["example.com", "vendor.io"]);
+        // The SAN retained for evidence is the first spelling seen, normalised.
+        assert_eq!(sans[0].0, "example.com");
+        assert_eq!(sans[1].0, "api.vendor.io");
+    }
+
+    #[test]
+    fn corroboration_requires_a_second_independently_issued_certificate() {
+        // A single certificate corroborates nothing — there is nothing to corroborate against.
+        assert!(corroborated_bases(&[vec!["a.com", "b.com"]]).is_empty());
+
+        // A different certificate re-attests b.com; a.com and c.com each appear exactly once.
+        let corroborated = corroborated_bases(&[vec!["a.com", "b.com"], vec!["b.com", "c.com"]]);
+        assert_eq!(corroborated, HashSet::from(["b.com"]));
+    }
+
+    #[test]
+    fn a_precertificates_duplicate_row_is_not_a_second_source() {
+        // crt.sh lists a precertificate AND its final certificate as separate rows with distinct
+        // IDs and identical names. Counting rows rather than certificates would make every base
+        // domain trivially "corroborated" by its own precertificate, and the shared-certificate cap
+        // would then admit every co-tenant of every bundle — the defect it exists to close.
+        // Reordered here as well, because the fingerprint must not depend on SAN order.
+        let precert_and_cert = [vec!["a.com", "b.com"], vec!["b.com", "a.com"]];
+        assert!(
+            corroborated_bases(&precert_and_cert).is_empty(),
+            "the same certificate logged twice is one source, not two"
+        );
+    }
+
+    /// `n` distinct base domains, corroborated by nothing.
+    fn synthetic_bases(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("vendor{i}.com")).collect()
+    }
+
+    #[test]
+    fn an_ordinary_certificate_admits_every_san() {
+        let owned = synthetic_bases(SHARED_CERT_SAN_BASE_LIMIT);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        // No corroboration anywhere, and it makes no difference: under the limit a certificate's
+        // SAN list *is* the relationship set, and second-guessing it costs real recall for nothing.
+        assert_eq!(admit_san_bases(&refs, &HashSet::new()), refs);
+    }
+
+    #[test]
+    fn a_shared_certificate_admits_only_what_a_second_certificate_attests() {
+        let owned = synthetic_bases(SHARED_CERT_SAN_BASE_LIMIT + 5);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let corroborated = HashSet::from([refs[3], refs[17]]);
+
+        let admitted = admit_san_bases(&refs, &corroborated);
+
+        assert_eq!(
+            admitted,
+            vec![refs[3], refs[17]],
+            "co-tenancy on one wide bundle is not a vendor relationship; only the base domains a \
+             second certificate also attests may seed recursion"
+        );
+
+        // The boundary is exact: one name below the limit everything is admitted, one name above it
+        // the burden of proof rises.
+        let over = synthetic_bases(SHARED_CERT_SAN_BASE_LIMIT + 1);
+        let over_refs: Vec<&str> = over.iter().map(String::as_str).collect();
+        assert_eq!(
+            admit_san_bases(&over_refs, &HashSet::from([over_refs[0]])),
+            vec![over_refs[0]]
+        );
+        let at_limit = synthetic_bases(SHARED_CERT_SAN_BASE_LIMIT);
+        let at_limit_refs: Vec<&str> = at_limit.iter().map(String::as_str).collect();
+        assert_eq!(
+            admit_san_bases(&at_limit_refs, &HashSet::from([at_limit_refs[0]])),
+            at_limit_refs
+        );
+    }
+
+    #[test]
+    fn a_shared_certificate_with_nothing_corroborated_is_never_emptied() {
+        let owned = synthetic_bases(SHARED_CERT_SAN_BASE_LIMIT + 5);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(
+            admit_san_bases(&refs, &HashSet::new()),
+            refs,
+            "with no second certificate to compare against there is no evidence this bundle is \
+             SHARED either — a stable single-org family reissued verbatim looks exactly like this. \
+             Taking none here would turn a fan-out bound into a total recall loss for the domain"
+        );
+    }
+
+    #[test]
+    fn retry_after_is_honoured_when_usable_and_still_backs_off_when_not() {
+        assert_eq!(throttle_cooldown(Some("120")), Duration::from_secs(120));
+        assert_eq!(throttle_cooldown(Some("  30  ")), Duration::from_secs(30));
+
+        // Absent, and every malformed shape. Reading "0 seconds" out of an HTTP-date would be worse
+        // than not parsing it, so the date form deliberately lands here too — the scan still backs
+        // off, it just uses its own default rather than a number it invented.
+        for header in [
+            None,
+            Some(""),
+            Some("soon"),
+            Some("-5"),
+            Some("12.5"),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT"),
+        ] {
+            assert_eq!(
+                throttle_cooldown(header),
+                Duration::from_secs(CT_COOLDOWN_DEFAULT_SECS),
+                "unparseable Retry-After {header:?} must still produce a real backoff"
+            );
+        }
+
+        // Bounded both ways: a `0` must not walk straight back into the same refusal, and one
+        // header must not remove a provider from the rotation for the rest of a deep scan.
+        assert_eq!(
+            throttle_cooldown(Some("0")),
+            Duration::from_secs(CT_COOLDOWN_MIN_SECS)
+        );
+        assert_eq!(
+            throttle_cooldown(Some("86400")),
+            Duration::from_secs(CT_COOLDOWN_MAX_SECS)
+        );
+    }
+
+    #[test]
+    fn a_throttled_empty_is_never_classified_as_an_authoritative_empty() {
+        // A sibling answered: the phase is not degraded, however loudly another provider complained
+        // on the way there.
+        for throttled in [false, true] {
+            for transport in [false, true] {
+                assert_eq!(
+                    classify_ct_outcome(true, throttled, transport),
+                    CtOutcome::Authoritative
+                );
+            }
+        }
+        // Nothing answered. Unreachable outranks throttled because the caller already propagates
+        // and counts a real transport error; recording it twice would inflate the degradation
+        // counts the summary prints.
+        assert_eq!(
+            classify_ct_outcome(false, true, true),
+            CtOutcome::Unreachable
+        );
+        assert_eq!(
+            classify_ct_outcome(false, false, true),
+            CtOutcome::Unreachable
+        );
+        assert_eq!(
+            classify_ct_outcome(false, true, false),
+            CtOutcome::ThrottledEmpty
+        );
+        assert_eq!(
+            classify_ct_outcome(false, false, false),
+            CtOutcome::UnusableEmpty
+        );
+
+        // The property the whole enum exists for: two byte-identical empty results, two meanings.
+        assert_ne!(
+            classify_ct_outcome(false, true, false),
+            classify_ct_outcome(true, false, false),
+            "a rate-limited scan must never be reported as a domain with no certificates"
+        );
+    }
+
+    #[test]
+    fn a_throttled_provider_stays_out_until_its_deadline_and_is_warned_about_once() {
+        let throttle = ProviderThrottle::default();
+        assert!(
+            throttle.is_usable_at(0),
+            "a provider that has never been throttled is usable"
+        );
+
+        let now = 1_000_000;
+        assert!(
+            throttle.begin_cooldown(now, Duration::from_secs(60)),
+            "the first throttle from a provider is the one that gets warned about"
+        );
+        assert!(!throttle.is_usable_at(now));
+        assert!(!throttle.is_usable_at(now + 59_999));
+        assert!(
+            throttle.is_usable_at(now + 60_000),
+            "the cooldown expires — it holds a provider out, it does not disable it"
+        );
+
+        // A shorter, overlapping refusal must neither warn again (a deep scan would print thousands
+        // of identical lines and teach the reader to ignore them) nor shorten the longer backoff.
+        assert!(!throttle.begin_cooldown(now, Duration::from_secs(5)));
+        assert!(throttle.is_usable_at(now + 60_000));
+        assert!(!throttle.is_usable_at(now + 59_999));
+    }
+
+    /// One wide bundle: the target, twenty-two strangers that appear nowhere else, and one domain a
+    /// second certificate also attests.
+    fn shared_certificate_names() -> String {
+        let mut names = vec!["example.com".to_string()];
+        names.extend((0..22).map(|i| format!("cotenant{i}.com")));
+        names.push("real-vendor.com".to_string());
+        names.join("\n")
+    }
+
+    #[tokio::test]
+    async fn a_shared_certificate_seeds_recursion_only_from_corroborated_sans() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!([
+            { "id": 700, "name_value": shared_certificate_names() },
+            { "id": 701, "name_value": "example.com\nreal-vendor.com" },
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert_eq!(
+            domains,
+            vec!["real-vendor.com"],
+            "only the base domain a second certificate attests may seed recursion; the twenty-two \
+             co-tenants of the wide bundle share a certificate with the target, not a vendor \
+             relationship"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wide_certificate_with_nothing_to_corroborate_it_is_kept_whole() {
+        let mock_server = MockServer::start().await;
+
+        // The same wide bundle, alone in the answer. There is no second certificate, so there is no
+        // evidence it is shared — Google's ccTLD bundle and Wikimedia's project bundle look exactly
+        // like this. Dropping it would delete true relationships to fix a false-positive problem.
+        let response_body = serde_json::json!([
+            { "id": 800, "name_value": shared_certificate_names() },
+        ]);
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), mock_server.uri());
+        let results = disc.discover("example.com").await.unwrap();
+
+        // 24 distinct base domains on the certificate, minus the target's own self-reference.
+        assert_eq!(results.len(), 23, "the cap must never take none");
+        assert!(results.iter().any(|r| r.domain == "real-vendor.com"));
+        assert!(results.iter().any(|r| r.domain == "cotenant0.com"));
+    }
+
+    #[tokio::test]
+    async fn a_429_holds_the_provider_out_of_the_rotation_and_is_counted() {
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
+            .mount(&crtsh)
+            .await;
+
+        let disc = CtLogDiscovery::with_base_url(Duration::from_secs(5), crtsh.uri());
+
+        let first = disc.discover("example.com").await.unwrap();
+        assert!(first.is_empty());
+        assert_eq!(
+            disc.throttles_seen(),
+            1,
+            "a 429 must be counted, not swallowed as an empty answer (TF-RATELIMIT)"
+        );
+
+        // The next domain must not re-ask a provider that told us to come back in two minutes.
+        let second = disc.discover("other.example.org").await.unwrap();
+        assert!(second.is_empty());
+        assert_eq!(
+            disc.throttles_seen(),
+            1,
+            "the second domain must have skipped crt.sh entirely; another 429 here means the \
+             Retry-After cooldown was not honoured"
+        );
+        assert_eq!(
+            crtsh
+                .received_requests()
+                .await
+                .expect("wiremock records requests by default")
+                .len(),
+            1,
+            "exactly one request may reach a provider that is inside its own Retry-After window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_throttled_provider_still_fails_over_to_a_healthy_sibling() {
+        let crtsh = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+            .mount(&crtsh)
+            .await;
+
+        let certspotter = MockServer::start().await;
+        let cs_body = serde_json::json!([
+            {"id": "9100", "dns_names": ["example.com", "vendor-w.io"], "issuer": {"name": "R3"}}
+        ]);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&cs_body))
+            .mount(&certspotter)
+            .await;
+
+        let disc = CtLogDiscovery::with_providers(
+            Duration::from_secs(5),
+            crtsh.uri(),
+            vec![CtProvider::CertSpotter {
+                base_url: certspotter.uri(),
+                token: None,
+            }],
+        );
+
+        let results = disc.discover("example.com").await.unwrap();
+        assert!(
+            results.iter().any(|r| r.domain == "vendor-w.io"),
+            "the cooldown holds one provider out; it must not cost the answer a sibling can give"
+        );
+        assert_eq!(disc.throttles_seen(), 1);
     }
 }

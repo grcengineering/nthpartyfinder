@@ -181,6 +181,31 @@ pub struct Metrics {
     /// platform's own sprawl, not the customer's nth-parties; the domain stays a recorded leaf
     /// edge, only its enumeration fan-out is gated. Each hit is one avoided hyperscaler explosion.
     pub fanout_gate_skip: Metric,
+    /// Second headless renders skipped because the trust-center render-capture already carried out
+    /// a usable settled DOM (P2.1c). One increment = one ~28-35s render not paid.
+    pub render_dom_reused: Metric,
+    /// Render-captures that took a second attempt (P2.1a). Paired with `render.retry_rescued` this
+    /// is the rescue RATE: retried-near-zero is the evidence the retry gate is tight; a rising
+    /// retried count against zero rescues means the gate has drifted open again.
+    pub render_capture_retried: Metric,
+    /// NER fallback inputs truncated by the size cap (P2.13a). Recall traded for latency must be
+    /// visible, never silent — a non-zero value means some page tails went unread.
+    pub ner_fallback_truncated: Metric,
+    /// A homepage fetch served from the scan-lifetime web-org outcome memo instead of refetching
+    /// (P2.4b). Each hit is one duplicate homepage download avoided.
+    pub weborg_memo_hit: Metric,
+    /// A fetch skipped because that URL already failed terminally this scan (P2.4a) — "we could not
+    /// look" recorded once instead of re-paid by every later subsystem.
+    pub weborg_dead_host_skip: Metric,
+    /// A DNS lookup answered from the scan-lifetime NEGATIVE memo for a zone-authoritative
+    /// (DNS_NAME-class) failure (P1.7b). One broken SPF include referenced by thousands of domains
+    /// now costs one provider rotation, not thousands. Throttle/transport failures are NEVER
+    /// memoized here — an outage must never memoize as absence.
+    pub dns_memo_negative_hit: Metric,
+    /// CT queries that came back throttled (429/Retry-After) rather than authoritatively empty
+    /// (P2.9c). Non-zero means CT recall is degraded for this scan and must be reported as such,
+    /// not silently absorbed as "no certificates found".
+    pub ct_throttled: Metric,
 }
 
 impl Metrics {
@@ -229,6 +254,13 @@ impl Metrics {
             report_dedup: Metric::new(),
             report_export: Metric::new(),
             fanout_gate_skip: Metric::new(),
+            render_dom_reused: Metric::new(),
+            render_capture_retried: Metric::new(),
+            ner_fallback_truncated: Metric::new(),
+            weborg_memo_hit: Metric::new(),
+            weborg_dead_host_skip: Metric::new(),
+            dns_memo_negative_hit: Metric::new(),
+            ct_throttled: Metric::new(),
         }
     }
 
@@ -253,7 +285,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 43] {
+    fn all(&self) -> [(&'static str, &Metric); 50] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -301,6 +333,13 @@ impl Metrics {
             ("report.dedup", &self.report_dedup),
             ("report.export", &self.report_export),
             ("fanout.gate_skip", &self.fanout_gate_skip),
+            ("render.dom_reused", &self.render_dom_reused),
+            ("render.capture_retried", &self.render_capture_retried),
+            ("ner.fallback_truncated", &self.ner_fallback_truncated),
+            ("weborg.memo_hit", &self.weborg_memo_hit),
+            ("weborg.dead_host_skip", &self.weborg_dead_host_skip),
+            ("dns.memo_negative_hit", &self.dns_memo_negative_hit),
+            ("ct.throttled", &self.ct_throttled),
         ]
     }
 
@@ -865,7 +904,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 43);
+        assert_eq!(snap.rows.len(), 50);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed

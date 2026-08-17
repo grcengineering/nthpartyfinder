@@ -129,16 +129,61 @@ fn whois_org_field_is_redacted(response: &str) -> bool {
     false
 }
 
+/// P2.4: may the NER step fetch this page itself, given what the web-org step already learned?
+///
+/// The two steps run seconds apart against the same URL on different budgets, so "the web-org
+/// step came back without HTML" is not one condition but three, and only two of them justify
+/// paying for a second fetch:
+///
+/// * it already has the body — nothing to fetch;
+/// * the web-org step never ran (web-org disabled, or its `Result` itself errored) — nobody has
+///   looked, so look;
+/// * it ran and failed — refetch only when that failure does not *prove* a second attempt futile,
+///   which is [`web_org::memoized_failure_proves_refetch_futile`]'s job, and which deliberately
+///   still says "go look" after a 4s timeout because this step is allowed 10s.
+///
+/// A transport failure must never harden into a permanent "no content" verdict here. It cannot:
+/// returning `false` skips exactly one fetch inside one scan, and the NER step's own no-content
+/// path already ends at the same honest domain-derived fallback a second failed fetch would have
+/// produced — so the skip costs time, never an attribution.
+fn ner_may_refetch(prefetched: &web_org::FetchOutcome) -> bool {
+    match prefetched {
+        web_org::FetchOutcome::Body(_) => false,
+        web_org::FetchOutcome::NotAttempted => true,
+        web_org::FetchOutcome::FailedFast(class) => {
+            !web_org::memoized_failure_proves_refetch_futile(
+                *class,
+                web_org::HTTP_ORG_FETCH_BUDGET_SECS,
+                web_org::PAGE_FETCH_BUDGET_SECS,
+            )
+        }
+    }
+}
+
 /// Page HTML for the NER step. Reuses the body already fetched by the web-org step
 /// when one is available, so a domain reaching NER is fetched once, not twice. Falls
-/// back to a fetch only when the web-org step did not run or produced no body.
-async fn fetch_org_page_content(domain: &str, prefetched_html: Option<String>) -> Option<String> {
-    match prefetched_html {
-        Some(html) => {
+/// back to a fetch only when the web-org step did not run, or failed in a way that leaves
+/// a second attempt genuinely worth making.
+async fn fetch_org_page_content(
+    domain: &str,
+    prefetched_outcome: web_org::FetchOutcome,
+) -> Option<String> {
+    match prefetched_outcome {
+        web_org::FetchOutcome::Body(html) => {
             debug!("Reusing web-org page body for NER extraction of {}", domain);
             Some(html)
         }
-        None => web_org::fetch_page_content(domain).await.ok(),
+        other => {
+            if !ner_may_refetch(&other) {
+                let class = other.failure();
+                debug!(
+                    "Skipping NER refetch for {}: web-org failed {:?}",
+                    domain, class
+                );
+                return None;
+            }
+            web_org::fetch_page_outcome(domain, None).await.into_body()
+        }
     }
 }
 
@@ -341,12 +386,16 @@ pub async fn get_organization_with_status_and_config(
     // `accept_extracted_name` clears it. Rejection here FALLS THROUGH to WHOIS rather than
     // dead-ending at the domain fallback — a scraped tagline must never outrank a real
     // registrant record, which is precisely what used to happen.
-    let mut prefetched_html: Option<String> = None;
+    //
+    // P2.4: the fetch outcome is carried forward tri-state, not as `Option<String>`. A dead host
+    // and a page nobody fetched used to be the same `None` here, and the NER step below re-paid
+    // for the dead one on a longer budget.
+    let mut prefetched = web_org::FetchOutcome::NotAttempted;
     if web_org_enabled {
-        if let Ok((web_result, html)) =
+        if let Ok((web_result, outcome)) =
             web_org::extract_organization_http_only_with_body(domain).await
         {
-            prefetched_html = html;
+            prefetched = outcome;
             if let Some(web_result) = web_result {
                 if web_result.confidence >= min_confidence {
                     if let Some(name) = accept_extracted_name(&web_result.organization, domain) {
@@ -424,7 +473,7 @@ pub async fn get_organization_with_status_and_config(
     // wrong answer.
     if ner_org::is_available() {
         debug!("NER is available, attempting extraction for {}", domain);
-        let page_content = fetch_org_page_content(domain, prefetched_html).await;
+        let page_content = fetch_org_page_content(domain, prefetched).await;
         let content_ref = page_content.as_deref();
 
         if let Ok(Some(ner_result)) = ner_org::extract_organization_async(domain, content_ref).await
@@ -3100,5 +3149,65 @@ mod tests {
         let whois = "Domain: test.com\nRegistrar Name: IndependentCo";
         let result = extract_registrar_from_whois(whois);
         assert_eq!(result, Some("IndependentCo".to_string()));
+    }
+
+    // ── P2.4: the NER step must not re-pay for a fetch that already failed terminally ──
+
+    #[test]
+    fn ner_does_not_refetch_a_page_it_already_holds() {
+        assert!(!ner_may_refetch(&web_org::FetchOutcome::Body(
+            "<html/>".into()
+        )));
+    }
+
+    #[test]
+    fn ner_fetches_when_the_web_org_step_never_ran() {
+        // Web-org disabled, or its own Result errored: nobody has looked, so recall demands we do.
+        assert!(ner_may_refetch(&web_org::FetchOutcome::NotAttempted));
+    }
+
+    #[test]
+    fn ner_does_not_refetch_a_host_that_answered_nothing() {
+        // The P2.4 headline case: HTTPS and HTTP both failed to connect seconds ago, so the
+        // second probe of the same dead host buys nothing but wall-clock and conntrack entries.
+        assert!(!ner_may_refetch(&web_org::FetchOutcome::FailedFast(
+            web_org::FetchFailureClass::Unreachable
+        )));
+    }
+
+    #[test]
+    fn ner_does_not_refetch_after_an_authoritative_rejection() {
+        assert!(!ner_may_refetch(&web_org::FetchOutcome::FailedFast(
+            web_org::FetchFailureClass::RejectedStatus(404)
+        )));
+        assert!(!ner_may_refetch(&web_org::FetchOutcome::FailedFast(
+            web_org::FetchFailureClass::RejectedStatus(403)
+        )));
+    }
+
+    #[test]
+    fn ner_still_refetches_after_a_transient_failure() {
+        // An outage must never memoize as absence: a 429/5xx or a broken connection means we
+        // could not look, so NER gets its own attempt rather than inheriting a verdict.
+        for class in [
+            web_org::FetchFailureClass::ThrottledStatus(429),
+            web_org::FetchFailureClass::ThrottledStatus(503),
+            web_org::FetchFailureClass::Transport,
+        ] {
+            assert!(
+                ner_may_refetch(&web_org::FetchOutcome::FailedFast(class)),
+                "{class} must not deny NER its own fetch"
+            );
+        }
+    }
+
+    #[test]
+    fn ner_still_refetches_after_the_org_steps_shorter_timeout() {
+        // The org step gives up at 4s; NER is allowed the client's 10s. A slow-but-live homepage
+        // that lost the first race must still get the longer attempt — this is the one refetch in
+        // the chain that earns its cost, and gating it away would be a silent recall loss.
+        assert!(ner_may_refetch(&web_org::FetchOutcome::FailedFast(
+            web_org::FetchFailureClass::TimedOut
+        )));
     }
 }

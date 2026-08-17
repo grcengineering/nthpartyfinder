@@ -15,8 +15,9 @@ use anyhow::{anyhow, Result};
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Deserialize;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info};
 
 /// Result of web-based organization extraction
@@ -91,7 +92,7 @@ fn page_client() -> Result<&'static reqwest::Client> {
         return Ok(client);
     }
     let client = crate::http_client::hardened_builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(PAGE_FETCH_BUDGET_SECS))
         .tcp_keepalive(Duration::from_secs(60))
         .user_agent(crate::http_client::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -99,41 +100,507 @@ fn page_client() -> Result<&'static reqwest::Client> {
     Ok(PAGE_CLIENT.get_or_init(|| client))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// P2.4: shared fetch-outcome state
+//
+// A dead-web vendor used to be probed over HTTP up to four times per scan plus a Chrome
+// navigate, and every live vendor's homepage was downloaded at least twice, because each
+// subsystem's fetch failure collapsed into a bare `None` — indistinguishable from "nobody
+// looked". The next subsystem read that `None` as "go look" and paid the full cost again.
+//
+// The fix is a tri-state outcome plus one bounded, scan-lifetime memo of what each homepage
+// fetch actually produced. The whole design tension lives in one rule, which the codebase has
+// paid for before: **an outage must never memoize as absence.** A transport failure means "we
+// could not look", never "there is nothing there", so failures are classified and only the
+// classes that genuinely prove a repeat attempt futile *within this scan* are allowed to
+// suppress one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The org chain's own homepage-fetch budget.
+///
+/// Named rather than inlined because the *number* is load-bearing for
+/// [`memoized_failure_proves_refetch_futile`]: a timeout proves nothing in the abstract, only
+/// relative to the budget that produced it, and this one is deliberately shorter than
+/// [`PAGE_FETCH_BUDGET_SECS`].
+pub(crate) const HTTP_ORG_FETCH_BUDGET_SECS: u64 = 4;
+
+/// The unbudgeted page-fetch ceiling: the shared client's own request timeout, which is what an
+/// unwrapped `fetch_page_content` actually waits.
+pub(crate) const PAGE_FETCH_BUDGET_SECS: u64 = 10;
+
+/// Why a page fetch failed, at exactly the granularity that decides whether repeating it inside
+/// this scan could produce a different answer.
+///
+/// The split mirrors the DNS failure-visibility contract this repo already runs on (`DNS_THROTTLE`
+/// = 429/5xx, back off and rotate; `DNS_ENDPOINT` = 4xx, the endpoint is simply wrong): a server
+/// answering 429 or 503 is saying "not right now", which is the opposite of "there is nothing
+/// here", and the two must never be folded together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchFailureClass {
+    /// Nothing answered on either scheme — DNS failure, refused connection, or a TLS handshake
+    /// that never completed — after both the HTTPS attempt *and* the HTTP fallback.
+    Unreachable,
+    /// The server answered with a status it will keep answering: 4xx other than 429.
+    RejectedStatus(u16),
+    /// The server answered "not right now": 429, or any 5xx.
+    ThrottledStatus(u16),
+    /// The fetch outlived the budget its caller gave it.
+    TimedOut,
+    /// A connection was established and then broke — reset, truncated body, decode failure.
+    Transport,
+}
+
+impl std::fmt::Display for FetchFailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FetchFailureClass::Unreachable => write!(f, "unreachable"),
+            FetchFailureClass::RejectedStatus(s) => write!(f, "rejected_status_{}", s),
+            FetchFailureClass::ThrottledStatus(s) => write!(f, "throttled_status_{}", s),
+            FetchFailureClass::TimedOut => write!(f, "timed_out"),
+            FetchFailureClass::Transport => write!(f, "transport"),
+        }
+    }
+}
+
+/// What one page fetch produced, keeping "we never looked" distinguishable from "we looked and
+/// it failed".
+///
+/// Those two used to be the same value (`None`), which is precisely how a vendor whose homepage
+/// had just refused on a 4s budget got fetched again on a 10s one, then fetched a third time by
+/// the web-traffic static pass, then navigated to by Chrome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchOutcome {
+    /// No fetch has been made for this URL — nothing is known either way.
+    NotAttempted,
+    /// A successful fetch, carrying the page body (which may legitimately be empty).
+    Body(String),
+    /// A fetch that terminated in a classified failure.
+    FailedFast(FetchFailureClass),
+}
+
+impl FetchOutcome {
+    /// The page body, if this outcome actually carries one.
+    ///
+    /// A `FailedFast` must never read back as an empty body: "the fetch failed" and "the page
+    /// was blank" lead to opposite decisions in every consumer downstream.
+    pub fn body(&self) -> Option<&str> {
+        match self {
+            FetchOutcome::Body(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Owned form of [`FetchOutcome::body`], for callers that hand the HTML onward.
+    pub fn into_body(self) -> Option<String> {
+        match self {
+            FetchOutcome::Body(body) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// The failure class, if this outcome is a classified failure.
+    pub fn failure(&self) -> Option<FetchFailureClass> {
+        match self {
+            FetchOutcome::FailedFast(class) => Some(*class),
+            _ => None,
+        }
+    }
+}
+
+/// Classify a non-success HTTP status into "the site says no" versus "the site says not now".
+pub(crate) fn classify_status_failure(status: u16) -> FetchFailureClass {
+    if status == 429 || (500..600).contains(&status) {
+        FetchFailureClass::ThrottledStatus(status)
+    } else {
+        FetchFailureClass::RejectedStatus(status)
+    }
+}
+
+/// Classify a transport-level failure from the shape `reqwest` reports.
+///
+/// Split from the `reqwest::Error` it is derived from so the decision itself is testable without
+/// a live socket. `is_timeout` is checked before `is_connect` because a connect *timeout* sets
+/// both, and treating it as a timeout keeps it under the budget rule rather than declaring the
+/// host dead outright. The catch-all is `Transport` on purpose: an unrecognised failure is
+/// treated as transient, which costs a retry — the only direction that can lose time rather than
+/// recall.
+pub(crate) fn classify_transport_failure(is_timeout: bool, is_connect: bool) -> FetchFailureClass {
+    if is_timeout {
+        FetchFailureClass::TimedOut
+    } else if is_connect {
+        FetchFailureClass::Unreachable
+    } else {
+        FetchFailureClass::Transport
+    }
+}
+
+/// P2.4 read gate: does a recorded failure **prove** that fetching this URL again, now, in this
+/// scan, cannot produce a body?
+///
+/// This is the single place where "an outage must never memoize as absence" is enforced, so it is
+/// deliberately stingy — the read-direction sibling of
+/// [`crate::subprocessor::may_record_subprocessor_absence`]'s write gate. Returning `false` costs
+/// one redundant fetch; returning `true` wrongly silently deletes a vendor's page from the scan,
+/// so every `true` arm below has to be an argument about the site, never about the moment.
+pub(crate) fn memoized_failure_proves_refetch_futile(
+    class: FetchFailureClass,
+    recorded_budget_secs: u64,
+    pending_budget_secs: u64,
+) -> bool {
+    match class {
+        // Both schemes were already tried and nothing answered on either, so this is a
+        // host-level verdict, not a path-level one — the same discrimination `subprocessor`'s
+        // `is_transport_dead_error` makes before populating its per-pass dead-host set.
+        FetchFailureClass::Unreachable => true,
+        // The server answered, and answered authoritatively: a 404/403/410 for `GET /` is a
+        // property of the site, not of the instant we asked.
+        FetchFailureClass::RejectedStatus(_) => true,
+        // The textbook outage-as-absence trap. A 503 or a 429 says we could not look, and the
+        // very next caller may well be let through — memoizing it would convert a rate limit
+        // into a permanent verdict of "this vendor has no homepage".
+        FetchFailureClass::ThrottledStatus(_) => false,
+        // A timeout only proves something about a budget at least as generous as the one that
+        // produced it. The org step abandons at `HTTP_ORG_FETCH_BUDGET_SECS`, while the NER
+        // refetch runs on the client's `PAGE_FETCH_BUDGET_SECS`, so a slow-but-live homepage
+        // that lost the 4s race must still get its 10s attempt — that is the one refetch in this
+        // chain that genuinely earns its cost, and suppressing it would be exactly the silent
+        // recall loss this gate exists to prevent.
+        FetchFailureClass::TimedOut => pending_budget_secs <= recorded_budget_secs,
+        // A connection that broke mid-transfer says nothing at all about the next one.
+        FetchFailureClass::Transport => false,
+    }
+}
+
+/// How long a recorded FAILURE stays authoritative.
+///
+/// Failures expire and bodies do not, and that asymmetry is the whole doctrine: a fetched
+/// homepage is a fact that does not change mid-scan, while a failure is a statement about the
+/// network at one instant. A depth-3 scan runs for hours, and the conntrack-exhaustion incident
+/// documented in `http_client` made *every* host unreachable for a stretch — memoizing that for
+/// the remainder of the run would have silently zeroed recall for every vendor unlucky enough to
+/// be probed during the blip. Ten minutes is far longer than the seconds separating the org fetch
+/// from the NER refetch this item exists to collapse, and far shorter than a scan.
+pub(crate) const FAILURE_MEMO_TTL_SECS: u64 = 600;
+
+/// Is a recorded failure still recent enough to act on?
+///
+/// `saturating_sub` so a clock that stepped backwards reads as fresh rather than underflowing —
+/// the same guard, for the same reason, as
+/// [`crate::subprocessor::negative_subprocessor_entry_is_fresh`].
+pub(crate) fn failure_memo_is_authoritative(recorded_at: u64, now: u64, ttl_secs: u64) -> bool {
+    now.saturating_sub(recorded_at) < ttl_secs
+}
+
+/// Largest page body the memo will retain.
+///
+/// An unbounded scan-lifetime map of page bodies is a memory leak on a 300k-relationship scan, and
+/// the tail of the size distribution is where it bites: a handful of multi-megabyte SPA bundles
+/// would dominate the whole budget. An oversize body is still returned to its caller in-band, it
+/// just is not kept — the cost is one possible refetch for a rare page, paid in time.
+pub(crate) const MAX_MEMOIZED_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Hard ceiling on memo entries, independent of their size, so failure records (which retain no
+/// body at all) cannot grow without bound either on a scan that touches tens of thousands of
+/// dead hosts.
+pub(crate) const MAX_MEMO_ENTRIES: usize = 512;
+
+/// Hard ceiling on retained body bytes. With the per-entry cap this bounds the memo's footprint
+/// at a fixed few tens of megabytes regardless of scan depth.
+pub(crate) const MAX_MEMO_RETAINED_BYTES: usize = 48 * 1024 * 1024;
+
+/// May a body of this size be retained?
+pub(crate) fn memo_body_is_retainable(len: usize) -> bool {
+    len <= MAX_MEMOIZED_BODY_BYTES
+}
+
+/// Must the memo drop its oldest entry before admitting `incoming_bytes`?
+pub(crate) fn memo_must_evict(
+    entry_count: usize,
+    retained_bytes: usize,
+    incoming_bytes: usize,
+) -> bool {
+    entry_count >= MAX_MEMO_ENTRIES
+        || retained_bytes.saturating_add(incoming_bytes) > MAX_MEMO_RETAINED_BYTES
+}
+
+#[derive(Debug)]
+struct MemoEntry {
+    outcome: FetchOutcome,
+    recorded_at: u64,
+    /// The budget the recorded attempt was given — meaningless for every class except
+    /// `TimedOut`, where it is the entire basis of the futility judgement.
+    budget_secs: u64,
+}
+
+/// Scan-lifetime record of what each homepage fetch produced, bounded in both entry count and
+/// retained bytes, with FIFO eviction.
+///
+/// Eviction is always safe in the recall direction: dropping a body memo costs a refetch, and
+/// dropping a failure memo costs an attempt that would probably fail again. Neither can turn into
+/// a wrong answer, which is why plain insertion-order FIFO is enough and no recency accounting is
+/// warranted.
+#[derive(Debug, Default)]
+pub(crate) struct FetchMemo {
+    entries: HashMap<String, MemoEntry>,
+    order: VecDeque<String>,
+    retained_bytes: usize,
+}
+
+impl FetchMemo {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bound accessors, test-only: production code never inspects the memo's size, it only
+    /// relies on `record` enforcing the ceilings. Gating them keeps the non-test build free of
+    /// an unused-code warning rather than suppressing one.
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// What this key is known to have produced, from the point of view of a caller willing to
+    /// wait `pending_budget_secs`.
+    ///
+    /// Returns `NotAttempted` for a miss, for an expired failure, AND for a failure that does not
+    /// prove a refetch futile. Those are three different situations that all mean one thing to a
+    /// caller: we do not know — go look. Collapsing them here rather than at each call site is
+    /// what keeps the "outage is not absence" rule in a single auditable place.
+    pub(crate) fn lookup(&self, key: &str, pending_budget_secs: u64, now: u64) -> FetchOutcome {
+        let Some(entry) = self.entries.get(key) else {
+            return FetchOutcome::NotAttempted;
+        };
+        match &entry.outcome {
+            FetchOutcome::Body(body) => FetchOutcome::Body(body.clone()),
+            FetchOutcome::FailedFast(class) => {
+                let actionable =
+                    failure_memo_is_authoritative(entry.recorded_at, now, FAILURE_MEMO_TTL_SECS)
+                        && memoized_failure_proves_refetch_futile(
+                            *class,
+                            entry.budget_secs,
+                            pending_budget_secs,
+                        );
+                if actionable {
+                    FetchOutcome::FailedFast(*class)
+                } else {
+                    FetchOutcome::NotAttempted
+                }
+            }
+            // Never stored — a memo of "we did not look" is indistinguishable from a miss.
+            FetchOutcome::NotAttempted => FetchOutcome::NotAttempted,
+        }
+    }
+
+    pub(crate) fn record(&mut self, key: &str, outcome: FetchOutcome, budget: u64, now: u64) {
+        let incoming_bytes = match &outcome {
+            FetchOutcome::Body(body) => {
+                if !memo_body_is_retainable(body.len()) {
+                    // Recording "succeeded, body dropped" would be a fourth state whose only
+                    // possible consumer would have to refetch anyway, so the honest cheap thing
+                    // is to leave this key a miss.
+                    return;
+                }
+                body.len()
+            }
+            FetchOutcome::FailedFast(_) => 0,
+            FetchOutcome::NotAttempted => return,
+        };
+
+        // Re-recording a key must not double-count its bytes or leave a second entry in the
+        // eviction order.
+        self.remove(key);
+
+        while memo_must_evict(self.entries.len(), self.retained_bytes, incoming_bytes) {
+            let Some(oldest) = self.order.front().cloned() else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+
+        self.retained_bytes = self.retained_bytes.saturating_add(incoming_bytes);
+        self.entries.insert(
+            key.to_string(),
+            MemoEntry {
+                outcome,
+                recorded_at: now,
+                budget_secs: budget,
+            },
+        );
+        self.order.push_back(key.to_string());
+    }
+
+    fn remove(&mut self, key: &str) {
+        // Drop from the eviction order unconditionally, before consulting `entries`. The eviction
+        // loop pops the front key and calls this to make room, so it must make progress even if
+        // the two structures ever disagreed — a spin here would hang the whole scan, which is a
+        // far worse failure than a leaked entry.
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        if let Some(entry) = self.entries.remove(key) {
+            if let FetchOutcome::Body(body) = &entry.outcome {
+                self.retained_bytes = self.retained_bytes.saturating_sub(body.len());
+            }
+        }
+    }
+}
+
+/// The process-wide memo. One scan per process, so process lifetime *is* scan lifetime.
+static FETCH_MEMO: OnceLock<Mutex<FetchMemo>> = OnceLock::new();
+
+fn fetch_memo() -> &'static Mutex<FetchMemo> {
+    FETCH_MEMO.get_or_init(|| Mutex::new(FetchMemo::new()))
+}
+
+// coverage(off): wall-clock read; the freshness decision it feeds is unit-tested with injected time
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The memo key for a domain's homepage.
+///
+/// Keyed on the normalised host rather than a URL string because `https://` and `http://` are one
+/// logical fetch here — the fetch itself falls back from the former to the latter — so keying on
+/// the URL would record the two halves of a single attempt as two independent facts.
+pub(crate) fn memo_key(domain: &str) -> String {
+    domain.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Fetch a domain's homepage, consulting and populating the scan-lifetime memo.
+///
+/// `budget` bounds this particular attempt; `None` means the shared client's own
+/// `PAGE_FETCH_BUDGET_SECS` timeout is the only bound. The budget is recorded alongside the
+/// outcome because a timeout is only evidence relative to it.
+// coverage(off): network I/O — every decision it consults is unit-tested directly against `FetchMemo`
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub async fn fetch_page_outcome(domain: &str, budget: Option<Duration>) -> FetchOutcome {
+    let key = memo_key(domain);
+    let budget_secs = budget.map_or(PAGE_FETCH_BUDGET_SECS, |b| b.as_secs());
+    let now = unix_now_secs();
+
+    {
+        let memo = fetch_memo().lock().unwrap_or_else(|p| p.into_inner());
+        match memo.lookup(&key, budget_secs, now) {
+            FetchOutcome::Body(body) => {
+                crate::perf::METRICS.weborg_memo_hit.hit();
+                debug!("Reusing memoized page body for {}", domain);
+                return FetchOutcome::Body(body);
+            }
+            FetchOutcome::FailedFast(class) => {
+                crate::perf::METRICS.weborg_dead_host_skip.hit();
+                debug!(
+                    "Skipping page fetch for {}: already failed {}",
+                    domain, class
+                );
+                return FetchOutcome::FailedFast(class);
+            }
+            FetchOutcome::NotAttempted => {}
+        }
+    }
+
+    let outcome = match budget {
+        Some(b) => match tokio::time::timeout(b, fetch_page_uncached(domain)).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                debug!(
+                    "Page fetch for {} exceeded its {}s budget",
+                    domain, budget_secs
+                );
+                FetchOutcome::FailedFast(FetchFailureClass::TimedOut)
+            }
+        },
+        None => fetch_page_uncached(domain).await,
+    };
+
+    {
+        let mut memo = fetch_memo().lock().unwrap_or_else(|p| p.into_inner());
+        memo.record(&key, outcome.clone(), budget_secs, now);
+    }
+    outcome
+}
+
+/// The actual network fetch, with no memo involvement: HTTPS, falling back to HTTP.
 // coverage(off): network I/O — fetches live HTTPS/HTTP, non-success and fallback branches require real server
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub async fn fetch_page_content(domain: &str) -> Result<String> {
+async fn fetch_page_uncached(domain: &str) -> FetchOutcome {
     let url = format!("https://{}", domain);
 
     debug!("Fetching web page content: {}", url);
 
     let _fetch_timer = crate::perf::scoped(&crate::perf::METRICS.http_fetch);
-    let client = page_client()?;
+    let client = match page_client() {
+        Ok(client) => client,
+        Err(e) => {
+            debug!("No usable HTTP client for {}: {}", domain, e);
+            return FetchOutcome::FailedFast(FetchFailureClass::Transport);
+        }
+    };
 
-    let response =
-        match client.get(&url).send_gated().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                debug!("Failed to fetch {}: {}", url, e);
-                // Try HTTP fallback
-                let http_url = format!("http://{}", domain);
-                client.get(&http_url).send_gated().await.map_err(|e2| {
-                    anyhow!("Failed to fetch {}: HTTPS: {}, HTTP: {}", domain, e, e2)
-                })?
+    let response = match client.get(&url).send_gated().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            debug!("Failed to fetch {}: {}", url, e);
+            // Try HTTP fallback
+            let http_url = format!("http://{}", domain);
+            match client.get(&http_url).send_gated().await {
+                Ok(resp) => resp,
+                Err(e2) => {
+                    // Only call the host unreachable when BOTH attempts were connect-level
+                    // failures; if either one timed out, the honest class is the budget-gated
+                    // `TimedOut`, and anything else stays transient.
+                    let class = classify_transport_failure(
+                        e.is_timeout() || e2.is_timeout(),
+                        e.is_connect() && e2.is_connect(),
+                    );
+                    debug!(
+                        "Failed to fetch {}: HTTPS: {}, HTTP: {} ({})",
+                        domain, e, e2, class
+                    );
+                    return FetchOutcome::FailedFast(class);
+                }
             }
-        };
+        }
+    };
 
     if !response.status().is_success() {
-        return Err(anyhow!(
-            "Non-success status {} for {}",
+        let class = classify_status_failure(response.status().as_u16());
+        debug!(
+            "Non-success status {} for {} ({})",
             response.status(),
-            url
-        ));
+            url,
+            class
+        );
+        return FetchOutcome::FailedFast(class);
     }
 
-    response
-        .text()
-        .await
-        .map_err(|e| anyhow!("Failed to read response body: {}", e))
+    match response.text().await {
+        Ok(body) => FetchOutcome::Body(body),
+        Err(e) => {
+            debug!("Failed to read response body for {}: {}", url, e);
+            FetchOutcome::FailedFast(FetchFailureClass::Transport)
+        }
+    }
+}
+
+/// Fetch a domain's homepage as a plain `Result`, for callers with no interest in *why* a fetch
+/// failed. Memo-aware via [`fetch_page_outcome`].
+// coverage(off): network I/O — thin wrapper; the memo decisions beneath it are unit-tested directly
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub async fn fetch_page_content(domain: &str) -> Result<String> {
+    match fetch_page_outcome(domain, None).await {
+        FetchOutcome::Body(body) => Ok(body),
+        FetchOutcome::FailedFast(class) => Err(anyhow!("Failed to fetch {}: {}", domain, class)),
+        FetchOutcome::NotAttempted => Err(anyhow!("Page fetch for {} never ran", domain)),
+    }
 }
 
 // coverage(off): requires live HTTP — not unit-testable
@@ -234,30 +701,34 @@ pub async fn extract_organization_http_only(domain: &str) -> Result<Option<WebOr
         .map(|(result, _body)| result)
 }
 
-/// As [`extract_organization_http_only`], but also hands back the page body it fetched.
+/// As [`extract_organization_http_only`], but also hands back what the fetch actually produced.
 ///
 /// The org-resolution chain in `whois` may fall through from this step all the way to
 /// NER, which needs the same page. Returning the body lets the chain fetch each domain
 /// once instead of twice. The body is returned even when no organization could be
 /// extracted from it — that is exactly the case NER exists to handle.
+///
+/// P2.4 changed this from `Option<String>` to a [`FetchOutcome`]. The old shape reported a dead
+/// host and a never-fetched page with the same `None`, so the NER step downstream could not tell
+/// "this homepage refused four seconds ago" from "nobody has looked" and dutifully re-fetched the
+/// dead host on a longer budget.
 // coverage(off): requires live HTTP — not unit-testable
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub async fn extract_organization_http_only_with_body(
     domain: &str,
-) -> Result<(Option<WebOrgResult>, Option<String>)> {
-    let fetch = fetch_page_content(domain);
-    match tokio::time::timeout(Duration::from_secs(4), fetch).await {
-        Ok(Ok(html_content)) => {
+) -> Result<(Option<WebOrgResult>, FetchOutcome)> {
+    let budget = Duration::from_secs(HTTP_ORG_FETCH_BUDGET_SECS);
+    match fetch_page_outcome(domain, Some(budget)).await {
+        FetchOutcome::Body(html_content) => {
             let result = parse_organization_off_runtime(html_content.clone(), domain).await?;
-            Ok((result, Some(html_content)))
+            Ok((result, FetchOutcome::Body(html_content)))
         }
-        Ok(Err(e)) => {
-            debug!("HTTP org fetch failed for {}: {}", domain, e);
-            Ok((None, None))
-        }
-        Err(_) => {
-            debug!("HTTP org fetch timed out for {}", domain);
-            Ok((None, None))
+        failed => {
+            debug!(
+                "HTTP org fetch produced no body for {}: {:?}",
+                domain, failed
+            );
+            Ok((None, failed))
         }
     }
 }
@@ -2259,5 +2730,351 @@ mod tests {
         let doc = Html::parse_document(html);
         let result = extract_from_title(&doc, "test.com");
         assert!(result.is_none());
+    }
+
+    // ── P2.4: tri-state fetch outcome + bounded scan-lifetime memo ───────────
+
+    #[test]
+    fn failed_fast_is_never_read_as_a_body() {
+        let failed = FetchOutcome::FailedFast(FetchFailureClass::Unreachable);
+        assert_eq!(failed.body(), None);
+        assert_eq!(failed.clone().into_body(), None);
+        assert_eq!(failed.failure(), Some(FetchFailureClass::Unreachable));
+    }
+
+    #[test]
+    fn not_attempted_is_never_read_as_a_body_or_a_failure() {
+        let none = FetchOutcome::NotAttempted;
+        assert_eq!(none.body(), None);
+        assert_eq!(none.failure(), None);
+    }
+
+    #[test]
+    fn an_empty_page_is_a_body_not_a_failure() {
+        // A site that serves a genuinely blank homepage answered us. Folding that into the
+        // failure states would let a real (if useless) fetch masquerade as a dead host.
+        let empty = FetchOutcome::Body(String::new());
+        assert_eq!(empty.body(), Some(""));
+        assert_eq!(empty.failure(), None);
+    }
+
+    #[test]
+    fn status_failures_split_authoritative_from_not_right_now() {
+        assert_eq!(
+            classify_status_failure(404),
+            FetchFailureClass::RejectedStatus(404)
+        );
+        assert_eq!(
+            classify_status_failure(403),
+            FetchFailureClass::RejectedStatus(403)
+        );
+        assert_eq!(
+            classify_status_failure(429),
+            FetchFailureClass::ThrottledStatus(429)
+        );
+        assert_eq!(
+            classify_status_failure(500),
+            FetchFailureClass::ThrottledStatus(500)
+        );
+        assert_eq!(
+            classify_status_failure(503),
+            FetchFailureClass::ThrottledStatus(503)
+        );
+        assert_eq!(
+            classify_status_failure(599),
+            FetchFailureClass::ThrottledStatus(599)
+        );
+        // 6xx is not a real HTTP class; it must not fall into the throttled range by accident.
+        assert_eq!(
+            classify_status_failure(600),
+            FetchFailureClass::RejectedStatus(600)
+        );
+    }
+
+    #[test]
+    fn transport_failures_prefer_the_timeout_reading() {
+        // A connect timeout sets both flags; reading it as a timeout keeps it under the budget
+        // rule instead of declaring the host dead on a 4s sample.
+        assert_eq!(
+            classify_transport_failure(true, true),
+            FetchFailureClass::TimedOut
+        );
+        assert_eq!(
+            classify_transport_failure(true, false),
+            FetchFailureClass::TimedOut
+        );
+        assert_eq!(
+            classify_transport_failure(false, true),
+            FetchFailureClass::Unreachable
+        );
+        // Unrecognised shape → transient, which is the direction that costs time not recall.
+        assert_eq!(
+            classify_transport_failure(false, false),
+            FetchFailureClass::Transport
+        );
+    }
+
+    #[test]
+    fn only_site_level_failures_prove_a_refetch_futile() {
+        assert!(memoized_failure_proves_refetch_futile(
+            FetchFailureClass::Unreachable,
+            4,
+            10
+        ));
+        assert!(memoized_failure_proves_refetch_futile(
+            FetchFailureClass::RejectedStatus(404),
+            4,
+            10
+        ));
+    }
+
+    #[test]
+    fn an_outage_never_proves_a_refetch_futile() {
+        // The whole point of the classification: 429/5xx and a broken connection mean "we could
+        // not look", so they must never suppress a later attempt however long the scan runs.
+        for class in [
+            FetchFailureClass::ThrottledStatus(429),
+            FetchFailureClass::ThrottledStatus(503),
+            FetchFailureClass::Transport,
+        ] {
+            assert!(
+                !memoized_failure_proves_refetch_futile(class, 4, 10),
+                "{class} must not suppress a refetch"
+            );
+            assert!(
+                !memoized_failure_proves_refetch_futile(class, 10, 4),
+                "{class} must not suppress a refetch even on a shorter retry budget"
+            );
+        }
+    }
+
+    #[test]
+    fn a_timeout_only_proves_futility_within_its_own_budget() {
+        // The exact asymmetry in the live chain: the org step abandons at 4s, the NER refetch is
+        // allowed 10s, so the slow-but-live homepage must still get its second, longer attempt.
+        assert!(!memoized_failure_proves_refetch_futile(
+            FetchFailureClass::TimedOut,
+            HTTP_ORG_FETCH_BUDGET_SECS,
+            PAGE_FETCH_BUDGET_SECS
+        ));
+        // Equal budget: the retry would wait exactly as long and learn exactly as much.
+        assert!(memoized_failure_proves_refetch_futile(
+            FetchFailureClass::TimedOut,
+            10,
+            10
+        ));
+        // Shorter retry budget: strictly less patient than the attempt that already lost.
+        assert!(memoized_failure_proves_refetch_futile(
+            FetchFailureClass::TimedOut,
+            10,
+            4
+        ));
+    }
+
+    #[test]
+    fn failure_memo_freshness_expires_and_survives_a_backwards_clock() {
+        assert!(failure_memo_is_authoritative(1_000, 1_000, 600));
+        assert!(failure_memo_is_authoritative(1_000, 1_599, 600));
+        assert!(!failure_memo_is_authoritative(1_000, 1_600, 600));
+        assert!(!failure_memo_is_authoritative(1_000, 9_000, 600));
+        // Clock stepped backwards: saturating_sub yields 0, i.e. fresh, rather than underflowing.
+        assert!(failure_memo_is_authoritative(9_000, 1_000, 600));
+    }
+
+    #[test]
+    fn memo_body_retention_is_capped_at_the_documented_boundary() {
+        assert!(memo_body_is_retainable(0));
+        assert!(memo_body_is_retainable(MAX_MEMOIZED_BODY_BYTES));
+        assert!(!memo_body_is_retainable(MAX_MEMOIZED_BODY_BYTES + 1));
+    }
+
+    #[test]
+    fn memo_eviction_triggers_on_either_ceiling() {
+        assert!(!memo_must_evict(0, 0, 1024));
+        assert!(!memo_must_evict(MAX_MEMO_ENTRIES - 1, 0, 1024));
+        assert!(memo_must_evict(MAX_MEMO_ENTRIES, 0, 0));
+        assert!(!memo_must_evict(1, MAX_MEMO_RETAINED_BYTES, 0));
+        assert!(memo_must_evict(1, MAX_MEMO_RETAINED_BYTES, 1));
+        // No overflow panic when the arithmetic would wrap.
+        assert!(memo_must_evict(1, usize::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn memo_returns_a_recorded_body() {
+        let mut memo = FetchMemo::new();
+        memo.record("vendor.com", FetchOutcome::Body("<html/>".into()), 4, 100);
+        assert_eq!(
+            memo.lookup("vendor.com", 10, 100),
+            FetchOutcome::Body("<html/>".into())
+        );
+        assert_eq!(memo.retained_bytes(), "<html/>".len());
+    }
+
+    #[test]
+    fn memo_body_does_not_expire_with_the_failure_ttl() {
+        // Positives are durable, negatives are perishable: a homepage fetched at the start of a
+        // ten-hour scan is still the page that domain serves.
+        let mut memo = FetchMemo::new();
+        memo.record("vendor.com", FetchOutcome::Body("<html/>".into()), 4, 100);
+        let long_after = 100 + FAILURE_MEMO_TTL_SECS * 100;
+        assert_eq!(
+            memo.lookup("vendor.com", 10, long_after),
+            FetchOutcome::Body("<html/>".into())
+        );
+    }
+
+    #[test]
+    fn memo_misses_on_an_unknown_key() {
+        let memo = FetchMemo::new();
+        assert_eq!(
+            memo.lookup("never-seen.com", 10, 100),
+            FetchOutcome::NotAttempted
+        );
+    }
+
+    #[test]
+    fn memo_replays_a_terminal_failure() {
+        let mut memo = FetchMemo::new();
+        memo.record(
+            "dead.com",
+            FetchOutcome::FailedFast(FetchFailureClass::Unreachable),
+            4,
+            100,
+        );
+        assert_eq!(
+            memo.lookup("dead.com", 10, 100),
+            FetchOutcome::FailedFast(FetchFailureClass::Unreachable)
+        );
+    }
+
+    #[test]
+    fn memo_reads_a_transient_failure_back_as_not_attempted() {
+        // The load-bearing safety property: a 503 is stored (so it can be reasoned about) but
+        // reads back as "we do not know", so the caller fetches instead of inheriting the outage.
+        let mut memo = FetchMemo::new();
+        memo.record(
+            "throttled.com",
+            FetchOutcome::FailedFast(FetchFailureClass::ThrottledStatus(503)),
+            4,
+            100,
+        );
+        assert_eq!(
+            memo.lookup("throttled.com", 10, 100),
+            FetchOutcome::NotAttempted
+        );
+    }
+
+    #[test]
+    fn memo_reads_a_short_budget_timeout_back_as_not_attempted_for_a_longer_caller() {
+        let mut memo = FetchMemo::new();
+        memo.record(
+            "slow.com",
+            FetchOutcome::FailedFast(FetchFailureClass::TimedOut),
+            HTTP_ORG_FETCH_BUDGET_SECS,
+            100,
+        );
+        // The NER step is willing to wait longer, so the memo must not answer for it.
+        assert_eq!(
+            memo.lookup("slow.com", PAGE_FETCH_BUDGET_SECS, 100),
+            FetchOutcome::NotAttempted
+        );
+        // Another caller on the same 4s budget learns nothing new by trying.
+        assert_eq!(
+            memo.lookup("slow.com", HTTP_ORG_FETCH_BUDGET_SECS, 100),
+            FetchOutcome::FailedFast(FetchFailureClass::TimedOut)
+        );
+    }
+
+    #[test]
+    fn memo_stops_honouring_a_failure_after_its_ttl() {
+        // A network blip early in a long scan must not silently suppress the rest of it.
+        let mut memo = FetchMemo::new();
+        memo.record(
+            "dead.com",
+            FetchOutcome::FailedFast(FetchFailureClass::Unreachable),
+            4,
+            100,
+        );
+        assert_eq!(
+            memo.lookup("dead.com", 10, 100 + FAILURE_MEMO_TTL_SECS - 1),
+            FetchOutcome::FailedFast(FetchFailureClass::Unreachable)
+        );
+        assert_eq!(
+            memo.lookup("dead.com", 10, 100 + FAILURE_MEMO_TTL_SECS),
+            FetchOutcome::NotAttempted
+        );
+    }
+
+    #[test]
+    fn memo_refuses_to_store_not_attempted() {
+        let mut memo = FetchMemo::new();
+        memo.record("vendor.com", FetchOutcome::NotAttempted, 4, 100);
+        assert_eq!(memo.entry_count(), 0);
+    }
+
+    #[test]
+    fn memo_drops_an_oversize_body_rather_than_retaining_it() {
+        let mut memo = FetchMemo::new();
+        let huge = "x".repeat(MAX_MEMOIZED_BODY_BYTES + 1);
+        memo.record("bloated.com", FetchOutcome::Body(huge), 4, 100);
+        assert_eq!(memo.entry_count(), 0);
+        assert_eq!(memo.retained_bytes(), 0);
+        // A miss, so the caller refetches — a time cost, never a wrong answer.
+        assert_eq!(
+            memo.lookup("bloated.com", 10, 100),
+            FetchOutcome::NotAttempted
+        );
+    }
+
+    #[test]
+    fn memo_evicts_oldest_first_at_the_entry_ceiling() {
+        let mut memo = FetchMemo::new();
+        for i in 0..MAX_MEMO_ENTRIES {
+            memo.record(&format!("d{i}.com"), FetchOutcome::Body("b".into()), 4, 100);
+        }
+        assert_eq!(memo.entry_count(), MAX_MEMO_ENTRIES);
+        memo.record("overflow.com", FetchOutcome::Body("b".into()), 4, 100);
+
+        assert_eq!(memo.entry_count(), MAX_MEMO_ENTRIES);
+        assert_eq!(memo.lookup("d0.com", 10, 100), FetchOutcome::NotAttempted);
+        assert_eq!(
+            memo.lookup("d1.com", 10, 100),
+            FetchOutcome::Body("b".into())
+        );
+        assert_eq!(
+            memo.lookup("overflow.com", 10, 100),
+            FetchOutcome::Body("b".into())
+        );
+        assert_eq!(memo.retained_bytes(), MAX_MEMO_ENTRIES);
+    }
+
+    #[test]
+    fn memo_re_recording_a_key_does_not_double_count_or_duplicate_it() {
+        let mut memo = FetchMemo::new();
+        memo.record("vendor.com", FetchOutcome::Body("aaaa".into()), 4, 100);
+        memo.record("vendor.com", FetchOutcome::Body("bb".into()), 4, 200);
+        assert_eq!(memo.entry_count(), 1);
+        assert_eq!(memo.retained_bytes(), 2);
+        assert_eq!(
+            memo.lookup("vendor.com", 10, 200),
+            FetchOutcome::Body("bb".into())
+        );
+
+        // A failure replacing a body must release the body's bytes too.
+        memo.record(
+            "vendor.com",
+            FetchOutcome::FailedFast(FetchFailureClass::Unreachable),
+            4,
+            300,
+        );
+        assert_eq!(memo.entry_count(), 1);
+        assert_eq!(memo.retained_bytes(), 0);
+    }
+
+    #[test]
+    fn memo_key_normalises_case_and_a_trailing_root_dot() {
+        assert_eq!(memo_key("Vendor.COM"), "vendor.com");
+        assert_eq!(memo_key("vendor.com."), "vendor.com");
+        assert_eq!(memo_key("  vendor.com  "), "vendor.com");
     }
 }

@@ -35,7 +35,7 @@ use std::io::Write;
 #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 use std::sync::OnceLock;
 #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Model bytes embedded at compile time (only when `embedded-ner` is selected).
 #[cfg(feature = "embedded-ner")]
@@ -185,6 +185,123 @@ fn dedup_filter_sort_orgs(orgs: Vec<(String, f32)>, min_name_len: usize) -> Vec<
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     results
+}
+
+/// Byte ceiling on the text the multi-org fallback runs inference over.
+///
+/// The subprocessor NER fallback used to chunk a whole rendered page: a 100 KB page became
+/// ~40 inferences run one after another while holding one of only ~2 global inference
+/// permits, so a single large page camped on a permit for 10-30s and stalled every other
+/// NER user in the scan. Vendor/subprocessor lists are the *subject* of these pages and sit
+/// near the top; the tail is nav chrome, footers, cookie notices and legal boilerplate, so
+/// the bytes past this cap are low-yield per inference spent.
+///
+/// This is not free, and the tradeoff is recall, not just latency: a page that lists vendors
+/// only after 24 KB — an appendix-style layout, or a list pushed down by a large inlined
+/// script or nav block that `extract_text_from_html` did not strip — loses those
+/// organizations outright. That loss is why [`cap_fallback_input`] returns a flag and every
+/// caller must report it; a truncated page must never be indistinguishable from a page that
+/// genuinely listed nothing.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+const FALLBACK_MAX_INPUT_BYTES: usize = 24_000;
+
+/// Longest text handed to a single inference before [`chunk_text`] splits it.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+const NER_SINGLE_INFERENCE_BYTES: usize = 4_000;
+
+/// Target chunk size once splitting kicks in.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+const NER_CHUNK_BYTES: usize = 3_000;
+
+/// Overlap carried between adjacent chunks so an org name straddling a split is still seen
+/// whole by one of them.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+const NER_CHUNK_OVERLAP_BYTES: usize = 500;
+
+/// Chunks folded into a single inference call.
+///
+/// At [`FALLBACK_MAX_INPUT_BYTES`] ordinary prose splits into ~10 chunks, so in practice the
+/// fallback is ONE batched inference instead of ten serial ones. The bound is still explicit
+/// because the ONNX batch tensor grows linearly in the batch dimension: if the cap is ever
+/// raised, or whitespace-sparse text makes `chunk_text` emit short chunks, an unbounded batch
+/// would trade the permit monopoly for a memory spike.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+const NER_MAX_BATCH_CHUNKS: usize = 16;
+
+/// Cap the fallback's input, reporting whether anything was dropped.
+///
+/// The bool is the point of the function. Returning only the capped text would make the cap
+/// a silent recall loss, which is the failure mode this whole change is required not to
+/// introduce.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+fn cap_fallback_input(text: &str, max_bytes: usize) -> (&str, bool) {
+    let capped = truncate_text(text, max_bytes);
+    (capped, capped.len() < text.len())
+}
+
+/// Group `text`'s chunks into the batches the inference loop drives one permit at a time.
+///
+/// Owned `String`s because a batch crosses a `spawn_blocking` boundary on the async path.
+/// The sync path pays the same copy so both paths run byte-identical batching — the async
+/// wrapper and the sync method are asserted bit-for-bit equal by
+/// `tests/ner_async_parity_tests.rs`, and two batching implementations would eventually
+/// drift apart and break that claim.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+fn plan_inference_batches(text: &str, max_batch_chunks: usize) -> Vec<Vec<String>> {
+    let chunks = chunk_text(
+        text,
+        NER_SINGLE_INFERENCE_BYTES,
+        NER_CHUNK_BYTES,
+        NER_CHUNK_OVERLAP_BYTES,
+    );
+    chunks
+        .chunks(max_batch_chunks.max(1))
+        .map(|batch| batch.iter().map(|&chunk| chunk.to_string()).collect())
+        .collect()
+}
+
+/// Keep the org-typed candidates at or above `threshold`, trimmed and non-empty.
+///
+/// Shared by the sync and async multi-org paths: extracting it is what makes "batching
+/// preserves the serial path's extracted set" a claim a unit test can check, rather than
+/// two copies of a filter that happen to agree today.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner", test))]
+fn keep_org_candidates(
+    candidates: Vec<(String, String, f32)>,
+    threshold: f32,
+) -> Vec<(String, f32)> {
+    let mut kept = Vec::new();
+    for (entity_type, org_name, confidence) in candidates {
+        if (entity_type == "organization" || entity_type == "company") && confidence >= threshold {
+            let trimmed = org_name.trim().to_string();
+            if !trimmed.is_empty() {
+                kept.push((trimmed, confidence));
+            }
+        }
+    }
+    kept
+}
+
+/// Report the recall the cap just traded away.
+///
+/// One warn per process, then debug for the rest. A depth-3 scan truncates many pages and a
+/// warn each would flood the progress bar, but a cap that says nothing at default verbosity
+/// is exactly the silent recall loss the cap is not allowed to become — so it speaks once.
+/// Mirrors the DNS path's warn-once-per-provider idiom.
+#[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
+fn report_fallback_truncation(original_len: usize, kept_len: usize) {
+    crate::perf::METRICS.ner_fallback_truncated.hit();
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        warn!(
+            "NER fallback truncated page text {} -> {} bytes; organizations listed past the cap are not extracted (further truncations logged at -vv)",
+            original_len, kept_len
+        );
+    });
+    debug!(
+        "NER fallback truncated page text {} -> {} bytes",
+        original_len, kept_len
+    );
 }
 
 /// Global NER extractor instance
@@ -412,7 +529,26 @@ impl NerOrganizationExtractor {
         text: &str,
         entity_types: &[&str],
     ) -> Result<Vec<(String, String, f32)>> {
-        let input = TextInput::from_str(&[text], entity_types)
+        self.run_inference_batch(&[text], entity_types)
+    }
+
+    /// One inference over `texts` as a single ONNX batch.
+    ///
+    /// `TextInput` has always taken a slice of sequences and `SpanOutput::spans` has always
+    /// been one `Vec<Span>` per input, so flattening them yields the same candidate list the
+    /// old one-inference-per-chunk loop produced — with one honest caveat that the header of
+    /// `tests/ner_async_parity_tests.rs` called out before batching was adopted: batching
+    /// pads every sequence to the longest in the batch, which changes tensor shapes and
+    /// therefore float reduction order, so a near-tie argmax can in principle flip. That is
+    /// a deliberate accuracy-for-latency trade taken to end the permit monopoly, not an
+    /// oversight; a scan that suddenly loses a marginal org here is the expected shape of it.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_inference_batch(
+        &self,
+        texts: &[&str],
+        entity_types: &[&str],
+    ) -> Result<Vec<(String, String, f32)>> {
+        let input = TextInput::from_str(texts, entity_types)
             .map_err(|e| anyhow!("Failed to create TextInput: {}", e))?;
         let inference_started = std::time::Instant::now();
         let output = self
@@ -513,6 +649,9 @@ impl NerOrganizationExtractor {
     /// Unlike `extract_organization()` which returns only the single best match,
     /// this returns all detected organizations, deduplicated by normalized name
     /// (keeping the highest confidence for each).
+    ///
+    /// Input is capped at [`FALLBACK_MAX_INPUT_BYTES`] and the surviving chunks are folded
+    /// into batched inferences — see those constants for why, and for what recall that costs.
     #[cfg_attr(coverage_nightly, coverage(off))] // coverage: LLVM artifact — closing brace instrumentation gap
     pub fn extract_all_organizations(
         &self,
@@ -520,28 +659,27 @@ impl NerOrganizationExtractor {
         min_confidence: Option<f32>,
     ) -> Result<Vec<NerOrgResult>> {
         let threshold = min_confidence.unwrap_or(self.min_confidence);
-        let chunks = chunk_text(text, 4000, 3000, 500);
+        let original_len = text.len();
+        let (text, truncated) = cap_fallback_input(text, FALLBACK_MAX_INPUT_BYTES);
+        if truncated {
+            report_fallback_truncation(original_len, text.len());
+        }
+        let batches = plan_inference_batches(text, NER_MAX_BATCH_CHUNKS);
 
         let mut all_candidates: Vec<(String, f32)> = Vec::new();
-        for chunk in &chunks {
-            let candidates = self.run_inference(chunk, &["organization", "company"])?;
-            for (entity_type, org_name, confidence) in candidates {
-                if (entity_type == "organization" || entity_type == "company")
-                    && confidence >= threshold
-                {
-                    let trimmed = org_name.trim().to_string();
-                    if !trimmed.is_empty() {
-                        all_candidates.push((trimmed, confidence));
-                    }
-                }
-            }
+        for batch in &batches {
+            let sequences: Vec<&str> = batch.iter().map(String::as_str).collect();
+            let candidates = self.run_inference_batch(&sequences, &["organization", "company"])?;
+            all_candidates.extend(keep_org_candidates(candidates, threshold));
         }
 
         let results = dedup_filter_sort_orgs(all_candidates, 3);
         debug!(
-            "NER extracted {} organizations from {} chars of text",
+            "NER extracted {} organizations from {} chars of text ({} inference batches, truncated: {})",
             results.len(),
-            text.len()
+            text.len(),
+            batches.len(),
+            truncated
         );
         Ok(results)
     }
@@ -668,6 +806,18 @@ pub async fn extract_organization_async(
 
 /// Async form of [`extract_all_organizations`]: identical inputs, identical output,
 /// executed on the blocking pool under an inference permit.
+///
+/// The permit is acquired **per batch**, not once for the whole call. Wrapping the entire
+/// call meant a single 100 KB page held one of only ~2 global permits for its whole ~40-chunk
+/// run — 10-30s during which no other vendor pipeline in the scan could reach NER at all.
+/// Batching shrinks that to (usually) one inference, and re-acquiring per batch means even a
+/// page that still needs several cannot camp: the permit is a unit of *work*, not a unit of
+/// *page*.
+///
+/// This does not re-enter `extract_all_organizations`; it drives the same
+/// [`plan_inference_batches`] / [`keep_org_candidates`] / [`dedup_filter_sort_orgs`] steps so
+/// the bit-for-bit sync/async parity asserted by `tests/ner_async_parity_tests.rs` still
+/// holds, while the permit boundary sits between batches instead of around everything.
 #[cfg(any(feature = "embedded-ner", feature = "runtime-ner"))]
 pub async fn extract_all_organizations_async(
     text: &str,
@@ -676,11 +826,41 @@ pub async fn extract_all_organizations_async(
     let Some(extractor) = NER_EXTRACTOR.get() else {
         return Ok(Vec::new());
     };
-    let text = text.to_string();
-    let _permit = inference_permits().acquire().await;
-    tokio::task::spawn_blocking(move || extractor.extract_all_organizations(&text, min_confidence))
-        .await
-        .map_err(|e| anyhow!("NER inference task failed to join: {}", e))?
+    let threshold = min_confidence.unwrap_or(extractor.min_confidence);
+    let original_len = text.len();
+    let (capped, truncated) = cap_fallback_input(text, FALLBACK_MAX_INPUT_BYTES);
+    if truncated {
+        report_fallback_truncation(original_len, capped.len());
+    }
+    let batches = plan_inference_batches(capped, NER_MAX_BATCH_CHUNKS);
+    let batch_count = batches.len();
+
+    let mut all_candidates: Vec<(String, f32)> = Vec::new();
+    for batch in batches {
+        let permit = inference_permits().acquire().await;
+        let joined = tokio::task::spawn_blocking(move || {
+            let sequences: Vec<&str> = batch.iter().map(String::as_str).collect();
+            extractor.run_inference_batch(&sequences, &["organization", "company"])
+        })
+        .await;
+        // Dropped before the next iteration's acquire. Letting it live to the end of the
+        // loop body would still hold it across the next await point on a multi-batch page —
+        // the whole-call monopoly again, just with extra steps.
+        drop(permit);
+        let candidates =
+            joined.map_err(|e| anyhow!("NER inference task failed to join: {}", e))??;
+        all_candidates.extend(keep_org_candidates(candidates, threshold));
+    }
+
+    let results = dedup_filter_sort_orgs(all_candidates, 3);
+    debug!(
+        "NER extracted {} organizations from {} chars of text ({} inference batches, truncated: {})",
+        results.len(),
+        capped.len(),
+        batch_count,
+        truncated
+    );
+    Ok(results)
 }
 
 // ============================================================================
@@ -2695,6 +2875,252 @@ mod tests {
         assert!(!chunks.is_empty());
         for chunk in &chunks {
             assert!(!chunk.is_empty());
+        }
+    }
+
+    // ── Fallback input cap + inference batching (P2.13) ───────────────
+    //
+    // The fallback used to run ~40 serial inferences over a whole 100KB page while holding
+    // one of ~2 global inference permits. These pin the two mechanisms that replaced it: the
+    // input cap (which trades recall, so truncation must be *reported*, never silent) and the
+    // batching plan (which must feed inference exactly the text the serial loop fed it).
+
+    /// Prose whose chunk shape matches a real rendered subprocessor page: ordinary word
+    /// spacing, so `chunk_text` finds whitespace to break on rather than hard-cutting.
+    fn fallback_prose(len: usize) -> String {
+        let mut text = String::with_capacity(len + 64);
+        while text.len() < len {
+            text.push_str("Acme Corporation is a listed subprocessor of the service. ");
+        }
+        text.truncate(len);
+        text
+    }
+
+    #[test]
+    fn test_cap_fallback_input_under_cap_is_untouched_and_unreported() {
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES - 1);
+        let (capped, truncated) = cap_fallback_input(&text, FALLBACK_MAX_INPUT_BYTES);
+        assert_eq!(capped, text.as_str());
+        assert!(
+            !truncated,
+            "a page under the cap loses nothing, so nothing may be reported"
+        );
+    }
+
+    #[test]
+    fn test_cap_fallback_input_exactly_at_cap_is_untouched_and_unreported() {
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES);
+        assert_eq!(text.len(), FALLBACK_MAX_INPUT_BYTES);
+        let (capped, truncated) = cap_fallback_input(&text, FALLBACK_MAX_INPUT_BYTES);
+        assert_eq!(capped.len(), FALLBACK_MAX_INPUT_BYTES);
+        assert!(!truncated, "the boundary byte itself is kept, not dropped");
+    }
+
+    #[test]
+    fn test_cap_fallback_input_one_byte_over_cap_truncates_and_reports() {
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES + 1);
+        let (capped, truncated) = cap_fallback_input(&text, FALLBACK_MAX_INPUT_BYTES);
+        assert_eq!(capped.len(), FALLBACK_MAX_INPUT_BYTES);
+        assert!(
+            truncated,
+            "one dropped byte is still dropped recall and must be reported"
+        );
+        assert_eq!(capped, &text[..FALLBACK_MAX_INPUT_BYTES]);
+    }
+
+    #[test]
+    fn test_cap_fallback_input_reports_when_multibyte_char_straddles_cap() {
+        // The cap lands mid-char, so truncate_text backs off further than max_bytes. The
+        // report must key off "text was lost", not off "we hit exactly max_bytes".
+        let mut text = String::from("Acme Corp"); // 9 ASCII bytes
+        text.push('\u{2019}'); // 3 bytes, spanning bytes 9..12
+        text.push_str("Beta Inc");
+        let (capped, truncated) = cap_fallback_input(&text, 10);
+        assert_eq!(capped.len(), 9, "must back off to a char boundary");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn test_cap_fallback_input_empty_text_is_not_reported_as_truncated() {
+        let (capped, truncated) = cap_fallback_input("", FALLBACK_MAX_INPUT_BYTES);
+        assert_eq!(capped, "");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_plan_inference_batches_feeds_inference_exactly_the_serial_chunks() {
+        // The correctness claim behind batching: the batched call sees the same sequences,
+        // in the same order, that the old one-inference-per-chunk loop saw.
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES);
+        let serial = chunk_text(
+            &text,
+            NER_SINGLE_INFERENCE_BYTES,
+            NER_CHUNK_BYTES,
+            NER_CHUNK_OVERLAP_BYTES,
+        );
+        let batched: Vec<String> = plan_inference_batches(&text, NER_MAX_BATCH_CHUNKS)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(batched.len(), serial.len());
+        for (got, want) in batched.iter().zip(&serial) {
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
+    fn test_plan_inference_batches_collapses_a_capped_page_to_one_inference() {
+        // The headline of P2.13: a page that used to cost ~10 serial permit-held inferences
+        // at the cap (and ~40 uncapped) now costs one call.
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES);
+        let batches = plan_inference_batches(&text, NER_MAX_BATCH_CHUNKS);
+        assert_eq!(
+            batches.len(),
+            1,
+            "a cap-sized prose page must batch into a single inference call"
+        );
+        assert!(
+            batches[0].len() > 1,
+            "the page is long enough to have been chunked at all: {} chunks",
+            batches[0].len()
+        );
+    }
+
+    #[test]
+    fn test_plan_inference_batches_respects_the_batch_bound() {
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES);
+        let total_chunks = chunk_text(
+            &text,
+            NER_SINGLE_INFERENCE_BYTES,
+            NER_CHUNK_BYTES,
+            NER_CHUNK_OVERLAP_BYTES,
+        )
+        .len();
+        assert!(total_chunks > 2, "need enough chunks to split into batches");
+
+        let batches = plan_inference_batches(&text, 2);
+        assert_eq!(batches.len(), total_chunks.div_ceil(2));
+        for batch in &batches {
+            assert!(!batch.is_empty());
+            assert!(
+                batch.len() <= 2,
+                "the batch bound is what keeps the ONNX batch tensor from growing without limit"
+            );
+        }
+    }
+
+    #[test]
+    fn test_plan_inference_batches_zero_bound_does_not_panic() {
+        // slice::chunks(0) panics; the .max(1) guard is the only thing between a misconfigured
+        // bound and a scan-killing panic inside the fallback.
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES);
+        let batches = plan_inference_batches(&text, 0);
+        assert!(!batches.is_empty());
+        for batch in &batches {
+            assert_eq!(batch.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_plan_inference_batches_short_text_is_one_chunk_one_batch() {
+        let batches = plan_inference_batches("Acme Corporation is a subprocessor.", 16);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[0][0], "Acme Corporation is a subprocessor.");
+    }
+
+    #[test]
+    fn test_plan_inference_batches_empty_text_still_yields_one_sequence() {
+        // GLiNER rejects a zero-length sequence, and `tests/ner_async_parity_tests.rs` pins
+        // that both the sync and async paths reproduce that error identically. That parity
+        // only holds if the empty input still reaches inference as one sequence.
+        let batches = plan_inference_batches("", 16);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0], vec![String::new()]);
+    }
+
+    #[test]
+    fn test_keep_org_candidates_batched_equals_serial() {
+        // Batching changes how many inference calls produce the candidates, not which
+        // candidates survive filtering. Splitting one candidate list across batches and
+        // re-joining must land on the identical filtered set.
+        let candidates = vec![
+            ("organization".to_string(), "Acme Corp".to_string(), 0.9),
+            ("person".to_string(), "Jane Doe".to_string(), 0.99),
+            ("company".to_string(), "Beta Inc".to_string(), 0.5),
+            ("organization".to_string(), "  ".to_string(), 0.95),
+            ("organization".to_string(), " Gamma Ltd ".to_string(), 0.7),
+            ("product".to_string(), "Widget".to_string(), 0.95),
+            ("company".to_string(), "Delta LLC".to_string(), 0.4),
+        ];
+
+        let serial = keep_org_candidates(candidates.clone(), 0.5);
+
+        let mut batched: Vec<(String, f32)> = Vec::new();
+        for slice in candidates.chunks(3) {
+            batched.extend(keep_org_candidates(slice.to_vec(), 0.5));
+        }
+
+        assert_eq!(serial, batched);
+        assert_eq!(
+            serial,
+            vec![
+                ("Acme Corp".to_string(), 0.9),
+                ("Beta Inc".to_string(), 0.5),
+                ("Gamma Ltd".to_string(), 0.7),
+            ],
+            "non-org types, sub-threshold scores and whitespace-only names are all dropped"
+        );
+    }
+
+    #[test]
+    fn test_keep_org_candidates_threshold_is_inclusive() {
+        let at = keep_org_candidates(
+            vec![("organization".to_string(), "Acme".to_string(), 0.85)],
+            0.85,
+        );
+        assert_eq!(at, vec![("Acme".to_string(), 0.85)]);
+
+        let below = keep_org_candidates(
+            vec![("organization".to_string(), "Acme".to_string(), 0.84)],
+            0.85,
+        );
+        assert!(below.is_empty());
+    }
+
+    #[test]
+    fn test_keep_org_candidates_empty_input() {
+        assert!(keep_org_candidates(Vec::new(), 0.5).is_empty());
+    }
+
+    /// The whole point of the batching + cap change is that a large page no longer costs
+    /// ~40 permit-held inferences. This runs the real model over an over-cap page through
+    /// both the sync and the permit-per-batch async path and asserts they still agree
+    /// bit-for-bit — the claim `tests/ner_async_parity_tests.rs` makes for smaller inputs,
+    /// re-asserted on an input that actually exercises the cap.
+    #[cfg(feature = "embedded-ner")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[tokio::test]
+    async fn test_ner_async_extract_all_matches_sync_on_over_cap_page() {
+        if !ensure_ner_available() {
+            return;
+        }
+        let text = fallback_prose(FALLBACK_MAX_INPUT_BYTES + 6_000);
+        assert!(text.len() > FALLBACK_MAX_INPUT_BYTES);
+
+        let sync = extract_all_organizations(&text, Some(0.3)).expect("sync extraction");
+        let asynchronous = extract_all_organizations_async(&text, Some(0.3))
+            .await
+            .expect("async extraction");
+
+        assert_eq!(
+            sync.len(),
+            asynchronous.len(),
+            "sync={sync:?} async={asynchronous:?}"
+        );
+        for (s, a) in sync.iter().zip(&asynchronous) {
+            assert_eq!(s.organization, a.organization);
+            assert_eq!(s.confidence.to_bits(), a.confidence.to_bits());
         }
     }
 }

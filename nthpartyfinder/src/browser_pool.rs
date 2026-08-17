@@ -20,7 +20,9 @@
 //! headless_chrome 1.0.22's `Context` has no `Drop` and exposes no `Target.disposeBrowserContext`,
 //! so contexts would accumulate for the life of the process with no way to free them.
 //!
-//! Uses std::sync primitives so it works in both async and sync (spawn_blocking) contexts.
+//! The render slot is a `tokio::sync::Semaphore` permit, acquired from async context *before* the
+//! caller enters `spawn_blocking` — see [`acquire_render_permit`] for why waiting on a thread was
+//! the more expensive of the two ways to wait.
 
 use std::sync::Arc;
 
@@ -396,82 +398,183 @@ impl Drop for PoolShutdownGuard {
     }
 }
 
-/// Global counting semaphore for browser instances.
-static BROWSER_SEMAPHORE: once_cell::sync::Lazy<BrowserSemaphore> =
-    once_cell::sync::Lazy::new(|| BrowserSemaphore::new(resolve_max_browser_instances()));
+/// How many renders may run at once. Resolved once, and reported by [`permits`] — deliberately
+/// held separately from the semaphore, whose `available_permits()` counts what is *free right now*
+/// rather than the capacity the perf table needs.
+static MAX_RENDER_SLOTS: once_cell::sync::Lazy<usize> =
+    once_cell::sync::Lazy::new(resolve_max_browser_instances);
+
+/// Build a render-slot semaphore. Split out from the static so the unit tests exercise the same
+/// constructor the scan does instead of a hand-built stand-in.
+fn new_render_semaphore(slots: usize) -> Arc<tokio::sync::Semaphore> {
+    Arc::new(tokio::sync::Semaphore::new(slots))
+}
+
+/// Global render-slot semaphore.
+///
+/// This was a hand-rolled `Mutex` + `Condvar` counter, and *both* of its properties were wrong for
+/// the way this scan queues:
+///
+/// * It handed a freed slot off with `notify_one`, which wakes an arbitrary waiter. With
+///   `browser.permit_wait` averaging 201.6s across 1,113 acquisitions on the 2026-08-15 depth-3
+///   run, queue depth — not render speed — was the render path's cost, and an unlucky render could
+///   be skipped over repeatedly with no bound on its wait.
+/// * It could only be waited on by *blocking a thread*. Every render site waits inside
+///   `spawn_blocking`, so each queued render pinned one of tokio's 512 blocking-pool threads for
+///   the whole wait. Past ~512 queued renders the pool is exhausted, and NER inference, WHOIS and
+///   HTML extraction — which share that pool — stop being scheduled at all: a priority inversion
+///   in which the render *queue* starves the work it is queued behind.
+///
+/// `tokio::sync::Semaphore` is FIFO by contract, and is waited on by suspending a future rather
+/// than parking a thread, so a render can queue before it ever touches the blocking pool.
+static RENDER_PERMITS: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
+    once_cell::sync::Lazy::new(|| new_render_semaphore(*MAX_RENDER_SLOTS));
 
 /// How many renders this process can run concurrently.
 ///
 /// The perf attribution table divides serialized render time by this to get the floor the
 /// render path imposes on the scan's wall clock.
 pub fn permits() -> usize {
-    BROWSER_SEMAPHORE.max
+    *MAX_RENDER_SLOTS
 }
 
-/// A simple counting semaphore using std::sync primitives.
-/// Unlike tokio::sync::Semaphore, this works in synchronous contexts
-/// (e.g., inside spawn_blocking closures).
-struct BrowserSemaphore {
-    state: std::sync::Mutex<usize>,
-    condvar: std::sync::Condvar,
-    max: usize,
+/// A held render slot, plus how long its holder queued for it.
+///
+/// The slot is owned, not borrowed, so it can be moved into a `spawn_blocking` closure — that
+/// move is the whole point: the wait happens in async context and only the *held* slot crosses
+/// onto the blocking pool. `OwnedSemaphorePermit` returns the slot from `Drop`, so it is released
+/// on every exit path that runs destructors — normal return, `?`, and a panic that unwinds.
+///
+/// A `panic = "abort"` build runs no destructors, but the process is already dying and the slot
+/// dies with it; Chrome itself is still reaped there by the panic hook, which works off
+/// `CHROME_PIDS` rather than off this permit.
+pub struct RenderPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    waited: std::time::Duration,
 }
 
-impl BrowserSemaphore {
-    fn new(max: usize) -> Self {
-        Self {
-            state: std::sync::Mutex::new(0),
-            condvar: std::sync::Condvar::new(),
-            max,
-        }
-    }
-
-    /// Acquire a permit, blocking until one is available. Returns the permit and how long
-    /// the caller was blocked waiting for it.
+impl RenderPermit {
+    /// How long this caller queued for its render slot.
     ///
-    /// The wait duration is not diagnostic decoration: callers with a time budget must be
-    /// able to subtract time they spent queued behind *other* vendors' browsers, or their
-    /// budget measures how busy the scan is rather than how much work they did. See
+    /// Not diagnostic decoration: callers with a time budget must be able to subtract time they
+    /// spent queued behind *other* vendors' browsers, or their budget measures how busy the scan
+    /// is rather than how much work they did. See
     /// `subprocessor::analyze_domain_with_full_options`.
-    ///
-    /// Mutex/Condvar poison is recovered (not unwrapped): the guarded value is a
-    /// simple permit counter, so a peer thread panicking while holding the lock
-    /// must not take down the whole browser pool. `into_inner()` returns the
-    /// still-valid counter so acquisition continues.
-    fn acquire(&self) -> (BrowserPermit<'_>, std::time::Duration) {
-        let started = std::time::Instant::now();
-        let mut count = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while *count >= self.max {
-            count = self
-                .condvar
-                .wait(count)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        *count += 1;
-        (BrowserPermit { semaphore: self }, started.elapsed())
-    }
-
-    fn release(&self) {
-        let mut count = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *count -= 1;
-        self.condvar.notify_one();
+    pub fn waited(&self) -> std::time::Duration {
+        self.waited
     }
 }
 
-/// RAII guard that releases a browser semaphore permit on drop.
-struct BrowserPermit<'a> {
-    semaphore: &'a BrowserSemaphore,
+/// Record the wait and wrap the raw slot. The single place the metric is recorded, so a slot can
+/// never be counted twice — which would silently halve the mean the perf table reports.
+fn into_render_permit(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    waited: std::time::Duration,
+) -> RenderPermit {
+    crate::perf::METRICS.browser_permit_wait.record(waited);
+    RenderPermit {
+        _permit: permit,
+        waited,
+    }
 }
 
-impl<'a> Drop for BrowserPermit<'a> {
-    fn drop(&mut self) {
-        self.semaphore.release();
+/// Refuse a render when a launch earlier this run already proved Chrome unlaunchable.
+///
+/// Callers (subprocessor → static HTML, web-org → HTTP-only, web-traffic → skipped) already
+/// degrade gracefully on this `Err`. Checked *before* queueing so a Chrome-less scan does not
+/// serialize every render site behind a semaphore it can only fail on, and again after queueing
+/// because the latch can flip while a render waits.
+fn refuse_if_chrome_unavailable() -> anyhow::Result<()> {
+    if chrome_known_unavailable() {
+        return Err(anyhow::anyhow!(
+            "Chrome/Chromium not installed — skipping browser-based rendering for this target"
+        ));
+    }
+    Ok(())
+}
+
+/// Acquire a render slot from async context, **before** entering `spawn_blocking`.
+///
+/// This is the half of the fix that keeps the render queue off the blocking pool: waiting here
+/// suspends a future, so a thousand queued renders cost a thousand cheap wakers instead of a
+/// thousand of tokio's 512 blocking threads. Move the returned permit into the `spawn_blocking`
+/// closure and hand it to [`acquire_tab_with_permit`]; the slot is released when the blocking work
+/// finishes and the resulting [`TabGuard`] drops.
+///
+/// A site that acquires here must NOT also subtract [`RenderPermit::waited`] from its
+/// `RenderTimer`: the wait now happens before the timer is started, so excluding it again
+/// subtracts time the timer never counted.
+pub async fn acquire_render_permit() -> anyhow::Result<RenderPermit> {
+    refuse_if_chrome_unavailable()?;
+    let started = std::time::Instant::now();
+    let permit = Arc::clone(&*RENDER_PERMITS)
+        .acquire_owned()
+        .await
+        // Unreachable in practice: nothing ever closes a process-global `Lazy` semaphore. Reported
+        // rather than unwrapped so a future edit that does close it degrades instead of panicking.
+        .map_err(|e| anyhow::anyhow!("render-slot semaphore closed: {e}"))?;
+    Ok(into_render_permit(permit, started.elapsed()))
+}
+
+/// How a *synchronous* caller must wait for a render slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncWait {
+    /// A slot was already free: take it, no waiting and no runtime needed.
+    Immediate,
+    /// Contended, with a tokio runtime in scope: park on the semaphore's FIFO queue, keeping this
+    /// caller's place in line among the async callers queued alongside it.
+    ParkOnRuntime,
+    /// Contended with no runtime at all: poll. `Handle::block_on` needs a runtime to block on, so
+    /// parking here would panic — and with no async callers in existence there is no ordering left
+    /// to preserve anyway.
+    PollWithoutRuntime,
+}
+
+/// Pick the waiting strategy for a synchronous caller. Pure, so the routing rule is exhaustively
+/// testable without a runtime or a browser — which matters because two of the three arms are only
+/// reachable under conditions a unit test cannot easily stage at the call site.
+fn sync_wait_strategy(slot_was_free: bool, runtime_available: bool) -> SyncWait {
+    match (slot_was_free, runtime_available) {
+        (true, _) => SyncWait::Immediate,
+        (false, true) => SyncWait::ParkOnRuntime,
+        (false, false) => SyncWait::PollWithoutRuntime,
+    }
+}
+
+/// Poll interval for the runtime-less fallback. Only ever reached by a synchronous caller with no
+/// tokio runtime anywhere (today: `web_org`'s `fetch_page_with_headless` invoked directly from a
+/// plain `#[test]`), which is uncontended in practice — so this never spins in a real scan.
+const SYNC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Block the current thread until a render slot is free.
+///
+/// **Must be called from a blocking context, never from a runtime worker thread** —
+/// `Handle::block_on` panics if the thread it is on is already driving async tasks. Every render
+/// site reaches this from inside `spawn_blocking`, which runs on the blocking pool rather than on
+/// a worker, so this holds today; [`acquire_render_permit`] exists so that new call sites need not
+/// come through here at all.
+fn wait_for_slot_blocking(
+    sem: Arc<tokio::sync::Semaphore>,
+) -> anyhow::Result<tokio::sync::OwnedSemaphorePermit> {
+    let handle = tokio::runtime::Handle::try_current().ok();
+    // One non-blocking attempt first, so the strategy is chosen on whether this caller is actually
+    // contended rather than on whether it might be.
+    let free_slot = Arc::clone(&sem).try_acquire_owned().ok();
+
+    match sync_wait_strategy(free_slot.is_some(), handle.is_some()) {
+        // Both `expect`s below restate `sync_wait_strategy`'s contract, which its truth-table test
+        // pins: `Immediate` is returned only for a taken slot, `ParkOnRuntime` only with a handle.
+        SyncWait::Immediate => Ok(free_slot.expect("Immediate implies a slot was taken")),
+        SyncWait::ParkOnRuntime => handle
+            .expect("ParkOnRuntime implies a runtime handle")
+            .block_on(sem.acquire_owned())
+            .map_err(|e| anyhow::anyhow!("render-slot semaphore closed: {e}")),
+        SyncWait::PollWithoutRuntime => loop {
+            std::thread::sleep(SYNC_POLL_INTERVAL);
+            if let Ok(permit) = Arc::clone(&sem).try_acquire_owned() {
+                return Ok(permit);
+            }
+        },
     }
 }
 
@@ -484,8 +587,12 @@ pub struct TabGuard {
     /// `None` only transiently, while `Drop` moves the browser back into the pool.
     browser: Option<TrackedBrowser>,
     served: usize,
-    _permit: BrowserPermit<'static>,
-    permit_wait: std::time::Duration,
+    /// Declared last on purpose. `Drop for TabGuard` runs first (closing the tab and returning or
+    /// killing its Chrome), then fields drop in declaration order — so the render slot is released
+    /// only once this render has fully let go of its browser, never while a Chrome process is
+    /// still being torn down. Moving this field up would let the next render start against a pool
+    /// this one has not finished handing back to.
+    permit: RenderPermit,
 }
 
 impl TabGuard {
@@ -494,12 +601,12 @@ impl TabGuard {
         &self.tab
     }
 
-    /// How long this caller blocked waiting for a render permit.
+    /// How long this caller waited for a render permit.
     ///
     /// Time-budgeted callers subtract this so their budget bounds their own work rather
     /// than the depth of the queue they happened to land in.
     pub fn permit_wait(&self) -> std::time::Duration {
-        self.permit_wait
+        self.permit.waited()
     }
 }
 
@@ -688,12 +795,6 @@ fn launch_browser() -> anyhow::Result<TrackedBrowser> {
     Ok(browser)
 }
 
-/// Acquire a render permit and a fresh Chrome tab, reusing a pooled Chrome process when one is
-/// available. Blocks until a permit is free.
-///
-/// Opening the tab doubles as the liveness probe for a reused browser: if `new_tab()` fails,
-/// that Chrome is discarded and a fresh one is launched. A caller therefore never receives a
-/// tab on a wedged process.
 /// The retry rule, isolated from Chrome so it can be tested.
 ///
 /// A retry that pops the pool again gets a *second* dead browser when several died while idle
@@ -711,20 +812,40 @@ fn take_pooled(force_fresh: bool) -> Option<PooledBrowser> {
     take_from_pool(force_fresh, &mut lock_idle())
 }
 
+/// Synchronous [`acquire_tab_with_permit`], for render sites that have not yet been converted to
+/// take their permit in async context.
+///
+/// Prefer [`acquire_render_permit`] + [`acquire_tab_with_permit`]: this entry point still parks a
+/// blocking-pool thread for the whole queue wait, which is the exhaustion this change exists to
+/// remove. It is kept correct (and FIFO, since it queues on the same semaphore) so an unconverted
+/// site is merely slower, never wrong.
 // coverage(off): drives real Chrome processes.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn acquire_tab() -> anyhow::Result<TabGuard> {
-    // Fail fast when the startup pre-flight found no Chrome: never attempt a launch that would fail
-    // slowly or hang. Callers (subprocessor → static HTML, web-org → HTTP-only, web-traffic →
-    // skipped) already degrade gracefully on this `Err`. Runs before acquiring a render permit so a
-    // Chrome-less scan does not serialize on the semaphore.
-    if chrome_known_unavailable() {
-        return Err(anyhow::anyhow!(
-            "Chrome/Chromium not installed — skipping browser-based rendering for this target"
-        ));
-    }
-    let (permit, permit_wait) = BROWSER_SEMAPHORE.acquire();
-    crate::perf::METRICS.browser_permit_wait.record(permit_wait);
+    // Before queueing, so a Chrome-less scan does not serialize on the semaphore.
+    refuse_if_chrome_unavailable()?;
+    let started = std::time::Instant::now();
+    let permit = wait_for_slot_blocking(Arc::clone(&*RENDER_PERMITS))?;
+    acquire_tab_with_permit(into_render_permit(permit, started.elapsed()))
+}
+
+/// Open a fresh Chrome tab against an already-held render slot, reusing a pooled Chrome process
+/// when one is available.
+///
+/// Call this inside `spawn_blocking` with the permit from [`acquire_render_permit`]. The permit
+/// moves into the returned [`TabGuard`], so the slot stays held for exactly as long as the tab and
+/// its browser do, and is returned however the render ends — success, `?`, or an unwinding panic.
+///
+/// Opening the tab doubles as the liveness probe for a reused browser: if `new_tab()` fails, that
+/// Chrome is discarded and a fresh one is launched. A caller therefore never receives a tab on a
+/// wedged process.
+// coverage(off): drives real Chrome processes.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn acquire_tab_with_permit(permit: RenderPermit) -> anyhow::Result<TabGuard> {
+    // Re-checked after queueing: a render that waited minutes for a slot can find that some other
+    // render meanwhile latched Chrome as unlaunchable, and `launch_browser` does not consult the
+    // latch itself — so without this it would re-pay the full 45s launch timeout.
+    refuse_if_chrome_unavailable()?;
 
     // At most two attempts: one that may reuse a pooled browser, then one on a guaranteed-fresh
     // launch. `force_fresh` is what makes the second attempt actually fresh — popping the pool
@@ -769,8 +890,7 @@ pub fn acquire_tab() -> anyhow::Result<TabGuard> {
                     tab,
                     browser: Some(browser),
                     served: served + 1,
-                    _permit: permit,
-                    permit_wait,
+                    permit,
                 });
             }
             Err(e) => {
@@ -886,153 +1006,251 @@ mod tests {
     use super::*;
 
     // ──────────────────────────────────────────────────────────────────
-    // BrowserSemaphore unit tests
+    // Render-slot semaphore
     // ──────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_browser_semaphore_new() {
-        let sem = BrowserSemaphore::new(3);
-        assert_eq!(sem.max, 3);
-        let count = sem.state.lock().unwrap();
-        assert_eq!(*count, 0);
+    fn test_render_semaphore_starts_with_every_slot_free() {
+        let sem = new_render_semaphore(3);
+        assert_eq!(sem.available_permits(), 3);
     }
 
+    /// The ceiling is the whole point of the semaphore: each concurrent browser is the scan's
+    /// dominant open-socket consumer, so handing out an extra slot directly inflates the peak
+    /// socket footprint that `MAX_RENDER_PERMITS` was lowered to bound.
     #[test]
-    fn test_browser_semaphore_acquire_increments_count() {
-        let sem = BrowserSemaphore::new(4);
-        let (_p1, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 1);
-        let (_p2, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 2);
-    }
-
-    #[test]
-    fn test_browser_semaphore_release_decrements_count() {
-        let sem = BrowserSemaphore::new(4);
-        let (_p1, _) = sem.acquire();
-        let (p2, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 2);
-        drop(p2);
-        assert_eq!(*sem.state.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn test_browser_permit_drop_releases() {
-        let sem = BrowserSemaphore::new(2);
-        {
-            let (_p, _) = sem.acquire();
-            assert_eq!(*sem.state.lock().unwrap(), 1);
-        }
-        // After permit is dropped, count should be back to 0
-        assert_eq!(*sem.state.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn test_browser_semaphore_acquire_up_to_max() {
-        let sem = BrowserSemaphore::new(3);
-        let (_p1, _) = sem.acquire();
-        let (_p2, _) = sem.acquire();
-        let (_p3, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 3);
-    }
-
-    #[test]
-    fn test_browser_semaphore_blocks_at_max_then_releases() {
-        use std::sync::Arc;
-        use std::thread;
-        use std::time::Duration;
-
-        let sem = Arc::new(BrowserSemaphore::new(1));
-
-        // Acquire the only permit
-        let (p1, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 1);
-
-        let sem2 = Arc::clone(&sem);
-        let handle = thread::spawn(move || {
-            // This should block until p1 is dropped
-            let (_p2, _) = sem2.acquire();
-            assert_eq!(*sem2.state.lock().unwrap(), 1);
-        });
-
-        // Give the thread a moment to start blocking
-        thread::sleep(Duration::from_millis(50));
-        // Count should still be 1 (thread is blocked)
-        assert_eq!(*sem.state.lock().unwrap(), 1);
-
-        // Drop p1 to unblock the thread
-        drop(p1);
-        handle.join().unwrap();
-        // After thread exits, count is back to 0
-        assert_eq!(*sem.state.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn test_browser_semaphore_multiple_acquire_release_cycles() {
-        let sem = BrowserSemaphore::new(2);
-        for _ in 0..10 {
-            let (_p, _) = sem.acquire();
-            assert_eq!(*sem.state.lock().unwrap(), 1);
-        }
-        assert_eq!(*sem.state.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn test_browser_semaphore_release_notifies_waiters() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
-        use std::thread;
-        use std::time::Duration;
-
-        let sem = Arc::new(BrowserSemaphore::new(1));
-        let acquired = Arc::new(AtomicBool::new(false));
-
-        let (p1, _) = sem.acquire();
-
-        let sem2 = Arc::clone(&sem);
-        let acquired2 = Arc::clone(&acquired);
-        let handle = thread::spawn(move || {
-            let (_p2, _) = sem2.acquire();
-            acquired2.store(true, Ordering::SeqCst);
-        });
-
-        thread::sleep(Duration::from_millis(50));
-        assert!(!acquired.load(Ordering::SeqCst), "Thread should be blocked");
-
-        drop(p1); // release, which calls notify_one
-        handle.join().unwrap();
+    fn test_render_semaphore_hands_out_no_more_slots_than_it_has() {
+        let sem = new_render_semaphore(2);
+        let _first = Arc::clone(&sem).try_acquire_owned().expect("slot 1 of 2");
+        let _second = Arc::clone(&sem).try_acquire_owned().expect("slot 2 of 2");
         assert!(
-            acquired.load(Ordering::SeqCst),
-            "Thread should have acquired after release"
+            Arc::clone(&sem).try_acquire_owned().is_err(),
+            "a third concurrent render must not get a slot"
         );
     }
 
-    /// A contended acquire must report a wait that reflects the block, and an uncontended one
-    /// must report ~nothing. This is the measurement the subprocessor budget subtracts, so a
-    /// silently-zero wait would re-introduce concurrency-dependent recall loss.
     #[test]
-    fn test_acquire_reports_permit_wait() {
-        use std::sync::Arc;
-        let sem = Arc::new(BrowserSemaphore::new(1));
-        let (held, first_wait) = sem.acquire();
-        assert!(
-            first_wait < std::time::Duration::from_millis(50),
-            "uncontended acquire should not report a meaningful wait, got {first_wait:?}"
+    fn test_render_slot_is_returned_on_drop() {
+        let sem = new_render_semaphore(2);
+        let first = Arc::clone(&sem).try_acquire_owned().expect("slot 1 of 2");
+        let second = Arc::clone(&sem).try_acquire_owned().expect("slot 2 of 2");
+        assert_eq!(sem.available_permits(), 0);
+        drop(second);
+        assert_eq!(sem.available_permits(), 1);
+        drop(first);
+        assert_eq!(sem.available_permits(), 2);
+    }
+
+    /// A render that panics mid-flight must still hand its slot back. If it did not, every panic
+    /// would permanently shrink the scan's render parallelism — the same class of leak that
+    /// `CHROME_PIDS` exists to prevent for the Chrome process itself.
+    #[test]
+    fn test_render_slot_is_returned_when_its_holder_panics() {
+        let sem = new_render_semaphore(1);
+        let holder = Arc::clone(&sem);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _slot = holder.try_acquire_owned().expect("the only slot");
+            panic!("render panicked while holding a slot");
+        }));
+        assert!(outcome.is_err(), "the closure must actually have panicked");
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "a panicking render must not strand its slot"
         );
+    }
 
-        let sem2 = Arc::clone(&sem);
-        let waiter = std::thread::spawn(move || {
-            let (_p, waited) = sem2.acquire();
-            waited
-        });
+    /// The property the hand-rolled `Condvar` semaphore did NOT have, and the reason
+    /// `browser.permit_wait` had an unbounded tail: `notify_one` wakes an arbitrary waiter, so a
+    /// queued render could be skipped over repeatedly while later arrivals went first. Renders
+    /// must be served strictly in the order they queued.
+    #[tokio::test]
+    async fn test_render_slots_are_served_first_come_first_served() {
+        let sem = new_render_semaphore(1);
+        let held = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("the only slot");
 
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut waiters = Vec::new();
+        for position in 0..6 {
+            let sem = Arc::clone(&sem);
+            let served = Arc::clone(&served);
+            waiters.push(tokio::spawn(async move {
+                let _slot = sem.acquire_owned().await.expect("a slot once one frees");
+                served.lock().expect("served log").push(position);
+            }));
+            // `#[tokio::test]` runs a current-thread runtime, so yielding lets the task just
+            // spawned run until it parks on the semaphore — which is what fixes its place in the
+            // queue before the next one is spawned. Without this the enqueue order is undefined
+            // and the assertion below would be testing nothing.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+        }
+
         drop(held);
-        let waited = waiter.join().expect("waiter thread panicked");
-        assert!(
-            waited >= std::time::Duration::from_millis(100),
-            "blocked acquire must report the time it was queued, got {waited:?}"
+        for waiter in waiters {
+            waiter.await.expect("waiter task");
+        }
+
+        assert_eq!(
+            *served.lock().expect("served log"),
+            vec![0, 1, 2, 3, 4, 5],
+            "renders must be served in the order they queued"
         );
+    }
+
+    /// The wait is the measurement `subprocessor::analyze_domain_with_full_options` subtracts from
+    /// its per-domain budget, so a silently-zero wait re-introduces concurrency-dependent recall
+    /// loss. It must reflect the real time queued, and the slot must outlive the report.
+    #[tokio::test]
+    async fn test_render_permit_reports_time_queued_and_frees_its_slot_on_drop() {
+        let sem = new_render_semaphore(1);
+        let held = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("the only slot");
+
+        let queued = Arc::clone(&sem);
+        let waiter = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let slot = queued.acquire_owned().await.expect("a slot once one frees");
+            into_render_permit(slot, started.elapsed())
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        drop(held);
+
+        let permit = waiter.await.expect("waiter task");
+        assert!(
+            permit.waited() >= std::time::Duration::from_millis(100),
+            "a queued render must report the time it spent waiting, got {:?}",
+            permit.waited()
+        );
+        assert_eq!(
+            sem.available_permits(),
+            0,
+            "the slot is still held while the permit is alive"
+        );
+        drop(permit);
+        assert_eq!(
+            sem.available_permits(),
+            1,
+            "dropping the permit returns the slot"
+        );
+    }
+
+    /// An uncontended acquire must report ~nothing, so the perf table's mean is not inflated by
+    /// renders that never actually queued.
+    #[tokio::test]
+    async fn test_uncontended_render_permit_reports_no_meaningful_wait() {
+        let sem = new_render_semaphore(2);
+        let started = std::time::Instant::now();
+        let slot = Arc::clone(&sem).acquire_owned().await.expect("a free slot");
+        let permit = into_render_permit(slot, started.elapsed());
+        assert!(
+            permit.waited() < std::time::Duration::from_millis(50),
+            "uncontended acquire should not report a meaningful wait, got {:?}",
+            permit.waited()
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // sync_wait_strategy — how a synchronous caller waits for a slot
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Getting any arm wrong is a panic or a stall, not a slow path: parking without a runtime
+    /// panics inside `Handle::block_on`, and polling when a runtime *is* available silently drops
+    /// this caller out of the FIFO queue it shares with the async callers.
+    #[test]
+    fn sync_wait_strategy_truth_table() {
+        assert_eq!(
+            sync_wait_strategy(true, true),
+            SyncWait::Immediate,
+            "a free slot is taken outright, runtime or not"
+        );
+        assert_eq!(
+            sync_wait_strategy(true, false),
+            SyncWait::Immediate,
+            "a free slot never needs a runtime"
+        );
+        assert_eq!(
+            sync_wait_strategy(false, true),
+            SyncWait::ParkOnRuntime,
+            "contended with a runtime must queue in FIFO order alongside the async callers"
+        );
+        assert_eq!(
+            sync_wait_strategy(false, false),
+            SyncWait::PollWithoutRuntime,
+            "contended with no runtime must poll — block_on has no runtime to block on"
+        );
+    }
+
+    /// `web_org::fetch_page_with_headless` is called directly from a plain `#[test]`, with no
+    /// tokio runtime anywhere. That caller must still be served.
+    #[test]
+    fn test_wait_for_slot_blocking_serves_an_uncontended_caller_with_no_runtime() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run outside a runtime for the fallback to be the path under test"
+        );
+        let sem = new_render_semaphore(1);
+        let permit = wait_for_slot_blocking(Arc::clone(&sem)).expect("an uncontended slot");
+        assert_eq!(sem.available_permits(), 0);
+        drop(permit);
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    /// The runtime-less *contended* path — the poll loop. Two plain threads, no runtime: the
+    /// waiter must still be handed the slot once it frees rather than spinning forever.
+    #[test]
+    fn test_wait_for_slot_blocking_polls_to_completion_with_no_runtime() {
+        let sem = new_render_semaphore(1);
+        let held = Arc::clone(&sem).try_acquire_owned().expect("the only slot");
+
+        let queued = Arc::clone(&sem);
+        let waiter = std::thread::spawn(move || wait_for_slot_blocking(queued));
+
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        drop(held);
+
+        let permit = waiter
+            .join()
+            .expect("waiter thread")
+            .expect("a slot once one frees");
+        drop(permit);
+        assert_eq!(sem.available_permits(), 1);
+    }
+
+    /// The unconverted sync path parks with `Handle::block_on`, which panics if it is called on a
+    /// thread already driving async tasks. Every render site reaches it from inside
+    /// `spawn_blocking`, so this pins that this really is a legal place to block — and that the
+    /// caller genuinely waits rather than being handed a slot that is still held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_for_slot_blocking_parks_inside_spawn_blocking_until_a_slot_frees() {
+        let sem = new_render_semaphore(1);
+        let held = Arc::clone(&sem)
+            .acquire_owned()
+            .await
+            .expect("the only slot");
+
+        let queued = Arc::clone(&sem);
+        let waiter = tokio::task::spawn_blocking(move || wait_for_slot_blocking(queued));
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !waiter.is_finished(),
+            "must still be queued while the only slot is held"
+        );
+
+        drop(held);
+        let permit = waiter
+            .await
+            .expect("blocking task")
+            .expect("a slot once one frees");
+        drop(permit);
+        assert_eq!(sem.available_permits(), 1);
     }
 
     /// The auto-sized pool must stay inside its bounds on any host. The floor exists so a small
@@ -1249,43 +1467,71 @@ mod tests {
         drop(guard);
     }
 
-    #[test]
-    fn test_browser_semaphore_concurrent_acquire_release() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let sem = Arc::new(BrowserSemaphore::new(4));
-        let mut handles = Vec::new();
-
-        for _ in 0..8 {
-            let sem_clone = Arc::clone(&sem);
-            handles.push(thread::spawn(move || {
-                let (_permit, _) = sem_clone.acquire();
-                // Hold the permit briefly
-                thread::sleep(std::time::Duration::from_millis(10));
+    /// Every slot must come back after a burst of contended renders — a leak of even one would
+    /// permanently narrow the render path for the rest of the scan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_every_slot_returns_after_a_contended_burst() {
+        let sem = new_render_semaphore(4);
+        let mut renders = Vec::new();
+        for _ in 0..16 {
+            let sem = Arc::clone(&sem);
+            renders.push(tokio::spawn(async move {
+                let _slot = sem.acquire_owned().await.expect("a slot");
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }));
         }
-
-        for h in handles {
-            h.join().unwrap();
+        for render in renders {
+            render.await.expect("render task");
         }
-        assert_eq!(*sem.state.lock().unwrap(), 0);
+        assert_eq!(
+            sem.available_permits(),
+            4,
+            "all four slots must be free once every render has finished"
+        );
     }
 
+    /// A single-slot semaphore is the degenerate case that serializes every render; it must still
+    /// hand the slot back rather than deadlocking the scan on its own first render.
     #[test]
-    fn test_browser_semaphore_max_one() {
-        // Edge case: semaphore with max=1 acts like a mutex
-        let sem = BrowserSemaphore::new(1);
-        let (_p, _) = sem.acquire();
-        assert_eq!(*sem.state.lock().unwrap(), 1);
-        drop(_p);
-        assert_eq!(*sem.state.lock().unwrap(), 0);
+    fn test_single_slot_semaphore_recycles_its_only_slot() {
+        let sem = new_render_semaphore(1);
+        for _ in 0..10 {
+            let slot = Arc::clone(&sem).try_acquire_owned().expect("the only slot");
+            assert_eq!(sem.available_permits(), 0);
+            drop(slot);
+        }
+        assert_eq!(sem.available_permits(), 1);
     }
 
+    /// `permits()` must report the *configured* capacity, not what is free right now — the perf
+    /// attribution table divides serialized render time by it to get the render path's floor, so
+    /// reading `available_permits()` instead would make that floor drift with live load.
     #[test]
-    fn test_global_semaphore_exists() {
-        // Verify the lazy static is accessible without panicking
-        let _ = &*BROWSER_SEMAPHORE;
+    fn test_permits_reports_capacity_not_currently_free_slots() {
+        assert_eq!(permits(), *MAX_RENDER_SLOTS);
+
+        let sem = new_render_semaphore(3);
+        let _held = Arc::clone(&sem).try_acquire_owned().expect("a slot");
+        assert_eq!(
+            sem.available_permits(),
+            2,
+            "available_permits() shrinks under load, which is exactly why permits() must not use it"
+        );
+        assert_eq!(permits(), *MAX_RENDER_SLOTS, "capacity is load-independent");
+    }
+
+    /// The global semaphore must initialise to the same capacity `permits()` advertises, or the
+    /// perf table's divisor describes a pool that does not exist.
+    #[test]
+    fn test_global_render_semaphore_is_sized_to_permits() {
+        assert!(
+            RENDER_PERMITS.available_permits() <= permits(),
+            "the global semaphore can never have more free slots than its capacity"
+        );
+        assert!(
+            permits() > 0,
+            "a zero-slot pool would deadlock every render"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────
