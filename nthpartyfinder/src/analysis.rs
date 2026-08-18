@@ -619,10 +619,25 @@ pub fn should_gate_infra_enumeration(current_depth: u32, base_domain: &str) -> b
 /// sum. The 2026-08-15 depth-3 validation scan measured a 93s worst case for a single origin
 /// this way, with no mechanism anywhere that could see the total.
 ///
-/// 90s sits deliberately between the two observations: a healthy-but-slow domain at depth ≥2
-/// spends roughly 45s (a ~30s join behind a ~5s preamble and a ~10s org resolution), so the body
-/// of the distribution is untouched and only the 93s-class tail is clipped.
-pub const DOMAIN_WORK_CEILING: Duration = Duration::from_secs(90);
+/// **The 90s value this started at was falsified in the field and must not be restored without new
+/// measurement.** The reasoning behind it — "a healthy-but-slow domain spends ~45s, so 90s clips
+/// only the 93s-class tail" — modelled the ceiling against per-method budgets in isolation. The
+/// 2026-08-17 depth-3 validation scan measured what actually happens: **1,608 cuts across 559
+/// domains** (the ceiling wraps each phase of the join, so it fires per phase, not per domain),
+/// which starved web-traffic on 509 of 559 domains and collapsed the scan from 22,482 relationships
+/// to 2,564. It was not clipping a tail; it had become the primary control.
+///
+/// The gap between model and reality is queueing the clock cannot see: `permit_wait` averaged 155s
+/// per browser acquisition on that same scan, and only the waits this clock is told about are
+/// subtracted. So "working time" as measured here still contains queueing, and a 90s bound trips on
+/// the body of the distribution rather than its tail.
+///
+/// 600s restores this to what it was always meant to be: a backstop against the genuinely unbounded
+/// case (before P3.6 there was no whole-domain ceiling at all), sitting far enough above legitimate
+/// per-domain work that tripping it is evidence of a pathology rather than of a deep scan. Re-tuning
+/// it downward is a measurement exercise — watch `domain.budget_cut` against the relationship count
+/// on a full depth-3 scan — not a judgement call (TF-DOMAIN-CEILING-SIZING).
+pub const DOMAIN_WORK_CEILING: Duration = Duration::from_secs(600);
 
 /// P3.6: how long the [`await_work_deadline`] watchdog waits before re-reading the clock when
 /// the remaining budget rounds to almost nothing. Without a floor, a domain whose queue time is
@@ -4098,7 +4113,13 @@ mod tests {
     fn test_domain_ceiling_enforced_from_depth_two_onwards() {
         // Depth 2 is the first layer the ceiling applies to — the same boundary P4.8's
         // enumeration gate uses, so the two mechanisms carve the root out identically.
-        let spent = Duration::from_secs(120);
+        //
+        // `spent` is derived from the ceiling rather than hard-coded: DOMAIN_WORK_CEILING is an
+        // explicitly tunable value (it was re-sized once already, after field measurement showed
+        // the original figure was clipping the body of the distribution instead of its tail). A
+        // literal here would make a legitimate re-tune look like a broken test, which is exactly
+        // the kind of false signal that trains people to edit assertions to make them pass.
+        let spent = DOMAIN_WORK_CEILING + Duration::from_secs(30);
         assert_eq!(
             domain_ceiling_decision(1, spent, Duration::ZERO, DOMAIN_WORK_CEILING),
             DomainCeiling::Exempt
