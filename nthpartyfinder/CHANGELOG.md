@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.7.0] - 2026-08-18
+
+### Changed
+- **A depth-3 scan that took 9 hours now takes well under an hour, without losing recall.** A code investigation (83 file:line-cited findings) found the entire discovery pipeline shared one root cause: dedup was checked *inside* each spawned task, never at dispatch, never keyed on the registrable domain, and never depth-aware — so `mongodb.com` and `cloud.mongodb.com` each paid for a full 5-phase discovery run, and a vendor first reached at depth 3 could never be correctly re-expanded when a shallower path to it appeared later. That one defect compounded multiplicatively across every discovery method.
+
+  Fixed at the root: recursion dispatch now claims work atomically, keyed on the registrable base, with the claim recording its dispatch depth (so a vendor found later at a shallower depth still re-expands correctly instead of silently truncating). Subfinder, CT-log, and SaaS-tenant probing — apex-scoped by nature — now share one scan-lifetime memo instead of re-running per subdomain. Org resolution (WHOIS → web → NER) is now singleflight per vendor instead of racing duplicate lookups. A negative cache lets a vendor confirmed to have no subprocessor page skip the full probe on a warm rescan. Layer/depth bookkeeping is recomputed once at export via BFS instead of trusted from first-touch, closing a class of layer-assignment bugs the old first-wins memo could produce.
+
+  Measured on the reference network, same target, same discovery methods, cold cache: **22,482 relationships in 9.15 hours → 16,560 relationships in 42 minutes.** (Run-to-run relationship counts vary ±50% on this network from live DNS/CT/trust-center churn — the wall-clock improvement is the reliable number; recall stayed in the same order of magnitude, which is the bar that matters.)
+
+- **Per-tier attribution telemetry now actually reports which evidence tier resolved each vendor's organization** (curated / self-declared / WHOIS / system WHOIS / NER / domain-fallback) — previously invisible, now surfaced as six independent counters, letting future org-pipeline changes be measured instead of guessed at.
+
+- Discovery-coverage instrumentation is more honest under contention: cut phases, budget exhaustion, and dead-host short-circuits are now individually counted and named in the scan summary rather than folding into an undifferentiated "degraded" state.
+
+### Fixed
+- **A silently-discarded DNS failure could read as a clean empty result.** When a DoH-sourced lookup returned an authoritative failure (e.g. SERVFAIL) but zero records, the failure was dropped on one code path while an equivalent path correctly preserved it — meaning a genuinely broken name and a genuinely empty one were indistinguishable in some cases. Both TXT and CNAME lookup paths now classify and count the failure consistently.
+
+- Sixteen dead candidate subprocessor-page URL patterns were removed from the discovery ranking, including one (`privacyportal.{company}.com`) that unconditionally appended `.com` to a vendor's label regardless of the vendor's actual TLD — aiming live scan traffic at an unrelated third-party domain for any non-`.com` vendor. The remaining patterns are now ranked by a real tally across 187 cached scan results rather than by intuition.
+
+- **A whole-domain wall-clock ceiling, added during this release's own development, briefly turned into a recall regression before it ever shipped.** Internal validation caught it: a 90-second per-domain ceiling — intended as a rare backstop — instead fired on the majority of depth-2+ domains, because all five discovery phases raced the same shared clock (one expiry cut every still-running phase) and the clock never credited time domains spent legitimately queued for a browser permit (measured 155s mean). Root-caused and fixed before this tag: the ceiling is now a 600-second backstop sized from that field measurement, with a regression test pinning the fix. Full post-mortem: `Plans/postmortem-2026-08-17-domain-ceiling-regression.md`. This never reached a published release — v1.6.2 users were unaffected.
+
 ## [1.6.2] - 2026-08-13
 
 ### Fixed
