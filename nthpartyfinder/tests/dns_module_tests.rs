@@ -548,6 +548,7 @@ async fn test_dns_resolution_nonexistent_domain() {
 }
 
 #[tokio::test]
+#[ignore = "live network: real DoH lookup"]
 async fn test_dns_resolution_invalid_domain() {
     // Test with invalid domain format
     let result = dns::get_txt_records("not..valid").await;
@@ -572,22 +573,12 @@ async fn test_dns_resolution_with_pool() {
 async fn test_dns_server_rotation() {
     let pool = DnsServerPool::new();
 
+    let mut results = Vec::new();
     for _ in 0..5 {
-        let _ = dns::get_txt_records_with_pool("example.com", &pool).await;
+        results.push(dns::get_txt_records_with_pool("example.com", &pool).await);
     }
 
-    // If we get here without panicking, the test passed
-}
-
-#[tokio::test]
-async fn test_doh_fallback_to_traditional_dns() {
-    // This test is hard to write without mocking DoH failures
-    // Documenting as a manual test case
-
-    // To test manually:
-    // 1. Block DoH servers in firewall
-    // 2. Query a domain
-    // 3. Verify traditional DNS is used as fallback
+    assert_eq!(results.len(), 5, "expected one result per rotation attempt");
 }
 
 // ============================================================================

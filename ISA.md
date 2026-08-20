@@ -1,13 +1,13 @@
 ---
 project: nthpartyfinder
-principal_stated_goal: "Complete Plans/deep-scan-optimization-roadmap.md and ensure that you 1.) add relevant regression and unit tests to our local test suite and GitHub Actions test suite; 2.) perform depth 3 scans against vanta.com with HTML report outputs to validate that your fixes work as intended; 3.) run our test suite at relevant stages throughout your work here to ensure no new bugs are being introduced or regressions are being created"
-task: "IMPLEMENT the deep-scan optimization roadmap: dedup core + quick wins + render/scheduling/accuracy waves, each test-gated, validated by depth-3 vanta.com scans, shipped via PR. (2026-08-14)"
+principal_stated_goal: "please devise a plan to precisely and thoroughly investigate and remediate the underlying root causes of these latest issues, AND to ensure we stop having regressions around DNS/DoH query reliability and performance. This can't keep happening."
+task: "DNS/DoH reliability: localize the 07-29 flapping residual (47-60% backoff, false transport demotions), fix at the root, and gate DNS reliability permanently. Plan: Plans/zesty-tinkering-falcon.md (owner-approved 2026-08-19). (2026-08-19)"
 effort: E4
 phase: climbing
-progress: 0/14
+progress: 7/13
 mode: algorithm
-started: 2026-07-20T00:00:00-04:00
-updated: 2026-07-20T00:00:00-04:00
+started: 2026-08-19T16:30:00-04:00
+updated: 2026-08-19T16:30:00-04:00
 algorithm_config:
   effort_source: classifier
   classifier: { mode: ALGORITHM, tier: E4, source: classifier }
@@ -16,6 +16,7 @@ algorithm_config:
   preset: cautious
   metric: "a fresh `brew install grcengineering/grcengineering/nthpartyfinder` on a clean Mac yields a fully-working tool out-of-the-box: all deps auto-installed, no mid-scan install prompts, no hang, no empty-registry / Failed-to-load-SaaS degradations; and if a dep is somehow still absent the scan degrades gracefully (clear message, bounded time, never hangs). Gates green (fmt/clippy -D/tests/deny/coverage≥95); brew style+audit clean; zero recall loss vs the data-present path."
 prior_tasks:
+  - { task: "IMPLEMENT the deep-scan optimization roadmap: dedup core + quick wins + render/scheduling/accuracy waves", started: 2026-08-14, phase: complete, progress: "38 items across PRs #137/#138/#141/#142 + domain-ceiling post-mortem fix PR #143 + release v1.7.0 (PR #144); validated depth-3 08-18 (16,560 rel, budget_cut=0)" }
   - { task: "Categorical RCA of the depth-3 vanta.com scan log + tiered remediation of 7 issue classes", started: 2026-07-19, phase: verify, progress: "SHIPPED PR #80 (bebad11) merged (838cf34); + PR #84 coverage-visibility merged (5e99eaf); + safe-scan retirement / binary-native orphan sweep" }
   - { task: "Depth-3 DNS-error storm + WiFi/conntrack collapse: binary-resident FD/socket/reap fixes", started: 2026-07-18, phase: verify, progress: "PR #80 merged + PR #81 (safe-scan retirement) open/green" }
   - { task: "Resilience/reliability round from depth-3 vanta.com scan evidence (8 owner issues + raw-metric bug)", started: 2026-07-17, phase: complete, progress: "shipped: PR #79 merged to master (02d892b)" }
@@ -28,6 +29,33 @@ prior_tasks:
 ---
 
 # ISA — nthpartyfinder
+
+## Task 2026-08-19 — DNS/DoH reliability: localize, fix at the root, gate permanently
+
+**Trigger (owner, verbatim → frontmatter).** Depth-3 v1.7.0 scan: 60% backoff (34,506/57,286), 66,988 "DNS Failures" > queries, all three transports falsely declared blocked, relationships 11,719 vs 22,482 baseline. Owner: investigate + remediate root causes AND stop DNS/DoH regressions permanently. Full design + evidence: `Plans/zesty-tinkering-falcon.md` (approved 2026-08-19). This closes d646b7c's "48% flapping, not yet localized" residual.
+
+### Criteria
+
+- [x] **ISC-600** Phase-0 attribution instrumentation live: `dns_telemetry.rs` (per-provider ProviderStats ×8 with before/after-send timeout split + wait/rtt hists, per-tier TierStats ×3, terminal stages, cancellation matrix, failure_increments_by_site incl. the RootNegativeMemoExtra double-increment marker), governor timeout/rejection + step-down split + floor/ceiling timers + sample(), http_client timed gates + CountingResolver, perf 67→89 rows. *(evidence: snapshot test == 89 rows; targeted suites 24+7+11+33 green; full suite 4,910/0; fmt+clippy -D all-targets+coverage-cfg clean. Deferred: full per-path Σstages==lookups matrix — key stages stamped, exhaustive matrix + wiremock Σ test → Wave 1)*
+- [x] **ISC-601** Every scan persists `scan-summary.json` (schema v1, unconditional) + `.partial.json` every 5 s; HTML embeds `id="scan-summary"`; verdict single-sourced via `coverage::verdict`. *(evidence: live depth-1 vanta.com run → sidecar present, schema v1, all 8 sections, 89 perf rows, 6-provider attribution table populated, verdict SUCCESS, partial removed on finalize; 6 pinned byte-identical verdict tests; 214 targeted tests. scan-events.jsonl + batch sidecar deferred — comment at app.rs:3177)*
+- [x] **ISC-602** Repro fixtures committed under `scripts/repro/` (probe-providers, capture-dns53, summarize-pcap, run-matrix, compare, recheck-names) — observe-only. *(probe: bash -n ×6 clean, bash 3.2-compatible, no GNU-isms; staged on dns/phase0-attribution)*
+- [x] **ISC-603** L1 hermetic contention gate: doh_farm (6 seeded-deterministic wiremock providers, FlapWindow, DeadProvider) + 64-worker driver + P0–P6/P8 profiles (P7/P9 deferred: global-semaphore race), invariant asserts green on master, `tests/dns_contention/baseline.json` records the defects as numbers (P4: 2s all-429 burst → doh down_transitions=1, 23% lookups lost; P3: one hanging provider → 11.5% loss, governor at floor; P5: 2.4 counted failures per logical lookup). Hermeticity proven: mid-label-underscore names make the system-resolver path structurally unreachable; P5 completes 600 lookups in 27ms. *(evidence: `cargo test --test dns_contention_gate` 8/8 ok in 21.5s, ×4 runs; runs in required Integration Tests job by construction; CI-run + mutant-red proof lands in PR-0 body)*
+- [x] **ISC-604** L8 dead weight deleted (3 zero-assert test files, empty-body test, dead tests/common) and live-DNS hermeticity violations fixed incl. the sfw-killer `analysis.rs:3531`. *(probe: 619 lines deleted, per-hunk reviewed; sfw-killer + 2 live tests #[ignore]-gated; advisory lister in test.sh; full-suite proof lands with the PR-0 gate)*
+- [x] **ISC-605** Phase 0 is behaviour-neutral: depth-1 vanta.com relationship-set diff pre/post = ∅. *(evidence: brew-master binary 133 edges vs branch binary 133 edges, symmetric difference 0/0 on (customer, vendor, record_type) keys; walls 42s vs 43s)*
+- [ ] **ISC-606** Phase-1 matrix executed on owner's network (full matrix + passive tcpdump, unattended); `Plans/dns-flapping-localization-<date>.md` marks each of A–G confirmed/refuted/partial with numbers; D_false computed against provider probes; pcap class table quantifies invisible UDP/53. *(probe: the doc + sidecar JSONs)*
+- [ ] **ISC-607** Wave 1 merged (C: DNS off the shared semaphore; A: deadline-owned rotation + RTO budgets, no sleeps; G: leaf-RTT samples; E: logical counting + double-increment fix; F: typed timeout classification) with `dns-probe:` block ×3 in PR body; acceptance: TimedOut+Rejected share ↓≥10× vs Phase-1 baseline, zero false demotions, relationships ≥ baseline, `deadline_backstop_fired == 0`. *(probe: validation scan sidecar BEFORE merge)*
+- [ ] **ISC-608** Wave 2 merged (breaker trips only on Unreachable-always / NoResponse-at-floor evidence; one decrease per congestion epoch; deferred single retry replaces ladder-rescue for load-class failures) — acceptance: zero "appears blocked" with healthy probes, deferred_retry.rescued > 0, all-failed-on-resolvable = 0. *(probe: validation scan BEFORE merge)*
+- [ ] **ISC-609** Wave 3 merged (system-resolver OnceCell + DO53-gated; GovernedResolver staged SaaS→global with GAI fallback) — acceptance: gai_fallback ≈ 0 healthy, tenant-probe recall unchanged A/B, pcap U_wire drops. *(probe: A/B scan + pcap BEFORE global flip)*
+- [ ] **ISC-610** L4 canary live (`dns-canary.yml`, daily, adaptive+pinned, probes: grc.engineering/example.com/vanta.com) — green ×3, then a deliberate `/resolve`→`/dns-query` branch mutant turns it red. *(probe: workflow runs + tracking-issue mechanics)*
+- [ ] **ISC-611** L5 pre-merge DNS clause in repo CLAUDE.md + `dns-probe:` presence check in Lint; after Wave 2, "≤ baseline" bars replaced with measured absolute dated bars. *(probe: a docs-only PR touching dns.rs without the block fails Lint)*
+- [ ] **ISC-612** Final depth-3 vanta.com validation on the fixed binary: backoff ratio ≤ 0.05, demotions 0 (probes healthy), "All DNS resolution failed" on resolvable names = 0, dns_failures ≤ logical lookups, relationships ≥ baseline order of magnitude, wall ≤ 1.7.0 — all read from scan-summary.json, not a screenshot. *(probe: the sidecar)*
+- [ ] **ISC-613** Trail closed: ISA/CHANGELOG/roadmap updated; d646b7c residual, TF-DNS-REPRO, TF-DNS-FLOOD-PROTECTION half, reddy Steps 4/7, dnsLayer.7, ISC-513 half, TF-OBSERV dispositioned; LifeOS knowledge + incident record written; P2.10a re-evaluation queued as its own decision. *(probe: grep the artifacts)*
+
+**Anti-claims.** Never weaken a network-safety ceiling (DO53_MAX_QPS/BURST, governor floor 2, connection ceiling, subfinder caps) without a field measurement in the same PR. Never re-propose vetoed items (per-provider buckets, hedged UDP, DoQ/DoH3, CT pacing, external wrappers). No live DNS in the unit/integration suite — the gate is wiremock-only. No constant ships model-sized (CLAUDE.md rule 17).
+
+**Decisions.** Owner 2026-08-19: autonomous Phase-1→2 transition iff ≥2 of {A,B,C} confirm; full matrix + tcpdump unattended; canary probes include vanta.com.
+
+---
 
 ## Task 2026-08-14 — Implement the optimization roadmap (waves A-E)
 

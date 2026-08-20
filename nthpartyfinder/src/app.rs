@@ -25,6 +25,7 @@ use crate::memory_monitor::{self, MemoryMonitor};
 use crate::org_normalizer;
 use crate::result_sink::ResultSink;
 use crate::review;
+use crate::scan_summary;
 use crate::subprocessor;
 use crate::vendor::VendorRelationship;
 use crate::vendor_registry;
@@ -860,19 +861,83 @@ pub fn recompute_layers_bfs(relationships: &mut [VendorRelationship], root: &str
 }
 
 /// Dispatch export to the appropriate format handler.
+///
+/// `diagnostics_json` is the scan-summary embed payload (`ScanSummary::to_embed_json()`); only
+/// the HTML exporter consumes it (the other formats have no diagnostics surface). `None` keeps
+/// every format byte-identical to the pre-diagnostics output.
 pub fn dispatch_export(
     results: &[VendorRelationship],
     format: &str,
     output_path: &str,
+    diagnostics_json: Option<&str>,
 ) -> Result<()> {
     // P0.4: time report export — multi-MB embedded-data HTML at thousands of relationships had
     // no performance data until this counter.
     crate::perf::timed(&crate::perf::METRICS.report_export, || match format {
         "json" => export::export_json(results, output_path),
         "markdown" => export::export_markdown(results, output_path),
-        "html" => export::export_html(results, output_path),
+        "html" => export::export_html_with_diagnostics(results, output_path, diagnostics_json),
         _ => export::export_csv(results, output_path),
     })
+}
+
+/// The six discovery features' enabled state + reason, mirroring `compute_feature_flags`
+/// exactly — ONE derivation shared by the console coverage manifest and the scan-summary
+/// sidecar, so the two surfaces cannot disagree about what ran and why.
+fn discovery_feature_statuses(
+    args: &Args,
+    d: &crate::config::DiscoveryConfig,
+) -> Vec<crate::coverage::FeatureStatus> {
+    vec![
+        crate::coverage::feature_status(
+            "subprocessor",
+            args.dns_only,
+            args.enable_subprocessor_analysis,
+            args.disable_subprocessor_analysis,
+            d.subprocessor_enabled,
+            "--enable-subprocessor-analysis",
+        ),
+        crate::coverage::feature_status(
+            "subdomain",
+            args.dns_only,
+            args.enable_subdomain_discovery,
+            args.disable_subdomain_discovery,
+            d.subdomain_enabled,
+            "--enable-subdomain-discovery",
+        ),
+        crate::coverage::feature_status(
+            "saas-tenant",
+            args.dns_only,
+            args.enable_saas_tenant_discovery,
+            args.disable_saas_tenant_discovery,
+            d.saas_tenant_enabled,
+            "--enable-saas-tenant-discovery",
+        ),
+        crate::coverage::feature_status(
+            "ct-logs",
+            args.dns_only,
+            args.enable_ct_discovery,
+            args.disable_ct_discovery,
+            d.ct_discovery_enabled,
+            "--enable-ct-discovery",
+        ),
+        crate::coverage::feature_status(
+            "web-traffic",
+            args.dns_only,
+            args.enable_web_traffic_discovery,
+            args.disable_web_traffic_discovery,
+            d.web_traffic_enabled,
+            "--enable-web-traffic-discovery",
+        ),
+        crate::coverage::feature_status(
+            "web-org",
+            args.dns_only,
+            args.enable_web_org,
+            args.disable_web_org,
+            d.web_org_enabled,
+            "--enable-web-org",
+        ),
+    ]
 }
 
 /// State restored from a checkpoint for resuming an analysis.
@@ -2257,6 +2322,31 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         _app_config.dns.dns_servers.len()
     ));
 
+    // ── scan-summary sidecar (Phase 0: persist every scan's diagnostics) ──
+    // Anchor DNS provider telemetry timestamps to this scan's wall-clock start.
+    crate::dns_telemetry::DNS_TELEMETRY.install_epoch(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    );
+    // The sidecar lands in the directory the report file itself goes to (normally
+    // `<output_dir>/reports/<domain_clean>/`, or wherever the user redirected the report at the
+    // interactive prompt), so "scan-summary.json alongside this report" is literally true.
+    // Written UNCONDITIONALLY: not `-v`-gated, not `--log-file`-gated.
+    let summary_dir = Path::new(final_output_path.as_str())
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(&output_dir));
+    let summary_ctx = Arc::new(scan_summary::ScanSummaryContext::new(
+        scan_summary::ArgsSummary::from_args(&args),
+        discovery_feature_statuses(&args, &_app_config.discovery),
+        (*logger).clone(),
+        dns_pool.clone(),
+        summary_dir,
+    ));
+
     let subprocessor_enabled = subprocessor_will_be_enabled;
     let subprocessor_analyzer = if subprocessor_enabled {
         Some(Arc::new(subprocessor::SubprocessorAnalyzer::new().await))
@@ -2358,6 +2448,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     {
         let pressure = memory_pressure_level.clone();
         let logger_mem = logger.clone();
+        let summary_sampler = summary_ctx.clone();
         tokio::spawn(async move {
             let mut monitor = MemoryMonitor::new(10);
             loop {
@@ -2389,6 +2480,13 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                         )),
                         _ => {}
                     }
+                }
+                // Phase 0: refresh the crash-safe sidecar partial on the same 5 s cadence, so a
+                // Ctrl-C hard-exit / SIGKILL / panic still leaves scan-summary.partial.json as a
+                // record of what the scan was doing. `write_partial` self-latches off once the
+                // final scan-summary.json has been written.
+                if let Err(e) = summary_sampler.write_partial() {
+                    logger_mem.debug(&format!("scan-summary partial write failed: {}", e));
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
@@ -2516,6 +2614,14 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
                 eprintln!("Partial progress has been saved as a checkpoint. Re-run with --resume to continue.");
                 eprintln!("To increase the timeout: use --timeout <seconds> or export NTHPARTY_ANALYSIS_TIMEOUT_SECS=<seconds>");
                 eprintln!("To disable the timeout entirely: --timeout 0");
+                // Phase 0: persist the terminal record BEFORE bailing — the sidecar is the
+                // machine-readable answer to "what was the scan doing when it timed out".
+                if let Err(e) = summary_ctx.finalize("timeout") {
+                    logger.warn(&format!(
+                        "Failed to write scan-summary.json on timeout: {}",
+                        e
+                    ));
+                }
                 bail!(AppExitCode(142));
             }
         }
@@ -2538,6 +2644,16 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     if analysis::is_interrupted() {
         logger.warn("Analysis interrupted by user.");
+        // Phase 0: best-effort terminal record. NOTE: the Ctrl-C handler installed earlier
+        // hard-exits via `std::process::exit(130)` after ~2 s without unwinding, so this branch
+        // is reached only when the analysis future returns within that window; for the common
+        // hard-exit case the 5 s `scan-summary.partial.json` is the surviving record.
+        if let Err(e) = summary_ctx.finalize("interrupted") {
+            logger.warn(&format!(
+                "Failed to write scan-summary.json on interrupt: {}",
+                e
+            ));
+        }
         bail!(AppExitCode(130));
     }
 
@@ -2687,9 +2803,34 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
 
     logger.log_export_start(&args.output_format);
 
-    dispatch_export(&results, &args.output_format, &final_output_path)?;
+    // Phase 0: collect the diagnostics for the HTML embed just before export. The embedded copy
+    // predates the export itself by design (it cannot contain the export's own perf row); the
+    // sidecar finalized below is collected fresh and does.
+    let embed_json = summary_ctx.collect("success").to_embed_json();
+    if let Err(e) = dispatch_export(
+        &results,
+        &args.output_format,
+        &final_output_path,
+        Some(&embed_json),
+    ) {
+        // The scan finished; only the report write failed. Record that, then bubble the
+        // original export error unchanged.
+        if let Err(we) = summary_ctx.finalize("error") {
+            logger.warn(&format!(
+                "Failed to write scan-summary.json after export failure: {}",
+                we
+            ));
+        }
+        return Err(e);
+    }
 
     logger.log_export_success(&final_output_path);
+
+    // Phase 0: the persisted sidecar — every completed scan leaves scan-summary.json next to
+    // its report (and deletes the in-flight partial).
+    if let Err(e) = summary_ctx.finalize("success") {
+        logger.warn(&format!("Failed to write scan-summary.json: {}", e));
+    }
 
     // Compute the two uncertain sets ONCE — consumed by the non-interactive
     // `--review-json` machine contract and/or the interactive human prompts.
@@ -2774,57 +2915,7 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
     // compute_feature_flags exactly; per-phase found/failed counts come from the scan-coverage
     // report the discovery phases populate.
     {
-        let d = &_app_config.discovery;
-        let features = [
-            crate::coverage::feature_status(
-                "subprocessor",
-                args.dns_only,
-                args.enable_subprocessor_analysis,
-                args.disable_subprocessor_analysis,
-                d.subprocessor_enabled,
-                "--enable-subprocessor-analysis",
-            ),
-            crate::coverage::feature_status(
-                "subdomain",
-                args.dns_only,
-                args.enable_subdomain_discovery,
-                args.disable_subdomain_discovery,
-                d.subdomain_enabled,
-                "--enable-subdomain-discovery",
-            ),
-            crate::coverage::feature_status(
-                "saas-tenant",
-                args.dns_only,
-                args.enable_saas_tenant_discovery,
-                args.disable_saas_tenant_discovery,
-                d.saas_tenant_enabled,
-                "--enable-saas-tenant-discovery",
-            ),
-            crate::coverage::feature_status(
-                "ct-logs",
-                args.dns_only,
-                args.enable_ct_discovery,
-                args.disable_ct_discovery,
-                d.ct_discovery_enabled,
-                "--enable-ct-discovery",
-            ),
-            crate::coverage::feature_status(
-                "web-traffic",
-                args.dns_only,
-                args.enable_web_traffic_discovery,
-                args.disable_web_traffic_discovery,
-                d.web_traffic_enabled,
-                "--enable-web-traffic-discovery",
-            ),
-            crate::coverage::feature_status(
-                "web-org",
-                args.dns_only,
-                args.enable_web_org,
-                args.disable_web_org,
-                d.web_org_enabled,
-                "--enable-web-org",
-            ),
-        ];
+        let features = discovery_feature_statuses(&args, &_app_config.discovery);
         let cov = crate::coverage::SCAN_COVERAGE.snapshot();
         print!("\n{}", crate::coverage::render_manifest(&features, &cov));
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -3086,10 +3177,15 @@ pub async fn run_batch_analysis(
                 .collect()
         };
 
+        // Phase 0 follow-up: no scan-summary embed on the batch paths yet — the diagnostics
+        // sources (perf/coverage/logger counters) are process-global and batch runs several
+        // domains through them concurrently, so a per-domain sidecar needs per-scan scoping
+        // first. Single-domain scans (the recall-debug surface) carry the sidecar today.
         dispatch_export(
             &export_relationships,
             &args.output_format,
             &combined_path.to_string_lossy(),
+            None,
         )?;
 
         println!("Combined report: {}", combined_path.display());
@@ -3194,7 +3290,14 @@ async fn analyze_single_domain_for_batch(
         std::fs::create_dir_all(&domain_dir)?;
         let output_path = domain_dir.join(&filename);
 
-        dispatch_export(&results, output_format, &output_path.to_string_lossy())?;
+        // Phase 0 follow-up: None for the same process-global-scoping reason as the combined
+        // batch export above.
+        dispatch_export(
+            &results,
+            output_format,
+            &output_path.to_string_lossy(),
+            None,
+        )?;
         Some(output_path.to_string_lossy().to_string())
     } else {
         None
@@ -5110,7 +5213,7 @@ mod tests {
             RecordType::DnsTxtSpf,
             "ev",
         )];
-        dispatch_export(&results, "csv", &path.to_string_lossy()).unwrap();
+        dispatch_export(&results, "csv", &path.to_string_lossy(), None).unwrap();
         assert!(path.exists());
     }
 
@@ -5125,7 +5228,7 @@ mod tests {
             RecordType::DnsTxtSpf,
             "ev",
         )];
-        dispatch_export(&results, "json", &path.to_string_lossy()).unwrap();
+        dispatch_export(&results, "json", &path.to_string_lossy(), None).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("s.com"));
@@ -5135,7 +5238,7 @@ mod tests {
     fn test_dispatch_export_markdown() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.md");
-        dispatch_export(&[], "markdown", &path.to_string_lossy()).unwrap();
+        dispatch_export(&[], "markdown", &path.to_string_lossy(), None).unwrap();
         assert!(path.exists());
     }
 
@@ -5143,7 +5246,7 @@ mod tests {
     fn test_dispatch_export_html() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.html");
-        dispatch_export(&[], "html", &path.to_string_lossy()).unwrap();
+        dispatch_export(&[], "html", &path.to_string_lossy(), None).unwrap();
         assert!(path.exists());
     }
 
@@ -5151,7 +5254,7 @@ mod tests {
     fn test_dispatch_export_unknown_falls_to_csv() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.xml");
-        dispatch_export(&[], "xml", &path.to_string_lossy()).unwrap();
+        dispatch_export(&[], "xml", &path.to_string_lossy(), None).unwrap();
         assert!(path.exists());
     }
 

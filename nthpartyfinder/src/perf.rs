@@ -253,6 +253,56 @@ pub struct Metrics {
     /// Time WHOIS spent waiting for a global connection permit (P2.12a) — port-43 sockets are now
     /// counted against the same ceiling as every other outbound connection.
     pub whois_permit_wait: Metric,
+    /// Time ANY caller spent waiting for a global connection permit (Phase-0 DNS attribution).
+    /// The all-consumer denominator against which `dns.conn_permit_wait` is compared.
+    pub conn_permit_wait: Metric,
+    /// Time DNS callers specifically (DoH sends, DoT/UDP resolver ops, system-resolver fallback)
+    /// spent waiting for a connection permit — INSIDE their governor permit window, which is why
+    /// semaphore starvation has historically read as DNS latency. Hypothesis C's direct measure.
+    pub dns_conn_permit_wait: Metric,
+    /// Time spent queued in `acquire_dns_permit` (rate bucket + governor), before any network I/O.
+    pub dns_governor_acquire_wait: Metric,
+    /// Wall time DNS permits were held (acquire→complete). The denominator for wait-share ratios.
+    pub dns_permit_held: Metric,
+    /// The subdomain fast path (`get_txt_and_cname_fast`) — the scan's highest-volume DNS path,
+    /// previously the only one with no timer (`dns.query` covers the root path alone).
+    pub dns_fast_lookup: Metric,
+    /// One DoH HTTP attempt (any provider, any outcome).
+    pub dns_doh_attempt: Metric,
+    /// One DoT lookup attempt.
+    pub dns_dot_attempt: Metric,
+    /// One raw UDP/53 lookup attempt.
+    pub dns_udp53_attempt: Metric,
+    /// One system-resolver (getaddrinfo-path) fallback attempt on the root TXT path.
+    pub dns_system_resolver: Metric,
+    /// Throttle-backoff sleeps inside the DoH rotation — today counted INSIDE the governor's
+    /// measured RTT (defect G); this counter sizes that pollution.
+    pub dns_backoff_sleep: Metric,
+    /// An outer lookup wrapper fired, cancelling an in-flight attempt (defect A's signature).
+    pub dns_wrapper_timeout: Metric,
+    /// A lookup descended from DoH into the DoT/UDP ladder.
+    pub dns_ladder_entered: Metric,
+    /// DoH skipped because its breaker was open.
+    pub dns_doh_skipped_breaker: Metric,
+    /// DoT skipped because its breaker was open.
+    pub dns_dot_skipped_breaker: Metric,
+    /// UDP/53 skipped because its breaker was open.
+    pub dns_udp53_skipped_breaker: Metric,
+    /// UDP/53 admission shed by the hard token budget (distinct from breaker skip).
+    pub dns_udp53_shed: Metric,
+    /// "All DNS resolution failed" terminals — every transport exhausted for a name.
+    pub dns_all_failed: Metric,
+    /// A DoH attempt cancelled by wrapper timeout before its own outcome was observed.
+    pub dns_attempt_cancelled: Metric,
+    /// HTTP sends to hostname (non-IP-literal) targets — each implies a getaddrinfo resolution
+    /// invisible to the DNS governor (defect D's cheap proxy).
+    pub http_send_nonip_host: Metric,
+    /// HTTP sends to IP-literal targets (no resolution).
+    pub http_send_ip_host: Metric,
+    /// getaddrinfo resolutions observed via the counting resolver (defect D's exact count).
+    pub http_getaddrinfo: Metric,
+    /// subfinder subprocess invocations (count + wall).
+    pub subfinder_proc: Metric,
 }
 
 impl Metrics {
@@ -325,6 +375,28 @@ impl Metrics {
             whois_org_cache_miss: Metric::new(),
             whois_org_cache_write_failed: Metric::new(),
             whois_permit_wait: Metric::new(),
+            conn_permit_wait: Metric::new(),
+            dns_conn_permit_wait: Metric::new(),
+            dns_governor_acquire_wait: Metric::new(),
+            dns_permit_held: Metric::new(),
+            dns_fast_lookup: Metric::new(),
+            dns_doh_attempt: Metric::new(),
+            dns_dot_attempt: Metric::new(),
+            dns_udp53_attempt: Metric::new(),
+            dns_system_resolver: Metric::new(),
+            dns_backoff_sleep: Metric::new(),
+            dns_wrapper_timeout: Metric::new(),
+            dns_ladder_entered: Metric::new(),
+            dns_doh_skipped_breaker: Metric::new(),
+            dns_dot_skipped_breaker: Metric::new(),
+            dns_udp53_skipped_breaker: Metric::new(),
+            dns_udp53_shed: Metric::new(),
+            dns_all_failed: Metric::new(),
+            dns_attempt_cancelled: Metric::new(),
+            http_send_nonip_host: Metric::new(),
+            http_send_ip_host: Metric::new(),
+            http_getaddrinfo: Metric::new(),
+            subfinder_proc: Metric::new(),
         }
     }
 
@@ -349,7 +421,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 67] {
+    fn all(&self) -> [(&'static str, &Metric); 89] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -439,6 +511,28 @@ impl Metrics {
                 &self.whois_org_cache_write_failed,
             ),
             ("whois.permit_wait", &self.whois_permit_wait),
+            ("conn.permit_wait", &self.conn_permit_wait),
+            ("dns.conn_permit_wait", &self.dns_conn_permit_wait),
+            ("dns.governor_acquire_wait", &self.dns_governor_acquire_wait),
+            ("dns.permit_held", &self.dns_permit_held),
+            ("dns.fast_lookup", &self.dns_fast_lookup),
+            ("dns.doh_attempt", &self.dns_doh_attempt),
+            ("dns.dot_attempt", &self.dns_dot_attempt),
+            ("dns.udp53_attempt", &self.dns_udp53_attempt),
+            ("dns.system_resolver", &self.dns_system_resolver),
+            ("dns.backoff_sleep", &self.dns_backoff_sleep),
+            ("dns.wrapper_timeout", &self.dns_wrapper_timeout),
+            ("dns.ladder_entered", &self.dns_ladder_entered),
+            ("dns.doh_skipped_breaker", &self.dns_doh_skipped_breaker),
+            ("dns.dot_skipped_breaker", &self.dns_dot_skipped_breaker),
+            ("dns.udp53_skipped_breaker", &self.dns_udp53_skipped_breaker),
+            ("dns.udp53_shed", &self.dns_udp53_shed),
+            ("dns.all_failed", &self.dns_all_failed),
+            ("dns.attempt_cancelled", &self.dns_attempt_cancelled),
+            ("http.send_nonip_host", &self.http_send_nonip_host),
+            ("http.send_ip_host", &self.http_send_ip_host),
+            ("http.getaddrinfo", &self.http_getaddrinfo),
+            ("subfinder.proc", &self.subfinder_proc),
         ]
     }
 
@@ -997,13 +1091,35 @@ mod tests {
             "saas.apex_skip",
             "subfinder.apex_skip",
             "ct.apex_skip",
+            "conn.permit_wait",
+            "dns.conn_permit_wait",
+            "dns.governor_acquire_wait",
+            "dns.permit_held",
+            "dns.fast_lookup",
+            "dns.doh_attempt",
+            "dns.dot_attempt",
+            "dns.udp53_attempt",
+            "dns.system_resolver",
+            "dns.backoff_sleep",
+            "dns.wrapper_timeout",
+            "dns.ladder_entered",
+            "dns.doh_skipped_breaker",
+            "dns.dot_skipped_breaker",
+            "dns.udp53_skipped_breaker",
+            "dns.udp53_shed",
+            "dns.all_failed",
+            "dns.attempt_cancelled",
+            "http.send_nonip_host",
+            "http.send_ip_host",
+            "http.getaddrinfo",
+            "subfinder.proc",
         ] {
             assert!(
                 snap.get(expected).is_some(),
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 67);
+        assert_eq!(snap.rows.len(), 89);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed
