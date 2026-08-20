@@ -834,6 +834,10 @@ mod html_report_template {
         pub(super) vendor_graph_js: &'static str,
         pub(super) vendor_graph_css: &'static str,
         pub(super) design_system_css: &'static str,
+        /// Compact `ScanSummary::to_embed_json()` payload (`</` pre-escaped). Empty string =
+        /// no diagnostics; the template renders its `<script id="scan-summary">` only when
+        /// non-empty.
+        pub(super) scan_summary_json: String,
     }
 }
 use html_report_template::HtmlReportTemplate;
@@ -861,6 +865,21 @@ struct HtmlSummary {
 /// alongside this work; it cannot be done from the exporter alone.
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> Result<()> {
+    export_html_with_diagnostics(relationships, output_path, None)
+}
+
+/// `export_html` plus an optional embedded scan-diagnostics payload
+/// (`ScanSummary::to_embed_json()`), rendered into a `<script type="application/json"
+/// id="scan-summary">` element so the report is self-describing about how its scan ran.
+/// `None` renders byte-identically to the pre-diagnostics report (no script tag, no footer
+/// line) — which is why `export_html` can delegate here without disturbing its callers.
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub fn export_html_with_diagnostics(
+    relationships: &[VendorRelationship],
+    output_path: &str,
+    diagnostics_json: Option<&str>,
+) -> Result<()> {
+    let scan_summary_json = diagnostics_json.unwrap_or_default().to_string();
     debug!(
         "Exporting {} relationships to HTML: {}",
         relationships.len(),
@@ -886,6 +905,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,
+            scan_summary_json,
         };
 
         let html_content = empty_template.render()?;
@@ -937,6 +957,7 @@ pub fn export_html(relationships: &[VendorRelationship], output_path: &str) -> R
         vendor_graph_js: VENDOR_GRAPH_JS,
         vendor_graph_css: VENDOR_GRAPH_CSS,
         design_system_css: DESIGN_SYSTEM_CSS,
+        scan_summary_json,
     };
 
     let html_content = template.render()?;
@@ -1444,6 +1465,7 @@ mod tests {
             vendor_graph_js: "",
             vendor_graph_css: "",
             design_system_css: "",
+            scan_summary_json: String::new(),
         };
         let mut buf = String::new();
         template
@@ -1518,6 +1540,7 @@ mod tests {
             vendor_graph_js: "",
             vendor_graph_css: "",
             design_system_css: "",
+            scan_summary_json: String::new(),
         };
         let html = template.render().expect("render");
 
@@ -1786,6 +1809,7 @@ mod tests {
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,
+            scan_summary_json: String::new(),
         };
         let html = template
             .render()
@@ -1818,6 +1842,7 @@ mod tests {
             vendor_graph_js: VENDOR_GRAPH_JS,
             vendor_graph_css: VENDOR_GRAPH_CSS,
             design_system_css: DESIGN_SYSTEM_CSS,
+            scan_summary_json: String::new(),
         };
         let mut buf = String::new();
         template.render_into(&mut buf).unwrap();
@@ -2327,5 +2352,46 @@ mod tests {
         assert!(!content.contains("openEvidenceModal(2)"));
         assert!(content.contains("\"r-spf\""));
         assert!(content.contains("\"r-ct\""));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    #[test]
+    fn test_export_html_with_diagnostics_embeds_payload_and_none_omits_it() {
+        let dir = TempDir::new().unwrap();
+        let rels = vec![make_vendor("a.com", "A Org", 1, RecordType::DnsTxtSpf)];
+        let payload = r#"{"schema_version":1,"probe":"embedded-diagnostics-probe"}"#;
+
+        // Some(json): the payload lands in the typed JSON script element + a footer note.
+        let with_path = dir.path().join("with.html");
+        export_html_with_diagnostics(&rels, with_path.to_str().unwrap(), Some(payload)).unwrap();
+        let html = std::fs::read_to_string(&with_path).unwrap();
+        assert!(
+            html.contains(r#"<script type="application/json" id="scan-summary">"#),
+            "diagnostics script element missing"
+        );
+        assert!(
+            html.contains("embedded-diagnostics-probe"),
+            "payload not embedded"
+        );
+        assert!(
+            html.contains("scan-summary.json alongside this report"),
+            "footer note missing"
+        );
+
+        // export_html (delegates with None): no script element, no footer note — the
+        // pre-diagnostics surface its 22 existing test call sites rely on.
+        let without_path = dir.path().join("without.html");
+        export_html(&rels, without_path.to_str().unwrap()).unwrap();
+        let html = std::fs::read_to_string(&without_path).unwrap();
+        assert!(!html.contains(r#"id="scan-summary""#));
+        assert!(!html.contains("scan-summary.json alongside this report"));
+
+        // The empty-relationships template branch honors the payload too — a failed scan's
+        // empty report still explains itself.
+        let empty_path = dir.path().join("empty.html");
+        export_html_with_diagnostics(&[], empty_path.to_str().unwrap(), Some(payload)).unwrap();
+        let html = std::fs::read_to_string(&empty_path).unwrap();
+        assert!(html.contains(r#"id="scan-summary""#));
+        assert!(html.contains("embedded-diagnostics-probe"));
     }
 }

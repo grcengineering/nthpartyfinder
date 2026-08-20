@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "recorded": "2026-08-20",
+  "note": "current-master behavior BEFORE the Wave 1-3 fixes; ratchet: future asserts are <= these * 1.15. Worst case of 3 local runs of tests/dns_contention_gate.rs (per-run JSON in target/dns-contention/). backoff_ratio = governor.backoff_events / governor.total_queries; failed_ratio = dns_failures / 600 logical lookups (>1.0 means the counters over-count per lookup — itself a recorded defect, see plan defect E); down_transitions = transport.doh.down_transitions. Headline defects captured here: p4 (a 2 s all-provider 429 burst trips the DoH breaker, down_transitions=1, and ~23% of lookups fail), p3 (one hanging provider costs ~4% of lookups and drives the governor to its floor), p5 failed_ratio 2.45 (an outage counts ~2.4 failures per logical lookup).",
+  "profiles": {
+    "p0_healthy": {
+      "backoff_ratio": 0.0,
+      "failed_ratio": 0.0,
+      "down_transitions": 0,
+      "wall_ms": 544
+    },
+    "p1_slow_but_healthy": {
+      "backoff_ratio": 0.0,
+      "failed_ratio": 0.0,
+      "down_transitions": 0,
+      "wall_ms": 5844
+    },
+    "p2_one_provider_dead": {
+      "backoff_ratio": 0.0,
+      "failed_ratio": 0.065,
+      "down_transitions": 0,
+      "wall_ms": 537
+    },
+    "p3_one_provider_slow": {
+      "backoff_ratio": 0.0924,
+      "failed_ratio": 0.115,
+      "down_transitions": 0,
+      "wall_ms": 6594
+    },
+    "p4_transient_throttle_burst": {
+      "backoff_ratio": 0.671,
+      "failed_ratio": 0.7534,
+      "down_transitions": 1,
+      "wall_ms": 2603
+    },
+    "p5_genuine_outage": {
+      "backoff_ratio": 1.0,
+      "failed_ratio": 2.4467,
+      "down_transitions": 1,
+      "wall_ms": 27
+    },
+    "p6_intermittent_flap": {
+      "backoff_ratio": 0.0154,
+      "failed_ratio": 0.075,
+      "down_transitions": 0,
+      "wall_ms": 4146
+    },
+    "p8_memo_dedupe": {
+      "backoff_ratio": 0.0,
+      "failed_ratio": 0.0,
+      "down_transitions": 0,
+      "wall_ms": 401
+    }
+  }
+}

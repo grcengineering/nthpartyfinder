@@ -152,7 +152,7 @@ impl DnsOutcome {
 }
 
 /// Point-in-time view of the controller, for reporting to the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct GovernorStats {
     pub current_limit: u32,
     pub max_limit: u32,
@@ -164,6 +164,42 @@ pub struct GovernorStats {
     pub congestion_signals: u64,
     /// True when the user pinned the limit with an explicit override.
     pub user_pinned: bool,
+    /// Congestion split: permits that ended `TimedOut` (no response — ambiguous) vs `Rejected`
+    /// (explicit refusal — the real over-rate signal). Phase-0 attribution.
+    pub timeouts: u64,
+    pub rejections: u64,
+    /// `apply_limit` transitions by direction — actual controller movement, distinct from
+    /// `backoff_events` (congestion-outcome permits, which fire even at an immovable floor).
+    pub step_ups: u32,
+    pub step_downs: u32,
+    /// Control ticks that held still (app-limited workload / cooldown clamp).
+    pub holds_app_limited: u64,
+    pub holds_cooldown: u64,
+    /// Wall time parked at the floor / at the ceiling, open intervals folded in.
+    pub floor_ms: u64,
+    pub ceiling_ms: u64,
+    /// Current EWMA state, microseconds (0.0 until the first sample).
+    pub rtt_recent_us: f64,
+    pub rtt_baseline_us: f64,
+    pub in_cooldown: bool,
+    pub in_slow_start: bool,
+}
+
+/// A compact, copyable governor snapshot for telemetry events (demotions, 5 s samples).
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct GovernorSample {
+    pub limit: u32,
+    pub max_limit: u32,
+    pub in_flight: u32,
+    pub is_backing_off: bool,
+    pub in_cooldown: bool,
+    pub in_slow_start: bool,
+    pub cooldown_left_ms: u64,
+    pub rtt_recent_us: f64,
+    pub rtt_baseline_us: f64,
+    pub backoff_events: u32,
+    pub congestion_signals: u64,
+    pub total_queries: u64,
 }
 
 impl GovernorStats {
@@ -259,6 +295,26 @@ pub struct DnsGovernor {
     total_queries: AtomicU64,
     congestion_signals: AtomicU64,
 
+    // ── Phase-0 attribution counters (observation only; none influences control flow) ──
+    /// Congestion signals that were timeouts vs explicit rejections — the split the summary
+    /// needs to tell "no response" (ambiguous) from "server said no" (real 429-class signal).
+    timeouts: AtomicU64,
+    rejections: AtomicU64,
+    /// `apply_limit` transitions, split by direction. Distinct from `backoff_events`, which
+    /// counts congestion-outcome permits even when the limit was already at the floor and
+    /// could not move — the conflation that made "34,506 backoff events" unreadable.
+    step_ups: AtomicU32,
+    step_downs: AtomicU32,
+    /// Control ticks held still because the workload was app-limited / in cooldown.
+    holds_app_limited: AtomicU64,
+    holds_cooldown: AtomicU64,
+    /// Accumulated wall time spent parked at the floor / at the ceiling (open intervals are
+    /// folded in by `stats()`); `*_since_ms` of 0 means "not currently there".
+    floor_since_ms: AtomicU64,
+    floor_ms_total: AtomicU64,
+    ceiling_since_ms: AtomicU64,
+    ceiling_ms_total: AtomicU64,
+
     /// When set, the limit is pinned and adaptation is disabled.
     user_pinned: bool,
 }
@@ -299,6 +355,16 @@ impl DnsGovernor {
             backoff_events: AtomicU32::new(0),
             total_queries: AtomicU64::new(0),
             congestion_signals: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
+            rejections: AtomicU64::new(0),
+            step_ups: AtomicU32::new(0),
+            step_downs: AtomicU32::new(0),
+            holds_app_limited: AtomicU64::new(0),
+            holds_cooldown: AtomicU64::new(0),
+            floor_since_ms: AtomicU64::new(0),
+            floor_ms_total: AtomicU64::new(0),
+            ceiling_since_ms: AtomicU64::new(0),
+            ceiling_ms_total: AtomicU64::new(0),
             user_pinned,
         });
         // Withhold the difference between the ceiling and the starting limit. These permits are
@@ -355,6 +421,14 @@ impl DnsGovernor {
 
     /// Snapshot for reporting.
     pub fn stats(&self) -> GovernorStats {
+        let now = self.now_ms();
+        let fold_open = |since: &AtomicU64, total: &AtomicU64| -> u64 {
+            let open = match since.load(Ordering::Relaxed) {
+                0 => 0,
+                s => now.saturating_sub(s),
+            };
+            total.load(Ordering::Relaxed) + open
+        };
         GovernorStats {
             current_limit: self.limit(),
             max_limit: self.max_limit,
@@ -365,6 +439,38 @@ impl DnsGovernor {
             total_queries: self.total_queries.load(Ordering::Relaxed),
             congestion_signals: self.congestion_signals.load(Ordering::Relaxed),
             user_pinned: self.user_pinned,
+            timeouts: self.timeouts.load(Ordering::Relaxed),
+            rejections: self.rejections.load(Ordering::Relaxed),
+            step_ups: self.step_ups.load(Ordering::Relaxed),
+            step_downs: self.step_downs.load(Ordering::Relaxed),
+            holds_app_limited: self.holds_app_limited.load(Ordering::Relaxed),
+            holds_cooldown: self.holds_cooldown.load(Ordering::Relaxed),
+            floor_ms: fold_open(&self.floor_since_ms, &self.floor_ms_total),
+            ceiling_ms: fold_open(&self.ceiling_since_ms, &self.ceiling_ms_total),
+            rtt_recent_us: f64::from_bits(self.rtt_recent_us.load(Ordering::Relaxed)),
+            rtt_baseline_us: f64::from_bits(self.rtt_baseline_us.load(Ordering::Relaxed)),
+            in_cooldown: now < self.cooldown_until_ms.load(Ordering::Relaxed),
+            in_slow_start: self.in_slow_start.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Compact snapshot for telemetry events — cheap enough to take on every demotion/sample.
+    pub fn sample(&self) -> GovernorSample {
+        let now = self.now_ms();
+        let cooldown_until = self.cooldown_until_ms.load(Ordering::Relaxed);
+        GovernorSample {
+            limit: self.limit(),
+            max_limit: self.max_limit,
+            in_flight: self.in_flight(),
+            is_backing_off: self.is_backing_off(),
+            in_cooldown: now < cooldown_until,
+            in_slow_start: self.in_slow_start.load(Ordering::Relaxed),
+            cooldown_left_ms: cooldown_until.saturating_sub(now),
+            rtt_recent_us: f64::from_bits(self.rtt_recent_us.load(Ordering::Relaxed)),
+            rtt_baseline_us: f64::from_bits(self.rtt_baseline_us.load(Ordering::Relaxed)),
+            backoff_events: self.backoff_events.load(Ordering::Relaxed),
+            congestion_signals: self.congestion_signals.load(Ordering::Relaxed),
+            total_queries: self.total_queries.load(Ordering::Relaxed),
         }
     }
 
@@ -388,6 +494,11 @@ impl DnsGovernor {
 
         if outcome.is_congestion_signal() {
             self.congestion_signals.fetch_add(1, Ordering::Relaxed);
+            match outcome {
+                DnsOutcome::TimedOut => self.timeouts.fetch_add(1, Ordering::Relaxed),
+                DnsOutcome::Rejected => self.rejections.fetch_add(1, Ordering::Relaxed),
+                _ => unreachable!("is_congestion_signal admits only TimedOut | Rejected"),
+            };
             self.on_congestion();
             return;
         }
@@ -497,9 +608,13 @@ impl DnsGovernor {
                     // and keep it there — the controller would end up tracking our own token
                     // bucket rather than the network. Netflix's Gradient2 does the same thing:
                     // `if (inflight < estimatedLimit / 2) return estimatedLimit;`
+                    self.holds_app_limited.fetch_add(1, Ordering::Relaxed);
                     current
                 } else if in_cooldown {
                     // Recovering from a hard failure: corrections may only reduce.
+                    if next > current {
+                        self.holds_cooldown.fetch_add(1, Ordering::Relaxed);
+                    }
                     next.min(current)
                 } else {
                     next
@@ -521,7 +636,37 @@ impl DnsGovernor {
         }
         self.peak_limit.fetch_max(target, Ordering::Relaxed);
         self.min_limit_seen.fetch_min(target, Ordering::Relaxed);
+        if target > previous {
+            self.step_ups.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.step_downs.fetch_add(1, Ordering::Relaxed);
+        }
+        self.note_extreme_transition(previous, target);
         self.resize(target);
+    }
+
+    /// Track wall time spent parked at the floor / ceiling (Phase-0 attribution). Open intervals
+    /// are folded in by [`DnsGovernor::stats`]; a `*_since_ms` of 0 means "not currently there".
+    fn note_extreme_transition(&self, previous: u32, target: u32) {
+        let now = self.now_ms().max(1); // 0 is the "not there" sentinel
+        if target == MIN_LIMIT && previous != MIN_LIMIT {
+            self.floor_since_ms.store(now, Ordering::Relaxed);
+        } else if previous == MIN_LIMIT && target != MIN_LIMIT {
+            let since = self.floor_since_ms.swap(0, Ordering::Relaxed);
+            if since != 0 {
+                self.floor_ms_total
+                    .fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+            }
+        }
+        if target == self.max_limit && previous != self.max_limit {
+            self.ceiling_since_ms.store(now, Ordering::Relaxed);
+        } else if previous == self.max_limit && target != self.max_limit {
+            let since = self.ceiling_since_ms.swap(0, Ordering::Relaxed);
+            if since != 0 {
+                self.ceiling_ms_total
+                    .fetch_add(now.saturating_sub(since), Ordering::Relaxed);
+            }
+        }
     }
 
     /// Reconcile withheld permits with the current limit.

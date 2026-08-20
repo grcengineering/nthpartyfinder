@@ -887,6 +887,10 @@ impl SubfinderDiscovery {
             .acquire()
             .await
             .expect("subfinder semaphore is never closed");
+        // Phase-0 DNS attribution: count + time each subprocess run — subfinder's ~30-40
+        // passive-source getaddrinfo resolutions per run are invisible to the DNS governor, so
+        // its process count is the denominator for the pcap's wire-truth measurement.
+        let _proc_timer = crate::perf::scoped(&crate::perf::METRICS.subfinder_proc);
 
         let mut child = match Command::new(&binary_path)
             // Argument vector (including the rate limit and the per-source timeout) lives in

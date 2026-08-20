@@ -111,7 +111,7 @@ impl CoverageReport {
 pub static SCAN_COVERAGE: CoverageReport = CoverageReport::new();
 
 /// One phase's counts at reporting time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct PhaseSnapshot {
     pub found: u64,
     pub failed: u64,
@@ -119,7 +119,7 @@ pub struct PhaseSnapshot {
 }
 
 /// Every phase's counts at reporting time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct CoverageSnapshot {
     pub subprocessor: PhaseSnapshot,
     pub subfinder: PhaseSnapshot,
@@ -153,7 +153,7 @@ impl CoverageSnapshot {
 }
 
 /// A discovery feature's enabled state and the reason, for the coverage manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FeatureStatus {
     pub name: &'static str,
     pub enabled: bool,
@@ -279,6 +279,74 @@ pub fn degradation_advice(dns_failures: u64, dns_name_failures: u64) -> &'static
          network for full recall."
     } else {
         " Results may undercount; see the discovery-coverage section above."
+    }
+}
+
+/// The scan's final verdict — decision AND wording — single-sourced so the colored console path,
+/// the plain console path, the `--log-file` mirror, and the persisted `scan-summary.json` can
+/// never disagree about how the scan ended.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Verdict {
+    /// `SUCCESS` | `DEGRADED` | `WARNING`.
+    pub kind: String,
+    /// The full plain sentence that follows the `KIND:` label on the console.
+    pub detail: String,
+    /// Follow-up guidance sentence; empty for `SUCCESS`.
+    pub advice: String,
+}
+
+/// Decide the scan verdict. Extracted verbatim from the branch logic that used to live three times in
+/// `logger::print_final_summary` (colored, plain, file mirror); every string here is byte-for-byte
+/// the pre-refactor console wording, pinned by tests in `logger`.
+///
+/// `degradation` is `degradation_summary(..)`'s output for this scan (`None` = ran clean).
+/// Precedence mirrors the original: WARNING (DNS failed and nothing was found) over DEGRADED
+/// (something completed but coverage suffered) over SUCCESS.
+pub fn verdict(
+    total_relationships: usize,
+    dns_failures: u64,
+    dns_name_failures: u64,
+    degradation: Option<&str>,
+) -> Verdict {
+    if dns_failures > 0 && total_relationships == 0 {
+        let advice = if dns_name_failures >= dns_failures {
+            "Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
+        } else {
+            "This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+        };
+        Verdict {
+            kind: "WARNING".to_string(),
+            detail: format!(
+                "Results may be unreliable — {dns_failures} DNS resolution failure(s) occurred and no vendors were found."
+            ),
+            advice: advice.to_string(),
+        }
+    } else if let Some(detail) = degradation {
+        Verdict {
+            kind: "DEGRADED".to_string(),
+            detail: format!(
+                "Completed with {total_relationships} vendor relationships, but coverage was DEGRADED — {detail}."
+            ),
+            // `degradation_advice` returns a leading space (it was appended directly after the
+            // detail's period); trim it here — renderers re-insert the single joining space.
+            advice: degradation_advice(dns_failures, dns_name_failures)
+                .trim_start()
+                .to_string(),
+        }
+    } else if total_relationships > 0 {
+        Verdict {
+            kind: "SUCCESS".to_string(),
+            detail: format!(
+                "Analysis completed successfully! Found {total_relationships} vendor relationships."
+            ),
+            advice: String::new(),
+        }
+    } else {
+        Verdict {
+            kind: "SUCCESS".to_string(),
+            detail: "Analysis completed. No vendor relationships found.".to_string(),
+            advice: String::new(),
+        }
     }
 }
 
@@ -524,6 +592,87 @@ mod tests {
         let s = degradation_summary(&snap, 0, 0, 0).unwrap();
         assert!(s.contains("subprocessor failed on 2 domain(s)"));
         assert!(!s.contains("starved"));
+    }
+
+    #[test]
+    fn verdict_warning_when_dns_failed_and_nothing_found() {
+        // Transport failures present → the retry-elsewhere advice.
+        let v = verdict(0, 5, 1, Some("DNS degraded on 4 lookup(s)"));
+        assert_eq!(v.kind, "WARNING");
+        assert_eq!(
+            v.detail,
+            "Results may be unreliable — 5 DNS resolution failure(s) occurred and no vendors were found."
+        );
+        assert_eq!(
+            v.advice,
+            "This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+        );
+        // Every failure was the name's own authority → the don't-blame-the-network advice.
+        let v = verdict(0, 5, 5, Some("x"));
+        assert_eq!(v.kind, "WARNING");
+        assert!(v.advice.contains("own authoritative DNS"));
+        assert!(!v.advice.contains("Retry with a different network"));
+    }
+
+    #[test]
+    fn verdict_degraded_wraps_detail_and_trims_advice() {
+        let v = verdict(42, 0, 0, Some("subprocessor failed on 2 domain(s)"));
+        assert_eq!(v.kind, "DEGRADED");
+        assert_eq!(
+            v.detail,
+            "Completed with 42 vendor relationships, but coverage was DEGRADED — subprocessor failed on 2 domain(s)."
+        );
+        // Trimmed of `degradation_advice`'s leading space; renderers re-insert the join space.
+        assert_eq!(
+            v.advice,
+            "Results may undercount; see the discovery-coverage section above."
+        );
+        assert!(!v.advice.starts_with(' '));
+        // With transport failures, the advice adds the stable-network clause.
+        let v = verdict(42, 6, 1, Some("DNS degraded on 5 lookup(s)"));
+        assert_eq!(
+            v.advice,
+            "Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall."
+        );
+    }
+
+    #[test]
+    fn verdict_success_with_and_without_relationships() {
+        let v = verdict(17, 0, 0, None);
+        assert_eq!(v.kind, "SUCCESS");
+        assert_eq!(
+            v.detail,
+            "Analysis completed successfully! Found 17 vendor relationships."
+        );
+        assert_eq!(v.advice, "");
+        let v = verdict(0, 0, 0, None);
+        assert_eq!(v.kind, "SUCCESS");
+        assert_eq!(
+            v.detail,
+            "Analysis completed. No vendor relationships found."
+        );
+        assert_eq!(v.advice, "");
+    }
+
+    #[test]
+    fn verdict_precedence_warning_beats_degraded_beats_success() {
+        // DNS failures + zero relationships wins over a degradation detail.
+        assert_eq!(verdict(0, 3, 0, Some("deg")).kind, "WARNING");
+        // Relationships present demote the same inputs to DEGRADED.
+        assert_eq!(verdict(1, 3, 0, Some("deg")).kind, "DEGRADED");
+        // DNS failures with relationships and no degradation summary → SUCCESS. (Unreachable in
+        // practice — dns_failures>0 makes degradation_summary Some — but the precedence must not
+        // invent a warning the console never printed.)
+        assert_eq!(verdict(1, 0, 0, None).kind, "SUCCESS");
+    }
+
+    #[test]
+    fn verdict_serializes_for_the_sidecar() {
+        let v = verdict(42, 0, 0, Some("subprocessor failed on 2 domain(s)"));
+        let json = serde_json::to_string(&v).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["kind"], "DEGRADED");
+        assert!(parsed["detail"].as_str().unwrap().contains("42"));
     }
 
     #[test]

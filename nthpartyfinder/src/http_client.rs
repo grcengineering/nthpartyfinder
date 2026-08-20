@@ -20,7 +20,7 @@
 //! every code path, no external wrapper script required — all scan safety is binary-native.
 
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 /// What this scanner calls itself on every outbound HTTP request.
@@ -219,7 +219,10 @@ static CONNECTION_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 /// later calls are ignored, so startup must run this before any send. `permits` is floored at 1.
 #[cfg_attr(coverage_nightly, coverage(off))] // coverage: installs a process-global OnceLock at startup; a racy set under parallel unit tests, exercised via app.rs startup and the guarded deep-scan run
 pub fn init_connection_ceiling(permits: usize) {
-    let _ = CONNECTION_SEMAPHORE.set(Semaphore::new(permits.max(1)));
+    let permits = permits.max(1);
+    if CONNECTION_SEMAPHORE.set(Semaphore::new(permits)).is_ok() {
+        let _ = CONNECTION_CAP.set(permits);
+    }
 }
 
 /// The global connection semaphore, lazily initialized from the environment (or the default) if
@@ -233,6 +236,7 @@ fn connection_semaphore() -> &'static Semaphore {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_MAX_CONNECTIONS);
+        let _ = CONNECTION_CAP.set(permits);
         Semaphore::new(permits)
     })
 }
@@ -251,11 +255,28 @@ async fn gated<F>(semaphore: &Semaphore, op: F) -> F::Output
 where
     F: std::future::Future,
 {
+    gated_timed(semaphore, op).await.1
+}
+
+/// [`gated`], but returning how long the permit acquisition waited alongside the op's output.
+///
+/// The wait is also recorded into `perf::METRICS.conn_permit_wait` for every caller — the
+/// all-consumer denominator that Phase-0 DNS attribution compares `dns.conn_permit_wait` against.
+/// Observation only: the acquire-then-run ordering is byte-identical to what [`gated`] always did
+/// (the op future is constructed by the caller before this is awaited, so e.g. a `reqwest` timeout
+/// deadline is still armed before the permit wait — measuring that inversion is the point).
+async fn gated_timed<F>(semaphore: &Semaphore, op: F) -> (Duration, F::Output)
+where
+    F: std::future::Future,
+{
+    let t0 = Instant::now();
     let _permit = semaphore
         .acquire()
         .await
         .expect("connection semaphore is never closed");
-    op.await
+    let wait = t0.elapsed();
+    crate::perf::METRICS.conn_permit_wait.record(wait);
+    (wait, op.await)
 }
 
 /// Send a `reqwest` request under the global connection ceiling.
@@ -271,6 +292,18 @@ pub trait GatedSend {
     fn send_gated(
         self,
     ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send;
+
+    /// [`GatedSend::send_gated`], returning the permit wait alongside the response.
+    ///
+    /// Also classifies the target host (IP-literal vs hostname) into
+    /// `http.send_ip_host`/`http.send_nonip_host` — every hostname send implies a `getaddrinfo`
+    /// resolution the DNS governor never sees (Phase-0 attribution, hypothesis D's cheap proxy).
+    /// Behaviour-identical to [`GatedSend::send_gated`]: the request future (and any per-request
+    /// timeout deadline inside it) is constructed BEFORE the permit is awaited, exactly as the
+    /// eager `self.send()` argument always was.
+    fn send_gated_timed(
+        self,
+    ) -> impl std::future::Future<Output = (Duration, reqwest::Result<reqwest::Response>)> + Send;
 }
 
 impl GatedSend for reqwest::RequestBuilder {
@@ -278,6 +311,26 @@ impl GatedSend for reqwest::RequestBuilder {
         self,
     ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send {
         gated(connection_semaphore(), self.send())
+    }
+
+    async fn send_gated_timed(self) -> (Duration, reqwest::Result<reqwest::Response>) {
+        let (client, req) = self.build_split();
+        match req {
+            Ok(req) => {
+                match req.url().host() {
+                    Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+                        crate::perf::METRICS.http_send_ip_host.hit();
+                    }
+                    _ => crate::perf::METRICS.http_send_nonip_host.hit(),
+                }
+                // Construct the send future BEFORE the permit wait — `client.execute` arms
+                // the per-request timeout at call time, matching `send_gated`'s eager
+                // `self.send()` argument. Phase 0 measures that inversion; it must not fix it.
+                let fut = client.execute(req);
+                gated_timed(connection_semaphore(), fut).await
+            }
+            Err(e) => (Duration::ZERO, Err(e)),
+        }
     }
 }
 
@@ -287,6 +340,87 @@ impl GatedSend for reqwest::RequestBuilder {
 /// every socket-opening path shares the one ceiling.
 pub async fn with_connection_permit<F: std::future::Future>(op: F) -> F::Output {
     gated(connection_semaphore(), op).await
+}
+
+/// [`with_connection_permit`], returning the permit wait alongside the op's output.
+pub async fn with_connection_permit_timed<F: std::future::Future>(op: F) -> (Duration, F::Output) {
+    gated_timed(connection_semaphore(), op).await
+}
+
+/// The connection ceiling's `(capacity, currently_available)` — sampled for telemetry events so a
+/// transport-demotion record carries who was holding the 128 at the moment it fired.
+///
+/// Capacity is reconstructed as `available + in_flight` is not observable directly; instead the
+/// installed cap is remembered at init. Before any init, both read as the lazy default path would
+/// install them.
+pub fn connection_ceiling_state() -> (usize, usize) {
+    let sem = connection_semaphore();
+    let cap = *CONNECTION_CAP.get_or_init(|| DEFAULT_MAX_CONNECTIONS);
+    (cap, sem.available_permits())
+}
+
+static CONNECTION_CAP: OnceLock<usize> = OnceLock::new();
+
+// ── getaddrinfo observation (Phase-0 DNS attribution, hypothesis D) ─────────────────────────────
+//
+// Every `hardened_builder` client resolves hostnames through the system resolver (`getaddrinfo`),
+// which on macOS routes via mDNSResponder — invisible to per-process tools AND to the DNS
+// governor/breaker/UDP budget. This resolver delegates to the exact same system path
+// (`tokio::net::lookup_host` → `getaddrinfo` on a blocking thread) while counting each resolution
+// and remembering a bounded set of distinct hosts, so a scan can report how much un-governed DNS
+// it induced. Observation only: same syscall, same semantics, same failure behaviour.
+
+/// Cap on the distinct-host set so a pathological scan cannot grow it unbounded.
+const GETADDRINFO_HOST_SET_CAP: usize = 5000;
+
+static GETADDRINFO_HOSTS: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    OnceLock::new();
+
+fn note_getaddrinfo_host(host: &str) {
+    let set =
+        GETADDRINFO_HOSTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut set) = set.lock() {
+        if set.len() < GETADDRINFO_HOST_SET_CAP {
+            set.insert(host.to_ascii_lowercase());
+        }
+    }
+}
+
+/// How many distinct hostnames the counting resolver has resolved this scan (capped).
+pub fn getaddrinfo_distinct_hosts() -> usize {
+    GETADDRINFO_HOSTS
+        .get()
+        .and_then(|m| m.lock().ok().map(|s| s.len()))
+        .unwrap_or(0)
+}
+
+/// A `reqwest` DNS resolver that counts every `getaddrinfo` resolution it performs.
+///
+/// Installed by [`hardened_builder`] (never the DoH client — its endpoints are IP literals and
+/// must not recurse through any resolver). Delegates to the system resolver via
+/// `tokio::net::lookup_host`, recording `http.getaddrinfo` (count + duration) and the distinct
+/// host set. Failure behaviour is the system resolver's own.
+#[derive(Debug, Clone, Copy)]
+pub struct CountingResolver;
+
+impl reqwest::dns::Resolve for CountingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let t0 = Instant::now();
+            let result = tokio::net::lookup_host((host.as_str(), 0)).await;
+            crate::perf::METRICS.http_getaddrinfo.record(t0.elapsed());
+            note_getaddrinfo_host(&host);
+            match result {
+                Ok(addrs) => {
+                    let addrs: Vec<std::net::SocketAddr> = addrs.collect();
+                    Ok(Box::new(addrs.into_iter())
+                        as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
+                }
+                Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+            }
+        })
+    }
 }
 
 #[cfg(test)]

@@ -831,7 +831,6 @@ impl AnalysisLogger {
             }
 
             let dns_fail_count = self.dns_failure_count();
-            let dns_name_fail_count = self.dns_name_failure_count();
             if dns_fail_count > 0 {
                 println!(
                     "{}: {}",
@@ -842,69 +841,16 @@ impl AnalysisLogger {
 
             println!("{}\n", "========================".bold().cyan());
 
-            let cov = crate::coverage::SCAN_COVERAGE.snapshot();
-            // The starvation verdict uses `subproc_zero_yield`, not `subproc_budget_exhausted`: the
-            // budget also expires on vendors that had ALREADY found an authoritative source and
-            // were only sweeping the tail of a low-probability guess list. Flagging those as
-            // starved made the banner fire on healthy scans and told the reader to "re-run on a
-            // stable network", which cannot help — a budget expires identically on a perfect
-            // link. Only a vendor that ran out of time having found NOTHING lost real recall.
-            let subproc_starved = crate::perf::METRICS.subproc_zero_yield.snapshot().0;
-            let degradation = crate::coverage::degradation_summary(
-                &cov,
-                subproc_starved,
-                dns_fail_count as u64,
-                dns_name_fail_count as u64,
+            // Any phase failed/was starved OR DNS degraded → DEGRADED, not a bare SUCCESS.
+            // This is what makes an unintended run-to-run difference announce itself, rather
+            // than the subprocessor-collapse-still-prints-SUCCESS pathology. The decision AND
+            // the wording are single-sourced in `coverage::verdict` (shared with the plain
+            // path, the --log-file mirror, and scan-summary.json); only color lives here.
+            let (verdict, _degradation) = self.compute_verdict(metadata.total_vendor_relationships);
+            println!(
+                "{}",
+                render_verdict_colored(&verdict, metadata.total_vendor_relationships)
             );
-            if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
-                println!(
-                    "{} Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
-                    "WARNING:".bright_yellow().bold(),
-                    dns_fail_count
-                );
-                if dns_name_fail_count >= dns_fail_count {
-                    println!(
-                        "   Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
-                    );
-                } else {
-                    println!(
-                        "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
-                    );
-                }
-            } else if let Some(detail) = &degradation {
-                // Any phase failed/was starved OR DNS degraded → say so, instead of a bare SUCCESS.
-                // This is what makes an unintended run-to-run difference announce itself, rather
-                // than the subprocessor-collapse-still-prints-SUCCESS pathology.
-                println!(
-                    "{} Completed with {} vendor relationships, but coverage was DEGRADED — {}.{}",
-                    "DEGRADED:".bright_yellow().bold(),
-                    metadata
-                        .total_vendor_relationships
-                        .to_string()
-                        .bright_yellow()
-                        .bold(),
-                    detail,
-                    crate::coverage::degradation_advice(
-                        dns_fail_count as u64,
-                        dns_name_fail_count as u64
-                    )
-                );
-            } else if metadata.total_vendor_relationships > 0 {
-                println!(
-                    "{} Analysis completed successfully! Found {} vendor relationships.",
-                    "SUCCESS:".bright_green().bold(),
-                    metadata
-                        .total_vendor_relationships
-                        .to_string()
-                        .bright_green()
-                        .bold()
-                );
-            } else {
-                println!(
-                    "{} Analysis completed. No vendor relationships found.",
-                    "SUCCESS:".bright_green().bold()
-                );
-            }
         } else {
             println!("\n=== ANALYSIS SUMMARY ===");
 
@@ -928,59 +874,17 @@ impl AnalysisLogger {
             }
 
             let dns_fail_count = self.dns_failure_count();
-            let dns_name_fail_count = self.dns_name_failure_count();
             if dns_fail_count > 0 {
                 println!("DNS Failures: {}", dns_fail_count);
             }
 
             println!("========================\n");
 
-            let cov = crate::coverage::SCAN_COVERAGE.snapshot();
-            // The starvation verdict uses `subproc_zero_yield`, not `subproc_budget_exhausted`: the
-            // budget also expires on vendors that had ALREADY found an authoritative source and
-            // were only sweeping the tail of a low-probability guess list. Flagging those as
-            // starved made the banner fire on healthy scans and told the reader to "re-run on a
-            // stable network", which cannot help — a budget expires identically on a perfect
-            // link. Only a vendor that ran out of time having found NOTHING lost real recall.
-            let subproc_starved = crate::perf::METRICS.subproc_zero_yield.snapshot().0;
-            let degradation = crate::coverage::degradation_summary(
-                &cov,
-                subproc_starved,
-                dns_fail_count as u64,
-                dns_name_fail_count as u64,
-            );
-            if dns_fail_count > 0 && metadata.total_vendor_relationships == 0 {
-                println!(
-                    "WARNING: Results may be unreliable — {} DNS resolution failure(s) occurred and no vendors were found.",
-                    dns_fail_count
-                );
-                if dns_name_fail_count >= dns_fail_count {
-                    println!(
-                        "   Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
-                    );
-                } else {
-                    println!(
-                        "   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
-                    );
-                }
-            } else if let Some(detail) = &degradation {
-                println!(
-                    "DEGRADED: Completed with {} vendor relationships, but coverage was DEGRADED — {}.{}",
-                    metadata.total_vendor_relationships,
-                    detail,
-                    crate::coverage::degradation_advice(
-                        dns_fail_count as u64,
-                        dns_name_fail_count as u64
-                    )
-                );
-            } else if metadata.total_vendor_relationships > 0 {
-                println!(
-                    "SUCCESS: Analysis completed successfully! Found {} vendor relationships.",
-                    metadata.total_vendor_relationships
-                );
-            } else {
-                println!("SUCCESS: Analysis completed. No vendor relationships found.");
-            }
+            // Decision + strings single-sourced in `coverage::verdict` (shared with the colored
+            // path, the --log-file mirror below, and scan-summary.json). The rendering is pinned
+            // byte-identical to the pre-refactor literals by the `verdict_rendering_*` tests.
+            let (verdict, degradation) = self.compute_verdict(metadata.total_vendor_relationships);
+            println!("{}", render_verdict_plain(&verdict));
 
             // Mirror the key summary facts into scan.log (the --log-file sink), which the raw
             // println! summary above never reaches — a --log-file run's scan.log otherwise stops at
@@ -996,14 +900,19 @@ impl AnalysisLogger {
                 ),
             );
             if dns_fail_count > 0 {
-                let verdict = if metadata.total_vendor_relationships == 0 {
+                // `kind == WARNING` ⟺ the old `total_vendor_relationships == 0` check under this
+                // same `dns_fail_count > 0` guard — the decision now comes from the one verdict.
+                let verdict_note = if verdict.kind == "WARNING" {
                     "results may be unreliable — DNS queries likely blocked or failing; retry on a different network/DNS provider"
                 } else {
                     "some vendors may be missing"
                 };
                 self.log_summary_to_file(
                     "WARN",
-                    &format!("DNS resolution failures: {} ({})", dns_fail_count, verdict),
+                    &format!(
+                        "DNS resolution failures: {} ({})",
+                        dns_fail_count, verdict_note
+                    ),
                 );
             }
             // Mirror any discovery-coverage degradation into scan.log too, so a --log-file reader
@@ -1012,6 +921,41 @@ impl AnalysisLogger {
                 self.log_summary_to_file("WARN", &format!("Coverage degraded — {}", detail));
             }
         }
+    }
+
+    /// Derive the scan's final verdict from the live counters. ONE decision point —
+    /// `coverage::verdict` — feeds the colored console path, the plain console path, the
+    /// `--log-file` mirror, and the persisted `scan-summary.json`, so they cannot disagree.
+    ///
+    /// Also returns the raw degradation summary (the mirror logs it verbatim).
+    ///
+    /// The starvation input uses `subproc_zero_yield`, not `subproc_budget_exhausted`: the
+    /// budget also expires on vendors that had ALREADY found an authoritative source and
+    /// were only sweeping the tail of a low-probability guess list. Flagging those as
+    /// starved made the banner fire on healthy scans and told the reader to "re-run on a
+    /// stable network", which cannot help — a budget expires identically on a perfect
+    /// link. Only a vendor that ran out of time having found NOTHING lost real recall.
+    pub fn compute_verdict(
+        &self,
+        total_relationships: usize,
+    ) -> (crate::coverage::Verdict, Option<String>) {
+        let dns_fail_count = self.dns_failure_count() as u64;
+        let dns_name_fail_count = self.dns_name_failure_count() as u64;
+        let cov = crate::coverage::SCAN_COVERAGE.snapshot();
+        let subproc_starved = crate::perf::METRICS.subproc_zero_yield.snapshot().0;
+        let degradation = crate::coverage::degradation_summary(
+            &cov,
+            subproc_starved,
+            dns_fail_count,
+            dns_name_fail_count,
+        );
+        let verdict = crate::coverage::verdict(
+            total_relationships,
+            dns_fail_count,
+            dns_name_fail_count,
+            degradation.as_deref(),
+        );
+        (verdict, degradation)
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -1259,6 +1203,94 @@ impl AnalysisLogger {
             app_start: Instant::now(),
         }
     }
+
+    /// Point-in-time copy of the ANALYSIS SUMMARY numbers, for `scan_summary`'s persisted
+    /// sidecar — the same metadata `print_final_summary` reads, without printing anything.
+    pub fn analysis_summary_snapshot(&self) -> AnalysisSummarySnapshot {
+        let metadata = self
+            .analysis_metadata
+            .lock()
+            .expect("analysis_metadata mutex poisoned during analysis_summary_snapshot");
+        let duration_secs = match (metadata.start_time, metadata.end_time) {
+            (Some(start), Some(end)) => {
+                Some(end.duration_since(start).unwrap_or_default().as_secs_f64())
+            }
+            _ => None,
+        };
+        AnalysisSummarySnapshot {
+            duration_secs,
+            domains_processed: metadata.total_domains_processed,
+            txt_records_found: metadata.total_txt_records_found,
+            vendor_relationships: metadata.total_vendor_relationships,
+            unique_vendors: metadata.unique_vendors,
+            max_depth: metadata.max_depth_reached,
+        }
+    }
+}
+
+/// The ANALYSIS SUMMARY numbers at one instant (see [`AnalysisLogger::analysis_summary_snapshot`]).
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisSummarySnapshot {
+    /// `end_time - start_time` when both are recorded (`finish_progress` sets the end), else None.
+    pub duration_secs: Option<f64>,
+    pub domains_processed: usize,
+    pub txt_records_found: usize,
+    pub vendor_relationships: usize,
+    pub unique_vendors: usize,
+    pub max_depth: u32,
+}
+
+/// Render the verdict line(s) for the plain (no-color) console path. Byte-identical to the
+/// pre-refactor inline `println!`s — pinned against the old literal strings by the
+/// `verdict_rendering_*` tests below. Only formatting lives here; the decision and every
+/// sentence come from `coverage::verdict`.
+fn render_verdict_plain(v: &crate::coverage::Verdict) -> String {
+    match v.kind.as_str() {
+        // Two console lines: the headline, then the indented advice line.
+        "WARNING" => format!("WARNING: {}\n   {}", v.detail, v.advice),
+        // detail ends with '.'; the advice used to carry its own leading space — the join
+        // space here reproduces those bytes exactly.
+        "DEGRADED" => format!("DEGRADED: {} {}", v.detail, v.advice),
+        _ => format!("SUCCESS: {}", v.detail),
+    }
+}
+
+/// Render the verdict for the colored console path: the `KIND:` label and (for DEGRADED /
+/// SUCCESS) the relationship count get color, exactly as the pre-refactor branches colored
+/// them. The count is re-colored inside the single-sourced sentence via first-occurrence
+/// replacement — safe because `coverage::verdict` builds those sentences from digit-free
+/// prefixes with the count as the first digit run ("Completed with N …", "… Found N …").
+fn render_verdict_colored(v: &crate::coverage::Verdict, total_relationships: usize) -> String {
+    match v.kind.as_str() {
+        // The pre-refactor colored WARNING did NOT color the failure count — leave detail as-is.
+        "WARNING" => format!(
+            "{} {}\n   {}",
+            "WARNING:".bright_yellow().bold(),
+            v.detail,
+            v.advice
+        ),
+        "DEGRADED" => {
+            let n = total_relationships.to_string();
+            let detail = v
+                .detail
+                .replacen(&n, &n.as_str().bright_yellow().bold().to_string(), 1);
+            format!(
+                "{} {} {}",
+                "DEGRADED:".bright_yellow().bold(),
+                detail,
+                v.advice
+            )
+        }
+        _ => {
+            // Zero-relationship SUCCESS has no digits in its sentence, so replacen is a no-op —
+            // matching the pre-refactor branch, which colored nothing there either.
+            let n = total_relationships.to_string();
+            let detail = v
+                .detail
+                .replacen(&n, &n.as_str().bright_green().bold().to_string(), 1);
+            format!("{} {}", "SUCCESS:".bright_green().bold(), detail)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1298,126 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use tempfile::TempDir;
+
+    // ── verdict rendering: byte-identical to the pre-refactor console output ──
+    //
+    // The expected strings below were copied VERBATIM from the `print_final_summary`
+    // literals as they stood BEFORE the verdict logic moved to `coverage::verdict`
+    // (plain branch: the old `println!("DEGRADED: Completed with {} vendor relationships,
+    // but coverage was DEGRADED — {}.{}" ...)` and friends). Do not regenerate them from
+    // the code under test.
+
+    #[test]
+    fn verdict_rendering_pins_pre_refactor_degraded_string() {
+        let v = crate::coverage::verdict(42, 0, 0, Some("subprocessor failed on 2 domain(s)"));
+        assert_eq!(
+            render_verdict_plain(&v),
+            "DEGRADED: Completed with 42 vendor relationships, but coverage was DEGRADED — subprocessor failed on 2 domain(s). Results may undercount; see the discovery-coverage section above."
+        );
+    }
+
+    #[test]
+    fn verdict_rendering_pins_pre_refactor_success_string() {
+        let v = crate::coverage::verdict(17, 0, 0, None);
+        assert_eq!(
+            render_verdict_plain(&v),
+            "SUCCESS: Analysis completed successfully! Found 17 vendor relationships."
+        );
+        let v = crate::coverage::verdict(0, 0, 0, None);
+        assert_eq!(
+            render_verdict_plain(&v),
+            "SUCCESS: Analysis completed. No vendor relationships found."
+        );
+    }
+
+    #[test]
+    fn verdict_rendering_pins_pre_refactor_warning_strings() {
+        // Transport-flavoured advice (name failures < total failures).
+        let v = crate::coverage::verdict(0, 5, 1, Some("DNS degraded on 4 lookup(s)"));
+        assert_eq!(
+            render_verdict_plain(&v),
+            "WARNING: Results may be unreliable — 5 DNS resolution failure(s) occurred and no vendors were found.\n   This likely means DNS queries were blocked or failed. Retry with a different network or DNS provider."
+        );
+        // Authoritative-DNS-flavoured advice (every failure was the name's own authority).
+        let v = crate::coverage::verdict(0, 29, 29, Some("x"));
+        assert_eq!(
+            render_verdict_plain(&v),
+            "WARNING: Results may be unreliable — 29 DNS resolution failure(s) occurred and no vendors were found.\n   Every failure was the queried name's own authoritative DNS answering SERVFAIL/REFUSED — the fault is in that domain's DNS, not on this network, and retrying will not change it."
+        );
+    }
+
+    /// Strip ANSI CSI sequences (`ESC [ … <final byte>`), so the colored/plain comparison is
+    /// immune to the process-global `colored::control` override other tests flip.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                for d in chars.by_ref() {
+                    if ('@'..='~').contains(&d) {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn colored_verdict_rendering_is_plain_rendering_plus_color_only() {
+        // Color must add ANSI codes and NOTHING else: stripping them recovers the plain
+        // rendering byte-for-byte, for every verdict shape. This is the guard that keeps the
+        // two console paths from ever diverging in wording again.
+        for (rels, fails, name_fails, degradation) in [
+            (0usize, 5u64, 1u64, Some("DNS degraded on 4 lookup(s)")),
+            (0, 29, 29, Some("x")),
+            (42, 0, 0, Some("subprocessor failed on 2 domain(s)")),
+            (0, 0, 0, Some("web-traffic capture failed on 3 domain(s)")),
+            (17, 0, 0, None),
+            (0, 0, 0, None),
+        ] {
+            let v = crate::coverage::verdict(rels, fails, name_fails, degradation);
+            assert_eq!(
+                strip_ansi(&render_verdict_colored(&v, rels)),
+                render_verdict_plain(&v),
+                "colored path diverged from plain for kind={} (rels={rels})",
+                v.kind
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_summary_snapshot_reflects_recorded_metadata() {
+        let logger = AnalysisLogger::new(VerbosityLevel::Summary);
+        // No end time recorded → no duration, but counters still read.
+        logger.record_domain_processed();
+        logger.record_domain_processed();
+        logger.record_txt_records_found(7);
+        logger.record_vendor_relationships(3);
+        logger.record_unique_vendors(2);
+        logger.record_depth_reached(4);
+        let snap = logger.analysis_summary_snapshot();
+        assert_eq!(snap.duration_secs, None);
+        assert_eq!(snap.domains_processed, 2);
+        assert_eq!(snap.txt_records_found, 7);
+        assert_eq!(snap.vendor_relationships, 3);
+        assert_eq!(snap.unique_vendors, 2);
+        assert_eq!(snap.max_depth, 4);
+
+        // With both times recorded, the duration mirrors the printed one.
+        {
+            let mut metadata = logger.analysis_metadata.lock().unwrap();
+            let now = SystemTime::now();
+            metadata.start_time = Some(now - std::time::Duration::from_secs(5));
+            metadata.end_time = Some(now);
+        }
+        let snap = logger.analysis_summary_snapshot();
+        let secs = snap.duration_secs.expect("duration present");
+        assert!((secs - 5.0).abs() < 0.5, "duration ≈ 5s, got {secs}");
+    }
 
     #[rstest]
     #[case(0, VerbosityLevel::Summary)]

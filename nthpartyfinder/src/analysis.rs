@@ -3529,6 +3529,7 @@ mod tests {
     // ── subprocessor_analysis_with_logging ────────────────────────────
 
     #[tokio::test]
+    #[ignore = "live network: resolves a nonexistent name; kills the sfw cargo wrapper (CLAUDE.md)"]
     async fn test_subprocessor_analysis_with_logging_invalid_domain() {
         let analyzer = subprocessor::SubprocessorAnalyzer::new().await;
         let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
