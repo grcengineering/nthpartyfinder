@@ -435,11 +435,98 @@ async fn p4_transient_throttle_burst() {
     // Wave-1 hard assert (defect B, classification half): a 429 is positive transport
     // evidence — the provider answered — so a transient all-provider burst must NEVER
     // demote DoH. The pre-fix baseline recorded down_transitions = 1: that number WAS the
-    // finding. In-window lookups may still fail (their rescue is Wave 2's deferred retry);
-    // the recovery-limit and loss ratchets tighten there.
+    // finding.
     assert_eq!(
         m.transport.doh.down_transitions, 0,
         "a transient throttle burst demoted DoH — the breaker is reading answers as silence"
+    );
+
+    // Wave-2 hard asserts: (7a) one decrease per congestion epoch — a 2 s all-provider burst
+    // is a handful of epochs (cooldown-spaced), never one decrease per signal; (7d) the
+    // deferred retry rescues most in-window lookups after the burst passes. Measured across
+    // seeded runs: 21 decreases / 192 signals, 549/600 resolved (pre-7d: 240/240 and 415).
+    assert!(
+        m.governor.backoff_events * 3 <= m.governor.congestion_signals.max(1) as u32,
+        "epoch rule broken: {} decreases on {} signals — approaching one-per-signal again",
+        m.governor.backoff_events,
+        m.governor.congestion_signals
+    );
+    assert!(
+        m.lookups_with_records >= 500,
+        "the deferred retry must rescue the burst window: only {}/600 resolved",
+        m.lookups_with_records
+    );
+}
+
+/// P9 — pinned control: P6's messy flap mix under `--dns-max-concurrency`-style pinning.
+/// Every Phase-1 pinned arm produced a ZERO-relationship scan (defect H): with suppression
+/// keyed on `is_backing_off()` — constantly false when pinned — the breaker latched on the
+/// initial burst and rejected everything. The Wave-2 evidence rule makes the latch
+/// structurally impossible: a pinned governor never "retreats", so timeout evidence can
+/// never trip a breaker, and only genuine unreachability can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p9_pinned_control() {
+    let _gate = GATE.lock().await;
+    let specs = six(|i| {
+        ProviderSpec::Mock(Profile::weighted(vec![
+            (Behavior::Hang { delay_ms: 3500 }, 8),
+            (Behavior::Http5xx, 4),
+            (Behavior::Throttle429, 2),
+            (Behavior::Rcode(2), 1),
+            (
+                Behavior::Ok {
+                    delay_ms: 30 + 54 * i as u64,
+                },
+                85,
+            ),
+        ]))
+    });
+    let farm = Farm::start(common::doh_farm::splitmix64(FARM_SEED ^ 9), specs).await;
+    let cfg = farm_config(&farm);
+    let governor = DnsGovernor::pinned(16);
+    let failures = Arc::new(AtomicUsize::new(0));
+    let name_failures = Arc::new(AtomicUsize::new(0));
+    let pool = Arc::new(
+        DnsServerPool::from_config(&cfg)
+            .disable_dot()
+            .with_governor(Arc::clone(&governor))
+            .with_failure_counter(Arc::clone(&failures))
+            .with_name_failure_counter(Arc::clone(&name_failures)),
+    );
+    let names = Arc::new(gate_names(DISTINCT_NAMES));
+    let outcome = tokio::time::timeout(
+        PER_PROFILE_TIMEOUT,
+        drive(Arc::clone(&pool), names, Arc::clone(&failures)),
+    )
+    .await
+    .expect("p9 exceeded the hard timeout");
+
+    let measurement = Measurement {
+        schema: 1,
+        profile: "p9_pinned_control".to_string(),
+        wall_ms: outcome.wall_ms,
+        logical_lookups: LOGICAL_LOOKUPS as u64,
+        distinct_names: DISTINCT_NAMES as u64,
+        workers: WORKERS as u64,
+        config_dns_qps: GATE_DNS_QPS,
+        lookups_with_records: outcome.with_records,
+        lookups_empty: outcome.empty,
+        dns_failures: failures.load(Ordering::Relaxed) as u64,
+        name_failures: name_failures.load(Ordering::Relaxed) as u64,
+        provider_requests: farm.request_counts(),
+        governor: pool.governor_stats(),
+        transport: pool.transport_snapshot(),
+    };
+    persist(&measurement);
+
+    assert_eq!(
+        measurement.transport.doh.down_transitions, 0,
+        "a pinned governor must never latch the breaker on flap timeouts (defect H)"
+    );
+    assert!(
+        measurement.lookups_with_records >= 580,
+        "pinned mode must actually WORK now: {}/600 resolved",
+        measurement.lookups_with_records
     );
 }
 

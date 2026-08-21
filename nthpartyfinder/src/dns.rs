@@ -541,52 +541,13 @@ impl TransportHealth {
         self.down_transitions.load(Ordering::Relaxed)
     }
 
-    /// The transport failed *while we were overloading the network ourselves*.
-    ///
-    /// This must NOT advance the down-streak. The breaker exists to route around a transport that
-    /// is genuinely blocked or broken; congestion is neither. Counting congestion here caused a
-    /// vicious cycle in the 2026-07-24 incident: our own load timed DoH out, eight timeouts marked
-    /// DoH "blocked", the ladder fell through DoT to raw UDP/53, and that pushed *more* traffic at
-    /// the consumer DNS forwarder that was already collapsing — while the user was told "Results
-    /// are unaffected". The adaptive governor is the right responder to congestion, and it is
-    /// already backing off; the breaker should simply stay out of the way.
-    ///
-    /// Returns false always: there is nothing to warn about, because nothing is broken.
-    fn record_congestion(&self) -> bool {
-        false
-    }
-
-    /// Record a transport failure, unless the adaptive governor says we are the ones causing it.
-    ///
-    /// "Backing off" is the discriminator: the governor drops its limit the moment lookups start
-    /// timing out or being rejected, so a limit below its ceiling is direct evidence that the
-    /// failures are self-inflicted load rather than a broken transport. Under those conditions the
-    /// streak is not advanced and the transport stays eligible — the governor throttles instead.
-    fn record_failure_unless_congested(
-        &self,
-        governor: &std::sync::Arc<crate::dns_governor::DnsGovernor>,
-    ) -> bool {
-        self.record_failure_from_unless_congested(governor, 0, 1)
-    }
-
-    /// As [`Self::record_failure_unless_congested`], but attributing the failure to a specific
-    /// upstream so a multi-provider transport is only declared down once *every* provider has
-    /// failed in the current streak.
-    ///
-    /// `source_index` identifies the upstream (a DoH provider index); `source_count` is how many
-    /// are configured. Single-upstream transports pass `(0, 1)` and behave exactly as before.
-    fn record_failure_from_unless_congested(
-        &self,
-        governor: &std::sync::Arc<crate::dns_governor::DnsGovernor>,
-        source_index: usize,
-        source_count: usize,
-    ) -> bool {
-        if governor.is_backing_off() {
-            self.record_congestion()
-        } else {
-            self.record_failure_from(source_index, source_count)
-        }
-    }
+    // (Wave 2) The old `record_congestion` / `record_*_unless_congested` suppression trio is
+    // gone: "is the governor backing off?" was a bimodal discriminator — it disabled the breaker
+    // entirely while a cooldown kept refreshing (a genuine outage at the floor could never trip)
+    // and hair-triggered at the ceiling (a burst of 8 concurrent failures filled the mask before
+    // the controller could react). The discriminator is now the EVIDENCE at each call site:
+    // unreachable-class failures always advance the streak, no-response-class failures advance it
+    // only once the governor has retreated to its floor.
 
     /// The transport failed at the transport layer (timeout / connection / sustained throttle).
     /// Advance the streak; returns true exactly once, on the transition into "down", so the caller
@@ -2049,11 +2010,12 @@ impl DnsServerPool {
                         // The DoH breaker may only trip once EVERY configured provider has failed
                         // in the current streak, so an unattributed count would let one sick
                         // endpoint demote a working transport.
-                        self.doh_health.record_failure_from_unless_congested(
-                            &self.governor,
-                            server_index,
-                            self.doh_servers.len(),
-                        );
+                        // Wave 2: the EVIDENCE gate above is the whole discriminator —
+                        // `is_backing_off` no longer suppresses, so a genuine outage at the
+                        // governor floor trips reliably instead of hiding behind a
+                        // perpetually-refreshed cooldown.
+                        self.doh_health
+                            .record_failure_from(server_index, self.doh_servers.len());
                     }
                     last_err = Some(e);
                     // Rotate past ANY failing provider — broken (4xx/RCODE), unreachable
@@ -2161,11 +2123,12 @@ impl DnsServerPool {
                         // The DoH breaker may only trip once EVERY configured provider has failed
                         // in the current streak, so an unattributed count would let one sick
                         // endpoint demote a working transport.
-                        self.doh_health.record_failure_from_unless_congested(
-                            &self.governor,
-                            server_index,
-                            self.doh_servers.len(),
-                        );
+                        // Wave 2: the EVIDENCE gate above is the whole discriminator —
+                        // `is_backing_off` no longer suppresses, so a genuine outage at the
+                        // governor floor trips reliably instead of hiding behind a
+                        // perpetually-refreshed cooldown.
+                        self.doh_health
+                            .record_failure_from(server_index, self.doh_servers.len());
                     }
                     last_err = Some(e);
                     // Rotate past ANY failing provider (see TXT path) — no sleeps.
@@ -2351,7 +2314,8 @@ impl DnsServerPool {
             },
         };
 
-        let txt_result = txt_answer.map(|answer| answer.txt);
+        let mut txt_result = txt_answer.map(|answer| answer.txt);
+        let mut cname_result = cname_result;
 
         // Feed the adaptive controller. Either arm answering means the resolver path is alive;
         // only when BOTH fail do we have evidence of congestion, and even then a name the
@@ -2365,6 +2329,44 @@ impl DnsServerPool {
             &governor_view(txt_memo.is_some(), &txt_result),
             &governor_view(cname_memo.is_some(), &cname_result),
         ));
+
+        // Wave 2 (7d): deferred single retry for load-class failures. A DNS_TIMEOUT/DNS_THROTTLE
+        // while the governor is backing off is overwhelmingly OUR congestion; the old rescue was
+        // to descend the plain-port ladder immediately — more pressure at the worst moment, on
+        // transports that answer no better. Instead: report the signal (permit completed above),
+        // wait out the controller's cooldown, and retry ONCE on the transport known to work,
+        // paced by the reduced limit. Memo writes happen after, so only the final verdict lands.
+        let is_load_class = |r: &Result<Vec<String>>| {
+            r.as_ref().err().is_some_and(|e| {
+                let m = e.to_string();
+                m.contains("DNS_TIMEOUT") || m.contains("DNS_THROTTLE")
+            })
+        };
+        let txt_retry = txt_memo.is_none() && is_load_class(&txt_result);
+        let cname_retry = cname_memo.is_none() && is_load_class(&cname_result);
+        if (txt_retry || cname_retry) && self.governor.is_backing_off() {
+            crate::perf::METRICS.dns_deferred_retry.hit();
+            tokio::time::sleep(self.governor.cooldown_left()).await;
+            let permit = self.acquire_dns_permit().await;
+            if txt_retry {
+                txt_result = self.fast_txt_lookup(domain).await.map(|answer| answer.txt);
+            }
+            if cname_retry {
+                cname_result = self.fast_cname_lookup(domain).await;
+            }
+            let rescued =
+                (!txt_retry || txt_result.is_ok()) && (!cname_retry || cname_result.is_ok());
+            if rescued {
+                crate::perf::METRICS.dns_deferred_retry_rescued.hit();
+            }
+            crate::perf::METRICS
+                .dns_permit_held
+                .record(permit.elapsed());
+            permit.complete(classify_pair(
+                &governor_view(!txt_retry, &txt_result),
+                &governor_view(!cname_retry, &cname_result),
+            ));
+        }
 
         // Remember only what this call actually settled — an answer, or a `DNS_NAME` verdict.
         // Arms served from the memo are skipped rather than rewritten with their own value.
@@ -2436,14 +2438,11 @@ impl DnsServerPool {
                     }
                     return Ok(answer);
                 }
-                // All providers failed (throttled or broken endpoint) — descend the ladder, but if
-                // it yields no authoritative result either, surface the failure rather than a silent
-                // empty. The throttle was already counted at `note_throttle`, so returning an
-                // authoritative empty a lower transport found does not undercount it.
-                Ok(Err(e))
-                    if e.to_string().contains("DNS_THROTTLE")
-                        || e.to_string().contains("DNS_ENDPOINT") =>
-                {
+                // Broken endpoints (wrong API shape, or every provider unusable) — descend the
+                // ladder: another transport may genuinely serve what DoH's endpoints cannot. If
+                // it yields no authoritative result either, surface the classified failure
+                // rather than a silent empty.
+                Ok(Err(e)) if e.to_string().contains("DNS_ENDPOINT") => {
                     // The per-provider failures were already recorded inside the resilient
                     // rotation, which is the only layer that knows WHICH upstream failed. Recording
                     // again here would double-count and could trip the breaker on a single
@@ -2468,15 +2467,40 @@ impl DnsServerPool {
                                 cname: None,
                             })
                         }
-                        // Empty or TransportFailed: surface the DoH throttle `e` (already classified
-                        // and counted) instead of masking it with a fallback empty.
+                        // Empty or TransportFailed: surface the DoH failure `e` (already
+                        // classified) instead of masking it with a fallback empty.
                         _ => return Err(e),
                     }
                 }
+                // Wave 2 ladder policy: load-class failures (DNS_THROTTLE — the providers are
+                // shedding; DNS_TIMEOUT — our own measured deadline expired) and verdicts that no
+                // other transport can improve (DNS_NAME — the name's own servers are broken;
+                // DNS_LOCAL — this process is out of descriptors) return classified immediately.
+                // Descending the DoT/UDP ladder for them was pure pressure: it multiplied plain-
+                // port traffic exactly when the network was struggling, and a SERVFAILing name
+                // SERVFAILs identically on every transport. Load-class failures are the deferred
+                // single retry's input at the permit-owning caller (7d).
+                Ok(Err(e))
+                    if e.to_string().contains("DNS_THROTTLE")
+                        || e.to_string().contains("DNS_TIMEOUT")
+                        || e.to_string().contains("DNS_NAME")
+                        || e.to_string().contains("DNS_LOCAL") =>
+                {
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
+                        warn_transport_unavailable(
+                            crate::dns_telemetry::Tier::Doh,
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                            "doh_load_class_or_name",
+                            &self.doh_health,
+                            &self.governor,
+                        );
+                    }
+                    return Err(e);
+                }
                 Ok(Err(e)) => {
-                    // Keep the class. This arm catches `DNS_NAME` — the name's own servers failed
-                    // it over a working transport — and the bottom of the function must re-emit
-                    // that verdict rather than the generic transport-failure one.
+                    // Unclassified transport failures (connect refused, TLS, undecodable body) —
+                    // unreachable-class evidence: keep the message and descend the ladder below.
                     doh_failure = Some(e.to_string());
                     if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
@@ -2617,11 +2641,7 @@ impl DnsServerPool {
                         // retreated to its floor — see `TransportEvidence`.
                         let breaker_relevant = evidence == TransportEvidence::Unreachable
                             || self.governor.has_retreated_to_floor();
-                        if breaker_relevant
-                            && self
-                                .dot_health
-                                .record_failure_unless_congested(&self.governor)
-                        {
+                        if breaker_relevant && self.dot_health.record_failure() {
                             warn_transport_unavailable(
                                 crate::dns_telemetry::Tier::Dot,
                                 "DoT (DNS-over-TLS, 853)",
@@ -2677,11 +2697,7 @@ impl DnsServerPool {
                             tier.transport_failed.fetch_add(1, Ordering::Relaxed);
                             let breaker_relevant = evidence == TransportEvidence::Unreachable
                                 || self.governor.has_retreated_to_floor();
-                            if breaker_relevant
-                                && self
-                                    .do53_health
-                                    .record_failure_unless_congested(&self.governor)
-                            {
+                            if breaker_relevant && self.do53_health.record_failure() {
                                 warn_transport_unavailable(
                                     crate::dns_telemetry::Tier::Udp53,
                                     "Direct DNS (UDP/53)",
@@ -2747,14 +2763,9 @@ impl DnsServerPool {
                     }
                     return Ok(records);
                 }
-                Ok(Err(e))
-                    if e.to_string().contains("DNS_THROTTLE")
-                        || e.to_string().contains("DNS_ENDPOINT") =>
-                {
-                    // The per-provider failures were already recorded inside the resilient
-                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
-                    // again here would double-count and could trip the breaker on a single
-                    // provider's streak. Just report the transition if this failure completed it.
+                Ok(Err(e)) if e.to_string().contains("DNS_ENDPOINT") => {
+                    // Broken endpoints — descend; another transport may serve what DoH's
+                    // endpoints cannot (mirrors the TXT twin).
                     if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             crate::dns_telemetry::Tier::Doh,
@@ -2767,13 +2778,33 @@ impl DnsServerPool {
                     }
                     match self.laddered_direct(domain, RecordKind::Cname).await {
                         DirectOutcome::Answered(records) => return Ok(records),
-                        // Empty or TransportFailed: surface the DoH throttle `e` (already classified
-                        // and counted) instead of masking it with a fallback empty.
+                        // Empty or TransportFailed: surface the DoH failure `e` (already
+                        // classified) instead of masking it with a fallback empty.
                         _ => return Err(e),
                     }
                 }
+                // Wave 2 ladder policy — load-class and name/local verdicts return classified
+                // without descending; see the TXT twin for the full rationale.
+                Ok(Err(e))
+                    if e.to_string().contains("DNS_THROTTLE")
+                        || e.to_string().contains("DNS_TIMEOUT")
+                        || e.to_string().contains("DNS_NAME")
+                        || e.to_string().contains("DNS_LOCAL") =>
+                {
+                    if self.doh_health.just_went_down(self.doh_servers.len()) {
+                        warn_transport_unavailable(
+                            crate::dns_telemetry::Tier::Doh,
+                            "DoH",
+                            "trying DNS-over-TLS (853), then direct DNS",
+                            "doh_load_class_or_name",
+                            &self.doh_health,
+                            &self.governor,
+                        );
+                    }
+                    return Err(e);
+                }
                 Ok(Err(e)) => {
-                    // Keep the class — see `fast_txt_lookup`. This arm catches `DNS_NAME`.
+                    // Unclassified transport failures — unreachable-class; descend below.
                     doh_failure = Some(e.to_string());
                     if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
@@ -3102,11 +3133,7 @@ pub async fn get_txt_records_with_rate_limit(
                     // Timeout evidence only counts at the governor floor — see TransportEvidence.
                     let breaker_relevant = evidence == TransportEvidence::Unreachable
                         || dns_pool.governor().has_retreated_to_floor();
-                    if breaker_relevant
-                        && dns_pool
-                            .do53_health
-                            .record_failure_unless_congested(dns_pool.governor())
-                    {
+                    if breaker_relevant && dns_pool.do53_health.record_failure() {
                         warn_transport_unavailable(
                             crate::dns_telemetry::Tier::Udp53,
                             "Direct DNS (UDP/53)",
@@ -3203,6 +3230,51 @@ pub async fn get_txt_records_with_rate_limit(
         // The overall timeout fired, so no arm ever reported a class.
         Err(_) => None,
     };
+    let mut doh_failure = doh_failure;
+
+    // Wave 2 (7d): deferred single retry for load-class root failures — wait out the cooldown
+    // the controller just started, then retry the DoH rotation once, paced by the reduced limit,
+    // on the transport known to work. See `get_txt_and_cname_fast` for the full rationale.
+    if doh_failure
+        .as_deref()
+        .is_some_and(|m| m.contains("DNS_TIMEOUT") || m.contains("DNS_THROTTLE"))
+        && dns_pool.governor().is_backing_off()
+    {
+        crate::perf::METRICS.dns_deferred_retry.hit();
+        tokio::time::sleep(dns_pool.governor().cooldown_left()).await;
+        let permit = dns_pool.acquire_dns_permit().await;
+        let retried = tokio::time::timeout(
+            DOH_WRAPPER_BACKSTOP,
+            dns_pool.doh_txt_lookup_resilient(domain),
+        )
+        .await;
+        crate::perf::METRICS
+            .dns_permit_held
+            .record(permit.elapsed());
+        match retried {
+            Ok(Ok(answer)) => {
+                permit.complete(crate::dns_governor::DnsOutcome::Answered);
+                crate::perf::METRICS.dns_deferred_retry_rescued.hit();
+                crate::dns_telemetry::DNS_TELEMETRY.terminal(
+                    crate::dns_telemetry::LookupPath::RootTxt,
+                    crate::dns_telemetry::TerminalStage::DohOkA1,
+                );
+                dns_pool
+                    .remember_answer(RecordKind::Txt, domain, &answer.txt)
+                    .await;
+                return Ok(answer.txt);
+            }
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                permit.complete(failure_outcome_for_governor(Some(&msg)));
+                doh_failure = Some(msg);
+            }
+            Err(_elapsed) => {
+                crate::perf::METRICS.dns_deadline_backstop_fired.hit();
+                permit.complete(crate::dns_governor::DnsOutcome::TimedOut);
+            }
+        }
+    }
 
     // Names hickory cannot parse (mid-label underscore, e.g. `spf_s2.oraclecloud.com`)
     // would fail the system resolver with a misleading "Label contains invalid characters"
@@ -3438,6 +3510,40 @@ pub async fn get_cname_records_with_rate_limit(
         Ok(Err(e)) => failure_outcome_for_governor(Some(&e.to_string())),
         Err(_) => crate::dns_governor::DnsOutcome::TimedOut,
     });
+
+    // Wave 2 (7d): deferred single retry for load-class failures — mirrors the root TXT path.
+    let mut outcome = outcome;
+    if outcome.as_ref().is_ok_and(|r| {
+        r.as_ref().is_err_and(|e| {
+            let m = e.to_string();
+            m.contains("DNS_TIMEOUT") || m.contains("DNS_THROTTLE")
+        })
+    }) && dns_pool.governor().is_backing_off()
+    {
+        crate::perf::METRICS.dns_deferred_retry.hit();
+        tokio::time::sleep(dns_pool.governor().cooldown_left()).await;
+        let permit = dns_pool.acquire_dns_permit().await;
+        let retried = tokio::time::timeout(
+            DOH_WRAPPER_BACKSTOP,
+            dns_pool.doh_cname_lookup_resilient(domain),
+        )
+        .await;
+        crate::perf::METRICS
+            .dns_permit_held
+            .record(permit.elapsed());
+        permit.complete(match &retried {
+            Ok(Ok(_)) => {
+                crate::perf::METRICS.dns_deferred_retry_rescued.hit();
+                crate::dns_governor::DnsOutcome::Answered
+            }
+            Ok(Err(e)) => failure_outcome_for_governor(Some(&e.to_string())),
+            Err(_) => {
+                crate::perf::METRICS.dns_deadline_backstop_fired.hit();
+                crate::dns_governor::DnsOutcome::TimedOut
+            }
+        });
+        outcome = retried;
+    }
 
     match outcome {
         // Genuine answer: records present.

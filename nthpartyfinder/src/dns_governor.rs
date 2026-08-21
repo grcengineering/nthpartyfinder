@@ -267,7 +267,7 @@ impl DnsPermit {
     /// exchange that actually put one query on the wire.
     pub fn complete(mut self, outcome: DnsOutcome) {
         self.recorded = true;
-        self.governor.record(outcome);
+        self.governor.record(outcome, self.started);
     }
 
     /// Elapsed time since the permit was granted.
@@ -310,6 +310,9 @@ pub struct DnsGovernor {
     epoch: Instant,
     next_control_at_ms: AtomicU64,
     cooldown_until_ms: AtomicU64,
+    /// Epoch-relative ms of the last multiplicative decrease (0 = never) — the congestion-epoch
+    /// marker (Wave 2, 7a). Written by CAS so one wave of correlated signals decreases once.
+    last_decrease_at_ms: AtomicU64,
 
     /// Slow-start ends at the first congestion signal and never resumes.
     in_slow_start: AtomicBool,
@@ -375,6 +378,7 @@ impl DnsGovernor {
             epoch: Instant::now(),
             next_control_at_ms: AtomicU64::new(0),
             cooldown_until_ms: AtomicU64::new(0),
+            last_decrease_at_ms: AtomicU64::new(0),
             in_slow_start: AtomicBool::new(!user_pinned),
             peak_limit: AtomicU32::new(start),
             min_limit_seen: AtomicU32::new(start),
@@ -507,7 +511,9 @@ impl DnsGovernor {
 
     /// Fold one completed lookup's OUTCOME into the controller. Latency arrives separately via
     /// [`Self::record_rtt`] — see [`DnsPermit::complete`] for why the split is load-bearing.
-    fn record(self: &Arc<Self>, outcome: DnsOutcome) {
+    /// `started` is when the lookup's permit was granted — the congestion-epoch discriminator
+    /// (see [`Self::on_congestion`]).
+    fn record(self: &Arc<Self>, outcome: DnsOutcome, started: Instant) {
         self.total_queries.fetch_add(1, Ordering::Relaxed);
 
         if outcome == DnsOutcome::Unrelated {
@@ -523,7 +529,7 @@ impl DnsGovernor {
                 DnsOutcome::Rejected => self.rejections.fetch_add(1, Ordering::Relaxed),
                 _ => unreachable!("is_congestion_signal admits only TimedOut | Rejected"),
             };
-            self.on_congestion();
+            self.on_congestion(started);
             return;
         }
 
@@ -587,20 +593,52 @@ impl DnsGovernor {
     /// governor never retreats, so under `--dns-max-concurrency` timeout evidence stays ambiguous
     /// forever and can never trip a breaker (unreachable-class evidence still can) — the latch
     /// that made every pinned Phase-1 arm a zero-relationship scan cannot re-arm this way.
+    /// Time remaining in the post-failure cooldown (zero when none). The deferred-retry rescue
+    /// (Wave 2, 7d) sleeps exactly this long before its one retry, so the retry runs after the
+    /// controller's reduction has taken effect — bounded by `BACKOFF_COOLDOWN` by construction.
+    pub fn cooldown_left(&self) -> Duration {
+        Duration::from_millis(
+            self.cooldown_until_ms
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.now_ms()),
+        )
+    }
+
     pub fn has_retreated_to_floor(&self) -> bool {
         !self.user_pinned && self.limit.load(Ordering::Relaxed) <= MIN_LIMIT
     }
 
-    /// Hard failure: multiplicative decrease, and suppress upward moves briefly.
-    fn on_congestion(self: &Arc<Self>) {
+    /// Hard failure: at most ONE multiplicative decrease per congestion EPOCH — TCP's rule
+    /// (Wave 2, 7a). A signal whose permit started BEFORE the last decrease was already in
+    /// flight when the controller reacted: it corroborates that epoch rather than opening a new
+    /// one. Without this, one correlated wave of 64 timeouts applied 0.7^k in a single burst and
+    /// collapsed the limit 64 → 2 instantly — the cliff the Phase-1 baseline spent 61% of its
+    /// scan at the bottom of. Every signal still refreshes the cooldown (upward pressure stays
+    /// suppressed while failures continue) and still counts in `congestion_signals`;
+    /// `backoff_events` now counts actual decreases (epochs).
+    fn on_congestion(self: &Arc<Self>, started: Instant) {
         if self.user_pinned {
             return;
         }
         self.in_slow_start.store(false, Ordering::Relaxed);
-        self.cooldown_until_ms.store(
-            self.now_ms() + BACKOFF_COOLDOWN.as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        let now = self.now_ms();
+        self.cooldown_until_ms
+            .store(now + BACKOFF_COOLDOWN.as_millis() as u64, Ordering::Relaxed);
+
+        let started_ms = started.saturating_duration_since(self.epoch).as_millis() as u64;
+        let last = self.last_decrease_at_ms.load(Ordering::Relaxed);
+        if started_ms < last {
+            return; // in flight when the epoch's decrease was applied — corroboration only
+        }
+        // Exactly one concurrent fresh signal wins the epoch's decrease; the CAS losers were
+        // part of the same wave.
+        if self
+            .last_decrease_at_ms
+            .compare_exchange(last, now.max(1), Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         self.backoff_events.fetch_add(1, Ordering::Relaxed);
 
         let current = self.limit.load(Ordering::Relaxed);
@@ -815,7 +853,7 @@ mod tests {
             if outcome == DnsOutcome::Answered {
                 governor.record_rtt(rtt);
             }
-            governor.record(outcome);
+            governor.record(outcome, Instant::now());
         }
     }
 
@@ -883,7 +921,7 @@ mod tests {
         let climbed = g.limit();
         assert!(climbed > INITIAL_LIMIT, "slow start did not climb");
 
-        g.record(DnsOutcome::TimedOut);
+        g.record(DnsOutcome::TimedOut, Instant::now());
         assert!(
             g.limit() < climbed,
             "limit {} did not drop from {climbed}",
@@ -1042,7 +1080,7 @@ mod tests {
             "a fresh governor is not backing off, so failures mean a broken transport"
         );
 
-        g.record(DnsOutcome::TimedOut);
+        g.record(DnsOutcome::TimedOut, Instant::now());
         assert!(
             g.is_backing_off(),
             "after a hard failure the governor is visibly backing off"
@@ -1054,7 +1092,7 @@ mod tests {
 
         // A pinned governor never claims congestion — the user chose the limit.
         let pinned = DnsGovernor::pinned(4);
-        pinned.record(DnsOutcome::TimedOut);
+        pinned.record(DnsOutcome::TimedOut, Instant::now());
         assert!(!pinned.is_backing_off());
     }
 
@@ -1071,12 +1109,12 @@ mod tests {
     #[test]
     fn stats_summary_reports_pinned_and_adaptive_modes() {
         let pinned = DnsGovernor::pinned(9);
-        pinned.record(DnsOutcome::Answered);
+        pinned.record(DnsOutcome::Answered, Instant::now());
         let line = pinned.stats().summary_line().expect("pinned summary");
         assert!(line.contains("pinned to 9"), "got: {line}");
 
         let adaptive = DnsGovernor::new(32);
-        adaptive.record(DnsOutcome::Answered);
+        adaptive.record(DnsOutcome::Answered, Instant::now());
         let line = adaptive.stats().summary_line().expect("adaptive summary");
         assert!(line.contains("adapted between"), "got: {line}");
 
@@ -1307,6 +1345,73 @@ mod tests {
             g.record_rtt(Duration::from_millis(50));
         }
         assert_eq!(g.rto(), Some(MIN_RTO));
+    }
+
+    /// Wave-2 falsifier (7a): one correlated wave of congestion signals applies exactly ONE
+    /// multiplicative decrease. 64 permits that all started before any reaction, all failing
+    /// together, must move the limit 64 → 44 — never 0.7^64 → the floor.
+    #[test]
+    fn a_correlated_wave_of_signals_decreases_the_limit_exactly_once() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        g.apply_limit(DEFAULT_MAX_LIMIT);
+        let wave_start = Instant::now();
+        for _ in 0..64 {
+            g.record(DnsOutcome::TimedOut, wave_start);
+        }
+        let stats = g.stats();
+        assert_eq!(
+            stats.backoff_events, 1,
+            "one epoch, one decrease — got {} decreases",
+            stats.backoff_events
+        );
+        assert_eq!(stats.congestion_signals, 64, "every signal still counts");
+        assert_eq!(
+            g.limit(),
+            (DEFAULT_MAX_LIMIT as f64 * 0.7).floor() as u32,
+            "one multiplicative step from the ceiling, not a collapse to the floor"
+        );
+
+        // A signal from a permit granted AFTER the decrease opens a new epoch. The epoch marker
+        // is millisecond-granular, so step past the decrease's millisecond first.
+        std::thread::sleep(Duration::from_millis(3));
+        let fresh = Instant::now();
+        g.record(DnsOutcome::TimedOut, fresh);
+        assert_eq!(
+            g.stats().backoff_events,
+            2,
+            "a fresh permit's failure opens a new epoch"
+        );
+    }
+
+    /// Wave-2 test (7c): the sqrt-headroom probe climbs the governor from the floor back to the
+    /// ceiling within ~15 s of clean, saturated ticks — "dead at 2" must be a transient, never a
+    /// resting state. Ticks are forced (allow_control_tick) so the test measures the climb's
+    /// TICK COUNT, the deterministic analogue of the wall-clock claim (a tick fires at most
+    /// every 250 ms, so <= 60 ticks == <= 15 s).
+    #[test]
+    fn a_governor_at_the_floor_climbs_back_to_the_ceiling_in_bounded_clean_ticks() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        g.in_slow_start.store(false, Ordering::Relaxed);
+        g.apply_limit(MIN_LIMIT);
+        g.cooldown_until_ms.store(0, Ordering::Relaxed);
+        // Establish a healthy baseline so the gradient reads 1.0.
+        for _ in 0..30 {
+            g.record_rtt(Duration::from_millis(20));
+        }
+        let mut ticks = 0;
+        while g.limit() < DEFAULT_MAX_LIMIT && ticks < 60 {
+            allow_control_tick(&g);
+            g.in_flight.store(g.limit(), Ordering::Relaxed);
+            drive(&g, DnsOutcome::Answered, Duration::from_millis(20), 3);
+            ticks += 1;
+        }
+        assert_eq!(
+            g.limit(),
+            DEFAULT_MAX_LIMIT,
+            "still at {} after {ticks} clean saturated ticks (~{}s wall)",
+            g.limit(),
+            ticks / 4
+        );
     }
 
     /// The breaker's no-response discriminator: only an un-pinned governor parked at its floor
