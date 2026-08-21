@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.8.0] - 2026-08-21
+
+### Fixed
+- **The DNS layer no longer manufactures its own congestion — the 2026-07-29 "48% flapping" residual is localized, fixed at the root, and permanently gated.** A four-phase investigation (instrument → 14-arm reproduction matrix with packet capture → three fix waves, each validated by real scans before merging → a hermetic contention gate plus a daily live canary) proved the flapping was self-inflicted, not the network's fault: 3,007 of 3,007 independent provider probes taken during a flapping scan were healthy, while the scanner declared every transport blocked.
+
+  The causal chain, each link now closed:
+  - **DNS queries no longer queue behind unrelated HTTP work.** Every DNS transport (DoH, DoT, UDP/53, the system-resolver rescue) has left the process-wide 128-permit connection semaphore; the adaptive governor is DNS's only concurrency ceiling, and a compile-time guard keeps its ceiling at or under half the connection ceiling. Measured before the fix: 22.8% of DNS time was spent waiting on that semaphore, and half of all per-attempt timeouts fired before a single byte was sent.
+  - **Provider rotation always completes.** The resilient lookup loop owns one 3-second deadline and slices it across attempts, floored by a measured RTO (RFC 6298, with its one-second minimum); the old outer wrapper — equal to the per-attempt timeout, so it cancelled attempt 0 mid-flight and providers 2–4 never ran (7,032 of 7,988 measured cancellations) — is now a 12-second hang backstop with an expected-zero counter.
+  - **The transport breaker trips on evidence, never on our own load.** A 429/5xx clears the streak (the provider demonstrably answered); a timeout counts only once the governor has already retreated to its concurrency floor; refused/reset/TLS failures always count. Before: 100% of a flapping scan's transport demotions were false.
+  - **One congestion event causes one multiplicative decrease** (TCP's rule). A correlated wave of 64 timeouts used to apply 0.7^k in a single burst, collapsing concurrency 64→2 instantly; the scan then spent 61% of its runtime parked at the floor.
+  - **Failure counts are honest.** `DNS Failures` counts lookups the scan actually lost — never provider rotations (4 attempts used to read as 4 failures), never memo replays re-counted per referencing domain (~93% of the incident scan's headline number), and a double-counted negative-memo path is gone. The incident screenshot's impossible "66,988 failures on 57,286 queries" cannot recur by construction.
+  - **`--dns-max-concurrency` works again.** Every pinned-mode scan during reproduction produced zero relationships (the breaker latched on start-up bursts with suppression disabled); pinned governors are now structurally exempt from timeout-latch demotion.
+  - **Load-class failures wait out the cooldown and retry once** on the transport known to work, instead of descending to plain-port DNS at the worst possible moment (measured rescue rate: 53 of 64 deferred lookups).
+  - **Address resolution for discovery HTTP is now governed too**: reqwest clients resolve through the same memoized, permit-bounded DoH path (~30,000 resolutions per depth-2 scan that were previously invisible to every safety mechanism), with getaddrinfo kept only as a counted fallback (measured: 0.05%).
+
+  Measured end-to-end on the reference network (depth-2, full methods, identical flags): congestion backoff ratio 0.0112 → 0.0003, transport demotions 5 → 0, wrapper cancellations 797 → 0, "All DNS resolution failed" warnings 28 → 0, time parked at the governor floor 253 s → 0 s — at equal wall-clock and equal-or-better recall on DNS-derived evidence.
+
+### Added
+- Every scan now persists `scan-summary.json` next to its report: full DNS attribution (per-provider, per-tier, terminal stages, failure decomposition), governor trajectory, coverage, and all 96 performance counters — so the next incident is diagnosed from disk, not a screenshot. The HTML report embeds the same data.
+- A hermetic DNS contention gate (10 seeded wiremock profiles — provider hangs, throttle bursts, outages, permit starvation, pinned control) runs in CI on every PR and holds the fixed behaviors as ratcheted baselines.
+- A daily live DNS canary (`dns-canary.yml`) scans three probe domains on a clean runner in adaptive and pinned modes, checks the sidecars against committed bounds, and files a standing issue on breach.
+- PRs touching the DNS layer must carry a `dns-probe:` validation block (three real scans, rendered by `scripts/diff-scan-summary.sh`) — enforced by Lint.
+
 ## [1.7.0] - 2026-08-18
 
 ### Changed
