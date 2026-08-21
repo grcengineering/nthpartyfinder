@@ -490,6 +490,15 @@
     if (!children) return;
     const childArray = Array.from(children);
 
+    // Remove THIS node from the expanded set BEFORE recursing into expanded children —
+    // the visited-set discipline that makes collapse terminate on cyclic data. Vendor
+    // relationships are a graph, not a tree: a real depth-3 scan carried 324 mutual pairs
+    // (atlassian.com ↔ canva.com among them), and with both ends expanded the old order
+    // (recurse first, delete last) re-entered the starting node forever — a stack overflow
+    // that killed Reset View on its first statement and broke each node's own collapse
+    // toggle whenever its expanded partner linked back.
+    expandedNodes.delete(nodeId);
+
     for (const childId of childArray) {
       if (expandedNodes.has(childId)) collapseNode(childId);
     }
@@ -510,7 +519,6 @@
     });
 
     edges = edges.map(e => e.source === nodeId ? { ...e, hidden: true } : e);
-    expandedNodes.delete(nodeId);
     paginationState.delete(nodeId);
     doFitView();
   }
