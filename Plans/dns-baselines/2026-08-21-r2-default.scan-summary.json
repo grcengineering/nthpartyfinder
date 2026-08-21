@@ -2,9 +2,9 @@
   "schema_version": 1,
   "meta": {
     "version": "1.7.0",
-    "started_at": "2026-08-21T02:51:26.418336+00:00",
-    "ended_at": "2026-08-21T03:12:00.292967+00:00",
-    "wall_secs": 1233.847351875,
+    "started_at": "2026-08-21T04:55:46.756637+00:00",
+    "ended_at": "2026-08-21T05:16:15.396291+00:00",
+    "wall_secs": 1228.607591667,
     "status": "success",
     "args": {
       "domain": "vanta.com",
@@ -19,38 +19,38 @@
     }
   },
   "analysis_summary": {
-    "duration_secs": 1234.724016,
+    "duration_secs": 1229.168317,
     "domains_processed": 103,
-    "txt_records_found": 1487,
-    "vendor_relationships": 1935,
-    "unique_vendors": 461,
+    "txt_records_found": 1582,
+    "vendor_relationships": 1905,
+    "unique_vendors": 430,
     "max_depth": 2
   },
   "dns": {
-    "failures": 50,
-    "name_failures": 28,
-    "transport_failures": 22,
+    "failures": 46,
+    "name_failures": 33,
+    "transport_failures": 13,
     "governor": {
-      "current_limit": 24,
+      "current_limit": 22,
       "max_limit": 64,
-      "peak_limit": 64,
-      "min_limit_seen": 2,
+      "peak_limit": 51,
+      "min_limit_seen": 8,
       "in_flight": 0,
-      "backoff_events": 43,
-      "total_queries": 49485,
-      "congestion_signals": 43,
+      "backoff_events": 15,
+      "total_queries": 59438,
+      "congestion_signals": 32,
       "user_pinned": false,
-      "timeouts": 29,
-      "rejections": 14,
-      "step_ups": 176,
-      "step_downs": 55,
-      "holds_app_limited": 3426,
-      "holds_cooldown": 47,
-      "floor_ms": 6415,
-      "ceiling_ms": 82632,
-      "rtt_recent_us": 144208.29058340093,
-      "rtt_baseline_us": 90311.22833339415,
-      "rtt_var_us": 115742.95165411857,
+      "timeouts": 12,
+      "rejections": 20,
+      "step_ups": 122,
+      "step_downs": 37,
+      "holds_app_limited": 4249,
+      "holds_cooldown": 30,
+      "floor_ms": 0,
+      "ceiling_ms": 0,
+      "rtt_recent_us": 101748.92694635654,
+      "rtt_baseline_us": 88627.19921580728,
+      "rtt_var_us": 73193.66241504875,
       "in_cooldown": false,
       "in_slow_start": false
     },
@@ -58,15 +58,15 @@
       "providers": [
         {
           "name": "Cloudflare DoH (IP)",
-          "attempts": 8342,
-          "ok": 8273,
+          "attempts": 10078,
+          "ok": 9960,
           "http_429": 0,
           "http_5xx": 0,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
-          "rcode_fail": 36,
+          "rcode_fail": 40,
           "timeout_before_send": 0,
-          "timeout_after_send": 32,
+          "timeout_after_send": 19,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
@@ -100,20 +100,20 @@
           ],
           "rtt_hist": [
             0,
-            344,
-            3950,
-            1737,
-            518,
-            526,
-            559,
-            402,
-            98,
-            77,
-            41,
-            15,
-            21,
-            13,
-            8,
+            543,
+            5462,
+            1517,
+            567,
+            591,
+            682,
+            417,
+            111,
+            80,
+            22,
+            6,
+            0,
+            2,
+            0,
             0,
             0,
             0,
@@ -125,15 +125,15 @@
         },
         {
           "name": "Google DoH (IP)",
-          "attempts": 8342,
-          "ok": 8271,
+          "attempts": 10073,
+          "ok": 9960,
           "http_429": 0,
           "http_5xx": 0,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
           "rcode_fail": 28,
           "timeout_before_send": 0,
-          "timeout_after_send": 42,
+          "timeout_after_send": 25,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
@@ -168,18 +168,18 @@
           "rtt_hist": [
             0,
             0,
-            1174,
-            4239,
-            917,
-            513,
-            629,
-            573,
-            93,
-            73,
-            33,
-            14,
-            24,
-            17,
+            1491,
+            5079,
+            957,
+            701,
+            776,
+            708,
+            165,
+            75,
+            29,
+            3,
+            1,
+            3,
             0,
             0,
             0,
@@ -192,15 +192,15 @@
         },
         {
           "name": "dns.sb DoH (IP)",
-          "attempts": 8344,
-          "ok": 8158,
+          "attempts": 10078,
+          "ok": 9736,
           "http_429": 0,
-          "http_5xx": 32,
+          "http_5xx": 43,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
           "rcode_fail": 0,
           "timeout_before_send": 0,
-          "timeout_after_send": 143,
+          "timeout_after_send": 63,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
@@ -241,13 +241,13 @@
             0,
             0,
             0,
-            4528,
-            2753,
-            366,
-            213,
-            239,
-            74,
-            17,
+            5285,
+            3284,
+            515,
+            296,
+            348,
+            48,
+            3,
             0,
             0,
             0,
@@ -259,21 +259,21 @@
         },
         {
           "name": "Cloudflare DoH (IP, secondary)",
-          "attempts": 8344,
-          "ok": 8273,
+          "attempts": 10079,
+          "ok": 9960,
           "http_429": 0,
           "http_5xx": 0,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
-          "rcode_fail": 30,
+          "rcode_fail": 42,
           "timeout_before_send": 0,
-          "timeout_after_send": 38,
+          "timeout_after_send": 20,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
           "permit_wait_p50_ms": null,
           "permit_wait_p95_ms": null,
-          "rtt_p50_ms": 35,
+          "rtt_p50_ms": 20,
           "rtt_p95_ms": 150,
           "permit_wait_hist": [
             0,
@@ -301,19 +301,19 @@
           ],
           "rtt_hist": [
             0,
-            225,
-            3582,
-            2065,
-            619,
-            521,
-            581,
-            434,
-            92,
-            79,
-            48,
-            18,
-            22,
-            16,
+            529,
+            5426,
+            1554,
+            632,
+            591,
+            660,
+            403,
+            108,
+            72,
+            15,
+            7,
+            3,
+            1,
             1,
             0,
             0,
@@ -326,15 +326,15 @@
         },
         {
           "name": "Google DoH (IP, secondary)",
-          "attempts": 8342,
-          "ok": 8260,
+          "attempts": 10078,
+          "ok": 9954,
           "http_429": 0,
           "http_5xx": 0,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
-          "rcode_fail": 37,
+          "rcode_fail": 36,
           "timeout_before_send": 0,
-          "timeout_after_send": 41,
+          "timeout_after_send": 22,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
@@ -369,18 +369,18 @@
           "rtt_hist": [
             0,
             0,
-            1241,
-            4100,
-            897,
-            565,
-            627,
-            604,
-            96,
-            78,
-            34,
-            18,
+            1536,
+            5095,
+            1001,
+            622,
+            778,
+            709,
+            148,
+            71,
             21,
-            16,
+            5,
+            2,
+            2,
             0,
             0,
             0,
@@ -393,15 +393,15 @@
         },
         {
           "name": "dns.sb DoH (IP, secondary)",
-          "attempts": 8344,
-          "ok": 8181,
+          "attempts": 10079,
+          "ok": 9764,
           "http_429": 0,
-          "http_5xx": 22,
+          "http_5xx": 48,
           "http_4xx_other": 0,
           "non_dnsjson_2xx": 0,
           "rcode_fail": 0,
           "timeout_before_send": 0,
-          "timeout_after_send": 130,
+          "timeout_after_send": 48,
           "connect_err": 0,
           "other_err": 0,
           "local_resource_err": 0,
@@ -442,13 +442,13 @@
             0,
             0,
             0,
-            4629,
-            2756,
-            348,
-            188,
-            196,
-            80,
-            7,
+            5322,
+            3280,
+            485,
+            333,
+            355,
+            34,
+            3,
             0,
             0,
             0,
@@ -477,10 +477,10 @@
         },
         {
           "name": "dot",
-          "attempts": 171,
-          "answered": 4,
-          "empty": 164,
-          "transport_failed": 3,
+          "attempts": 0,
+          "answered": 0,
+          "empty": 0,
+          "transport_failed": 0,
           "permit_starved": 0,
           "skipped_breaker": 0,
           "skipped_budget": 0,
@@ -488,22 +488,22 @@
           "recoveries": 0,
           "reprobes": 0,
           "permit_wait_p95_ms": null,
-          "rtt_p95_ms": 300
+          "rtt_p95_ms": null
         },
         {
           "name": "udp53",
-          "attempts": 285,
-          "answered": 13,
-          "empty": 128,
-          "transport_failed": 43,
+          "attempts": 249,
+          "answered": 58,
+          "empty": 11,
+          "transport_failed": 9,
           "permit_starved": 0,
           "skipped_breaker": 0,
-          "skipped_budget": 186,
+          "skipped_budget": 56,
           "demotions": 0,
           "recoveries": 0,
           "reprobes": 0,
           "permit_wait_p95_ms": null,
-          "rtt_p95_ms": 4000
+          "rtt_p95_ms": 1500
         }
       ],
       "terminal": [
@@ -512,19 +512,11 @@
           [
             [
               "memo_hit",
-              110
+              121
             ],
             [
               "doh_ok_a1",
-              286
-            ],
-            [
-              "system_ok",
-              22
-            ],
-            [
-              "system_fail",
-              6
+              317
             ]
           ]
         ],
@@ -542,9 +534,9 @@
         ]
       ],
       "doh_ok_at_attempt": [
-        49185,
-        226,
-        5,
+        50306,
+        68,
+        14,
         0
       ],
       "doh_cancelled_at": [
@@ -560,8 +552,8 @@
         [
           "in_flight",
           [
-            30,
-            0,
+            73,
+            4,
             0,
             0
           ]
@@ -580,83 +572,11 @@
       "failure_sites": [
         [
           "settle_arm",
-          44
-        ],
-        [
-          "root_all_failed",
-          6
+          46
         ]
       ],
-      "events": [
-        {
-          "kind": "lookup_failed",
-          "t_ms": 24048,
-          "name": "vantatrust.com",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 645,
-          "governor_limit": 2,
-          "conn_available": 0
-        },
-        {
-          "kind": "lookup_failed",
-          "t_ms": 24442,
-          "name": "_dmarc.swoogo.net",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 722,
-          "governor_limit": 2,
-          "conn_available": 0
-        },
-        {
-          "kind": "lookup_failed",
-          "t_ms": 76638,
-          "name": "shopify.com",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 1387,
-          "governor_limit": 4,
-          "conn_available": 0
-        },
-        {
-          "kind": "lookup_failed",
-          "t_ms": 656238,
-          "name": "webflow.services",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 573,
-          "governor_limit": 2,
-          "conn_available": 0
-        },
-        {
-          "kind": "lookup_failed",
-          "t_ms": 673073,
-          "name": "bing.net",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 410,
-          "governor_limit": 2,
-          "conn_available": 0
-        },
-        {
-          "kind": "lookup_failed",
-          "t_ms": 675118,
-          "name": "zoominfo.com",
-          "path": "root_txt",
-          "stage": "system_fail",
-          "elapsed_ms": 2454,
-          "governor_limit": 2,
-          "conn_available": 0
-        }
-      ],
-      "failed_names_sample": [
-        "_dmarc.swoogo.net",
-        "bing.net",
-        "shopify.com",
-        "vantatrust.com",
-        "webflow.services",
-        "zoominfo.com"
-      ]
+      "events": [],
+      "failed_names_sample": []
     }
   },
   "coverage": {
@@ -694,17 +614,17 @@
     ],
     "phases": {
       "subprocessor": {
-        "found": 175,
-        "failed": 52,
+        "found": 180,
+        "failed": 47,
         "degraded": true
       },
       "subfinder": {
-        "found": 2102,
-        "failed": 58,
+        "found": 393,
+        "failed": 86,
         "degraded": true
       },
       "saas": {
-        "found": 237,
+        "found": 311,
         "failed": 0,
         "degraded": false
       },
@@ -714,8 +634,8 @@
         "degraded": false
       },
       "webtraffic": {
-        "found": 919,
-        "failed": 38,
+        "found": 970,
+        "failed": 37,
         "degraded": true
       }
     },
@@ -724,43 +644,43 @@
   "perf": [
     {
       "name": "browser.permit_wait",
-      "count": 120,
-      "total_secs": 2012.252006374
+      "count": 126,
+      "total_secs": 1377.788207706
     },
     {
       "name": "browser.launch",
-      "count": 27,
-      "total_secs": 71.662066836
+      "count": 25,
+      "total_secs": 52.055257375
     },
     {
       "name": "browser.reuse",
-      "count": 93,
+      "count": 101,
       "total_secs": 0.0
     },
     {
       "name": "render.navigate",
-      "count": 5,
-      "total_secs": 23.498108876
+      "count": 8,
+      "total_secs": 24.982769084
     },
     {
       "name": "render.settle",
-      "count": 5,
-      "total_secs": 16.032717957
+      "count": 8,
+      "total_secs": 22.032026958
     },
     {
       "name": "render.capture",
-      "count": 5,
-      "total_secs": 0.266100126
+      "count": 8,
+      "total_secs": 0.787119168
     },
     {
       "name": "render.total",
-      "count": 120,
-      "total_secs": 1218.170163748
+      "count": 126,
+      "total_secs": 1072.781393668
     },
     {
       "name": "render.subproc",
-      "count": 5,
-      "total_secs": 54.297483457
+      "count": 8,
+      "total_secs": 62.730175377
     },
     {
       "name": "render.weborg",
@@ -770,12 +690,12 @@
     {
       "name": "render.webtraffic",
       "count": 103,
-      "total_secs": 980.666148417
+      "total_secs": 827.552714418
     },
     {
       "name": "render.trustcenter",
-      "count": 12,
-      "total_secs": 183.206531874
+      "count": 15,
+      "total_secs": 182.498503873
     },
     {
       "name": "ner.infer",
@@ -784,13 +704,13 @@
     },
     {
       "name": "http.fetch",
-      "count": 282,
-      "total_secs": 475.522611042
+      "count": 250,
+      "total_secs": 284.399301958
     },
     {
       "name": "subproc.probe",
-      "count": 128,
-      "total_secs": 2829.619759703
+      "count": 114,
+      "total_secs": 2158.210946495
     },
     {
       "name": "subproc.spa_render",
@@ -799,63 +719,63 @@
     },
     {
       "name": "whois.lookup",
-      "count": 298,
-      "total_secs": 240.192017464
+      "count": 237,
+      "total_secs": 101.58151838
     },
     {
       "name": "dns.query",
-      "count": 315,
-      "total_secs": 2444.263391671
+      "count": 317,
+      "total_secs": 4383.749075665
     },
     {
       "name": "dns.memo_hit",
-      "count": 111,
+      "count": 11540,
       "total_secs": 0.0
     },
     {
       "name": "subproc.budget_exhausted",
-      "count": 52,
+      "count": 47,
       "total_secs": 0.0
     },
     {
       "name": "subproc.zero_yield",
-      "count": 52,
+      "count": 47,
       "total_secs": 0.0
     },
     {
       "name": "phase.subproc",
       "count": 103,
-      "total_secs": 2850.317382959
+      "total_secs": 2162.256690915
     },
     {
       "name": "phase.subfinder",
       "count": 103,
-      "total_secs": 40864.341528539
+      "total_secs": 50339.673967834
     },
     {
       "name": "phase.saas",
       "count": 103,
-      "total_secs": 12003.344958004
+      "total_secs": 10803.434064621
     },
     {
       "name": "phase.ct",
       "count": 103,
-      "total_secs": 0.063822542
+      "total_secs": 0.023932371
     },
     {
       "name": "phase.webtraffic",
       "count": 103,
-      "total_secs": 3598.709240085
+      "total_secs": 2711.818451957
     },
     {
       "name": "depth.d1",
       "count": 1,
-      "total_secs": 17.76302375
+      "total_secs": 17.386658084
     },
     {
       "name": "depth.d2",
       "count": 102,
-      "total_secs": 42648.954862001
+      "total_secs": 50999.075281214
     },
     {
       "name": "depth.d3",
@@ -874,7 +794,7 @@
     },
     {
       "name": "dedup.domain_hit",
-      "count": 1892,
+      "count": 1366,
       "total_secs": 0.0
     },
     {
@@ -889,12 +809,12 @@
     },
     {
       "name": "whois.cache_hit",
-      "count": 1,
+      "count": 0,
       "total_secs": 0.0
     },
     {
       "name": "subproc.dead_host_skip",
-      "count": 46,
+      "count": 57,
       "total_secs": 0.0
     },
     {
@@ -914,7 +834,7 @@
     },
     {
       "name": "subproc.negative_cache_hit",
-      "count": 3,
+      "count": 4,
       "total_secs": 0.0
     },
     {
@@ -925,12 +845,12 @@
     {
       "name": "report.dedup",
       "count": 1,
-      "total_secs": 0.009785708
+      "total_secs": 0.001580916
     },
     {
       "name": "report.export",
       "count": 1,
-      "total_secs": 0.001717625
+      "total_secs": 0.001830916
     },
     {
       "name": "fanout.gate_skip",
@@ -939,12 +859,12 @@
     },
     {
       "name": "render.dom_reused",
-      "count": 6,
+      "count": 8,
       "total_secs": 0.0
     },
     {
       "name": "render.capture_retried",
-      "count": 2,
+      "count": 3,
       "total_secs": 0.0
     },
     {
@@ -974,12 +894,12 @@
     },
     {
       "name": "subproc.url_envelope_exceeded",
-      "count": 11,
+      "count": 4,
       "total_secs": 0.0
     },
     {
       "name": "domain.budget_cut",
-      "count": 58,
+      "count": 86,
       "total_secs": 0.0
     },
     {
@@ -1009,22 +929,22 @@
     },
     {
       "name": "whois.attributed_curated",
-      "count": 235,
+      "count": 231,
       "total_secs": 0.0
     },
     {
       "name": "whois.attributed_web_self_declared",
-      "count": 110,
+      "count": 127,
       "total_secs": 0.0
     },
     {
       "name": "whois.attributed_whois",
-      "count": 56,
+      "count": 39,
       "total_secs": 0.0
     },
     {
       "name": "whois.attributed_system_whois",
-      "count": 101,
+      "count": 113,
       "total_secs": 0.0
     },
     {
@@ -1034,17 +954,17 @@
     },
     {
       "name": "whois.attributed_domain_fallback",
-      "count": 162,
+      "count": 122,
       "total_secs": 0.0
     },
     {
       "name": "whois.org_cache_hit",
-      "count": 147,
+      "count": 151,
       "total_secs": 0.0
     },
     {
       "name": "whois.org_cache_miss",
-      "count": 282,
+      "count": 250,
       "total_secs": 0.0
     },
     {
@@ -1054,13 +974,13 @@
     },
     {
       "name": "whois.permit_wait",
-      "count": 298,
+      "count": 237,
       "total_secs": 0.0
     },
     {
       "name": "conn.permit_wait",
-      "count": 25992,
-      "total_secs": 198092.763745586
+      "count": 25924,
+      "total_secs": 169877.800308513
     },
     {
       "name": "dns.conn_permit_wait",
@@ -1069,38 +989,38 @@
     },
     {
       "name": "dns.governor_acquire_wait",
-      "count": 50397,
-      "total_secs": 639600.89731001
+      "count": 70264,
+      "total_secs": 800801.367995543
     },
     {
       "name": "dns.permit_held",
-      "count": 49485,
-      "total_secs": 6541.997665948
+      "count": 50482,
+      "total_secs": 5114.117435524
     },
     {
       "name": "dns.fast_lookup",
-      "count": 50082,
-      "total_secs": 643723.384546397
+      "count": 51296,
+      "total_secs": 772771.805944174
     },
     {
       "name": "dns.doh_attempt",
-      "count": 50058,
-      "total_secs": 6263.293048982
+      "count": 50825,
+      "total_secs": 5108.446610068
     },
     {
       "name": "dns.dot_attempt",
-      "count": 171,
-      "total_secs": 113.300391284
+      "count": 0,
+      "total_secs": 0.0
     },
     {
       "name": "dns.udp53_attempt",
-      "count": 184,
-      "total_secs": 196.224060421
+      "count": 78,
+      "total_secs": 29.170349712
     },
     {
       "name": "dns.system_resolver",
-      "count": 28,
-      "total_secs": 20.714140541
+      "count": 0,
+      "total_secs": 0.0
     },
     {
       "name": "dns.backoff_sleep",
@@ -1119,12 +1039,37 @@
     },
     {
       "name": "dns.doh_attempt_budget",
-      "count": 50058,
-      "total_secs": 50537.327906293
+      "count": 60465,
+      "total_secs": 60875.283826505
+    },
+    {
+      "name": "dns.deferred_retry",
+      "count": 18,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.deferred_retry_rescued",
+      "count": 3,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.addr_lookup",
+      "count": 18633,
+      "total_secs": 30698.145599894
+    },
+    {
+      "name": "dns.addr_memo",
+      "count": 11418,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.addr_gai_fallback",
+      "count": 10,
+      "total_secs": 0.0
     },
     {
       "name": "dns.ladder_entered",
-      "count": 171,
+      "count": 0,
       "total_secs": 0.0
     },
     {
@@ -1144,17 +1089,17 @@
     },
     {
       "name": "dns.udp53_shed",
-      "count": 186,
+      "count": 56,
       "total_secs": 0.0
     },
     {
       "name": "dns.all_failed",
-      "count": 6,
+      "count": 0,
       "total_secs": 0.0
     },
     {
       "name": "dns.attempt_cancelled",
-      "count": 30,
+      "count": 77,
       "total_secs": 0.0
     },
     {
@@ -1169,23 +1114,23 @@
     },
     {
       "name": "http.getaddrinfo",
-      "count": 0,
-      "total_secs": 0.0
+      "count": 456,
+      "total_secs": 84.858079206
     },
     {
       "name": "subfinder.proc",
-      "count": 95,
-      "total_secs": 1959.19935238
+      "count": 96,
+      "total_secs": 1897.601563249
     }
   ],
   "http": {
-    "getaddrinfo_distinct_hosts": 0,
+    "getaddrinfo_distinct_hosts": 351,
     "conn_cap": 128,
     "conn_available_at_close": 128
   },
   "verdict": {
     "kind": "DEGRADED",
-    "detail": "Completed with 1935 vendor relationships, but coverage was DEGRADED — subprocessor starved on 52 vendor(s); web-traffic capture failed on 38 domain(s); subdomain discovery failed on 58 domain(s); DNS degraded on 22 lookup(s); 28 name(s) failed at their own authoritative DNS (not a local network fault).",
+    "detail": "Completed with 1905 vendor relationships, but coverage was DEGRADED — subprocessor starved on 47 vendor(s); web-traffic capture failed on 37 domain(s); subdomain discovery failed on 86 domain(s); DNS degraded on 13 lookup(s); 33 name(s) failed at their own authoritative DNS (not a local network fault).",
     "advice": "Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall."
   }
 }
