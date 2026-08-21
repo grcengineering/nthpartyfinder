@@ -201,6 +201,15 @@ pub fn doh_builder() -> reqwest::ClientBuilder {
 // A task may briefly hold two permits when it `join!`s two gated leaf ops, but neither release waits
 // on the other, so there is no wait-for cycle. It caps peak concurrency directly, so a deep scan
 // stays safe without throttling anyone's request *rate*.
+//
+// DNS is deliberately NOT under this semaphore (Wave 1, 2026-08-21). Every DNS transport —
+// DoH sends, DoT/UDP hickory exchanges, the system-resolver rescue — is bounded by the DNS
+// governor's own adaptive permit instead. Sharing this ceiling put DoH sends in the same FIFO as
+// 30 s subprocessor fetches and 120 s subfinder HTTP, INSIDE each lookup's own budget: Phase 1
+// measured 22.8% of DNS permit time spent waiting here, half of all per-attempt timeouts firing
+// before a byte was sent, and 100%-false transport demotions downstream of that starvation. The
+// compile-time guard in dns.rs (`DEFAULT_MAX_LIMIT <= DEFAULT_MAX_CONNECTIONS / 2`) keeps the
+// decoupled DNS socket count small against this ceiling by construction.
 
 /// Default ceiling on network sends in flight at once, across the whole process.
 ///
@@ -336,8 +345,9 @@ impl GatedSend for reqwest::RequestBuilder {
 
 /// Run any async network op under the global connection ceiling.
 ///
-/// For non-`reqwest` sockets that cannot use [`GatedSend`] — e.g. the raw-UDP DNS resolver — so
-/// every socket-opening path shares the one ceiling.
+/// For non-`reqwest` sockets that cannot use [`GatedSend`] (WHOIS port-43, for one) so every
+/// non-DNS socket-opening path shares the one ceiling. DNS transports must NOT be wrapped in
+/// this — they are governed by the DNS governor's own permit (see the module docs).
 pub async fn with_connection_permit<F: std::future::Future>(op: F) -> F::Output {
     gated(connection_semaphore(), op).await
 }

@@ -318,9 +318,12 @@ async fn p0_healthy() {
     }
 }
 
-/// P1 — six providers answering slowly (900-1500 ms). RECORD ONLY in this PR: the current
-/// code's handling of slow-but-healthy (3 s per-attempt budget vs ~1.2 s answers under
-/// contention) is one of the suspected defects; whatever it does is the baseline.
+/// P1 — six providers answering slowly (900-1500 ms). Wave-1 hard asserts: slow is NOT
+/// congested. Every lookup must resolve, with zero backoff and zero demotions — the
+/// cold-start budget contract (an unmeasured network never has its in-flight attempts
+/// sliced short) is exactly what this profile falsifies: mid-Wave-1 development, fair-slice
+/// cold starts sent this profile to 100% loss, a false DoH demotion, and 42 s at the
+/// governor floor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn p1_slow_but_healthy() {
     let _gate = GATE.lock().await;
@@ -329,8 +332,18 @@ async fn p1_slow_but_healthy() {
             delay_ms: 900 + 120 * i as u64,
         }))
     });
-    let _m = run_profile("p1_slow_but_healthy", 1, specs, DISTINCT_NAMES).await;
-    // Deliberately no numeric asserts: the ratchet arrives with the baseline (see module docs).
+    let m = run_profile("p1_slow_but_healthy", 1, specs, DISTINCT_NAMES).await;
+
+    assert_eq!(
+        m.lookups_with_records, m.logical_lookups,
+        "a slow-but-healthy network must resolve everything"
+    );
+    assert_eq!(
+        m.governor.backoff_events, 0,
+        "slow is not congested: the governor must not back off on healthy 1.2 s answers"
+    );
+    assert_eq!(m.transport.doh.down_transitions, 0);
+    assert_eq!(m.dns_failures, 0);
 }
 
 /// P2 — provider 0 is a dead loopback port, five healthy. Rotation must carry every lookup
@@ -363,8 +376,13 @@ async fn p2_one_provider_dead() {
     );
 }
 
-/// P3 — provider 0 hangs past the per-attempt timeout, five healthy. RECORD ONLY: the
-/// 3 s-vs-3 s budget interaction (per-attempt vs whole-rotation) is a suspected defect.
+/// P3 — provider 0 hangs past the per-attempt timeout, five healthy. Wave-1 hard asserts
+/// (defect A): the deadline-owned rotation must carry essentially every lookup past the
+/// hanging provider. A bounded cold-start tail is permitted — before the RTO is learned an
+/// attempt gets the full remaining deadline (deliberately, see `attempt_budget`), so the
+/// handful of lookups that meet the hanger first can burn their deadline. Measured 4/600
+/// across three seeded runs; the bound leaves headroom without re-admitting the defect
+/// (the pre-fix baseline lost 69).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn p3_one_provider_slow() {
     let _gate = GATE.lock().await;
@@ -375,7 +393,22 @@ async fn p3_one_provider_slow() {
             ProviderSpec::Mock(Profile::uniform(Behavior::Ok { delay_ms: 50 }))
         }
     });
-    let _m = run_profile("p3_one_provider_slow", 3, specs, DISTINCT_NAMES).await;
+    let m = run_profile("p3_one_provider_slow", 3, specs, DISTINCT_NAMES).await;
+
+    assert!(
+        m.lookups_with_records >= 585,
+        "one hanging provider may only cost a cold-start tail, not recall: {}/600 resolved",
+        m.lookups_with_records
+    );
+    assert_eq!(
+        m.transport.doh.down_transitions, 0,
+        "one hanging provider must never demote the transport"
+    );
+    assert!(
+        m.governor.backoff_events <= 5,
+        "rotation past a hang is not congestion: {} backoff events",
+        m.governor.backoff_events
+    );
 }
 
 /// P4 — all six providers 429 during a 2-second flap window, healthy either side. RECORD
@@ -397,7 +430,17 @@ async fn p4_transient_throttle_burst() {
             Behavior::Throttle429,
         ))
     });
-    let _m = run_profile("p4_transient_throttle_burst", 4, specs, DISTINCT_NAMES).await;
+    let m = run_profile("p4_transient_throttle_burst", 4, specs, DISTINCT_NAMES).await;
+
+    // Wave-1 hard assert (defect B, classification half): a 429 is positive transport
+    // evidence — the provider answered — so a transient all-provider burst must NEVER
+    // demote DoH. The pre-fix baseline recorded down_transitions = 1: that number WAS the
+    // finding. In-window lookups may still fail (their rescue is Wave 2's deferred retry);
+    // the recovery-limit and loss ratchets tighten there.
+    assert_eq!(
+        m.transport.doh.down_transitions, 0,
+        "a transient throttle burst demoted DoH — the breaker is reading answers as silence"
+    );
 }
 
 /// P5 — all six providers dead: a genuine DoH outage. The breaker MUST trip (that is its
@@ -444,7 +487,16 @@ async fn p6_intermittent_flap() {
             ),
         ]))
     });
-    let _m = run_profile("p6_intermittent_flap", 6, specs, DISTINCT_NAMES).await;
+    let m = run_profile("p6_intermittent_flap", 6, specs, DISTINCT_NAMES).await;
+
+    // Wave-1 hard asserts: a messy-but-working network must stay usable — no demotions,
+    // and only a residual loss tail (measured 2/600 across three seeded runs; pre-fix 45).
+    assert_eq!(m.transport.doh.down_transitions, 0);
+    assert!(
+        m.lookups_with_records >= 580,
+        "an 8%-hang flap must not cost real recall: {}/600 resolved",
+        m.lookups_with_records
+    );
 }
 
 /// P8 — P0's healthy farm, but 600 lookups over only 20 distinct names: the scan-lifetime
@@ -467,4 +519,71 @@ async fn p8_memo_dedupe() {
         "memo is not deduplicating: {total} farm requests for 600 lookups over 20 names \
          (bound: 120)"
     );
+}
+
+/// P7 — permit starvation: the process-wide CONNECTION semaphore is fully occupied by
+/// unrelated slow work while a healthy farm serves DNS. Wave 1 removed every DNS transport
+/// from that semaphore (defect C), so DNS must be COMPLETELY indifferent: all 600 resolve,
+/// zero governor timeouts, zero backoff, zero demotions. Red on the old code, where every
+/// DoH send queued behind the shared permits INSIDE its own budget (Phase 1: S_wait 0.228,
+/// half of all per-attempt timeouts fired before a byte was sent). Deferred in PR-0
+/// precisely because it manipulates the global semaphore; the gate mutex serializes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn p7_connection_permit_starvation() {
+    let _gate = GATE.lock().await;
+
+    // Occupy every available connection permit for the duration of the profile.
+    let (cap, available) = nthpartyfinder::http_client::connection_ceiling_state();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut holders = Vec::new();
+    for _ in 0..available {
+        let release = Arc::clone(&release);
+        holders.push(tokio::spawn(async move {
+            nthpartyfinder::http_client::with_connection_permit(async move {
+                release.notified().await;
+            })
+            .await;
+        }));
+    }
+    for _ in 0..400 {
+        if nthpartyfinder::http_client::connection_ceiling_state().1 == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        nthpartyfinder::http_client::connection_ceiling_state().1,
+        0,
+        "test setup: the connection ceiling (cap {cap}) must be fully occupied"
+    );
+
+    let specs = six(|i| {
+        ProviderSpec::Mock(Profile::uniform(Behavior::Ok {
+            delay_ms: 50 + 2 * i as u64,
+        }))
+    });
+    let m = run_profile("p7_connection_permit_starvation", 7, specs, DISTINCT_NAMES).await;
+
+    // Release the holders BEFORE asserting, so a failed assert cannot leak a drained
+    // semaphore into the profiles that run after this one.
+    release.notify_waiters();
+    for h in holders {
+        let _ = h.await;
+    }
+
+    assert_eq!(
+        m.lookups_with_records, m.logical_lookups,
+        "DNS queued behind the connection ceiling: {}/600 resolved under permit starvation",
+        m.lookups_with_records
+    );
+    assert_eq!(
+        m.governor.timeouts, 0,
+        "permit starvation must not read as DNS timeouts"
+    );
+    assert_eq!(
+        m.governor.backoff_events, 0,
+        "permit starvation must not read as DNS congestion"
+    );
+    assert_eq!(m.transport.doh.down_transitions, 0);
+    assert_eq!(m.dns_failures, 0);
 }

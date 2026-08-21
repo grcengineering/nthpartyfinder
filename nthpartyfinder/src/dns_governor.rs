@@ -119,6 +119,26 @@ const MIN_SAMPLES_FOR_GRADIENT: u64 = 20;
 /// permanently biasing the gradient.
 const MIN_MEANINGFUL_RTT: Duration = Duration::from_millis(1);
 
+/// Jacobson/Karels smoothing for the RTT variance (RFC 6298 β). An estimator parameter, not a
+/// sized ceiling: it shapes how fast the deviation estimate tracks, and the budgets computed from
+/// it are observable per attempt via `perf::METRICS.dns_doh_attempt_budget`.
+const RTT_VAR_BETA: f64 = 0.25;
+
+/// RFC 6298 K: the retransmission-timeout multiplier on the deviation term.
+const RTO_K: f64 = 4.0;
+
+/// Leaf-RTT samples required before [`DnsGovernor::rto`] has an opinion. Below this the variance
+/// estimate is seeded noise and the caller's fair-slice budget governs instead.
+const MIN_SAMPLES_FOR_RTO: u64 = 8;
+
+/// RFC 6298 §2.4, verbatim: "Whenever RTO is computed, if it is less than 1 second, then the RTO
+/// SHOULD be rounded up to 1 second." A standards constant, not a model-sized one — and the r2
+/// validation A/B measured why it matters here: with steady ~100 ms RTTs the raw estimator gave
+/// per-attempt budgets a few hundred ms wide, ordinary DNS tail latency blew them chronically
+/// (dns.sb alone: 562 attempt timeouts in one truncated scan), and at 64 in-flight those bursts
+/// filled the breaker's all-providers mask in under five seconds.
+const MIN_RTO: Duration = Duration::from_secs(1);
+
 /// How a single DNS lookup ended, from the controller's point of view.
 ///
 /// The distinction that matters is not success-vs-failure but *does this carry usable latency
@@ -140,11 +160,6 @@ pub enum DnsOutcome {
 }
 
 impl DnsOutcome {
-    /// Does this outcome carry latency information worth feeding into the baselines?
-    fn is_latency_sample(self) -> bool {
-        matches!(self, DnsOutcome::Answered)
-    }
-
     /// Is this outcome evidence that we are pushing the network too hard?
     pub fn is_congestion_signal(self) -> bool {
         matches!(self, DnsOutcome::TimedOut | DnsOutcome::Rejected)
@@ -181,6 +196,9 @@ pub struct GovernorStats {
     /// Current EWMA state, microseconds (0.0 until the first sample).
     pub rtt_recent_us: f64,
     pub rtt_baseline_us: f64,
+    /// Jacobson mean-deviation estimate, microseconds (0.0 until the first sample). Together with
+    /// `rtt_recent_us` this is the RTO the per-attempt DoH budgets are computed from.
+    pub rtt_var_us: f64,
     pub in_cooldown: bool,
     pub in_slow_start: bool,
 }
@@ -241,10 +259,15 @@ pub struct DnsPermit {
 
 impl DnsPermit {
     /// Record how the lookup ended. Consumes the guard, releasing the slot.
+    ///
+    /// Deliberately carries NO latency: the permit's elapsed time contains every queue the lookup
+    /// waited in (rate-bucket, memo lock, provider rotation), so feeding it into the RTT baselines
+    /// let our own queueing read as network congestion — the Wave-1 fix for the 07-29 flapping.
+    /// Latency reaches the controller only through [`DnsGovernor::record_rtt`], fed by the leaf
+    /// exchange that actually put one query on the wire.
     pub fn complete(mut self, outcome: DnsOutcome) {
-        let elapsed = self.started.elapsed();
         self.recorded = true;
-        self.governor.record(outcome, elapsed);
+        self.governor.record(outcome);
     }
 
     /// Elapsed time since the permit was granted.
@@ -279,6 +302,8 @@ pub struct DnsGovernor {
     /// Fast- and slow-moving RTT averages, in microseconds, stored as bit-cast `f64`.
     rtt_recent_us: AtomicU64,
     rtt_baseline_us: AtomicU64,
+    /// Jacobson mean deviation of the RTT, microseconds, bit-cast `f64` (RFC 6298 RTTVAR).
+    rtt_var_us: AtomicU64,
     latency_samples: AtomicU64,
 
     /// Millis since construction; avoids wall-clock dependence.
@@ -345,6 +370,7 @@ impl DnsGovernor {
             in_flight: AtomicU32::new(0),
             rtt_recent_us: AtomicU64::new(0),
             rtt_baseline_us: AtomicU64::new(0),
+            rtt_var_us: AtomicU64::new(0),
             latency_samples: AtomicU64::new(0),
             epoch: Instant::now(),
             next_control_at_ms: AtomicU64::new(0),
@@ -449,6 +475,7 @@ impl DnsGovernor {
             ceiling_ms: fold_open(&self.ceiling_since_ms, &self.ceiling_ms_total),
             rtt_recent_us: f64::from_bits(self.rtt_recent_us.load(Ordering::Relaxed)),
             rtt_baseline_us: f64::from_bits(self.rtt_baseline_us.load(Ordering::Relaxed)),
+            rtt_var_us: f64::from_bits(self.rtt_var_us.load(Ordering::Relaxed)),
             in_cooldown: now < self.cooldown_until_ms.load(Ordering::Relaxed),
             in_slow_start: self.in_slow_start.load(Ordering::Relaxed),
         }
@@ -478,18 +505,15 @@ impl DnsGovernor {
         self.epoch.elapsed().as_millis() as u64
     }
 
-    /// Fold one completed lookup into the controller.
-    fn record(self: &Arc<Self>, outcome: DnsOutcome, elapsed: Duration) {
+    /// Fold one completed lookup's OUTCOME into the controller. Latency arrives separately via
+    /// [`Self::record_rtt`] — see [`DnsPermit::complete`] for why the split is load-bearing.
+    fn record(self: &Arc<Self>, outcome: DnsOutcome) {
         self.total_queries.fetch_add(1, Ordering::Relaxed);
 
         if outcome == DnsOutcome::Unrelated {
             // Data-dependent failure: says nothing about the network, so it must not move the
             // limit in either direction.
             return;
-        }
-
-        if outcome.is_latency_sample() && elapsed >= MIN_MEANINGFUL_RTT {
-            self.update_latency(elapsed);
         }
 
         if outcome.is_congestion_signal() {
@@ -506,21 +530,65 @@ impl DnsGovernor {
         self.maybe_run_control();
     }
 
-    /// Fold an RTT sample into both averages.
-    fn update_latency(&self, elapsed: Duration) {
+    /// Fold one LEAF-EXCHANGE latency sample into the averages: the elapsed time of exactly one
+    /// query put on the wire and answered, measured at the site that sent it. Never a permit's
+    /// lifetime (that contains our own queues), never a timeout's duration (that is the timeout).
+    /// Sub-[`MIN_MEANINGFUL_RTT`] samples are cache hits and are ignored here, exactly as before.
+    pub fn record_rtt(&self, elapsed: Duration) {
+        if elapsed < MIN_MEANINGFUL_RTT {
+            return;
+        }
         let sample = elapsed.as_micros() as f64;
         let n = self.latency_samples.fetch_add(1, Ordering::Relaxed);
         if n == 0 {
             // Seed both averages from the first real sample so the gradient starts at exactly 1.0
-            // rather than at an arbitrary ratio against zero.
+            // rather than at an arbitrary ratio against zero. RFC 6298: RTTVAR seeds at R/2.
             self.rtt_recent_us
                 .store(sample.to_bits(), Ordering::Relaxed);
             self.rtt_baseline_us
                 .store(sample.to_bits(), Ordering::Relaxed);
+            self.rtt_var_us
+                .store((sample / 2.0).to_bits(), Ordering::Relaxed);
             return;
         }
+        // Deviation against the pre-update smoothed RTT (Jacobson's ordering), then the means.
+        let recent_before = f64::from_bits(self.rtt_recent_us.load(Ordering::Relaxed));
+        ewma_update(
+            &self.rtt_var_us,
+            (sample - recent_before).abs(),
+            RTT_VAR_BETA,
+        );
         ewma_update(&self.rtt_recent_us, sample, ALPHA_RECENT);
         ewma_update(&self.rtt_baseline_us, sample, ALPHA_BASELINE);
+    }
+
+    /// The measured retransmission timeout — `rtt_recent + 4·rtt_var` (RFC 6298) — or `None`
+    /// until enough leaf samples exist to trust it. Callers use it as a per-attempt DoH budget
+    /// floor: an attempt gets at least the time a real answer plausibly takes on THIS network,
+    /// instead of a model-sized constant. Field-measured by construction (CLAUDE.md rule 17).
+    pub fn rto(&self) -> Option<Duration> {
+        if self.latency_samples.load(Ordering::Relaxed) < MIN_SAMPLES_FOR_RTO {
+            return None;
+        }
+        let recent = f64::from_bits(self.rtt_recent_us.load(Ordering::Relaxed));
+        let var = f64::from_bits(self.rtt_var_us.load(Ordering::Relaxed));
+        let rto_us = recent + RTO_K * var;
+        if !rto_us.is_finite() || rto_us <= 0.0 {
+            return None;
+        }
+        Some(Duration::from_micros(rto_us as u64).max(MIN_RTO))
+    }
+
+    /// Has the adaptive controller retreated all the way to its floor?
+    ///
+    /// This is the discriminator the breaker uses for NO-RESPONSE evidence (attempt-budget
+    /// timeouts): "the controller has already given the network every concession it can make and
+    /// the transport still does not answer" — which by construction is not our load. A pinned
+    /// governor never retreats, so under `--dns-max-concurrency` timeout evidence stays ambiguous
+    /// forever and can never trip a breaker (unreachable-class evidence still can) — the latch
+    /// that made every pinned Phase-1 arm a zero-relationship scan cannot re-arm this way.
+    pub fn has_retreated_to_floor(&self) -> bool {
+        !self.user_pinned && self.limit.load(Ordering::Relaxed) <= MIN_LIMIT
     }
 
     /// Hard failure: multiplicative decrease, and suppress upward moves briefly.
@@ -742,7 +810,12 @@ mod tests {
 
     fn drive(governor: &Arc<DnsGovernor>, outcome: DnsOutcome, rtt: Duration, times: usize) {
         for _ in 0..times {
-            governor.record(outcome, rtt);
+            // Mirror production wiring: only an answered exchange feeds a leaf-RTT sample; a
+            // timeout/rejection carries no latency information at all (its elapsed IS the budget).
+            if outcome == DnsOutcome::Answered {
+                governor.record_rtt(rtt);
+            }
+            governor.record(outcome);
         }
     }
 
@@ -810,7 +883,7 @@ mod tests {
         let climbed = g.limit();
         assert!(climbed > INITIAL_LIMIT, "slow start did not climb");
 
-        g.record(DnsOutcome::TimedOut, Duration::from_secs(5));
+        g.record(DnsOutcome::TimedOut);
         assert!(
             g.limit() < climbed,
             "limit {} did not drop from {climbed}",
@@ -969,7 +1042,7 @@ mod tests {
             "a fresh governor is not backing off, so failures mean a broken transport"
         );
 
-        g.record(DnsOutcome::TimedOut, Duration::from_secs(5));
+        g.record(DnsOutcome::TimedOut);
         assert!(
             g.is_backing_off(),
             "after a hard failure the governor is visibly backing off"
@@ -981,7 +1054,7 @@ mod tests {
 
         // A pinned governor never claims congestion — the user chose the limit.
         let pinned = DnsGovernor::pinned(4);
-        pinned.record(DnsOutcome::TimedOut, Duration::from_secs(5));
+        pinned.record(DnsOutcome::TimedOut);
         assert!(!pinned.is_backing_off());
     }
 
@@ -998,12 +1071,12 @@ mod tests {
     #[test]
     fn stats_summary_reports_pinned_and_adaptive_modes() {
         let pinned = DnsGovernor::pinned(9);
-        pinned.record(DnsOutcome::Answered, Duration::from_millis(5));
+        pinned.record(DnsOutcome::Answered);
         let line = pinned.stats().summary_line().expect("pinned summary");
         assert!(line.contains("pinned to 9"), "got: {line}");
 
         let adaptive = DnsGovernor::new(32);
-        adaptive.record(DnsOutcome::Answered, Duration::from_millis(5));
+        adaptive.record(DnsOutcome::Answered);
         let line = adaptive.stats().summary_line().expect("adaptive summary");
         assert!(line.contains("adapted between"), "got: {line}");
 
@@ -1152,6 +1225,104 @@ mod tests {
             start,
             "app-limited load ratcheted the limit from {start} to {}",
             g.limit()
+        );
+    }
+
+    /// Wave-1 falsifier (defects C/G): a permit's lifetime — which contains every queue the
+    /// lookup waited in — must contribute NOTHING to the RTT baselines. Only an explicit leaf
+    /// sample moves them. Red on the old code, where `complete()` fed `started.elapsed()` into
+    /// the averages and our own queueing read as network congestion.
+    #[tokio::test]
+    async fn permit_lifetime_is_excluded_from_the_governor_rtt_sample() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        let permit = g.acquire().await;
+        // Hold the permit long enough that its lifetime would be an unmistakable sample.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        permit.complete(DnsOutcome::Answered);
+        assert_eq!(
+            g.latency_samples.load(Ordering::Relaxed),
+            0,
+            "completing a permit must not create a latency sample"
+        );
+
+        // The leaf exchange is the only latency source.
+        g.record_rtt(Duration::from_millis(50));
+        let recent = f64::from_bits(g.rtt_recent_us.load(Ordering::Relaxed));
+        assert!(
+            (recent - 50_000.0).abs() < 1.0,
+            "the first leaf sample seeds the baseline exactly; got {recent}µs"
+        );
+    }
+
+    /// The RTO abstains until it has enough leaf samples to mean something.
+    #[test]
+    fn rto_is_none_until_enough_leaf_samples() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        assert!(g.rto().is_none());
+        for _ in 0..(MIN_SAMPLES_FOR_RTO - 1) {
+            g.record_rtt(Duration::from_millis(40));
+        }
+        assert!(
+            g.rto().is_none(),
+            "one short of the floor must still abstain"
+        );
+        g.record_rtt(Duration::from_millis(40));
+        assert!(g.rto().is_some());
+    }
+
+    /// RFC 6298 shape above the floor: steady samples give an RTO just above the RTT; jitter
+    /// widens it. This is what floors the per-attempt DoH budget at "what a real answer
+    /// plausibly takes here".
+    #[test]
+    fn rto_tracks_recent_rtt_plus_deviation() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        for _ in 0..40 {
+            g.record_rtt(Duration::from_millis(1200));
+        }
+        let steady = g.rto().expect("enough samples");
+        assert!(
+            steady >= Duration::from_millis(1200) && steady < Duration::from_millis(4000),
+            "steady 1.2s samples must yield an RTO near-but-above 1.2s, got {steady:?}"
+        );
+
+        for i in 0..40u64 {
+            let jitter = if i % 2 == 0 { 600 } else { 2400 };
+            g.record_rtt(Duration::from_millis(jitter));
+        }
+        let jittery = g.rto().expect("still enough samples");
+        assert!(
+            jittery > steady,
+            "jitter must widen the RTO ({steady:?} → {jittery:?}), or slow-but-real answers get \
+             cancelled by their own budget"
+        );
+    }
+
+    /// RFC 6298 §2.4: the RTO never computes below one second, however fast the network — a
+    /// sub-second budget turns ordinary DNS tail latency into chronic attempt timeouts (the r2
+    /// validation A/B measured 10 false DoH demotions born exactly this way).
+    #[test]
+    fn rto_is_floored_at_one_second() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        for _ in 0..40 {
+            g.record_rtt(Duration::from_millis(50));
+        }
+        assert_eq!(g.rto(), Some(MIN_RTO));
+    }
+
+    /// The breaker's no-response discriminator: only an un-pinned governor parked at its floor
+    /// counts as "retreated" — a pinned governor never does, so timeout evidence can never latch
+    /// a breaker under --dns-max-concurrency (defect H's mechanism).
+    #[test]
+    fn floor_retreat_is_only_claimed_by_an_adaptive_governor_at_the_floor() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        assert!(!g.has_retreated_to_floor(), "fresh governor is above floor");
+        g.apply_limit(MIN_LIMIT);
+        assert!(g.has_retreated_to_floor());
+
+        let pinned = DnsGovernor::pinned(MIN_LIMIT);
+        assert!(
+            !pinned.has_retreated_to_floor(),
+            "a pinned governor never 'retreats' — the user chose the limit"
         );
     }
 

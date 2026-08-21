@@ -1,0 +1,1191 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "version": "1.7.0",
+    "started_at": "2026-08-21T02:51:26.418336+00:00",
+    "ended_at": "2026-08-21T03:12:00.292967+00:00",
+    "wall_secs": 1233.847351875,
+    "status": "success",
+    "args": {
+      "domain": "vanta.com",
+      "depth": 2,
+      "dns_only": false,
+      "dns_max_concurrency": null,
+      "max_connections": null,
+      "output_format": "json",
+      "disabled_methods": [
+        "slm"
+      ]
+    }
+  },
+  "analysis_summary": {
+    "duration_secs": 1234.724016,
+    "domains_processed": 103,
+    "txt_records_found": 1487,
+    "vendor_relationships": 1935,
+    "unique_vendors": 461,
+    "max_depth": 2
+  },
+  "dns": {
+    "failures": 50,
+    "name_failures": 28,
+    "transport_failures": 22,
+    "governor": {
+      "current_limit": 24,
+      "max_limit": 64,
+      "peak_limit": 64,
+      "min_limit_seen": 2,
+      "in_flight": 0,
+      "backoff_events": 43,
+      "total_queries": 49485,
+      "congestion_signals": 43,
+      "user_pinned": false,
+      "timeouts": 29,
+      "rejections": 14,
+      "step_ups": 176,
+      "step_downs": 55,
+      "holds_app_limited": 3426,
+      "holds_cooldown": 47,
+      "floor_ms": 6415,
+      "ceiling_ms": 82632,
+      "rtt_recent_us": 144208.29058340093,
+      "rtt_baseline_us": 90311.22833339415,
+      "rtt_var_us": 115742.95165411857,
+      "in_cooldown": false,
+      "in_slow_start": false
+    },
+    "telemetry": {
+      "providers": [
+        {
+          "name": "Cloudflare DoH (IP)",
+          "attempts": 8342,
+          "ok": 8273,
+          "http_429": 0,
+          "http_5xx": 0,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 36,
+          "timeout_before_send": 0,
+          "timeout_after_send": 32,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 20,
+          "rtt_p95_ms": 150,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            344,
+            3950,
+            1737,
+            518,
+            526,
+            559,
+            402,
+            98,
+            77,
+            41,
+            15,
+            21,
+            13,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "Google DoH (IP)",
+          "attempts": 8342,
+          "ok": 8271,
+          "http_429": 0,
+          "http_5xx": 0,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 28,
+          "timeout_before_send": 0,
+          "timeout_after_send": 42,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 35,
+          "rtt_p95_ms": 150,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            0,
+            1174,
+            4239,
+            917,
+            513,
+            629,
+            573,
+            93,
+            73,
+            33,
+            14,
+            24,
+            17,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "dns.sb DoH (IP)",
+          "attempts": 8344,
+          "ok": 8158,
+          "http_429": 0,
+          "http_5xx": 32,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 0,
+          "timeout_before_send": 0,
+          "timeout_after_send": 143,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 200,
+          "rtt_p95_ms": 500,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4528,
+            2753,
+            366,
+            213,
+            239,
+            74,
+            17,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "Cloudflare DoH (IP, secondary)",
+          "attempts": 8344,
+          "ok": 8273,
+          "http_429": 0,
+          "http_5xx": 0,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 30,
+          "timeout_before_send": 0,
+          "timeout_after_send": 38,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 35,
+          "rtt_p95_ms": 150,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            225,
+            3582,
+            2065,
+            619,
+            521,
+            581,
+            434,
+            92,
+            79,
+            48,
+            18,
+            22,
+            16,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "Google DoH (IP, secondary)",
+          "attempts": 8342,
+          "ok": 8260,
+          "http_429": 0,
+          "http_5xx": 0,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 37,
+          "timeout_before_send": 0,
+          "timeout_after_send": 41,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 35,
+          "rtt_p95_ms": 150,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            0,
+            1241,
+            4100,
+            897,
+            565,
+            627,
+            604,
+            96,
+            78,
+            34,
+            18,
+            21,
+            16,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "name": "dns.sb DoH (IP, secondary)",
+          "attempts": 8344,
+          "ok": 8181,
+          "http_429": 0,
+          "http_5xx": 22,
+          "http_4xx_other": 0,
+          "non_dnsjson_2xx": 0,
+          "rcode_fail": 0,
+          "timeout_before_send": 0,
+          "timeout_after_send": 130,
+          "connect_err": 0,
+          "other_err": 0,
+          "local_resource_err": 0,
+          "permit_wait_p50_ms": null,
+          "permit_wait_p95_ms": null,
+          "rtt_p50_ms": 200,
+          "rtt_p95_ms": 500,
+          "permit_wait_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "rtt_hist": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4629,
+            2756,
+            348,
+            188,
+            196,
+            80,
+            7,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "tiers": [
+        {
+          "name": "doh",
+          "attempts": 0,
+          "answered": 0,
+          "empty": 0,
+          "transport_failed": 0,
+          "permit_starved": 0,
+          "skipped_breaker": 0,
+          "skipped_budget": 0,
+          "demotions": 0,
+          "recoveries": 0,
+          "reprobes": 0,
+          "permit_wait_p95_ms": null,
+          "rtt_p95_ms": null
+        },
+        {
+          "name": "dot",
+          "attempts": 171,
+          "answered": 4,
+          "empty": 164,
+          "transport_failed": 3,
+          "permit_starved": 0,
+          "skipped_breaker": 0,
+          "skipped_budget": 0,
+          "demotions": 0,
+          "recoveries": 0,
+          "reprobes": 0,
+          "permit_wait_p95_ms": null,
+          "rtt_p95_ms": 300
+        },
+        {
+          "name": "udp53",
+          "attempts": 285,
+          "answered": 13,
+          "empty": 128,
+          "transport_failed": 43,
+          "permit_starved": 0,
+          "skipped_breaker": 0,
+          "skipped_budget": 186,
+          "demotions": 0,
+          "recoveries": 0,
+          "reprobes": 0,
+          "permit_wait_p95_ms": null,
+          "rtt_p95_ms": 4000
+        }
+      ],
+      "terminal": [
+        [
+          "root_txt",
+          [
+            [
+              "memo_hit",
+              110
+            ],
+            [
+              "doh_ok_a1",
+              286
+            ],
+            [
+              "system_ok",
+              22
+            ],
+            [
+              "system_fail",
+              6
+            ]
+          ]
+        ],
+        [
+          "root_cname",
+          []
+        ],
+        [
+          "fast_txt",
+          []
+        ],
+        [
+          "fast_cname",
+          []
+        ]
+      ],
+      "doh_ok_at_attempt": [
+        49185,
+        226,
+        5,
+        0
+      ],
+      "doh_cancelled_at": [
+        [
+          "permit_wait",
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          "in_flight",
+          [
+            30,
+            0,
+            0,
+            0
+          ]
+        ],
+        [
+          "backoff_sleep",
+          [
+            0,
+            0,
+            0,
+            0
+          ]
+        ]
+      ],
+      "answered_with_sleep": 0,
+      "failure_sites": [
+        [
+          "settle_arm",
+          44
+        ],
+        [
+          "root_all_failed",
+          6
+        ]
+      ],
+      "events": [
+        {
+          "kind": "lookup_failed",
+          "t_ms": 24048,
+          "name": "vantatrust.com",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 645,
+          "governor_limit": 2,
+          "conn_available": 0
+        },
+        {
+          "kind": "lookup_failed",
+          "t_ms": 24442,
+          "name": "_dmarc.swoogo.net",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 722,
+          "governor_limit": 2,
+          "conn_available": 0
+        },
+        {
+          "kind": "lookup_failed",
+          "t_ms": 76638,
+          "name": "shopify.com",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 1387,
+          "governor_limit": 4,
+          "conn_available": 0
+        },
+        {
+          "kind": "lookup_failed",
+          "t_ms": 656238,
+          "name": "webflow.services",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 573,
+          "governor_limit": 2,
+          "conn_available": 0
+        },
+        {
+          "kind": "lookup_failed",
+          "t_ms": 673073,
+          "name": "bing.net",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 410,
+          "governor_limit": 2,
+          "conn_available": 0
+        },
+        {
+          "kind": "lookup_failed",
+          "t_ms": 675118,
+          "name": "zoominfo.com",
+          "path": "root_txt",
+          "stage": "system_fail",
+          "elapsed_ms": 2454,
+          "governor_limit": 2,
+          "conn_available": 0
+        }
+      ],
+      "failed_names_sample": [
+        "_dmarc.swoogo.net",
+        "bing.net",
+        "shopify.com",
+        "vantatrust.com",
+        "webflow.services",
+        "zoominfo.com"
+      ]
+    }
+  },
+  "coverage": {
+    "features": [
+      {
+        "name": "subprocessor",
+        "enabled": true,
+        "reason": "on by default"
+      },
+      {
+        "name": "subdomain",
+        "enabled": true,
+        "reason": "on by default"
+      },
+      {
+        "name": "saas-tenant",
+        "enabled": true,
+        "reason": "on by default"
+      },
+      {
+        "name": "ct-logs",
+        "enabled": false,
+        "reason": "disabled (default — enable with --enable-ct-discovery)"
+      },
+      {
+        "name": "web-traffic",
+        "enabled": true,
+        "reason": "on by default"
+      },
+      {
+        "name": "web-org",
+        "enabled": true,
+        "reason": "on by default"
+      }
+    ],
+    "phases": {
+      "subprocessor": {
+        "found": 175,
+        "failed": 52,
+        "degraded": true
+      },
+      "subfinder": {
+        "found": 2102,
+        "failed": 58,
+        "degraded": true
+      },
+      "saas": {
+        "found": 237,
+        "failed": 0,
+        "degraded": false
+      },
+      "ct": {
+        "found": 0,
+        "failed": 0,
+        "degraded": false
+      },
+      "webtraffic": {
+        "found": 919,
+        "failed": 38,
+        "degraded": true
+      }
+    },
+    "any_degraded": true
+  },
+  "perf": [
+    {
+      "name": "browser.permit_wait",
+      "count": 120,
+      "total_secs": 2012.252006374
+    },
+    {
+      "name": "browser.launch",
+      "count": 27,
+      "total_secs": 71.662066836
+    },
+    {
+      "name": "browser.reuse",
+      "count": 93,
+      "total_secs": 0.0
+    },
+    {
+      "name": "render.navigate",
+      "count": 5,
+      "total_secs": 23.498108876
+    },
+    {
+      "name": "render.settle",
+      "count": 5,
+      "total_secs": 16.032717957
+    },
+    {
+      "name": "render.capture",
+      "count": 5,
+      "total_secs": 0.266100126
+    },
+    {
+      "name": "render.total",
+      "count": 120,
+      "total_secs": 1218.170163748
+    },
+    {
+      "name": "render.subproc",
+      "count": 5,
+      "total_secs": 54.297483457
+    },
+    {
+      "name": "render.weborg",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "render.webtraffic",
+      "count": 103,
+      "total_secs": 980.666148417
+    },
+    {
+      "name": "render.trustcenter",
+      "count": 12,
+      "total_secs": 183.206531874
+    },
+    {
+      "name": "ner.infer",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "http.fetch",
+      "count": 282,
+      "total_secs": 475.522611042
+    },
+    {
+      "name": "subproc.probe",
+      "count": 128,
+      "total_secs": 2829.619759703
+    },
+    {
+      "name": "subproc.spa_render",
+      "count": 2,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.lookup",
+      "count": 298,
+      "total_secs": 240.192017464
+    },
+    {
+      "name": "dns.query",
+      "count": 315,
+      "total_secs": 2444.263391671
+    },
+    {
+      "name": "dns.memo_hit",
+      "count": 111,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subproc.budget_exhausted",
+      "count": 52,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subproc.zero_yield",
+      "count": 52,
+      "total_secs": 0.0
+    },
+    {
+      "name": "phase.subproc",
+      "count": 103,
+      "total_secs": 2850.317382959
+    },
+    {
+      "name": "phase.subfinder",
+      "count": 103,
+      "total_secs": 40864.341528539
+    },
+    {
+      "name": "phase.saas",
+      "count": 103,
+      "total_secs": 12003.344958004
+    },
+    {
+      "name": "phase.ct",
+      "count": 103,
+      "total_secs": 0.063822542
+    },
+    {
+      "name": "phase.webtraffic",
+      "count": 103,
+      "total_secs": 3598.709240085
+    },
+    {
+      "name": "depth.d1",
+      "count": 1,
+      "total_secs": 17.76302375
+    },
+    {
+      "name": "depth.d2",
+      "count": 102,
+      "total_secs": 42648.954862001
+    },
+    {
+      "name": "depth.d3",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "depth.d4",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "depth.d5plus",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dedup.domain_hit",
+      "count": 1892,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dedup.dispatch_avoided",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dedup.org_subproc_skip",
+      "count": 26,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.cache_hit",
+      "count": 1,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subproc.dead_host_skip",
+      "count": 46,
+      "total_secs": 0.0
+    },
+    {
+      "name": "saas.apex_skip",
+      "count": 1,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subfinder.apex_skip",
+      "count": 1,
+      "total_secs": 0.0
+    },
+    {
+      "name": "ct.apex_skip",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subproc.negative_cache_hit",
+      "count": 3,
+      "total_secs": 0.0
+    },
+    {
+      "name": "render.retry_rescued",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "report.dedup",
+      "count": 1,
+      "total_secs": 0.009785708
+    },
+    {
+      "name": "report.export",
+      "count": 1,
+      "total_secs": 0.001717625
+    },
+    {
+      "name": "fanout.gate_skip",
+      "count": 5,
+      "total_secs": 0.0
+    },
+    {
+      "name": "render.dom_reused",
+      "count": 6,
+      "total_secs": 0.0
+    },
+    {
+      "name": "render.capture_retried",
+      "count": 2,
+      "total_secs": 0.0
+    },
+    {
+      "name": "ner.fallback_truncated",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "weborg.memo_hit",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "weborg.dead_host_skip",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.memo_negative_hit",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "ct.throttled",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subproc.url_envelope_exceeded",
+      "count": 11,
+      "total_secs": 0.0
+    },
+    {
+      "name": "domain.budget_cut",
+      "count": 58,
+      "total_secs": 0.0
+    },
+    {
+      "name": "batch.org_memo_seeded",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "batch.org_memo_absorbed",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "mem.backpressure_withhold",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "mem.backpressure_release",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "mem.backpressure_shortfall",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_curated",
+      "count": 235,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_web_self_declared",
+      "count": 110,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_whois",
+      "count": 56,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_system_whois",
+      "count": 101,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_ner",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.attributed_domain_fallback",
+      "count": 162,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.org_cache_hit",
+      "count": 147,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.org_cache_miss",
+      "count": 282,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.org_cache_write_failed",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "whois.permit_wait",
+      "count": 298,
+      "total_secs": 0.0
+    },
+    {
+      "name": "conn.permit_wait",
+      "count": 25992,
+      "total_secs": 198092.763745586
+    },
+    {
+      "name": "dns.conn_permit_wait",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.governor_acquire_wait",
+      "count": 50397,
+      "total_secs": 639600.89731001
+    },
+    {
+      "name": "dns.permit_held",
+      "count": 49485,
+      "total_secs": 6541.997665948
+    },
+    {
+      "name": "dns.fast_lookup",
+      "count": 50082,
+      "total_secs": 643723.384546397
+    },
+    {
+      "name": "dns.doh_attempt",
+      "count": 50058,
+      "total_secs": 6263.293048982
+    },
+    {
+      "name": "dns.dot_attempt",
+      "count": 171,
+      "total_secs": 113.300391284
+    },
+    {
+      "name": "dns.udp53_attempt",
+      "count": 184,
+      "total_secs": 196.224060421
+    },
+    {
+      "name": "dns.system_resolver",
+      "count": 28,
+      "total_secs": 20.714140541
+    },
+    {
+      "name": "dns.backoff_sleep",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.wrapper_timeout",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.deadline_backstop_fired",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.doh_attempt_budget",
+      "count": 50058,
+      "total_secs": 50537.327906293
+    },
+    {
+      "name": "dns.ladder_entered",
+      "count": 171,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.doh_skipped_breaker",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.dot_skipped_breaker",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.udp53_skipped_breaker",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.udp53_shed",
+      "count": 186,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.all_failed",
+      "count": 6,
+      "total_secs": 0.0
+    },
+    {
+      "name": "dns.attempt_cancelled",
+      "count": 30,
+      "total_secs": 0.0
+    },
+    {
+      "name": "http.send_nonip_host",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "http.send_ip_host",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "http.getaddrinfo",
+      "count": 0,
+      "total_secs": 0.0
+    },
+    {
+      "name": "subfinder.proc",
+      "count": 95,
+      "total_secs": 1959.19935238
+    }
+  ],
+  "http": {
+    "getaddrinfo_distinct_hosts": 0,
+    "conn_cap": 128,
+    "conn_available_at_close": 128
+  },
+  "verdict": {
+    "kind": "DEGRADED",
+    "detail": "Completed with 1935 vendor relationships, but coverage was DEGRADED — subprocessor starved on 52 vendor(s); web-traffic capture failed on 38 domain(s); subdomain discovery failed on 58 domain(s); DNS degraded on 22 lookup(s); 28 name(s) failed at their own authoritative DNS (not a local network fault).",
+    "advice": "Results may undercount; see the discovery-coverage section above and re-run on a stable network for full recall."
+  }
+}

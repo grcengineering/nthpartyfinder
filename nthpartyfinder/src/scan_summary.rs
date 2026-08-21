@@ -355,6 +355,7 @@ mod tests {
             ceiling_ms: 0,
             rtt_recent_us: 1200.0,
             rtt_baseline_us: 900.0,
+            rtt_var_us: 300.0,
             in_cooldown: false,
             in_slow_start: true,
         };
