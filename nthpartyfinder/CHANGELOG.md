@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.1] - 2026-08-21
+
+### Fixed
+- **The Vendor Relationship Graph's "Reset View" button — and collapsing any node whose expanded partner linked back to it — silently did nothing on real data.** Vendor relationships form a graph, not a tree: a real depth-3 scan carried 324 mutual vendor pairs (atlassian.com ↔ canva.com among them). The graph's collapse walk recursed into expanded children before marking itself collapsed, so with both ends of such a pair expanded it re-entered its starting node forever and the resulting stack overflow killed the click handler before any state changed. Collapse now marks the node first (visited-set discipline), making the walk terminate on any cycle. Verified interactively on the failing 14,206-relationship report: Reset View restores the initial view and direct collapse cascades correctly through cyclic partners.
+- The evidence modal's generated validation command no longer glues the evidence-source join delimiter onto the URL (`curl -s "…/subprocessors;"` → `curl -s "…/subprocessors"`).
+
 ## [1.8.0] - 2026-08-21
 
 ### Fixed
