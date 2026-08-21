@@ -892,20 +892,37 @@ impl SubfinderDiscovery {
         // its process count is the denominator for the pcap's wire-truth measurement.
         let _proc_timer = crate::perf::scoped(&crate::perf::METRICS.subfinder_proc);
 
-        let mut child = match Command::new(&binary_path)
-            // Argument vector (including the rate limit and the per-source timeout) lives in
-            // `subfinder_args` so a test can assert on the real invocation.
-            .args(subfinder_args(domain))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Guarantee SIGKILL + reap on EVERY drop path — task cancellation mid-recursion, a
-            // stdout I/O error, a missing pipe — not only the explicit timeout branch below.
-            // Without this an abandoned subfinder keeps running and holds its sockets.
-            .kill_on_drop(true)
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => return Err(anyhow!("Failed to spawn subfinder: {}", e)),
+        let mut child = {
+            // ETXTBSY retry: on Linux, exec of a freshly-written executable races any concurrent
+            // fork in this process that briefly inherits the writer's still-open FD (the
+            // fork/exec window), failing with "Text file busy". It is transient by construction
+            // — the inherited FD closes on the other thread's exec/drop — so a few short retries
+            // absorb it. Hit in practice by the scripted-binary unit tests on CI runners, and
+            // reachable in production by a package manager replacing the subfinder binary
+            // mid-scan. errno 26 = ETXTBSY on Linux and macOS.
+            let mut attempt = 0;
+            loop {
+                match Command::new(&binary_path)
+                    // Argument vector (including the rate limit and the per-source timeout)
+                    // lives in `subfinder_args` so a test can assert on the real invocation.
+                    .args(subfinder_args(domain))
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    // Guarantee SIGKILL + reap on EVERY drop path — task cancellation
+                    // mid-recursion, a stdout I/O error, a missing pipe — not only the explicit
+                    // timeout branch below. Without this an abandoned subfinder keeps running
+                    // and holds its sockets.
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(c) => break c,
+                    Err(e) if e.raw_os_error() == Some(26) && attempt < 5 => {
+                        attempt += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(20 * attempt)).await;
+                    }
+                    Err(e) => return Err(anyhow!("Failed to spawn subfinder: {}", e)),
+                }
+            }
         };
 
         // Register the PID so the Ctrl-C handler (which ends in process::exit, bypassing every Drop
