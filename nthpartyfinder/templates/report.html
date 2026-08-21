@@ -2418,8 +2418,12 @@
                     grepExplanation
                 );
             } else if (isSubprocessor) {
+                // Evidence joins multiple sources with "; " — the delimiter's semicolon sits
+                // flush against the URL, so a bare [^\s)]+ swallows it and the generated
+                // curl fetches ".../subprocessors;" (a 404 on strict servers). Trailing
+                // punctuation is never part of these source URLs; strip it.
                 const urlMatch = evidence.match(/https?:\/\/[^\s)]+/);
-                const subprocessorUrl = urlMatch ? urlMatch[0] : '';
+                const subprocessorUrl = urlMatch ? urlMatch[0].replace(/[;,.]+$/, '') : '';
                 const curlCommand = 'curl -s "' + (subprocessorUrl || 'URL_HERE') + '" | grep -i "' + rel.nth_party_organization + '"';
                 const curlExplanation = 'curl -s fetches the page silently, and grep -i searches for the organization name (case-insensitive).';
 
