@@ -167,10 +167,38 @@ const _: () = {
 /// in place of `reqwest::Client::builder()` at every subsystem's client-construction site so the
 /// connection footprint is bounded uniformly, no matter which discovery path is running.
 pub fn hardened_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
-        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST)
+        .pool_max_idle_per_host(POOL_MAX_IDLE_PER_HOST);
+    // Wave 3 (6b): once app startup installs the governed resolver, every discovery client
+    // resolves through the memoized, permit-bounded DoH path with getaddrinfo kept only as a
+    // counted transport-failure fallback. Before installation (library callers, tests, auxiliary
+    // commands) the CountingResolver preserves today's behaviour exactly while closing the
+    // Phase-0 observation gap (`http.getaddrinfo` read 0 because this was never wired).
+    // Never applied to `doh_builder` — its endpoints are IP literals, and resolving DoH via DoH
+    // would be circular.
+    #[cfg(not(coverage))]
+    {
+        match GOVERNED_RESOLVER.get() {
+            Some(resolver) => builder.dns_resolver(std::sync::Arc::clone(resolver)),
+            None => builder.dns_resolver(std::sync::Arc::new(CountingResolver)),
+        }
+    }
+    #[cfg(coverage)]
+    builder
+}
+
+/// The process-wide governed DNS resolver, installed once at app startup after the DNS pool is
+/// constructed (Wave 3, 6b). Clients built BEFORE installation keep the counting system resolver.
+#[cfg(not(coverage))]
+static GOVERNED_RESOLVER: OnceLock<std::sync::Arc<crate::dns::GovernedResolver>> = OnceLock::new();
+
+/// Install the governed resolver for every subsequently-built discovery client. First call wins;
+/// later calls are ignored (mirrors `init_connection_ceiling`).
+#[cfg(not(coverage))]
+pub fn install_governed_resolver(resolver: std::sync::Arc<crate::dns::GovernedResolver>) {
+    let _ = GOVERNED_RESOLVER.set(resolver);
 }
 
 /// Like [`hardened_builder`], but with keep-alive reuse enabled for the fixed DoH endpoint set.

@@ -2316,6 +2316,12 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
             .with_failure_counter(logger.dns_failure_counter_arc())
             .with_name_failure_counter(logger.dns_name_failure_counter_arc()),
     );
+    // Wave 3 (6b): every discovery client built from here on resolves through the governed,
+    // memoized DoH path; getaddrinfo remains only as a counted transport-failure fallback.
+    #[cfg(not(coverage))]
+    crate::http_client::install_governed_resolver(std::sync::Arc::new(dns::GovernedResolver::new(
+        Arc::clone(&dns_pool),
+    )));
     logger.debug(&format!(
         "Initialized DNS server pool with {} DoH servers and {} DNS servers",
         _app_config.dns.doh_servers.len(),
@@ -3290,6 +3296,11 @@ async fn analyze_single_domain_for_batch(
             .with_failure_counter(logger.dns_failure_counter_arc())
             .with_name_failure_counter(logger.dns_name_failure_counter_arc()),
     );
+    // Wave 3 (6b): see the main-scan site — governed resolution for clients built after this.
+    #[cfg(not(coverage))]
+    crate::http_client::install_governed_resolver(std::sync::Arc::new(dns::GovernedResolver::new(
+        Arc::clone(&dns_pool),
+    )));
     let recursive_semaphore = Arc::new(Semaphore::new(parallel_jobs.min(10)));
 
     let root_customer_domain = entry.domain.clone();
