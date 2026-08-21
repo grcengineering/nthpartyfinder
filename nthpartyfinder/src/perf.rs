@@ -286,6 +286,11 @@ pub struct Metrics {
     /// Per-attempt DoH budget computed by the deadline-owned rotation (fair slice floored by the
     /// governor's measured RTO) — the observable for the Wave-1 estimator parameters.
     pub dns_doh_attempt_budget: Metric,
+    /// A load-class DNS failure (DNS_TIMEOUT/DNS_THROTTLE while the governor was backing off)
+    /// deferred for one post-cooldown retry instead of descending the ladder (Wave 2, 7d).
+    pub dns_deferred_retry: Metric,
+    /// Deferred retries whose second attempt resolved the lookup — the rescue rate.
+    pub dns_deferred_retry_rescued: Metric,
     /// A lookup descended from DoH into the DoT/UDP ladder.
     pub dns_ladder_entered: Metric,
     /// DoH skipped because its breaker was open.
@@ -394,6 +399,8 @@ impl Metrics {
             dns_wrapper_timeout: Metric::new(),
             dns_deadline_backstop_fired: Metric::new(),
             dns_doh_attempt_budget: Metric::new(),
+            dns_deferred_retry: Metric::new(),
+            dns_deferred_retry_rescued: Metric::new(),
             dns_ladder_entered: Metric::new(),
             dns_doh_skipped_breaker: Metric::new(),
             dns_dot_skipped_breaker: Metric::new(),
@@ -429,7 +436,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 91] {
+    fn all(&self) -> [(&'static str, &Metric); 93] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -535,6 +542,11 @@ impl Metrics {
                 &self.dns_deadline_backstop_fired,
             ),
             ("dns.doh_attempt_budget", &self.dns_doh_attempt_budget),
+            ("dns.deferred_retry", &self.dns_deferred_retry),
+            (
+                "dns.deferred_retry_rescued",
+                &self.dns_deferred_retry_rescued,
+            ),
             ("dns.ladder_entered", &self.dns_ladder_entered),
             ("dns.doh_skipped_breaker", &self.dns_doh_skipped_breaker),
             ("dns.dot_skipped_breaker", &self.dns_dot_skipped_breaker),
@@ -1117,6 +1129,8 @@ mod tests {
             "dns.wrapper_timeout",
             "dns.deadline_backstop_fired",
             "dns.doh_attempt_budget",
+            "dns.deferred_retry",
+            "dns.deferred_retry_rescued",
             "dns.ladder_entered",
             "dns.doh_skipped_breaker",
             "dns.dot_skipped_breaker",
@@ -1134,7 +1148,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 91);
+        assert_eq!(snap.rows.len(), 93);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed
