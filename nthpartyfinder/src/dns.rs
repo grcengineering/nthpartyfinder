@@ -831,9 +831,40 @@ enum DirectOutcome {
     /// The resolver responded, authoritatively, with no records of this type (NXDOMAIN / NODATA).
     /// The transport works; this is a fact about the zone, not a failure.
     Empty,
-    /// No usable response within the budget — a timeout, connection error, or "no nameserver
-    /// responded". This is what a blocked/rate-limited transport looks like; it trips the breaker.
-    TransportFailed,
+    /// No usable answer — carries WHAT KIND of silence, because the two kinds mean opposite
+    /// things to the breaker (see [`TransportEvidence`]).
+    TransportFailed(TransportEvidence),
+}
+
+/// What a transport-level failure actually proved (Wave 1, defect B's evidence typing).
+///
+/// The breaker's one job is "route around a transport that is genuinely unusable", and the two
+/// failure shapes are OPPOSITE evidence for that: a refused/reset connection or a TLS failure is
+/// the transport itself saying no (always breaker-relevant), while a TIMEOUT is silence measured
+/// against OUR OWN budget — under load it is overwhelmingly self-inflicted. The r2 validation A/B
+/// measured 10 DoH demotions, every one born from attempt-budget timeouts bursting at 64
+/// in-flight on a healthy network with ZERO connect errors. Timeout evidence therefore advances a
+/// breaker only when the adaptive governor has already retreated to its floor
+/// ([`crate::dns_governor::DnsGovernor::has_retreated_to_floor`]) — the network has been given
+/// every concession and still does not answer, which by construction is not our load.
+#[cfg_attr(coverage, allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportEvidence {
+    /// The transport actively refused: connection refused/reset, unreachable, TLS failure.
+    Unreachable,
+    /// No response inside the budget we chose. Ambiguous unless the governor is at its floor.
+    NoResponse,
+}
+
+/// Classify a hickory resolver error into breaker evidence. `NetError::Io`/`RustlsError` are the
+/// transport actively failing; `Timeout`/`NoConnections`/`Busy`/`Proto` and everything else are
+/// no-response shapes. (`Dns(_)` never reaches this — it is authoritative and handled first.)
+#[cfg_attr(coverage, allow(dead_code))]
+fn net_error_evidence(err: &NetError) -> TransportEvidence {
+    match err {
+        NetError::Io(_) | NetError::RustlsError(_) => TransportEvidence::Unreachable,
+        _ => TransportEvidence::NoResponse,
+    }
 }
 
 /// Does a resolver error represent an *authoritative DNS answer* (the server spoke DNS: NoRecordsFound
@@ -970,8 +1001,8 @@ async fn direct_txt_outcome(
     )
     .await
     {
-        // Outer budget exceeded: no response — the blocked/rate-limited-transport symptom.
-        Err(_) => DirectOutcome::TransportFailed,
+        // Outer budget exceeded: silence against our own budget — ambiguous evidence.
+        Err(_) => DirectOutcome::TransportFailed(TransportEvidence::NoResponse),
         Ok(Ok(lookup)) => {
             let records: Vec<String> = lookup
                 .answers()
@@ -991,7 +1022,7 @@ async fn direct_txt_outcome(
             if net_error_is_authoritative_negative(&e) {
                 DirectOutcome::Empty
             } else {
-                DirectOutcome::TransportFailed
+                DirectOutcome::TransportFailed(net_error_evidence(&e))
             }
         }
     }
@@ -1012,7 +1043,7 @@ async fn direct_cname_outcome(
     )
     .await
     {
-        Err(_) => DirectOutcome::TransportFailed,
+        Err(_) => DirectOutcome::TransportFailed(TransportEvidence::NoResponse),
         Ok(Ok(lookup)) => {
             use hickory_resolver::proto::rr::RData;
             let records: Vec<String> = lookup
@@ -1038,7 +1069,7 @@ async fn direct_cname_outcome(
             if net_error_is_authoritative_negative(&e) {
                 DirectOutcome::Empty
             } else {
-                DirectOutcome::TransportFailed
+                DirectOutcome::TransportFailed(net_error_evidence(&e))
             }
         }
     }
@@ -1999,13 +2030,21 @@ impl DnsServerPool {
                     // name. A DNS_THROTTLE (429/5xx) is equally positive transport evidence: the
                     // provider delivered an HTTP response over a working path and chose to shed
                     // the query. Both clear the streak (Wave 1, defect B — Phase 1 measured 100%
-                    // of demotions false while every probe was healthy). Only genuine transport
-                    // silence/refusal advances the breaker.
+                    // of demotions false while every probe was healthy).
+                    //
+                    // A DNS_TIMEOUT is silence against OUR OWN measured budget — ambiguous
+                    // evidence that advances the breaker only once the governor has retreated to
+                    // its floor (see `TransportEvidence`; the r2 validation A/B measured 10 false
+                    // DoH demotions from timeout bursts at 64 in-flight with zero connect
+                    // errors). Everything else — connect refused, TLS failure, wrong-API
+                    // endpoints, undecodable bodies — is direct transport/endpoint evidence and
+                    // always advances the streak.
                     if msg.contains("DNS_NAME") || msg.contains("DNS_THROTTLE") {
                         if self.doh_health.record_success() {
                             note_transport_recovered(crate::dns_telemetry::Tier::Doh);
                         }
-                    } else {
+                    } else if !msg.contains("DNS_TIMEOUT") || self.governor.has_retreated_to_floor()
+                    {
                         // Attribute a genuine transport failure to the provider that produced it.
                         // The DoH breaker may only trip once EVERY configured provider has failed
                         // in the current streak, so an unattributed count would let one sick
@@ -2109,13 +2148,15 @@ impl DnsServerPool {
                         break;
                     }
                     // DNS_NAME and DNS_THROTTLE are both positive transport evidence — the
-                    // provider delivered an HTTP response — so both clear the breaker streak
+                    // provider delivered an HTTP response — so both clear the breaker streak;
+                    // DNS_TIMEOUT is ambiguous and advances it only at the governor floor
                     // (Wave 1, defect B; see the TXT twin for the full rationale).
                     if msg.contains("DNS_NAME") || msg.contains("DNS_THROTTLE") {
                         if self.doh_health.record_success() {
                             note_transport_recovered(crate::dns_telemetry::Tier::Doh);
                         }
-                    } else {
+                    } else if !msg.contains("DNS_TIMEOUT") || self.governor.has_retreated_to_floor()
+                    {
                         // Attribute a genuine transport failure to the provider that produced it.
                         // The DoH breaker may only trip once EVERY configured provider has failed
                         // in the current streak, so an unattributed count would let one sick
@@ -2491,7 +2532,7 @@ impl DnsServerPool {
                     cname: None,
                 }),
             },
-            DirectOutcome::TransportFailed => Err(match doh_failure {
+            DirectOutcome::TransportFailed(_) => Err(match doh_failure {
                 // A DoH provider already told us this NAME is broken. The ladder failing after it
                 // does not make that a transport problem, and mislabelling it would make the
                 // governor throttle a healthy link once per broken name — and would keep the name
@@ -2570,11 +2611,16 @@ impl DnsServerPool {
                         }
                         saw_empty = true;
                     }
-                    DirectOutcome::TransportFailed => {
+                    DirectOutcome::TransportFailed(evidence) => {
                         tier.transport_failed.fetch_add(1, Ordering::Relaxed);
-                        if self
-                            .dot_health
-                            .record_failure_unless_congested(&self.governor)
+                        // Timeout evidence is breaker-relevant only once the governor has
+                        // retreated to its floor — see `TransportEvidence`.
+                        let breaker_relevant = evidence == TransportEvidence::Unreachable
+                            || self.governor.has_retreated_to_floor();
+                        if breaker_relevant
+                            && self
+                                .dot_health
+                                .record_failure_unless_congested(&self.governor)
                         {
                             warn_transport_unavailable(
                                 crate::dns_telemetry::Tier::Dot,
@@ -2627,11 +2673,14 @@ impl DnsServerPool {
                             }
                             saw_empty = true;
                         }
-                        DirectOutcome::TransportFailed => {
+                        DirectOutcome::TransportFailed(evidence) => {
                             tier.transport_failed.fetch_add(1, Ordering::Relaxed);
-                            if self
-                                .do53_health
-                                .record_failure_unless_congested(&self.governor)
+                            let breaker_relevant = evidence == TransportEvidence::Unreachable
+                                || self.governor.has_retreated_to_floor();
+                            if breaker_relevant
+                                && self
+                                    .do53_health
+                                    .record_failure_unless_congested(&self.governor)
                             {
                                 warn_transport_unavailable(
                                     crate::dns_telemetry::Tier::Udp53,
@@ -2648,11 +2697,13 @@ impl DnsServerPool {
             }
         }
         // No tier returned records. If a tier authoritatively said "empty" the name genuinely has no
-        // records; otherwise no transport could resolve it at all — a countable failure.
+        // records; otherwise no transport could resolve it at all — a countable failure. The
+        // aggregate is reported as NoResponse: each tier already fed its own typed evidence to its
+        // own breaker above, and the caller only turns this into a counted classified failure.
         if saw_empty {
             DirectOutcome::Empty
         } else {
-            DirectOutcome::TransportFailed
+            DirectOutcome::TransportFailed(TransportEvidence::NoResponse)
         }
     }
 
@@ -2766,7 +2817,7 @@ impl DnsServerPool {
                 Some(msg) if may_memoize_failure(&msg) => Err(anyhow::anyhow!("{}", msg)),
                 _ => Ok(vec![]),
             },
-            DirectOutcome::TransportFailed => Err(match doh_failure {
+            DirectOutcome::TransportFailed(_) => Err(match doh_failure {
                 // A DoH provider already answered "this NAME is broken" over a working transport;
                 // the ladder failing afterwards does not reclassify that as our network's fault.
                 Some(msg) if may_memoize_failure(&msg) => anyhow::anyhow!("{}", msg),
@@ -3046,11 +3097,15 @@ pub async fn get_txt_records_with_rate_limit(
                     }
                     None
                 }
-                DirectOutcome::TransportFailed => {
+                DirectOutcome::TransportFailed(evidence) => {
                     tier.transport_failed.fetch_add(1, Ordering::Relaxed);
-                    if dns_pool
-                        .do53_health
-                        .record_failure_unless_congested(dns_pool.governor())
+                    // Timeout evidence only counts at the governor floor — see TransportEvidence.
+                    let breaker_relevant = evidence == TransportEvidence::Unreachable
+                        || dns_pool.governor().has_retreated_to_floor();
+                    if breaker_relevant
+                        && dns_pool
+                            .do53_health
+                            .record_failure_unless_congested(dns_pool.governor())
                     {
                         warn_transport_unavailable(
                             crate::dns_telemetry::Tier::Udp53,
@@ -9130,6 +9185,81 @@ mod tests {
             elapsed < DOH_LOOKUP_DEADLINE,
             "rotation took {elapsed:?} — the deadline-owned loop must complete inside {:?}",
             DOH_LOOKUP_DEADLINE
+        );
+    }
+
+    /// Defect B, timeout-evidence half: attempt-budget timeouts at a HEALTHY governor limit must
+    /// never demote DoH, however many burst at once. Red on the pre-fix Wave-1 code: the r2
+    /// validation A/B measured 10 false DoH demotions, every one a timeout burst at 64 in-flight
+    /// with zero connect errors.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn attempt_budget_timeouts_at_a_healthy_limit_never_demote_doh() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Two providers that both answer far slower than the warmed attempt budget.
+        let mut urls = Vec::new();
+        let mut farms = Vec::new();
+        for _ in 0..2 {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/dns-query"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"Status": 0, "Answer": []}))
+                        // Comfortably above every possible attempt budget (the widest is the
+                        // final attempt's full remaining ~2 s), so no attempt can flakily land.
+                        .set_delay(std::time::Duration::from_millis(3500)),
+                )
+                .mount(&server)
+                .await;
+            urls.push(format!("{}/dns-query", server.uri()));
+            farms.push(server);
+        }
+        let pool = DnsServerPool::with_test_urls(urls);
+        // Warm the RTO with fast samples so every attempt budget is the 1 s floor — well under
+        // the providers' 2 s answers, guaranteeing DNS_TIMEOUT on every attempt.
+        for _ in 0..12 {
+            pool.governor()
+                .record_rtt(std::time::Duration::from_millis(50));
+        }
+        // 8 rounds x 2 attempts = 16 consecutive timeout-failures across both providers —
+        // double the streak threshold, with the full implication mask covered.
+        for _ in 0..TRANSPORT_DOWN_THRESHOLD {
+            let result = pool.doh_txt_lookup_resilient("slowpool.example").await;
+            let err = result.expect_err("3.5 s answers against <=2 s budgets must fail");
+            assert!(err.to_string().contains("DNS_TIMEOUT"), "got: {err}");
+        }
+        let snap = pool.transport_snapshot();
+        assert_eq!(
+            snap.doh.down_transitions, 0,
+            "timeout evidence at a healthy limit must never demote the transport"
+        );
+
+        // The counter-falsifier: the SAME silence once the governor has retreated to its floor
+        // IS breaker-relevant — the network was given every concession and still does not answer.
+        let floor_pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", farms[0].uri()),
+            format!("{}/dns-query", farms[1].uri()),
+        ])
+        .with_governor(crate::dns_governor::DnsGovernor::new(
+            crate::dns_governor::MIN_LIMIT,
+        ));
+        for _ in 0..12 {
+            floor_pool
+                .governor()
+                .record_rtt(std::time::Duration::from_millis(50));
+        }
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD - 2) {
+            let _ = floor_pool
+                .doh_txt_lookup_resilient("floorpool.example")
+                .await;
+        }
+        let snap = floor_pool.transport_snapshot();
+        assert!(
+            snap.doh.down_transitions >= 1,
+            "sustained silence at the governor floor must still trip the breaker"
         );
     }
 

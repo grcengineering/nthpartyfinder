@@ -131,6 +131,14 @@ const RTO_K: f64 = 4.0;
 /// estimate is seeded noise and the caller's fair-slice budget governs instead.
 const MIN_SAMPLES_FOR_RTO: u64 = 8;
 
+/// RFC 6298 §2.4, verbatim: "Whenever RTO is computed, if it is less than 1 second, then the RTO
+/// SHOULD be rounded up to 1 second." A standards constant, not a model-sized one — and the r2
+/// validation A/B measured why it matters here: with steady ~100 ms RTTs the raw estimator gave
+/// per-attempt budgets a few hundred ms wide, ordinary DNS tail latency blew them chronically
+/// (dns.sb alone: 562 attempt timeouts in one truncated scan), and at 64 in-flight those bursts
+/// filled the breaker's all-providers mask in under five seconds.
+const MIN_RTO: Duration = Duration::from_secs(1);
+
 /// How a single DNS lookup ended, from the controller's point of view.
 ///
 /// The distinction that matters is not success-vs-failure but *does this carry usable latency
@@ -568,7 +576,19 @@ impl DnsGovernor {
         if !rto_us.is_finite() || rto_us <= 0.0 {
             return None;
         }
-        Some(Duration::from_micros(rto_us as u64))
+        Some(Duration::from_micros(rto_us as u64).max(MIN_RTO))
+    }
+
+    /// Has the adaptive controller retreated all the way to its floor?
+    ///
+    /// This is the discriminator the breaker uses for NO-RESPONSE evidence (attempt-budget
+    /// timeouts): "the controller has already given the network every concession it can make and
+    /// the transport still does not answer" — which by construction is not our load. A pinned
+    /// governor never retreats, so under `--dns-max-concurrency` timeout evidence stays ambiguous
+    /// forever and can never trip a breaker (unreachable-class evidence still can) — the latch
+    /// that made every pinned Phase-1 arm a zero-relationship scan cannot re-arm this way.
+    pub fn has_retreated_to_floor(&self) -> bool {
+        !self.user_pinned && self.limit.load(Ordering::Relaxed) <= MIN_LIMIT
     }
 
     /// Hard failure: multiplicative decrease, and suppress upward moves briefly.
@@ -1250,22 +1270,23 @@ mod tests {
         assert!(g.rto().is_some());
     }
 
-    /// RFC 6298 shape: steady samples give an RTO just above the RTT; jitter widens it. This is
-    /// what floors the per-attempt DoH budget at "what a real answer plausibly takes here".
+    /// RFC 6298 shape above the floor: steady samples give an RTO just above the RTT; jitter
+    /// widens it. This is what floors the per-attempt DoH budget at "what a real answer
+    /// plausibly takes here".
     #[test]
     fn rto_tracks_recent_rtt_plus_deviation() {
         let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
         for _ in 0..40 {
-            g.record_rtt(Duration::from_millis(100));
+            g.record_rtt(Duration::from_millis(1200));
         }
         let steady = g.rto().expect("enough samples");
         assert!(
-            steady >= Duration::from_millis(100) && steady < Duration::from_millis(400),
-            "steady 100ms samples must yield an RTO near-but-above 100ms, got {steady:?}"
+            steady >= Duration::from_millis(1200) && steady < Duration::from_millis(4000),
+            "steady 1.2s samples must yield an RTO near-but-above 1.2s, got {steady:?}"
         );
 
         for i in 0..40u64 {
-            let jitter = if i % 2 == 0 { 40 } else { 260 };
+            let jitter = if i % 2 == 0 { 600 } else { 2400 };
             g.record_rtt(Duration::from_millis(jitter));
         }
         let jittery = g.rto().expect("still enough samples");
@@ -1273,6 +1294,35 @@ mod tests {
             jittery > steady,
             "jitter must widen the RTO ({steady:?} → {jittery:?}), or slow-but-real answers get \
              cancelled by their own budget"
+        );
+    }
+
+    /// RFC 6298 §2.4: the RTO never computes below one second, however fast the network — a
+    /// sub-second budget turns ordinary DNS tail latency into chronic attempt timeouts (the r2
+    /// validation A/B measured 10 false DoH demotions born exactly this way).
+    #[test]
+    fn rto_is_floored_at_one_second() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        for _ in 0..40 {
+            g.record_rtt(Duration::from_millis(50));
+        }
+        assert_eq!(g.rto(), Some(MIN_RTO));
+    }
+
+    /// The breaker's no-response discriminator: only an un-pinned governor parked at its floor
+    /// counts as "retreated" — a pinned governor never does, so timeout evidence can never latch
+    /// a breaker under --dns-max-concurrency (defect H's mechanism).
+    #[test]
+    fn floor_retreat_is_only_claimed_by_an_adaptive_governor_at_the_floor() {
+        let g = DnsGovernor::new(DEFAULT_MAX_LIMIT);
+        assert!(!g.has_retreated_to_floor(), "fresh governor is above floor");
+        g.apply_limit(MIN_LIMIT);
+        assert!(g.has_retreated_to_floor());
+
+        let pinned = DnsGovernor::pinned(MIN_LIMIT);
+        assert!(
+            !pinned.has_retreated_to_floor(),
+            "a pinned governor never 'retreats' — the user chose the limit"
         );
     }
 
