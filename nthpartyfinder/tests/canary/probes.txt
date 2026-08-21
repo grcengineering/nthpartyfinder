@@ -1,0 +1,7 @@
+# DNS canary probe set (owner decision 2026-08-19): one line per root domain.
+# Each probe runs twice daily on a clean runner — adaptive and pinned-16 —
+# at `-r 2 --dns-only`, and its scan-summary.json is checked against
+# tests/canary/baseline.json by scripts/check-dns-canary.sh.
+grc.engineering
+example.com
+vanta.com

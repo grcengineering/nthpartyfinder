@@ -1,0 +1,115 @@
+# DNS canary (plan L4, Plans/zesty-tinkering-falcon.md): a daily live probe of the DNS layer on a
+# clean runner, because the contention gate is hermetic by design and cannot see provider drift
+# (the /resolve-vs-/dns-query incident), TLS/anycast changes, or a regression that only real
+# networks expose. Non-blocking by design: it is deliberately NOT in the required-check set and
+# NOT in check-ci-completeness's always-on list — its output is the standing tracking issue plus
+# a red run, not a merge gate.
+#
+# Reading a failure: the pinned-16 control separates the governor from the ladder/breaker —
+# pinned clean + adaptive red points at governor/attribution; both red points at ladder, counting,
+# or provider drift; both noisy alike is the runner's network.
+name: DNS Canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Live DNS canary (adaptive + pinned control)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2
+        with:
+          workspaces: nthpartyfinder
+      - name: Build release binary
+        working-directory: nthpartyfinder
+        run: cargo build --release
+      - name: Run probes (adaptive + pinned-16 per domain)
+        working-directory: nthpartyfinder
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/canary
+          grep -v '^#' tests/canary/probes.txt | grep -v '^$' | while read -r domain; do
+            for mode in adaptive pinned; do
+              out="/tmp/canary/${domain}-${mode}"
+              extra=""
+              if [ "$mode" = "pinned" ]; then extra="--dns-max-concurrency 16"; fi
+              # timeout-minutes bounds the job; --timeout 600 bounds each scan.
+              ./target/release/nthpartyfinder -d "$domain" -r 2 --dns-only -f json \
+                --no-resume --timeout 600 --output-dir "$out" $extra \
+                > "$out.log" 2>&1 || echo "scan exited nonzero for $domain ($mode)" >> /tmp/canary/failures.txt
+            done
+          done
+      - name: Check sidecars against the canary baseline
+        id: check
+        working-directory: nthpartyfinder
+        run: |
+          set -uo pipefail
+          breaches=0
+          : > /tmp/canary/report.txt
+          grep -v '^#' tests/canary/probes.txt | grep -v '^$' | while read -r domain; do
+            for mode in adaptive pinned; do
+              slug=$(echo "$domain" | tr '.' '_')
+              sidecar="/tmp/canary/${domain}-${mode}/reports/${slug}/scan-summary.json"
+              if [ ! -f "$sidecar" ]; then
+                echo "BREACH ${domain} (${mode}): scan-summary.json missing" >> /tmp/canary/report.txt
+                continue
+              fi
+              echo "── ${domain} (${mode})" >> /tmp/canary/report.txt
+              scripts/check-dns-canary.sh "$sidecar" "$domain" tests/canary/baseline.json \
+                >> /tmp/canary/report.txt 2>&1 || true
+            done
+          done
+          cat /tmp/canary/report.txt
+          if grep -q "^BREACH" /tmp/canary/report.txt; then
+            echo "breached=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "breached=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload sidecars and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dns-canary-${{ github.run_id }}
+          path: /tmp/canary
+          retention-days: 14
+      - name: File or refresh the standing regression issue
+        if: steps.check.outputs.breached == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="DNS canary regression (standing)"
+          body_file=/tmp/canary/issue-body.md
+          {
+            echo "### $(date -u +%Y-%m-%dT%H:%M:%SZ) — run ${{ github.run_id }}"
+            echo ""
+            echo '```'
+            grep -E "^(BREACH|──)" /tmp/canary/report.txt
+            echo '```'
+            echo ""
+            echo "Full sidecars: run artifact \`dns-canary-${{ github.run_id }}\`."
+          } > "$body_file"
+          number=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq '[.[] | select(.title == "DNS canary regression (standing)")][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file "$body_file"
+          else
+            gh issue create --title "$title" --body-file "$body_file"
+          fi
+      - name: Fail on breach
+        if: steps.check.outputs.breached == 'true'
+        run: |
+          echo "DNS canary breached — see the report above and the standing issue."
+          exit 1

@@ -46,6 +46,35 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: DNS probe block present on DNS-touching PRs
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        working-directory: .
+        run: |
+          # L5 (Plans/zesty-tinkering-falcon.md): a PR touching the DNS layer must carry the
+          # 3-probe `dns-probe:` block in its body — the pre-merge scan rule made mechanical.
+          # This checks PRESENCE, not truth (stated honestly): the numbers are argued in review,
+          # but a DNS-touching PR with no probe block at all cannot merge quietly. Files list
+          # mirrors the repo CLAUDE.md DNS clause. Changed files come from the API (the checkout
+          # is shallow, so a base-sha git diff has nothing to diff against).
+          set -euo pipefail
+          changed=$(gh pr view "$PR_NUMBER" --json files --jq '.files[].path')
+          dns_touching=$(echo "$changed" | grep -E \
+            '^nthpartyfinder/src/(dns\.rs|dns_governor\.rs|rate_limit\.rs|http_client\.rs|analysis\.rs)$' \
+            || true)
+          if [ -z "$dns_touching" ]; then
+            echo "No DNS-layer files touched — probe block not required."
+            exit 0
+          fi
+          body=$(gh pr view "$PR_NUMBER" --json body --jq .body)
+          if echo "$body" | grep -q "dns-probe:"; then
+            echo "DNS-layer files touched and dns-probe: block present."
+          else
+            echo "::error::This PR touches the DNS layer ($(echo "$dns_touching" | tr '\n' ' ')) but its body has no 'dns-probe:' block. Run the 3-probe validation set (repo CLAUDE.md, DNS clause) and paste the block rendered by nthpartyfinder/scripts/diff-scan-summary.sh."
+            exit 1
+          fi
 
   test-unit:
     name: Unit Tests

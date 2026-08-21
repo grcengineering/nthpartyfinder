@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "recorded": "2026-08-21",
+  "note": "Initial post-Wave-3 canary bounds. Defect-shaped, deliberately generous on magnitudes and strict on the binary signals (a demotion or an all-failed warn on a clean runner is a defect at ANY magnitude). relationships_min is per-probe because the three roots differ by orders of magnitude; example.com legitimately yields ~0. Tighten from workflow_dispatch history once >=3 green runs exist (plan L4).",
+  "bounds": {
+    "backoff_ratio_max": 0.05,
+    "demotions_max": 0,
+    "failures_per_query_max": 0.05,
+    "all_failed_max": 0,
+    "backstop_fired_max": 0,
+    "wall_secs_max": 600
+  },
+  "relationships_min": {
+    "grc.engineering": 1,
+    "example.com": 0,
+    "vanta.com": 100
+  }
+}
