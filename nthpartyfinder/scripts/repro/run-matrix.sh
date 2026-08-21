@@ -61,6 +61,13 @@ run_arm() {
   local arm_dir="${ROOT}/${name}"
   mkdir -p "$arm_dir"
 
+  # Resume guard: an arm already recorded with exit 0 is not re-run (a crashed or
+  # edited runner can be relaunched without burning completed arms' network cost).
+  if [[ -f "$MATRIX_JSONL" ]] && grep -q "\"arm\":\"${name}\".*\"exit\":0" "$MATRIX_JSONL"; then
+    echo "run-matrix: [${name}] already completed (matrix.jsonl) — skipping"
+    return 0
+  fi
+
   local start_iso end_iso exit_code=0 cmd_display
   start_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "run-matrix: [${name}] starting at ${start_iso}"
@@ -93,7 +100,9 @@ run_arm() {
       --log-file "${arm_dir}/scan.log"
       --output-dir "${arm_dir}"
     )
-    local full_args=("${base_args[@]}" "${extra_args[@]}")
+    # bash 3.2 (macOS default): "${arr[@]}" on an EMPTY array trips `set -u`.
+    # The ${arr[@]+...} guard expands to nothing when the array is empty.
+    local full_args=("${base_args[@]}" ${extra_args[@]+"${extra_args[@]}"})
 
     cmd_display="${BINARY} ${full_args[*]}"
     echo "run-matrix: [${name}] cmd: ${cmd_display}"

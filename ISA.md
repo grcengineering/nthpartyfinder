@@ -4,7 +4,7 @@ principal_stated_goal: "please devise a plan to precisely and thoroughly investi
 task: "DNS/DoH reliability: localize the 07-29 flapping residual (47-60% backoff, false transport demotions), fix at the root, and gate DNS reliability permanently. Plan: Plans/zesty-tinkering-falcon.md (owner-approved 2026-08-19). (2026-08-19)"
 effort: E4
 phase: climbing
-progress: 7/13
+progress: 8/13
 mode: algorithm
 started: 2026-08-19T16:30:00-04:00
 updated: 2026-08-19T16:30:00-04:00
@@ -42,7 +42,7 @@ prior_tasks:
 - [x] **ISC-603** L1 hermetic contention gate: doh_farm (6 seeded-deterministic wiremock providers, FlapWindow, DeadProvider) + 64-worker driver + P0–P6/P8 profiles (P7/P9 deferred: global-semaphore race), invariant asserts green on master, `tests/dns_contention/baseline.json` records the defects as numbers (P4: 2s all-429 burst → doh down_transitions=1, 23% lookups lost; P3: one hanging provider → 11.5% loss, governor at floor; P5: 2.4 counted failures per logical lookup). Hermeticity proven: mid-label-underscore names make the system-resolver path structurally unreachable; P5 completes 600 lookups in 27ms. *(evidence: `cargo test --test dns_contention_gate` 8/8 ok in 21.5s, ×4 runs; runs in required Integration Tests job by construction; CI-run + mutant-red proof lands in PR-0 body)*
 - [x] **ISC-604** L8 dead weight deleted (3 zero-assert test files, empty-body test, dead tests/common) and live-DNS hermeticity violations fixed incl. the sfw-killer `analysis.rs:3531`. *(probe: 619 lines deleted, per-hunk reviewed; sfw-killer + 2 live tests #[ignore]-gated; advisory lister in test.sh; full-suite proof lands with the PR-0 gate)*
 - [x] **ISC-605** Phase 0 is behaviour-neutral: depth-1 vanta.com relationship-set diff pre/post = ∅. *(evidence: brew-master binary 133 edges vs branch binary 133 edges, symmetric difference 0/0 on (customer, vendor, record_type) keys; walls 42s vs 43s)*
-- [ ] **ISC-606** Phase-1 matrix executed on owner's network (full matrix + passive tcpdump, unattended); `Plans/dns-flapping-localization-<date>.md` marks each of A–G confirmed/refuted/partial with numbers; D_false computed against provider probes; pcap class table quantifies invisible UDP/53. *(probe: the doc + sidecar JSONs)*
+- [x] **ISC-606** Phase-1 matrix executed (14 arms, ~5 h, unattended, passive tcpdump). **A/B/C CONFIRMED, D REFUTED, E/F confirmed+quantified, G minor** — plus new defect H: pinned mode produces ZERO-relationship scans (breaker latch without suppression). D_false = 100% (3,007/3,007 probes healthy; pcap: 0 forwarder SERVFAILs, 219 getaddrinfo pkts in 5 h). *(evidence: `Plans/dns-flapping-localization-2026-08-20.md` + 13 sidecars + probes.jsonl + matrix.summary.json in ~/Desktop/npf-dns-matrix/)*
 - [ ] **ISC-607** Wave 1 merged (C: DNS off the shared semaphore; A: deadline-owned rotation + RTO budgets, no sleeps; G: leaf-RTT samples; E: logical counting + double-increment fix; F: typed timeout classification) with `dns-probe:` block ×3 in PR body; acceptance: TimedOut+Rejected share ↓≥10× vs Phase-1 baseline, zero false demotions, relationships ≥ baseline, `deadline_backstop_fired == 0`. *(probe: validation scan sidecar BEFORE merge)*
 - [ ] **ISC-608** Wave 2 merged (breaker trips only on Unreachable-always / NoResponse-at-floor evidence; one decrease per congestion epoch; deferred single retry replaces ladder-rescue for load-class failures) — acceptance: zero "appears blocked" with healthy probes, deferred_retry.rescued > 0, all-failed-on-resolvable = 0. *(probe: validation scan BEFORE merge)*
 - [ ] **ISC-609** Wave 3 merged (system-resolver OnceCell + DO53-gated; GovernedResolver staged SaaS→global with GAI fallback) — acceptance: gai_fallback ≈ 0 healthy, tenant-probe recall unchanged A/B, pcap U_wire drops. *(probe: A/B scan + pcap BEFORE global flip)*
@@ -54,6 +54,8 @@ prior_tasks:
 **Anti-claims.** Never weaken a network-safety ceiling (DO53_MAX_QPS/BURST, governor floor 2, connection ceiling, subfinder caps) without a field measurement in the same PR. Never re-propose vetoed items (per-provider buckets, hedged UDP, DoQ/DoH3, CT pacing, external wrappers). No live DNS in the unit/integration suite — the gate is wiremock-only. No constant ships model-sized (CLAUDE.md rule 17).
 
 **Decisions.** Owner 2026-08-19: autonomous Phase-1→2 transition iff ≥2 of {A,B,C} confirm; full matrix + tcpdump unattended; canary probes include vanta.com.
+
+**Log.** 2026-08-20: PR-0 MERGED to master (`5531911`) — PR #145, 28/28 checks + all 7 post-merge master workflows green. Phase 1 staged; matrix launch gated on one interactive `sudo -v` from the owner for the passive tcpdump (arms deliberately not burned without capture — each arm's one clean shot should carry hypothesis D's wire truth).
 
 ---
 
