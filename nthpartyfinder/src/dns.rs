@@ -270,6 +270,10 @@ pub(crate) struct TxtAnswer {
 pub(crate) enum RecordKind {
     Txt,
     Cname,
+    /// Address records (A/AAAA), for the governed reqwest resolver (Wave 3, 6b). Stored in the
+    /// same answer memo as strings; `POOL_MAX_IDLE_PER_HOST = 0` means reqwest resolves per
+    /// request, so the memo is what makes governed resolution affordable.
+    Addr,
 }
 
 /// Total wall-clock budget one DoH lookup (all provider rotations together) may spend. The
@@ -2615,6 +2619,12 @@ impl DnsServerPool {
                 let outcome = match kind {
                     RecordKind::Txt => direct_txt_outcome(resolver, domain, 4000).await,
                     RecordKind::Cname => direct_cname_outcome(resolver, domain, 4000).await,
+                    // The governed addr path never descends the ladder (its fallback is
+                    // getaddrinfo, counted); reaching here would be a wiring bug.
+                    RecordKind::Addr => {
+                        debug_assert!(false, "addr lookups never descend the ladder");
+                        DirectOutcome::TransportFailed(TransportEvidence::NoResponse)
+                    }
                 };
                 crate::perf::METRICS.dns_dot_attempt.record(t0.elapsed());
                 match outcome {
@@ -2673,6 +2683,11 @@ impl DnsServerPool {
                     let outcome = match kind {
                         RecordKind::Txt => direct_txt_outcome(resolver, domain, 2000).await,
                         RecordKind::Cname => direct_cname_outcome(resolver, domain, 2000).await,
+                        // See the DoT arm: the governed addr path never reaches the ladder.
+                        RecordKind::Addr => {
+                            debug_assert!(false, "addr lookups never descend the ladder");
+                            DirectOutcome::TransportFailed(TransportEvidence::NoResponse)
+                        }
                     };
                     crate::perf::METRICS.dns_udp53_attempt.record(t0.elapsed());
                     match outcome {
@@ -2863,6 +2878,263 @@ impl DnsServerPool {
     #[cfg(coverage)]
     async fn fast_cname_lookup(&self, _domain: &str) -> Result<Vec<String>> {
         Ok(vec![])
+    }
+}
+
+#[cfg(not(coverage))]
+impl DnsServerPool {
+    /// One DoH address (A) lookup against one provider (Wave 3, 6b). Mirrors the TXT/CNAME
+    /// leaf twins: same class markers, same per-provider attribution, same RCODE gate. AAAA is
+    /// deliberately not queried — the discovery clients dial IPv4-first everywhere else, and
+    /// one query per resolution keeps the governed path's cost at parity with getaddrinfo.
+    async fn doh_addr_lookup(
+        &self,
+        domain: &str,
+        server_index: usize,
+        server: &DohServerConfig,
+        attempt_budget: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        let provider = crate::dns_telemetry::DNS_TELEMETRY.provider(server_index);
+        provider.attempts.fetch_add(1, Ordering::Relaxed);
+        let attempt_t0 = std::time::Instant::now();
+        let query_params = [("name", domain), ("type", "A")];
+        let sent = self
+            .client
+            .get(&server.url)
+            .query(&query_params)
+            .header("Accept", "application/dns-json")
+            .timeout(attempt_budget)
+            .send()
+            .await;
+        let http_response = match sent {
+            Ok(response) => {
+                let rtt = attempt_t0.elapsed();
+                provider.rtt.record(rtt);
+                self.governor.record_rtt(rtt);
+                response
+            }
+            Err(e) => {
+                if e.is_timeout() {
+                    provider.timeout_after_send.fetch_add(1, Ordering::Relaxed);
+                    return Err(anyhow::anyhow!(
+                        "DNS_TIMEOUT: DoH provider {} exceeded its {}ms attempt budget for {}",
+                        server.name,
+                        attempt_budget.as_millis(),
+                        domain
+                    ));
+                } else if e.is_connect() {
+                    provider.connect_err.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let wrapped = anyhow::Error::from(e);
+                    if Self::is_local_resource_error(&wrapped) {
+                        provider.local_resource_err.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        provider.other_err.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Err(wrapped);
+                }
+                return Err(e.into());
+            }
+        };
+        let status = http_response.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            if status.as_u16() == 429 {
+                provider.http_429.fetch_add(1, Ordering::Relaxed);
+            } else {
+                provider.http_5xx.fetch_add(1, Ordering::Relaxed);
+            }
+            return Err(anyhow::anyhow!(
+                "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
+                server.name,
+                status,
+                domain
+            ));
+        }
+        if !status.is_success() {
+            provider.http_4xx_other.fetch_add(1, Ordering::Relaxed);
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
+                server.name,
+                status,
+                domain
+            ));
+        }
+        let response = http_response.json::<Value>().await?;
+        if let Some(rcode) = response["Status"].as_u64() {
+            if rcode != 0 && rcode != 3 {
+                provider.rcode_fail.fetch_add(1, Ordering::Relaxed);
+                return Err(anyhow::anyhow!(
+                    "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
+                    server.name,
+                    rcode,
+                    domain
+                ));
+            }
+        } else if response["Answer"].as_array().is_none() {
+            provider.non_dnsjson_2xx.fetch_add(1, Ordering::Relaxed);
+            return Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider {} returned a 2xx body without Status or Answer for {} — not a DNS JSON answer",
+                server.name,
+                domain
+            ));
+        }
+        let mut records = Vec::new();
+        if let Some(answers) = response["Answer"].as_array() {
+            for answer in answers {
+                // Type 1 = A. The resolver follows CNAME chains itself, so the terminal
+                // A records are present in the same answer section.
+                if answer["type"].as_u64() == Some(1) {
+                    if let Some(data) = answer["data"].as_str() {
+                        records.push(data.to_string());
+                    }
+                }
+            }
+        }
+        provider.ok.fetch_add(1, Ordering::Relaxed);
+        Ok(records)
+    }
+
+    /// Deadline-owned rotation for address lookups — same shape as the TXT/CNAME twins.
+    async fn doh_addr_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
+        let attempts = self.resilient_attempts();
+        let deadline = std::time::Instant::now() + DOH_LOOKUP_DEADLINE;
+        let mut last_err: Option<anyhow::Error> = None;
+        for i in 0..attempts {
+            let Some((server_index, server)) =
+                self.next_doh_server_indexed().map(|(i, s)| (i, s.clone()))
+            else {
+                return Err(anyhow::anyhow!(
+                    "no DoH servers configured for A lookup of {}",
+                    domain
+                ));
+            };
+            let Some(budget) = self.attempt_budget(deadline, i, attempts, server.timeout_secs)
+            else {
+                break;
+            };
+            match self
+                .doh_addr_lookup(domain, server_index, &server, budget)
+                .await
+            {
+                Ok(records) => return Ok(records),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if Self::is_local_resource_error(&e) {
+                        last_err = Some(anyhow::anyhow!("DNS_LOCAL: {:#}", e));
+                        break;
+                    }
+                    if msg.contains("DNS_NAME") || msg.contains("DNS_THROTTLE") {
+                        if self.doh_health.record_success() {
+                            note_transport_recovered(crate::dns_telemetry::Tier::Doh);
+                        }
+                    } else if !msg.contains("DNS_TIMEOUT") || self.governor.has_retreated_to_floor()
+                    {
+                        self.doh_health
+                            .record_failure_from(server_index, self.doh_servers.len());
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "DNS_TIMEOUT: DoH A rotation deadline ({}ms) exhausted for {}",
+                DOH_LOOKUP_DEADLINE.as_millis(),
+                domain
+            )
+        }))
+    }
+
+    /// Governed address resolution for the discovery HTTP clients (Wave 3, 6b): memo → governor
+    /// permit → DoH A lookup. Every packet this path emits is DoH under a governor permit; the
+    /// process-wide invariant is that getaddrinfo remains only as a COUNTED fallback on transport
+    /// failure. Deadlock-safe by construction since Wave 1: connection-permit holders may wait on
+    /// the governor here, but governor holders never wait on connection permits.
+    ///
+    /// An authoritative empty (NXDOMAIN/NODATA — the dominant shape for guessed SaaS tenant
+    /// hosts) memoizes and returns empty WITHOUT a getaddrinfo fallback: the recursive resolver
+    /// already answered, and GAI would re-ask the same question of the same resolvers through
+    /// the LAN forwarder — the exact ungoverned load this resolver exists to remove.
+    pub async fn addr_lookup_governed(&self, domain: &str) -> Result<Vec<std::net::IpAddr>> {
+        let parse = |records: &[String]| -> Vec<std::net::IpAddr> {
+            records.iter().filter_map(|r| r.parse().ok()).collect()
+        };
+        if let Some(entry) = self.recall_memo(RecordKind::Addr, domain).await {
+            crate::perf::METRICS.dns_addr_memo.hit();
+            return match entry {
+                MemoEntry::Answer(records) => Ok(parse(&records)),
+                // A remembered DNS_NAME verdict is an authoritative negative for this scan.
+                MemoEntry::NameFailure(_) => Ok(Vec::new()),
+            };
+        }
+        let _timer = crate::perf::scoped(&crate::perf::METRICS.dns_addr_lookup);
+        let permit = self.acquire_dns_permit().await;
+        let result = self.doh_addr_lookup_resilient(domain).await;
+        permit.complete(match &result {
+            Ok(_) => crate::dns_governor::DnsOutcome::Answered,
+            Err(e) => failure_outcome_for_governor(Some(&e.to_string())),
+        });
+        match &result {
+            Ok(records) => {
+                self.remember_answer(RecordKind::Addr, domain, records)
+                    .await;
+                Ok(parse(records))
+            }
+            Err(e) => {
+                self.remember_name_failure(RecordKind::Addr, domain, &e.to_string())
+                    .await;
+                Err(anyhow::anyhow!("{}", e))
+            }
+        }
+    }
+}
+
+/// A `reqwest` DNS resolver that routes the discovery clients' address lookups through the
+/// governed DoH path (Wave 3, 6b) — memoized, permit-bounded, breaker-aware — with getaddrinfo
+/// kept only as a COUNTED fallback on transport failure. Installed by app startup via
+/// [`crate::http_client::install_governed_resolver`]; never used by the DoH client itself
+/// (its endpoints are IP literals — resolving DoH via DoH would be circular).
+#[cfg(not(coverage))]
+pub struct GovernedResolver {
+    pool: std::sync::Arc<DnsServerPool>,
+}
+
+#[cfg(not(coverage))]
+impl GovernedResolver {
+    pub fn new(pool: std::sync::Arc<DnsServerPool>) -> Self {
+        Self { pool }
+    }
+}
+
+#[cfg(not(coverage))]
+impl reqwest::dns::Resolve for GovernedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let pool = std::sync::Arc::clone(&self.pool);
+        Box::pin(async move {
+            match pool.addr_lookup_governed(name.as_str()).await {
+                Ok(ips) => {
+                    let addrs: Box<dyn Iterator<Item = std::net::SocketAddr> + Send> = Box::new(
+                        ips.into_iter()
+                            .map(|ip| std::net::SocketAddr::new(ip, 0))
+                            .collect::<Vec<_>>()
+                            .into_iter(),
+                    );
+                    Ok(addrs)
+                }
+                Err(_) => {
+                    // Transport failure — fall back to the system path so recall cannot regress
+                    // below today's behaviour, and COUNT it (the canary's gai_fallback signal).
+                    crate::perf::METRICS.dns_addr_gai_fallback.hit();
+                    let host = name.as_str().to_string();
+                    let t0 = std::time::Instant::now();
+                    let looked = tokio::net::lookup_host((host.as_str(), 0)).await;
+                    crate::perf::METRICS.http_getaddrinfo.record(t0.elapsed());
+                    let addrs = looked?;
+                    Ok(Box::new(addrs.collect::<Vec<_>>().into_iter())
+                        as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
+                }
+            }
+        })
     }
 }
 
@@ -3305,7 +3577,35 @@ pub async fn get_txt_records_with_rate_limit(
         return Ok(vec![]);
     }
 
-    // Final fallback: system resolver (only if both racing attempts failed)
+    // Final fallback: system resolver (only if both racing attempts failed). Wave 3 (6a):
+    // this emits a UDP/53 query at the LAN forwarder via getaddrinfo's own path, so it is
+    // admitted through the SAME gate as every other plain-port emission — the DO53 budget and
+    // the UDP/53 breaker. A shed here costs one name's recall; an ungated storm is what got
+    // the WAN IP throttled upstream for ~2h08m on 2026-07-29.
+    if !dns_pool.admit_do53_query() {
+        debug!(
+            "System-resolver fallback for {} not admitted (UDP/53 budget/breaker) — unresolved",
+            domain
+        );
+        crate::dns_telemetry::DNS_TELEMETRY.terminal(
+            crate::dns_telemetry::LookupPath::RootTxt,
+            crate::dns_telemetry::TerminalStage::SystemFail,
+        );
+        if let Some(counter) = dns_failure_counter {
+            crate::dns_telemetry::DNS_TELEMETRY
+                .failure_site(crate::dns_telemetry::FailureSite::RootAllFailed);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(msg) = doh_failure.as_deref() {
+            if msg.contains("DNS_NAME") {
+                dns_pool.note_name_attribution();
+            }
+            dns_pool
+                .remember_name_failure(RecordKind::Txt, domain, msg)
+                .await;
+        }
+        return Ok(vec![]);
+    }
     debug!("DNS race failed for {}, trying system resolver", domain);
     let system_t0 = std::time::Instant::now();
     let system_result = try_system_dns_resolver(domain).await;
@@ -3380,11 +3680,28 @@ pub async fn get_txt_records_with_rate_limit(
     Ok(vec![])
 }
 
+/// The system-config resolver, built ONCE per process (Wave 3, 6a — mirrors `dot_resolver`).
+/// A fresh resolver per rescue meant a fresh socket per rescue at the very forwarder the
+/// rescue path is trying not to overwhelm.
+#[cfg(not(coverage))]
+static SYSTEM_RESOLVER: tokio::sync::OnceCell<Option<TokioResolver>> =
+    tokio::sync::OnceCell::const_new();
+
 // cfg(not(coverage)): performs live DNS lookup via system resolver — requires network
 #[cfg(not(coverage))]
 async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
-    // 0.26: builder_tokio() returns Result and build() now also returns Result.
-    let resolver = TokioResolver::builder_tokio()?.build()?;
+    let resolver = SYSTEM_RESOLVER
+        .get_or_init(|| async {
+            // 0.26: builder_tokio() and build() both return Result; a system config that cannot
+            // be read memoizes as None so every rescue does not re-attempt (and re-log) it.
+            TokioResolver::builder_tokio()
+                .ok()
+                .map(|b| b.build())
+                .and_then(Result::ok)
+        })
+        .await
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("system resolver unavailable (resolv.conf unreadable)"))?;
 
     // Query as an absolute (FQDN) name — trailing dot — so the system resolver's
     // search list from /etc/resolv.conf (e.g. OrbStack/Docker's `search localdomain`)
