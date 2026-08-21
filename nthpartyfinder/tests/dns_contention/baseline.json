@@ -1,55 +1,61 @@
 {
   "schema": 1,
-  "recorded": "2026-08-20",
-  "note": "current-master behavior BEFORE the Wave 1-3 fixes; ratchet: future asserts are <= these * 1.15. Worst case of 3 local runs of tests/dns_contention_gate.rs (per-run JSON in target/dns-contention/). backoff_ratio = governor.backoff_events / governor.total_queries; failed_ratio = dns_failures / 600 logical lookups (>1.0 means the counters over-count per lookup — itself a recorded defect, see plan defect E); down_transitions = transport.doh.down_transitions. Headline defects captured here: p4 (a 2 s all-provider 429 burst trips the DoH breaker, down_transitions=1, and ~23% of lookups fail), p3 (one hanging provider costs ~4% of lookups and drives the governor to its floor), p5 failed_ratio 2.45 (an outage counts ~2.4 failures per logical lookup).",
+  "recorded": "2026-08-21",
+  "note": "post-Wave-1 behavior (dns/wave1-root-fixes: semaphore decoupling, deadline-owned rotation with RTO budgets + cold-start full-deadline, throttle-clears-breaker, logical failure counting, typed DNS_TIMEOUT classification). Worst of 3 seeded local runs. failed_ratio = dns_failures / 600 logical lookups; counting is per-ARM (a TXT+CNAME pair that both fail counts 2), so an all-fail profile reads 1.8 (480 fast-path pairs x 2 + 120 root = 1080), never the pre-fix 2.45 of per-attempt inflation. Remaining honest defects held by this baseline for Wave 2: p4 in-window lookups still fail (386-390 arms; deferred-retry rescues them in Wave 2) and the burst still multiplicatively collapses the limit once per signal (backoff 239-241; one-decrease-per-epoch lands in Wave 2). p3/p6 carry a small cold-start tail (4 and 2 failed arms) permitted by the cold-start budget contract. Pre-fix baseline (2026-08-20, for history): p1 wall 5844 ratio 0.0 (the old equal-budgets code passed p1 by giving attempt 0 the whole 3 s); p3 ratio 0.115 backoff 0.0924; p4 ratio 0.7534 down 1; p5 ratio 2.4467; p6 ratio 0.075.",
   "profiles": {
     "p0_healthy": {
       "backoff_ratio": 0.0,
       "failed_ratio": 0.0,
       "down_transitions": 0,
-      "wall_ms": 544
+      "wall_ms": 562
     },
     "p1_slow_but_healthy": {
       "backoff_ratio": 0.0,
       "failed_ratio": 0.0,
       "down_transitions": 0,
-      "wall_ms": 5844
+      "wall_ms": 5840
     },
     "p2_one_provider_dead": {
       "backoff_ratio": 0.0,
-      "failed_ratio": 0.065,
+      "failed_ratio": 0.0,
       "down_transitions": 0,
-      "wall_ms": 537
+      "wall_ms": 540
     },
     "p3_one_provider_slow": {
-      "backoff_ratio": 0.0924,
-      "failed_ratio": 0.115,
+      "backoff_ratio": 0.0052,
+      "failed_ratio": 0.0067,
       "down_transitions": 0,
-      "wall_ms": 6594
+      "wall_ms": 3863
     },
     "p4_transient_throttle_burst": {
-      "backoff_ratio": 0.671,
-      "failed_ratio": 0.7534,
-      "down_transitions": 1,
-      "wall_ms": 2603
+      "backoff_ratio": 0.775,
+      "failed_ratio": 0.65,
+      "down_transitions": 0,
+      "wall_ms": 419
     },
     "p5_genuine_outage": {
-      "backoff_ratio": 1.0,
-      "failed_ratio": 2.4467,
+      "backoff_ratio": 0.0,
+      "failed_ratio": 1.8,
       "down_transitions": 1,
-      "wall_ms": 27
+      "wall_ms": 36
     },
     "p6_intermittent_flap": {
-      "backoff_ratio": 0.0154,
-      "failed_ratio": 0.075,
+      "backoff_ratio": 0.0102,
+      "failed_ratio": 0.0033,
       "down_transitions": 0,
-      "wall_ms": 4146
+      "wall_ms": 3181
+    },
+    "p7_connection_permit_starvation": {
+      "backoff_ratio": 0.0,
+      "failed_ratio": 0.0,
+      "down_transitions": 0,
+      "wall_ms": 540
     },
     "p8_memo_dedupe": {
       "backoff_ratio": 0.0,
       "failed_ratio": 0.0,
       "down_transitions": 0,
-      "wall_ms": 401
+      "wall_ms": 400
     }
   }
 }

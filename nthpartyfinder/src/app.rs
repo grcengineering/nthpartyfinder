@@ -2921,11 +2921,56 @@ pub async fn run_inner(mut args: Args, input: &dyn InputSource) -> Result<()> {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
-    // Report what the adaptive DNS controller did. A user who has just watched a deep scan run
-    // should be able to see whether the network constrained it, without turning on debug logging —
-    // a low final limit or a high backoff count is the visible symptom of a fragile link.
-    if let Some(line) = dns_pool.governor_stats().summary_line() {
-        println!("{line}");
+    // Report what the DNS layer did — honestly, in one block (Wave 1, defect E's user-facing
+    // half). Replaces the bare governor line: logical unresolved lookups with their attribution
+    // split, controller movement with its signal split, and per-transport breaker history — the
+    // facts every prior "appears blocked" incident report lacked. Sourced from the same counters
+    // scan-summary.json persists, so the console and the sidecar cannot disagree.
+    {
+        let g = dns_pool.governor_stats();
+        if g.total_queries > 0 {
+            let unresolved = logger.dns_failure_count();
+            let name = logger.dns_name_failure_count();
+            let transport = unresolved.saturating_sub(name);
+            let t = dns_pool.transport_snapshot();
+            let (shed, _) = crate::perf::METRICS.dns_udp53_shed.snapshot();
+            let (backstop, _) = crate::perf::METRICS.dns_deadline_backstop_fired.snapshot();
+            let limit_desc = if g.user_pinned {
+                format!("pinned at {}", g.max_limit)
+            } else {
+                format!(
+                    "limit {}\u{2013}{} (ended {})",
+                    g.min_limit_seen, g.peak_limit, g.current_limit
+                )
+            };
+            println!(
+                "DNS: {} queries, {} unresolved ({} name-attributed / {} transport-side); \
+                 governor: {}, {} step-down(s) on {} signal(s) ({} timeout / {} rejected), \
+                 rtt baseline {:.0} ms, {}s at floor; transports: DoH down {}x, DoT down {}x, \
+                 UDP/53 down {}x, {} shed by budget",
+                g.total_queries,
+                unresolved,
+                name,
+                transport,
+                limit_desc,
+                g.step_downs,
+                g.congestion_signals,
+                g.timeouts,
+                g.rejections,
+                g.rtt_baseline_us / 1000.0,
+                g.floor_ms / 1000,
+                t.doh.down_transitions,
+                t.dot.down_transitions,
+                t.do53.down_transitions,
+                shed,
+            );
+            if backstop > 0 {
+                println!(
+                    "DNS WARNING: the lookup deadline backstop fired {backstop}x — a \
+                     self-deadlining lookup hung, which is a defect; please report it"
+                );
+            }
+        }
     }
 
     logger.print_final_summary();

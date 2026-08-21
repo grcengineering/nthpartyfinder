@@ -1,9 +1,5 @@
 use crate::config::AppConfig;
 use crate::domain_utils;
-// All send_gated() sites in this file live in #[cfg(not(coverage))] DoH paths,
-// so the trait import is only referenced outside the coverage build.
-#[cfg(not(coverage))]
-use crate::http_client::GatedSend;
 use crate::rate_limit::{RateLimitContext, SharedRateLimiter};
 use crate::vendor::RecordType;
 use anyhow::Result;
@@ -146,8 +142,6 @@ pub struct DnsServerPool {
     governor: Arc<crate::dns_governor::DnsGovernor>,
     /// Max DoH provider rotations on a throttle (429/5xx) before giving up.
     max_dns_retries: u32,
-    /// Base backoff (ms) between throttled DoH retries.
-    backoff_base_ms: u64,
     /// GRC-367 (fix 1): the SINGLE choke-point throttle counter. When wired up via
     /// `with_failure_counter` (production: to `logger.dns_failure_counter_arc()`), every DoH
     /// throttle on EVERY path — TXT root, subdomain fast, CNAME, and the SPF include-chain
@@ -277,6 +271,31 @@ pub(crate) enum RecordKind {
     Txt,
     Cname,
 }
+
+/// Total wall-clock budget one DoH lookup (all provider rotations together) may spend. The
+/// RESILIENT LOOP owns this deadline — it slices the remainder across the attempts it has left
+/// (floored by the governor's measured RTO) — so rotation always completes inside it. The old
+/// shape, an outer `timeout(3s, …)` wrapping attempts that each carried their own 3 s, meant the
+/// wrapper fired while attempt 0 was still in flight and providers 2–4 never ran: Phase 1 measured
+/// 7,032 of 7,988 cancellations at attempt-0-in-flight (defect A). Same total budget as before.
+#[cfg_attr(coverage, allow(dead_code))]
+const DOH_LOOKUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Hang backstop on the callers of the resilient loops. The loop self-terminates at
+/// [`DOH_LOOKUP_DEADLINE`]; this outer guard exists only to catch a runaway future and is expected
+/// to NEVER fire — `perf::METRICS.dns_deadline_backstop_fired` counts it, and any nonzero reading
+/// is a defect. 4× the deadline, comfortably above every legitimate completion.
+#[cfg_attr(coverage, allow(dead_code))]
+const DOH_WRAPPER_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Compile-time guard (Wave 1, defect C): DNS left the shared connection semaphore — the governor
+/// is now the only DNS concurrency ceiling — so its ceiling must stay small against the process-wide
+/// connection ceiling, or DNS could reclaim through sockets the contention the decoupling removed.
+const _: () = assert!(
+    crate::dns_governor::DEFAULT_MAX_LIMIT as usize
+        <= crate::http_client::DEFAULT_MAX_CONNECTIONS / 2,
+    "DNS governor ceiling must stay at or under half the connection ceiling"
+);
 
 /// Consecutive failures on a single DNS transport before it is treated as unavailable (a blocked
 /// network, a rate-limiting router, or a provider outage). High enough that a transient
@@ -679,24 +698,28 @@ fn classify_pair<T, U, E: std::fmt::Display, F: std::fmt::Display>(
     if txt.is_ok() || cname.is_ok() {
         return DnsOutcome::Answered;
     }
-    let congested = [
+    let msgs: Vec<String> = [
         txt.as_ref().err().map(|e| e.to_string()),
         cname.as_ref().err().map(|e| e.to_string()),
     ]
     .into_iter()
     .flatten()
-    .any(|m| {
-        // DNS_NAME is deliberately absent: the resolver answered over a working link and simply
-        // reported SERVFAIL/REFUSED for this name. Reading that as congestion would make the
-        // adaptive governor throttle a healthy network because one domain is broken — exactly the
-        // failure this function's own doc comment warns about.
-        m.contains("DNS_THROTTLE")
-            || m.contains("DNS_ENDPOINT")
-            || m.contains("timed out")
-            || m.contains("timeout")
-    });
-    if congested {
+    .collect();
+    // Classified on the class MARKERS the lookup layer stamps, never on free-text substrings.
+    // The old `contains("timeout")` match was defect F twice over: reqwest's plain `Display`
+    // ("error sending request for url (…)") carries no such text, so real timeouts read as
+    // `Unrelated` — while any queried NAME containing "timeout" read as congestion.
+    //
+    // DNS_NAME is deliberately absent: the resolver answered over a working link and simply
+    // reported SERVFAIL/REFUSED for this name. DNS_ENDPOINT is now absent too — it means a
+    // provider answered with the wrong API shape, or that NO transport was available (the dead
+    // ladder). Neither is evidence of congestion, and reading the dead ladder's failures as
+    // explicit refusals is what parked the governor at its floor for 61% of the Phase-1 baseline
+    // scan (21,139 "rejections" against zero observed 429s).
+    if msgs.iter().any(|m| m.contains("DNS_THROTTLE")) {
         DnsOutcome::Rejected
+    } else if msgs.iter().any(|m| m.contains("DNS_TIMEOUT")) {
+        DnsOutcome::TimedOut
     } else {
         DnsOutcome::Unrelated
     }
@@ -711,12 +734,16 @@ fn classify_pair<T, U, E: std::fmt::Display, F: std::fmt::Display>(
 /// concurrency plus a cooldown — once per broken name — and the root TXT race did exactly that,
 /// because `.ok()` erased the class before anyone could look at it.
 ///
-/// Every other class, and an unattributed failure, keep the previous conservative reading. This is
-/// the single-error twin of [`classify_pair`]'s judgement on a TXT+CNAME pair.
+/// The mapping is the single-error twin of [`classify_pair`]'s judgement on a TXT+CNAME pair:
+/// only an explicit provider refusal (`DNS_THROTTLE`, a real 429/5xx) is `Rejected`; a lookup that
+/// ran out of its measured deadline is `TimedOut`; everything else — `DNS_NAME`, `DNS_ENDPOINT`
+/// (wrong API shape or dead ladder), local-resource failures, unclassified decode errors — says
+/// nothing about network load and is `Unrelated`.
 fn failure_outcome_for_governor(err: Option<&str>) -> crate::dns_governor::DnsOutcome {
     match err {
-        Some(msg) if msg.contains("DNS_NAME") => crate::dns_governor::DnsOutcome::Unrelated,
-        _ => crate::dns_governor::DnsOutcome::Rejected,
+        Some(msg) if msg.contains("DNS_THROTTLE") => crate::dns_governor::DnsOutcome::Rejected,
+        Some(msg) if msg.contains("DNS_TIMEOUT") => crate::dns_governor::DnsOutcome::TimedOut,
+        _ => crate::dns_governor::DnsOutcome::Unrelated,
     }
 }
 
@@ -756,7 +783,11 @@ fn governor_view(
 /// `DNS_NAME` must be the ONLY class present: a message that also carries `DNS_THROTTLE` or
 /// `DNS_ENDPOINT` is not a clean verdict about the name, so it is refused rather than guessed at.
 fn may_memoize_failure(msg: &str) -> bool {
-    msg.contains("DNS_NAME") && !msg.contains("DNS_THROTTLE") && !msg.contains("DNS_ENDPOINT")
+    msg.contains("DNS_NAME")
+        && !msg.contains("DNS_THROTTLE")
+        && !msg.contains("DNS_ENDPOINT")
+        && !msg.contains("DNS_TIMEOUT")
+        && !msg.contains("DNS_LOCAL")
 }
 
 /// The CNAME chain a dns-json answer section already carries, as cleaned target names.
@@ -930,9 +961,12 @@ async fn direct_txt_outcome(
     domain: &str,
     outer_ms: u64,
 ) -> DirectOutcome {
+    // Wave 1 (defect C): no shared connection permit — DNS transports are bounded by the
+    // governor alone, so a DoT/UDP exchange can no longer queue behind 30 s subprocessor
+    // fetches inside its own budget and read as a "blocked transport".
     match tokio::time::timeout(
         std::time::Duration::from_millis(outer_ms),
-        crate::http_client::with_connection_permit(resolver.txt_lookup(domain)),
+        resolver.txt_lookup(domain),
     )
     .await
     {
@@ -971,11 +1005,10 @@ async fn direct_cname_outcome(
     domain: &str,
     outer_ms: u64,
 ) -> DirectOutcome {
+    // Wave 1 (defect C): no shared connection permit — see `direct_txt_outcome`.
     match tokio::time::timeout(
         std::time::Duration::from_millis(outer_ms),
-        crate::http_client::with_connection_permit(
-            resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
-        ),
+        resolver.lookup(domain, hickory_resolver::proto::rr::RecordType::CNAME),
     )
     .await
     {
@@ -1070,7 +1103,6 @@ impl DnsServerPool {
                 }),
             dot_enabled: true,
             max_dns_retries: config.rate_limits.max_retries,
-            backoff_base_ms: config.rate_limits.backoff_base_delay_ms,
             failure_counter: None,
             name_failure_counter: None,
             doh_health: TransportHealth::default(),
@@ -1211,7 +1243,6 @@ impl DnsServerPool {
             governor: crate::dns_governor::DnsGovernor::new(crate::dns_governor::DEFAULT_MAX_LIMIT),
             dot_enabled: true,
             max_dns_retries: 3,
-            backoff_base_ms: 500,
             failure_counter: None,
             name_failure_counter: None,
             doh_health: TransportHealth::default(),
@@ -1285,11 +1316,15 @@ impl DnsServerPool {
         }
     }
 
-    /// Count a failure that the queried NAME caused: the resolver answered over a working
-    /// transport with SERVFAIL/REFUSED, so the name's own authoritative servers are at fault.
-    /// Increments the general counter too — it is still a DNS failure for the exit-3 guard — but
-    /// the separate tally lets the summary avoid telling the user to fix a network that is fine.
+    /// Count ONE logical failure that the queried NAME caused: the resolver answered over a
+    /// working transport with SERVFAIL/REFUSED, so the name's own authoritative servers are at
+    /// fault. Increments the general counter too — it is still a DNS failure for the exit-3
+    /// guard — but the separate tally lets the summary avoid telling the user to fix a network
+    /// that is fine. Wave 1: called only at negative-memo terminals (a memo hit IS the lookup's
+    /// terminal); live lookups count at their own terminal sites instead.
     fn note_name_failure(&self) {
+        crate::dns_telemetry::DNS_TELEMETRY
+            .failure_site(crate::dns_telemetry::FailureSite::NegativeMemoHit);
         self.note_throttle();
         self.note_name_attribution();
     }
@@ -1302,22 +1337,16 @@ impl DnsServerPool {
         }
     }
 
-    /// Count a classified failure that surfaced as a propagated *error message* rather than at the
-    /// choke point, keeping the two tallies consistent.
+    /// Count one LOGICAL lookup arm that ended unresolved, at its terminal (Wave 1, defect E).
     ///
-    /// Callers on this path own an explicit `&AtomicUsize` for the general count, so they bump it
-    /// directly; what they cannot see is which *kind* of failure it was. Without this, a `DNS_NAME`
-    /// error counted here would land in the general tally alone, and the summary computes
-    /// `transport_failures = general - name` — so every one of them would be reported as a degraded
-    /// local link and re-introduce the false "re-run on a stable network" advice for a domain whose
-    /// own authoritative servers are broken.
+    /// This is the scan-level `dns_failures` semantic: one increment per lookup arm that the scan
+    /// could not resolve — never one per provider attempt (those live in the per-provider tallies)
+    /// and never a re-count of the same arm at two layers. Every error counts, classified or not:
+    /// under logical counting an unclassified decode failure is still an arm the scan lost. The
+    /// name-attributed subset keeps the summary honest about whose fault the failures were —
+    /// `transport_failures = general - name` — so a broken domain is not reported as a degraded
+    /// local link.
     fn note_classified_failure(&self, msg: &str, general: &AtomicUsize) {
-        if !(msg.contains("DNS_THROTTLE")
-            || msg.contains("DNS_ENDPOINT")
-            || msg.contains("DNS_NAME"))
-        {
-            return;
-        }
         general.fetch_add(1, Ordering::Relaxed);
         crate::dns_telemetry::DNS_TELEMETRY
             .failure_site(crate::dns_telemetry::FailureSite::SettleArm);
@@ -1419,7 +1448,6 @@ impl DnsServerPool {
             governor: crate::dns_governor::DnsGovernor::pinned(1000),
             dot_enabled: false, // hermetic tests must not hit real DoT (853) servers
             max_dns_retries: 3,
-            backoff_base_ms: 1, // fast backoff so rotation tests run quickly
             failure_counter: None,
             name_failure_counter: None,
             doh_health: TransportHealth::default(),
@@ -1536,6 +1564,7 @@ impl DnsServerPool {
         domain: &str,
         server_index: usize,
         server: &DohServerConfig,
+        attempt_budget: std::time::Duration,
     ) -> Result<TxtAnswer> {
         debug!("DoH lookup for {} using {}", domain, server.name);
         let provider = crate::dns_telemetry::DNS_TELEMETRY.provider(server_index);
@@ -1546,37 +1575,39 @@ impl DnsServerPool {
         // Create DNS query in wire format
         let query_params = [("name", domain), ("type", "TXT")];
 
-        let (permit_wait, sent) = self
+        // Wave 1 (defect C): sent WITHOUT the shared connection semaphore. DNS egress is bounded
+        // by the governor's permit alone; queueing DoH behind 30 s subprocessor fetches inside its
+        // own budget is exactly what Phase 1 measured as S_wait = 0.228 with half the timeouts
+        // firing before a byte was sent.
+        let sent = self
             .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
-            .timeout(std::time::Duration::from_secs(server.timeout_secs))
-            .send_gated_timed()
+            .timeout(attempt_budget)
+            .send()
             .await;
-        provider.permit_wait.record(permit_wait);
-        crate::perf::METRICS
-            .dns_conn_permit_wait
-            .record(permit_wait);
         let http_response = match sent {
             Ok(response) => {
-                // RTT is send-to-headers with the permit wait excluded — the quantity a provider
-                // can actually be blamed for.
-                provider
-                    .rtt
-                    .record(attempt_t0.elapsed().saturating_sub(permit_wait));
+                // Send-to-headers latency of this one exchange: the provider-attributable RTT and
+                // the governor's leaf sample (defect G: never a permit lifetime, never a sleep).
+                let rtt = attempt_t0.elapsed();
+                provider.rtt.record(rtt);
+                self.governor.record_rtt(rtt);
                 response
             }
             Err(e) => {
-                // Attribute the transport-level failure to this provider (Phase-0). The
-                // before/after-send split is hypothesis C's direct measure: a timeout whose
-                // permit wait consumed the whole per-attempt budget never sent a byte.
                 if e.is_timeout() {
-                    if permit_wait >= std::time::Duration::from_secs(server.timeout_secs) {
-                        provider.timeout_before_send.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        provider.timeout_after_send.fetch_add(1, Ordering::Relaxed);
-                    }
+                    // Typed classification at the source (defect F): the class travels in the
+                    // message like every other DNS_* class, so no downstream layer ever has to
+                    // substring-match reqwest's free text again.
+                    provider.timeout_after_send.fetch_add(1, Ordering::Relaxed);
+                    return Err(anyhow::anyhow!(
+                        "DNS_TIMEOUT: DoH provider {} exceeded its {}ms attempt budget for {}",
+                        server.name,
+                        attempt_budget.as_millis(),
+                        domain
+                    ));
                 } else if e.is_connect() {
                     provider.connect_err.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -1594,19 +1625,17 @@ impl DnsServerPool {
         // GRC-367: a throttle (429) or provider 5xx MUST surface as a distinct error —
         // never be parsed into an empty answer, which the caller would otherwise mistake
         // for "this domain has no records" and report as a false-negative 0-vendor result.
+        //
+        // Wave 1 (defect E): per-ATTEMPT failures live in the per-provider tallies only; the
+        // scan-level `dns_failures` counter now counts LOGICAL lookups that end unresolved, at
+        // their terminal sites. Counting here made 4 rotations read as 4 scan failures.
         let status = http_response.status();
         if status.as_u16() == 429 || status.is_server_error() {
-            // GRC-367 (fix 1): count the throttle at the choke-point BEFORE returning, so every
-            // path that reaches a DoH TXT lookup (incl. SPF include recursion) is tracked once
-            // and for all against the exit-3 counter.
             if status.as_u16() == 429 {
                 provider.http_429.fetch_add(1, Ordering::Relaxed);
             } else {
                 provider.http_5xx.fetch_add(1, Ordering::Relaxed);
             }
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohTxtThrottle);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
                 server.name,
@@ -1622,9 +1651,6 @@ impl DnsServerPool {
         // distinct DNS_ENDPOINT class so the resilient loop rotates WITHOUT backoff.
         if !status.is_success() {
             provider.http_4xx_other.fetch_add(1, Ordering::Relaxed);
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohTxtEndpoint);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
                 server.name,
@@ -1647,9 +1673,6 @@ impl DnsServerPool {
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
                 provider.rcode_fail.fetch_add(1, Ordering::Relaxed);
-                crate::dns_telemetry::DNS_TELEMETRY
-                    .failure_site(crate::dns_telemetry::FailureSite::DohTxtName);
-                self.note_name_failure();
                 return Err(anyhow::anyhow!(
                     "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
@@ -1664,9 +1687,6 @@ impl DnsServerPool {
             // 0-record incident behind an HTTP 200. Only a body carrying the
             // RCODE (or actual records) earns authoritative-empty trust.
             provider.non_dnsjson_2xx.fetch_add(1, Ordering::Relaxed);
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohTxtNonJson);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_ENDPOINT: DoH provider {} returned a 2xx body without Status or Answer for {} — not a DNS JSON answer",
                 server.name,
@@ -1714,6 +1734,7 @@ impl DnsServerPool {
         _domain: &str,
         _server_index: usize,
         _server: &DohServerConfig,
+        _attempt_budget: std::time::Duration,
     ) -> Result<TxtAnswer> {
         Ok(TxtAnswer::default())
     }
@@ -1725,6 +1746,7 @@ impl DnsServerPool {
         domain: &str,
         server_index: usize,
         server: &DohServerConfig,
+        attempt_budget: std::time::Duration,
     ) -> Result<Vec<String>> {
         debug!("DoH CNAME lookup for {} using {}", domain, server.name);
         let provider = crate::dns_telemetry::DNS_TELEMETRY.provider(server_index);
@@ -1734,32 +1756,32 @@ impl DnsServerPool {
 
         let query_params = [("name", domain), ("type", "CNAME")];
 
-        let (permit_wait, sent) = self
+        // Wave 1 (defect C): no shared connection semaphore — see the TXT twin.
+        let sent = self
             .client
             .get(&server.url)
             .query(&query_params)
             .header("Accept", "application/dns-json")
-            .timeout(std::time::Duration::from_secs(server.timeout_secs))
-            .send_gated_timed()
+            .timeout(attempt_budget)
+            .send()
             .await;
-        provider.permit_wait.record(permit_wait);
-        crate::perf::METRICS
-            .dns_conn_permit_wait
-            .record(permit_wait);
         let http_response = match sent {
             Ok(response) => {
-                provider
-                    .rtt
-                    .record(attempt_t0.elapsed().saturating_sub(permit_wait));
+                let rtt = attempt_t0.elapsed();
+                provider.rtt.record(rtt);
+                self.governor.record_rtt(rtt);
                 response
             }
             Err(e) => {
                 if e.is_timeout() {
-                    if permit_wait >= std::time::Duration::from_secs(server.timeout_secs) {
-                        provider.timeout_before_send.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        provider.timeout_after_send.fetch_add(1, Ordering::Relaxed);
-                    }
+                    // Typed classification at the source (defect F) — see the TXT twin.
+                    provider.timeout_after_send.fetch_add(1, Ordering::Relaxed);
+                    return Err(anyhow::anyhow!(
+                        "DNS_TIMEOUT: DoH provider {} exceeded its {}ms attempt budget for {}",
+                        server.name,
+                        attempt_budget.as_millis(),
+                        domain
+                    ));
                 } else if e.is_connect() {
                     provider.connect_err.fetch_add(1, Ordering::Relaxed);
                 } else {
@@ -1775,18 +1797,14 @@ impl DnsServerPool {
             }
         };
         // GRC-367: surface DoH throttle/5xx as a distinct error, never an empty answer.
+        // Wave 1 (defect E): per-attempt tallies only here — see the TXT twin.
         let status = http_response.status();
         if status.as_u16() == 429 || status.is_server_error() {
-            // GRC-367 (fix 1): choke-point throttle count for the CNAME path (mirrors the TXT
-            // path) — increment before returning so it is visible to the exit-3 guard.
             if status.as_u16() == 429 {
                 provider.http_429.fetch_add(1, Ordering::Relaxed);
             } else {
                 provider.http_5xx.fetch_add(1, Ordering::Relaxed);
             }
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohCnameThrottle);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_THROTTLE: DoH provider {} returned HTTP {} for {}",
                 server.name,
@@ -1798,9 +1816,6 @@ impl DnsServerPool {
         // never an empty answer (mirrors the TXT path; see comment there).
         if !status.is_success() {
             provider.http_4xx_other.fetch_add(1, Ordering::Relaxed);
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohCnameEndpoint);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_ENDPOINT: DoH provider {} returned HTTP {} for {} — endpoint does not serve the JSON DoH API or rejected the query",
                 server.name,
@@ -1821,9 +1836,6 @@ impl DnsServerPool {
         if let Some(rcode) = response["Status"].as_u64() {
             if rcode != 0 && rcode != 3 {
                 provider.rcode_fail.fetch_add(1, Ordering::Relaxed);
-                crate::dns_telemetry::DNS_TELEMETRY
-                    .failure_site(crate::dns_telemetry::FailureSite::DohCnameName);
-                self.note_name_failure();
                 return Err(anyhow::anyhow!(
                     "DNS_NAME: DoH provider {} returned DNS RCODE {} for {}",
                     server.name,
@@ -1834,9 +1846,6 @@ impl DnsServerPool {
         } else if response["Answer"].as_array().is_none() {
             // No Status and no Answer: not a dns-json answer (see TXT path).
             provider.non_dnsjson_2xx.fetch_add(1, Ordering::Relaxed);
-            crate::dns_telemetry::DNS_TELEMETRY
-                .failure_site(crate::dns_telemetry::FailureSite::DohCnameNonJson);
-            self.note_throttle();
             return Err(anyhow::anyhow!(
                 "DNS_ENDPOINT: DoH provider {} returned a 2xx body without Status or Answer for {} — not a DNS JSON answer",
                 server.name,
@@ -1875,6 +1884,7 @@ impl DnsServerPool {
         _domain: &str,
         _server_index: usize,
         _server: &DohServerConfig,
+        _attempt_budget: std::time::Duration,
     ) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -1891,38 +1901,58 @@ impl DnsServerPool {
             .max(1)
     }
 
-    /// GRC-367 (fix 5): in-race backoff between throttled DoH rotations.
+    /// The per-attempt budget for attempt `i` of `attempts`, given the rotation's `deadline`.
     ///
-    /// The TXT/CNAME race wraps the resilient lookup in a 3-second `tokio::time::timeout`.
-    /// The original `backoff_base_ms << i` used the production base of 1000ms, so the very
-    /// first 1000ms + second 2000ms sleep blew the 3s budget and only ~1 rotation could fit
-    /// — defeating the whole point of rotation under throttle. Here we derive a short in-race
-    /// base (the configured base, capped at 200ms); use an OVERFLOW-SAFE shift (`checked_shl`
-    /// saturating to `u64::MAX`) so a provider count >= 64 can never panic/wrap; and cap each
-    /// individual sleep at 500ms. With a 200ms base this yields 200ms, 400ms, 500ms(cap)…,
-    /// letting 2-3 rotations comfortably complete inside the 3s race window.
+    /// The loop owns its deadline (Wave 1, defect A): each attempt gets a fair slice of what
+    /// REMAINS, floored by the governor's measured RTO — so an attempt is never granted less time
+    /// than a real answer plausibly takes on this network, and rotation always completes inside
+    /// [`DOH_LOOKUP_DEADLINE`]. Returns `None` when the deadline is exhausted (stop rotating).
+    /// The per-server configured timeout stays as an upper cap, preserving config semantics.
+    ///
+    /// COLD START: until the governor has a measured RTO, the attempt gets the FULL remaining
+    /// deadline, not a slice. Slicing before any RTT evidence exists locks a slow-but-healthy
+    /// network out permanently: with a 3 s deadline over 4 attempts every attempt gets 750 ms, a
+    /// network whose real answers take ~1.2 s never completes one, and — because no success ever
+    /// lands a sample — the RTO that would widen the budget can never be learned. The contention
+    /// gate's P1 profile (all providers healthy at 0.9–1.5 s) measured exactly that: 100% loss,
+    /// a false DoH demotion, and 42 s parked at the governor floor. Not cancelling an in-flight
+    /// attempt before the path's RTT is known is RFC 6298's own §2.1 posture (a deliberately
+    /// generous pre-measurement RTO); rotation-past-a-hang begins once evidence exists, which on
+    /// a concurrent scan is within the first wave of lookups.
     #[cfg(not(coverage))]
-    fn in_race_backoff(&self, attempt_index: usize) -> std::time::Duration {
-        const IN_RACE_BASE_CAP_MS: u64 = 200;
-        const IN_RACE_DELAY_CAP_MS: u64 = 500;
-        let base = self.backoff_base_ms.min(IN_RACE_BASE_CAP_MS);
-        // Overflow-safe: shl that would overflow saturates to u64::MAX, then saturating_mul
-        // keeps the multiply in-range; finally clamp to the per-sleep cap.
-        let multiplier = 1u64.checked_shl(attempt_index as u32).unwrap_or(u64::MAX);
-        let delay = base.saturating_mul(multiplier).min(IN_RACE_DELAY_CAP_MS);
-        std::time::Duration::from_millis(delay)
+    fn attempt_budget(
+        &self,
+        deadline: std::time::Instant,
+        i: usize,
+        attempts: usize,
+        server_cap_secs: u64,
+    ) -> Option<std::time::Duration> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let attempts_left = (attempts.saturating_sub(i)).max(1) as u32;
+        let fair = remaining / attempts_left;
+        let budget = self
+            .governor
+            .rto()
+            .map_or(remaining, |rto| rto.max(fair))
+            .min(remaining)
+            .min(std::time::Duration::from_secs(server_cap_secs.max(1)));
+        crate::perf::METRICS.dns_doh_attempt_budget.record(budget);
+        Some(budget)
     }
 
-    /// GRC-367: DoH TXT lookup with throttle-aware retry + provider rotation.
-    /// On a throttle (429/5xx) it backs off and rotates to the next DoH provider, up to
-    /// `max_dns_retries` times, instead of giving up after a single provider. A non-throttle
-    /// error (parse/transport) stops retrying immediately. This is what makes a 429 recover
-    /// (rotate to a healthy provider) instead of collapsing into a false-negative empty result.
+    /// GRC-367 + Wave 1: DoH TXT lookup with deadline-owned provider rotation. The loop slices
+    /// [`DOH_LOOKUP_DEADLINE`] across its remaining attempts (see [`Self::attempt_budget`]) and
+    /// rotates immediately past ANY failing provider — no sleeps: a 429 from provider N says
+    /// nothing about provider N+1, and Phase 1 observed zero real 429s while rotation-killing
+    /// timeouts were epidemic. A surviving failure propagates with its class intact.
     #[cfg(not(coverage))]
     async fn doh_txt_lookup_resilient(&self, domain: &str) -> Result<TxtAnswer> {
         let attempts = self.resilient_attempts();
+        let deadline = std::time::Instant::now() + DOH_LOOKUP_DEADLINE;
         let mut last_err: Option<anyhow::Error> = None;
-        let mut slept = false;
         for i in 0..attempts {
             // DoH-only configs are legal; so are DNS-only ones — never index an
             // empty pool (panic), surface a plain error the callers treat as a
@@ -1935,16 +1965,18 @@ impl DnsServerPool {
                     domain
                 ));
             };
+            let Some(budget) = self.attempt_budget(deadline, i, attempts, server.timeout_secs)
+            else {
+                break; // deadline exhausted — surface the last classified failure below
+            };
             let mut probe = crate::dns_telemetry::AttemptProbe::new(i);
-            match self.doh_txt_lookup(domain, server_index, &server).await {
+            match self
+                .doh_txt_lookup(domain, server_index, &server, budget)
+                .await
+            {
                 Ok(records) => {
                     probe.disarm();
                     crate::dns_telemetry::DNS_TELEMETRY.ok_at_attempt(i);
-                    if slept {
-                        crate::dns_telemetry::DNS_TELEMETRY
-                            .answered_with_sleep
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
                     return Ok(records);
                 }
                 Err(e) => {
@@ -1954,24 +1986,22 @@ impl DnsServerPool {
                     if Self::is_local_resource_error(&e) {
                         // EMFILE / local FD exhaustion is not a provider fault: the next provider,
                         // opened from this same exhausted process, would fail identically, and each
-                        // rotation burns another descriptor against the same wall — the feedback
-                        // loop that turned a depth-3 scan's FD exhaustion into tens of thousands of
-                        // counted "DNS failures". Count it once (so the exit-3 guard still sees a
-                        // failure) and stop rotating.
-                        crate::dns_telemetry::DNS_TELEMETRY.failure_site(
-                            crate::dns_telemetry::FailureSite::ResilientLocalResource,
-                        );
-                        self.note_throttle();
-                        last_err = Some(e);
+                        // rotation burns another descriptor against the same wall. Stop rotating;
+                        // the class marker keeps the terminal counting honest about whose fault
+                        // this was (ours, locally — not the network's and not the name's). The
+                        // per-provider `local_resource_err` tally at the choke point is the
+                        // occurrence record; `failure_sites` tracks only counter increments.
+                        last_err = Some(anyhow::anyhow!("DNS_LOCAL: {:#}", e));
                         break;
                     }
                     // A DNS_NAME error means the provider ANSWERED — an HTTPS response carrying a
                     // well-formed dns-json body that happens to report SERVFAIL/REFUSED for this
-                    // name. That is positive evidence the transport works, so it clears the streak
-                    // rather than advancing it. Counting it as a transport failure is how one
-                    // pathological domain (which fails identically on every provider) used to
-                    // satisfy the "all providers failed" condition and demote healthy DoH.
-                    if msg.contains("DNS_NAME") {
+                    // name. A DNS_THROTTLE (429/5xx) is equally positive transport evidence: the
+                    // provider delivered an HTTP response over a working path and chose to shed
+                    // the query. Both clear the streak (Wave 1, defect B — Phase 1 measured 100%
+                    // of demotions false while every probe was healthy). Only genuine transport
+                    // silence/refusal advances the breaker.
+                    if msg.contains("DNS_NAME") || msg.contains("DNS_THROTTLE") {
                         if self.doh_health.record_success() {
                             note_transport_recovered(crate::dns_telemetry::Tier::Doh);
                         }
@@ -1986,42 +2016,20 @@ impl DnsServerPool {
                             self.doh_servers.len(),
                         );
                     }
-                    let throttled = msg.contains("DNS_THROTTLE");
-                    // DNS_NAME joins DNS_ENDPOINT here only for the purposes of "already counted":
-                    // both call `note_throttle` at their choke point, so counting again would
-                    // double-count. They differ entirely in transport-health treatment above.
-                    let already_counted = msg.contains("DNS_ENDPOINT") || msg.contains("DNS_NAME");
-                    if !throttled && !already_counted {
-                        // Transport/parse failures (connect refused, TLS error,
-                        // 200-with-HTML body) are provider failures too — count
-                        // them for the exit-3 guard. Classed errors were already
-                        // counted at the doh_*_lookup choke point.
-                        crate::dns_telemetry::DNS_TELEMETRY
-                            .failure_site(crate::dns_telemetry::FailureSite::ResilientTransport);
-                        self.note_throttle();
-                    }
                     last_err = Some(e);
-                    if i + 1 < attempts {
-                        if throttled {
-                            // fix 5: short, overflow-safe backoff so 2-3 rotations fit the 3s race.
-                            let pause = self.in_race_backoff(i);
-                            let mut sleep_probe = crate::dns_telemetry::AttemptProbe::new(i);
-                            sleep_probe.phase = crate::dns_telemetry::AttemptPhase::BackoffSleep;
-                            tokio::time::sleep(pause).await;
-                            sleep_probe.disarm();
-                            crate::perf::METRICS.dns_backoff_sleep.record(pause);
-                            slept = true;
-                        }
-                        // Rotate past ANY failing provider — broken (4xx/RCODE),
-                        // unreachable (transport), or misbehaving (parse) endpoints
-                        // are not busy; only a throttle earns a backoff first.
-                        continue;
-                    }
-                    break;
+                    // Rotate past ANY failing provider — broken (4xx/RCODE), unreachable
+                    // (transport), throttling (429), or misbehaving (parse) endpoints: the next
+                    // provider is independent, and the deadline is the only budget that matters.
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("DoH TXT lookup failed for {}", domain)))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "DNS_TIMEOUT: DoH TXT rotation deadline ({}ms) exhausted for {}",
+                DOH_LOOKUP_DEADLINE.as_millis(),
+                domain
+            )
+        }))
     }
 
     #[cfg(coverage)]
@@ -2057,21 +2065,15 @@ impl DnsServerPool {
         msg.contains("Too many open files") || msg.contains("os error 24")
     }
 
-    /// GRC-367 (fix 2): DoH CNAME lookup with throttle-aware retry + provider rotation,
-    /// mirroring `doh_txt_lookup_resilient`. On a throttle (429/5xx) it backs off (using the
-    /// same short, overflow-safe `in_race_backoff`) and rotates to the next DoH provider,
-    /// up to `max_dns_retries` times. A non-throttle error stops retrying immediately.
-    ///
-    /// This lets the CNAME path RECOVER from a single throttling provider instead of the old
-    /// `get_cname_records_with_rate_limit` behavior of collapsing any failure into `Ok(empty)`
-    /// — which made a throttle indistinguishable from a genuine "this domain has no CNAME".
-    /// On a genuine no-CNAME the inner lookup returns `Ok(vec![])`, which we propagate as-is;
-    /// only an all-providers-throttle surfaces as a `DNS_THROTTLE` error.
+    /// GRC-367 (fix 2) + Wave 1: DoH CNAME lookup with deadline-owned provider rotation,
+    /// mirroring [`Self::doh_txt_lookup_resilient`] — same deadline slicing, same no-sleep
+    /// rotation, same class-marker propagation. On a genuine no-CNAME the inner lookup returns
+    /// `Ok(vec![])`, which we propagate as-is.
     #[cfg(not(coverage))]
     async fn doh_cname_lookup_resilient(&self, domain: &str) -> Result<Vec<String>> {
         let attempts = self.resilient_attempts();
+        let deadline = std::time::Instant::now() + DOH_LOOKUP_DEADLINE;
         let mut last_err: Option<anyhow::Error> = None;
-        let mut slept = false;
         for i in 0..attempts {
             // Mirror the TXT path: never index an empty DoH pool.
             let Some((server_index, server)) =
@@ -2082,16 +2084,18 @@ impl DnsServerPool {
                     domain
                 ));
             };
+            let Some(budget) = self.attempt_budget(deadline, i, attempts, server.timeout_secs)
+            else {
+                break; // deadline exhausted — surface the last classified failure below
+            };
             let mut probe = crate::dns_telemetry::AttemptProbe::new(i);
-            match self.doh_cname_lookup(domain, server_index, &server).await {
+            match self
+                .doh_cname_lookup(domain, server_index, &server, budget)
+                .await
+            {
                 Ok(records) => {
                     probe.disarm();
                     crate::dns_telemetry::DNS_TELEMETRY.ok_at_attempt(i);
-                    if slept {
-                        crate::dns_telemetry::DNS_TELEMETRY
-                            .answered_with_sleep
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
                     return Ok(records);
                 }
                 Err(e) => {
@@ -2099,22 +2103,15 @@ impl DnsServerPool {
                     let msg = e.to_string();
                     self.log_doh_failure(&server.name, &msg);
                     if Self::is_local_resource_error(&e) {
-                        // Local FD exhaustion, not a provider fault — count once, stop rotating
+                        // Local FD exhaustion, not a provider fault — stop rotating, classify
                         // (see the TXT path for the full rationale).
-                        crate::dns_telemetry::DNS_TELEMETRY.failure_site(
-                            crate::dns_telemetry::FailureSite::ResilientLocalResource,
-                        );
-                        self.note_throttle();
-                        last_err = Some(e);
+                        last_err = Some(anyhow::anyhow!("DNS_LOCAL: {:#}", e));
                         break;
                     }
-                    // A DNS_NAME error means the provider ANSWERED — an HTTPS response carrying a
-                    // well-formed dns-json body that happens to report SERVFAIL/REFUSED for this
-                    // name. That is positive evidence the transport works, so it clears the streak
-                    // rather than advancing it. Counting it as a transport failure is how one
-                    // pathological domain (which fails identically on every provider) used to
-                    // satisfy the "all providers failed" condition and demote healthy DoH.
-                    if msg.contains("DNS_NAME") {
+                    // DNS_NAME and DNS_THROTTLE are both positive transport evidence — the
+                    // provider delivered an HTTP response — so both clear the breaker streak
+                    // (Wave 1, defect B; see the TXT twin for the full rationale).
+                    if msg.contains("DNS_NAME") || msg.contains("DNS_THROTTLE") {
                         if self.doh_health.record_success() {
                             note_transport_recovered(crate::dns_telemetry::Tier::Doh);
                         }
@@ -2129,37 +2126,18 @@ impl DnsServerPool {
                             self.doh_servers.len(),
                         );
                     }
-                    let throttled = msg.contains("DNS_THROTTLE");
-                    // DNS_NAME joins DNS_ENDPOINT here only for the purposes of "already counted":
-                    // both call `note_throttle` at their choke point, so counting again would
-                    // double-count. They differ entirely in transport-health treatment above.
-                    let already_counted = msg.contains("DNS_ENDPOINT") || msg.contains("DNS_NAME");
-                    if !throttled && !already_counted {
-                        // Count transport/parse provider failures (see TXT path).
-                        crate::dns_telemetry::DNS_TELEMETRY
-                            .failure_site(crate::dns_telemetry::FailureSite::ResilientTransport);
-                        self.note_throttle();
-                    }
                     last_err = Some(e);
-                    if i + 1 < attempts {
-                        if throttled {
-                            // fix 5: same short, overflow-safe backoff as the TXT path.
-                            let pause = self.in_race_backoff(i);
-                            let mut sleep_probe = crate::dns_telemetry::AttemptProbe::new(i);
-                            sleep_probe.phase = crate::dns_telemetry::AttemptPhase::BackoffSleep;
-                            tokio::time::sleep(pause).await;
-                            sleep_probe.disarm();
-                            crate::perf::METRICS.dns_backoff_sleep.record(pause);
-                            slept = true;
-                        }
-                        // Rotate past ANY failing provider (see TXT path).
-                        continue;
-                    }
-                    break;
+                    // Rotate past ANY failing provider (see TXT path) — no sleeps.
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("DoH CNAME lookup failed for {}", domain)))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "DNS_TIMEOUT: DoH CNAME rotation deadline ({}ms) exhausted for {}",
+                DOH_LOOKUP_DEADLINE.as_millis(),
+                domain
+            )
+        }))
     }
 
     #[cfg(coverage)]
@@ -2403,11 +2381,10 @@ impl DnsServerPool {
                 .fetch_add(1, Ordering::Relaxed);
             crate::perf::METRICS.dns_doh_skipped_breaker.hit();
         } else {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                self.doh_txt_lookup_resilient(domain),
-            )
-            .await
+            // The resilient loop OWNS its 3 s deadline (Wave 1, defect A); this outer guard is a
+            // hang backstop only and is expected never to fire.
+            match tokio::time::timeout(DOH_WRAPPER_BACKSTOP, self.doh_txt_lookup_resilient(domain))
+                .await
             {
                 // Any authoritative answer — including a genuine empty (NOERROR/NXDOMAIN with
                 // no records) — is final: skip the fallback ladder entirely. On the high-volume
@@ -2472,11 +2449,11 @@ impl DnsServerPool {
                     }
                 }
                 Err(_elapsed) => {
-                    // The per-provider failures were already recorded inside the resilient
-                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
-                    // again here would double-count and could trip the breaker on a single
-                    // provider's streak. Just report the transition if this failure completed it.
+                    // The backstop fired: the self-deadlining loop hung, which is a defect by
+                    // definition — count it loudly. (Per-provider failures were already recorded
+                    // inside the rotation; recording here would double-count the breaker.)
                     crate::perf::METRICS.dns_wrapper_timeout.hit();
+                    crate::perf::METRICS.dns_deadline_backstop_fired.hit();
                     if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             crate::dns_telemetry::Tier::Doh,
@@ -2705,8 +2682,9 @@ impl DnsServerPool {
                 .fetch_add(1, Ordering::Relaxed);
             crate::perf::METRICS.dns_doh_skipped_breaker.hit();
         } else {
+            // Hang backstop only — the resilient loop owns its deadline (see fast_txt_lookup).
             match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                DOH_WRAPPER_BACKSTOP,
                 self.doh_cname_lookup_resilient(domain),
             )
             .await
@@ -2758,11 +2736,10 @@ impl DnsServerPool {
                     }
                 }
                 Err(_elapsed) => {
-                    // The per-provider failures were already recorded inside the resilient
-                    // rotation, which is the only layer that knows WHICH upstream failed. Recording
-                    // again here would double-count and could trip the breaker on a single
-                    // provider's streak. Just report the transition if this failure completed it.
+                    // Backstop fired — a self-deadlining loop hung; count it loudly (see the
+                    // TXT twin for why nothing else is recorded here).
                     crate::perf::METRICS.dns_wrapper_timeout.hit();
+                    crate::perf::METRICS.dns_deadline_backstop_fired.hit();
                     if self.doh_health.just_went_down(self.doh_servers.len()) {
                         warn_transport_unavailable(
                             crate::dns_telemetry::Tier::Doh,
@@ -2970,16 +2947,12 @@ pub async fn get_txt_records_with_rate_limit(
                 crate::dns_telemetry::LookupPath::RootTxt,
                 crate::dns_telemetry::TerminalStage::MemoNegHit,
             );
+            // ONE logical name failure — `note_name_failure` bumps the general counter (in
+            // production the same atomic as `dns_failure_counter`) plus the name-attributed
+            // tally. The second `counter.fetch_add` that used to sit here double-counted every
+            // negative-memo hit as an additional TRANSPORT failure (Wave 1, defect E — measured
+            // by the now-retired RootNegativeMemoExtra site before it was removed).
             dns_pool.note_name_failure();
-            if let Some(counter) = dns_failure_counter {
-                // Phase-0 (defect E): in production this counter is the SAME atomic
-                // `note_name_failure()` just bumped (app.rs wires both to the logger), so this
-                // second increment double-counts a pure name failure as a transport failure in
-                // the "DNS degraded on N" derivation. Measured here, fixed in Wave 1.
-                crate::dns_telemetry::DNS_TELEMETRY
-                    .failure_site(crate::dns_telemetry::FailureSite::RootNegativeMemoExtra);
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
             return Ok(vec![]);
         }
         None => {}
@@ -3094,9 +3067,10 @@ pub async fn get_txt_records_with_rate_limit(
         }
     };
 
-    // Race both with a 3s overall timeout
+    // Race both arms. Each arm is self-bounding (the DoH rotation owns its 3 s deadline; the UDP
+    // arm carries a 2 s budget), so the outer guard is a hang backstop only (Wave 1, defect A).
     let race_result = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        DOH_WRAPPER_BACKSTOP,
         async {
             tokio::pin!(doh_fut);
             tokio::pin!(dns_fut);
@@ -3145,6 +3119,9 @@ pub async fn get_txt_records_with_rate_limit(
     crate::perf::METRICS
         .dns_permit_held
         .record(permit.elapsed());
+    if race_result.is_err() {
+        crate::perf::METRICS.dns_deadline_backstop_fired.hit();
+    }
     permit.complete(match &race_result {
         Ok(RootRaceOutcome::Records(_)) => crate::dns_governor::DnsOutcome::Answered,
         Ok(RootRaceOutcome::Failed(msg)) => failure_outcome_for_governor(msg.as_deref()),
@@ -3177,11 +3154,27 @@ pub async fn get_txt_records_with_rate_limit(
     // error that surfaces as the headline failure. The DoH arm — which has no such
     // limitation — already had its turn in the race above, so skip the doomed hickory
     // fallback and its scary warning rather than attempt a lookup guaranteed to fail.
+    // The lookup still ended UNRESOLVED, so it is counted at this terminal (Wave 1,
+    // defect E — this used to be a silent, uncounted empty), and a clean DNS_NAME
+    // verdict is still memoized so referencing domains stop re-paying the rotation.
     if !hickory_resolvable(domain) {
         debug!(
             "Skipping hickory system-resolver fallback for {} (label not IDNA-parseable); DoH arm already attempted",
             domain
         );
+        if let Some(counter) = dns_failure_counter {
+            crate::dns_telemetry::DNS_TELEMETRY
+                .failure_site(crate::dns_telemetry::FailureSite::RootAllFailed);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(msg) = doh_failure.as_deref() {
+            if msg.contains("DNS_NAME") {
+                dns_pool.note_name_attribution();
+            }
+            dns_pool
+                .remember_name_failure(RecordKind::Txt, domain, msg)
+                .await;
+        }
         return Ok(vec![]);
     }
 
@@ -3238,6 +3231,9 @@ pub async fn get_txt_records_with_rate_limit(
             // lives in `remember_name_failure`, so a throttle, a broken endpoint or a timeout
             // reaching here writes nothing: an outage must never memoize as absence.
             if let Some(msg) = doh_failure.as_deref() {
+                if msg.contains("DNS_NAME") {
+                    dns_pool.note_name_attribution();
+                }
                 dns_pool
                     .remember_name_failure(RecordKind::Txt, domain, msg)
                     .await;
@@ -3272,7 +3268,9 @@ async fn try_system_dns_resolver(domain: &str) -> Result<Vec<String>> {
     } else {
         format!("{}.", domain)
     };
-    let txt_lookup = crate::http_client::with_connection_permit(resolver.txt_lookup(fqdn)).await?;
+    // Wave 1 (defect C): no shared connection permit — the system-resolver rescue must not
+    // queue behind unrelated HTTP work; its own outer budget bounds it.
+    let txt_lookup = resolver.txt_lookup(fqdn).await?;
     // 0.26: iterate answer Records and render each record's RData.
     let records: Vec<String> = txt_lookup
         .answers()
@@ -3366,30 +3364,23 @@ pub async fn get_cname_records_with_rate_limit(
 
     debug!("Querying CNAME records for domain: {}", domain);
 
-    // GRC-367 (fix 2): use the resilient (rotate + backoff) CNAME lookup so a single
-    // throttling provider is rotated past instead of collapsing every failure into
-    // `Ok(empty)`. The race is bounded by a 3s timeout — matching the TXT path — which the
-    // short in-race backoff (fix 5) is sized to allow 2-3 rotations within.
+    // GRC-367 (fix 2) + Wave 1: the resilient CNAME lookup owns its 3 s rotation deadline; the
+    // outer guard is a hang backstop only, expected never to fire.
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
+        DOH_WRAPPER_BACKSTOP,
         dns_pool.doh_cname_lookup_resilient(domain),
     )
     .await;
 
-    // Report to the adaptive controller before interpreting the result. A throttle (429/5xx across
-    // every provider) is congestion; the overall timeout is congestion; a parse/transport error is
-    // a property of the *name*, not the network, so it must not throttle a healthy link.
+    // Report to the adaptive controller before interpreting the result, using the same class →
+    // outcome mapping as every other path: only a real provider refusal is `Rejected`, a deadline
+    // exhaustion is `TimedOut`, and name/endpoint/local failures say nothing about load.
     crate::perf::METRICS
         .dns_permit_held
         .record(permit.elapsed());
     permit.complete(match &outcome {
         Ok(Ok(_)) => crate::dns_governor::DnsOutcome::Answered,
-        Ok(Err(e))
-            if e.to_string().contains("DNS_THROTTLE") || e.to_string().contains("DNS_ENDPOINT") =>
-        {
-            crate::dns_governor::DnsOutcome::Rejected
-        }
-        Ok(Err(_)) => crate::dns_governor::DnsOutcome::Unrelated,
+        Ok(Err(e)) => failure_outcome_for_governor(Some(&e.to_string())),
         Err(_) => crate::dns_governor::DnsOutcome::TimedOut,
     });
 
@@ -3432,26 +3423,36 @@ pub async fn get_cname_records_with_rate_limit(
             }
             Ok(vec![])
         }
-        // Non-throttle error (parse/transport) or overall timeout: not a throttle, treat as a
-        // normal no-CNAME outcome (unchanged from prior behavior for these cases).
+        // Non-throttle failure (DNS_NAME / DNS_TIMEOUT / DNS_LOCAL / parse) or the hang backstop:
+        // the lookup ended UNRESOLVED, so it is counted — exactly once, at this terminal — before
+        // degrading to an empty result so analysis continues. This closes the last silent-empty in
+        // the DNS layer (Wave 1, defect E: the old arm returned `Ok(vec![])` with no failure
+        // counted anywhere).
         other => {
-            // Phase-0 (defect E visibility): a wrapper timeout lands here and returns `Ok(vec![])`
-            // with no failure counted anywhere — the one remaining silent-empty in the DNS layer.
-            // Stamped so its magnitude is measurable before Wave 1 closes it.
             if other.is_err() {
                 crate::perf::METRICS.dns_wrapper_timeout.hit();
+                crate::perf::METRICS.dns_deadline_backstop_fired.hit();
                 crate::dns_telemetry::DNS_TELEMETRY.terminal(
                     crate::dns_telemetry::LookupPath::RootCname,
                     crate::dns_telemetry::TerminalStage::WrapperTimeoutSilentEmpty,
                 );
+            }
+            if let Some(counter) = dns_failure_counter {
+                crate::dns_telemetry::DNS_TELEMETRY
+                    .failure_site(crate::dns_telemetry::FailureSite::CnameUnresolvedOther);
+                counter.fetch_add(1, Ordering::Relaxed);
             }
             // A clean `DNS_NAME` verdict is the one failure here that is a durable fact about the
             // NAME rather than about our reach, so it is worth remembering — the same broken name
             // referenced by many domains then costs one rotation instead of one per referrer. The
             // gate in `remember_name_failure` refuses every other class, timeouts included.
             if let Ok(Err(e)) = &other {
+                let msg = e.to_string();
+                if msg.contains("DNS_NAME") {
+                    dns_pool.note_name_attribution();
+                }
                 dns_pool
-                    .remember_name_failure(RecordKind::Cname, domain, &e.to_string())
+                    .remember_name_failure(RecordKind::Cname, domain, &msg)
                     .await;
             }
             Ok(vec![])
@@ -4525,7 +4526,12 @@ mod tests {
     }
 
     /// The single-error twin of the pair rule, for the root TXT race. `.ok()` used to erase the
-    /// class here, so every SERVFAIL name cost the whole scan 30% of its concurrency.
+    /// class here, so every SERVFAIL name cost the whole scan 30% of its concurrency. Wave 1
+    /// narrowed what counts as congestion to what actually IS congestion evidence: an explicit
+    /// provider refusal (`DNS_THROTTLE`) or a measured-deadline exhaustion (`DNS_TIMEOUT`). A
+    /// broken endpoint, a dead ladder, and an unclassified decode error say nothing about load —
+    /// reading them as refusals is what parked the governor at its floor for 61% of the Phase-1
+    /// baseline (21,139 "rejections" against zero observed 429s).
     #[rstest]
     #[case::name_failure(
         Some("DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example"),
@@ -4535,15 +4541,27 @@ mod tests {
         Some("DNS_THROTTLE: DoH provider X returned HTTP 429 for a.example"),
         crate::dns_governor::DnsOutcome::Rejected
     )]
+    #[case::deadline_exhausted(
+        Some("DNS_TIMEOUT: DoH TXT rotation deadline (3000ms) exhausted for a.example"),
+        crate::dns_governor::DnsOutcome::TimedOut
+    )]
     #[case::broken_endpoint(
         Some("DNS_ENDPOINT: DoH provider X returned HTTP 400 for a.example"),
-        crate::dns_governor::DnsOutcome::Rejected
+        crate::dns_governor::DnsOutcome::Unrelated
+    )]
+    #[case::dead_ladder(
+        Some("DNS_ENDPOINT: no DNS transport could resolve TXT for a.example"),
+        crate::dns_governor::DnsOutcome::Unrelated
+    )]
+    #[case::local_resource(
+        Some("DNS_LOCAL: error sending request: Too many open files (os error 24)"),
+        crate::dns_governor::DnsOutcome::Unrelated
     )]
     #[case::unclassified(
         Some("no DoH servers configured for TXT lookup of a.example"),
-        crate::dns_governor::DnsOutcome::Rejected
+        crate::dns_governor::DnsOutcome::Unrelated
     )]
-    #[case::no_class_at_all(None, crate::dns_governor::DnsOutcome::Rejected)]
+    #[case::no_class_at_all(None, crate::dns_governor::DnsOutcome::Unrelated)]
     fn governor_verdict_turns_on_the_failure_class(
         #[case] err: Option<&str>,
         #[case] expected: crate::dns_governor::DnsOutcome,
@@ -6284,7 +6302,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_txt_lookup("example.com", 0, doh_server)
+            .doh_txt_lookup(
+                "example.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap()
             .txt;
@@ -6324,7 +6347,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_txt_lookup("multi.com", 0, doh_server)
+            .doh_txt_lookup(
+                "multi.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap()
             .txt;
@@ -6355,7 +6383,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_txt_lookup("empty.com", 0, doh_server)
+            .doh_txt_lookup(
+                "empty.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap()
             .txt;
@@ -6394,7 +6427,10 @@ mod tests {
 
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
-        let answer = pool.doh_txt_lookup("mix.com", 0, doh_server).await.unwrap();
+        let answer = pool
+            .doh_txt_lookup("mix.com", 0, doh_server, std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
 
         // Should only have the TXT record, not the A record
         assert_eq!(answer.txt.len(), 1);
@@ -6434,7 +6470,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_cname_lookup("alias.com", 0, doh_server)
+            .doh_cname_lookup(
+                "alias.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -6470,7 +6511,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_cname_lookup("nocname.com", 0, doh_server)
+            .doh_cname_lookup(
+                "nocname.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -6507,7 +6553,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_cname_lookup("nocname.com", 0, doh_server)
+            .doh_cname_lookup(
+                "nocname.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -7381,7 +7432,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = &pool.doh_servers[0];
         let records = pool
-            .doh_txt_lookup("escaped.com", 0, doh_server)
+            .doh_txt_lookup(
+                "escaped.com",
+                0,
+                doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .unwrap()
             .txt;
@@ -8004,7 +8060,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_txt_lookup("throttled.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "throttled.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -8082,7 +8143,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_cname_lookup("throttled.example", 0, &doh_server)
+            .doh_cname_lookup(
+                "throttled.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -8111,7 +8177,12 @@ mod tests {
         let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())]);
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_cname_lookup("err5xx.example", 0, &doh_server)
+            .doh_cname_lookup(
+                "err5xx.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
         assert!(
             result.is_err(),
@@ -8285,12 +8356,25 @@ mod tests {
             err.contains("DNS_THROTTLE"),
             "the surfaced error must be a DNS_THROTTLE, got: {err}"
         );
-        // Both providers 429'd, so the choke-point fired once per provider attempt; the exit-3
-        // guard only needs `> 0`, so we assert it was reached at least once.
-        assert!(
-            test_counter.load(Ordering::Relaxed) >= 1,
-            "a throttle defeating every DoH provider must increment the pool's choke-point \
-             counter so the exit-3 guard sees it — without any live system-resolver query"
+        // Wave 1 (defect E): per-attempt throttles live in the per-provider tallies only — two
+        // provider rotations must NOT read as two scan-level failures.
+        assert_eq!(
+            test_counter.load(Ordering::Relaxed),
+            0,
+            "provider attempts must not inflate the scan-level counter (4 rotations used to \
+             count as 4 scan failures)"
+        );
+        // The LOGICAL lookup is counted exactly once, at its terminal, where the surviving
+        // classified error settles into an empty result — this is what the exit-3 guard reads.
+        let terminal = AtomicUsize::new(0);
+        assert!(pool
+            .settle_arm(Err(anyhow::anyhow!("{}", err)), &terminal)
+            .is_empty());
+        assert_eq!(
+            terminal.load(Ordering::Relaxed),
+            1,
+            "a throttle defeating every DoH provider counts once — at the lookup's terminal — \
+             so the exit-3 guard still sees it, without per-attempt inflation"
         );
     }
 
@@ -8330,7 +8414,12 @@ mod tests {
             .with_failure_counter(std::sync::Arc::clone(&test_counter));
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_txt_lookup("incident.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "incident.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
 
         assert!(
@@ -8342,11 +8431,25 @@ mod tests {
             result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
             "a non-throttle 4xx must be tagged DNS_ENDPOINT so the resilient loop rotates without backoff"
         );
+        // Wave 1 (defect E): the choke point attributes the 4xx to the provider's tally only;
+        // the scan-level counter is owned by the lookup's terminal.
         assert_eq!(
             test_counter.load(Ordering::Relaxed),
+            0,
+            "a provider attempt must not bump the scan-level counter at the choke point"
+        );
+        let terminal = AtomicUsize::new(0);
+        pool.settle_arm(
+            Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider X returned HTTP 400 for incident.example"
+            )),
+            &terminal,
+        );
+        assert_eq!(
+            terminal.load(Ordering::Relaxed),
             1,
-            "a DNS_ENDPOINT failure must increment the choke-point counter exactly once so the \
-             exit-3 guard can see the broken endpoint"
+            "a DNS_ENDPOINT arm that ends unresolved counts exactly once at its terminal, so \
+             the exit-3 guard still sees the broken endpoint"
         );
     }
 
@@ -8369,7 +8472,12 @@ mod tests {
             .with_failure_counter(counter.clone());
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_cname_lookup("incident.example", 0, &doh_server)
+            .doh_cname_lookup(
+                "incident.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
 
         assert!(
@@ -8380,10 +8488,23 @@ mod tests {
             result.unwrap_err().to_string().contains("DNS_ENDPOINT"),
             "a non-throttle 4xx on the CNAME path must be tagged DNS_ENDPOINT (mirrors the TXT path)"
         );
+        // Wave 1 (defect E): per-provider tally at the choke; scan-level count at the terminal.
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a provider attempt must not bump the scan-level counter at the choke point"
+        );
+        let terminal = AtomicUsize::new(0);
+        pool.settle_arm(
+            Err(anyhow::anyhow!(
+                "DNS_ENDPOINT: DoH provider X returned HTTP 400 for incident.example"
+            )),
+            &terminal,
+        );
+        assert_eq!(
+            terminal.load(std::sync::atomic::Ordering::Relaxed),
             1,
-            "the CNAME 4xx must be counted at the choke point for the exit-3 guard, like the TXT path"
+            "the unresolved CNAME arm counts once at its terminal, like the TXT path"
         );
     }
 
@@ -8419,7 +8540,12 @@ mod tests {
             .with_failure_counter(std::sync::Arc::clone(&test_counter));
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_txt_lookup("servfail.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "servfail.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
 
         assert!(
@@ -8433,10 +8559,12 @@ mod tests {
              fault let one pathological domain — which SERVFAILs identically on every provider — \
              satisfy the breaker's all-providers-failed test and demote healthy DoH onto UDP/53"
         );
+        // Wave 1 (defect E): the RCODE is attributed to the provider tally at the choke; the
+        // scan-level count (and its name attribution) belongs to the lookup's terminal.
         assert_eq!(
             test_counter.load(Ordering::Relaxed),
-            1,
-            "a SERVFAIL RCODE must increment the choke-point counter exactly once"
+            0,
+            "a provider attempt must not bump the scan-level counter at the choke point"
         );
     }
 
@@ -8473,21 +8601,34 @@ mod tests {
             .with_name_failure_counter(std::sync::Arc::clone(&by_name));
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_txt_lookup("servfail.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "servfail.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
 
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Wave 1 (defect E): nothing counts at the choke — a DNS_NAME verdict used to count
+        // general+name at the choke AND again at settle, double-counting every broken name.
+        assert_eq!(all.load(Ordering::Relaxed), 0);
+        assert_eq!(by_name.load(Ordering::Relaxed), 0);
+        // The terminal counts it once — general (the exit-3 guard must not stop seeing it) AND
+        // name-attributed (what lets the summary stop blaming the user's network for the
+        // target's broken delegation).
+        let terminal = AtomicUsize::new(0);
+        pool.settle_arm(Err(anyhow::anyhow!("{}", err)), &terminal);
         assert_eq!(
-            all.load(Ordering::Relaxed),
+            terminal.load(Ordering::Relaxed),
             1,
-            "a SERVFAIL is still a DNS failure — the exit-3 guard reads this counter and must not \
-             stop seeing it"
+            "a SERVFAIL is still a DNS failure — counted once, at the terminal"
         );
         assert_eq!(
             by_name.load(Ordering::Relaxed),
             1,
-            "…and it must ALSO land in the name-attributed tally, which is what lets the summary \
-             stop blaming the user's network for the target's broken delegation"
+            "…and it must ALSO land in the name-attributed tally"
         );
     }
 
@@ -8531,17 +8672,18 @@ mod tests {
             "a throttle is transport-side and must not be attributed to the name"
         );
 
-        // An unclassified error (a bare timeout, a parse failure) is not a classified DNS failure
-        // and must not inflate either tally.
+        // Wave 1: an UNCLASSIFIED error arm is still a lookup the scan lost — under logical
+        // counting it counts in the general tally (it used to be counted per-attempt at the
+        // choke instead), but never in the name tally.
         pool.note_classified_failure("some unrelated error", &caller_counter);
-        assert_eq!(caller_counter.load(Ordering::Relaxed), 2);
+        assert_eq!(caller_counter.load(Ordering::Relaxed), 3);
         assert_eq!(by_name.load(Ordering::Relaxed), 1);
 
         // The subtraction the summary performs must never claim a transport failure that did not
-        // happen: with one name failure and one throttle, exactly one is transport-side.
+        // happen: one name failure, one throttle, one unclassified — exactly two transport-side.
         assert_eq!(
             caller_counter.load(Ordering::Relaxed) - by_name.load(Ordering::Relaxed),
-            1
+            2
         );
     }
 
@@ -8567,14 +8709,18 @@ mod tests {
             .with_name_failure_counter(std::sync::Arc::clone(&by_name));
         let doh_server = pool.next_doh_server().clone();
         let result = pool
-            .doh_txt_lookup("throttled.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "throttled.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await;
 
         assert!(result.is_err());
-        assert!(
-            all.load(Ordering::Relaxed) >= 1,
-            "a 429 is a transport-side failure and must be counted"
-        );
+        // Wave 1 (defect E): the 429 lands in the provider tally, not the scan-level counter —
+        // the logical lookup counts at its terminal instead.
+        assert_eq!(all.load(Ordering::Relaxed), 0);
         assert_eq!(
             by_name.load(Ordering::Relaxed),
             0,
@@ -8614,7 +8760,12 @@ mod tests {
             .with_failure_counter(std::sync::Arc::clone(&test_counter));
         let doh_server = pool.next_doh_server().clone();
         let records = pool
-            .doh_txt_lookup("nxdomain.example", 0, &doh_server)
+            .doh_txt_lookup(
+                "nxdomain.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_secs(5),
+            )
             .await
             .expect("NXDOMAIN (RCODE 3) is a genuine absence and must be Ok, not an error")
             .txt;
@@ -8921,5 +9072,296 @@ mod tests {
                 .is_none(),
             "a TXT answer must never satisfy a CNAME query"
         );
+    }
+
+    // ── Wave-1 falsifiers (defects A, B, E, F — Plans/zesty-tinkering-falcon.md §Phase 2) ──
+
+    /// Defect A: one slow provider must never consume the whole lookup budget. Provider 1 hangs
+    /// past its per-attempt slice; the deadline-owned rotation must reach provider 2 and answer
+    /// INSIDE the 3 s deadline. Red on the old code, where the outer 3 s wrapper equalled the
+    /// per-attempt 3 s and fired while attempt 0 was still in flight (7,032 of 7,988 measured
+    /// cancellations).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn a_provider_rotation_completes_inside_the_outer_lookup_budget() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let slow = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"Status": 0, "Answer": [
+                        {"name": "slowfast.example", "type": 16, "data": "\"slow-answer\""}
+                    ]}))
+                    .set_delay(std::time::Duration::from_millis(2500)),
+            )
+            .mount(&slow)
+            .await;
+        let fast = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Status": 0,
+                "Answer": [{"name": "slowfast.example", "type": 16, "data": "\"fast-answer\""}]
+            })))
+            .mount(&fast)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", slow.uri()),
+            format!("{}/dns-query", fast.uri()),
+        ]);
+        // Warm the RTO the way a running scan does: the budget slicer only cuts an in-flight
+        // attempt short once the network's real RTT is known (see `attempt_budget`'s cold-start
+        // contract, and the cold-start falsifier below).
+        for _ in 0..12 {
+            pool.governor()
+                .record_rtt(std::time::Duration::from_millis(50));
+        }
+        let t0 = std::time::Instant::now();
+        let result = pool.doh_txt_lookup_resilient("slowfast.example").await;
+        let elapsed = t0.elapsed();
+
+        let answer = result.expect("rotation must reach the healthy provider");
+        assert_eq!(answer.txt, vec!["fast-answer".to_string()]);
+        assert!(
+            elapsed < DOH_LOOKUP_DEADLINE,
+            "rotation took {elapsed:?} — the deadline-owned loop must complete inside {:?}",
+            DOH_LOOKUP_DEADLINE
+        );
+    }
+
+    /// The cold-start half of the budget contract (contention-gate P1's unit twin): before ANY
+    /// RTT evidence exists, an attempt must get the full remaining deadline — slicing it to
+    /// deadline/attempts locks a slow-but-healthy network out permanently, because no attempt
+    /// ever completes to seed the RTO that would widen the budget.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn a_slow_but_healthy_network_is_not_locked_out_before_its_rtt_is_learned() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"Status": 0, "Answer": [
+                        {"name": "slowok.example", "type": 16, "data": "\"slow-but-real\""}
+                    ]}))
+                    // Slower than deadline/attempts would allow, well inside the deadline.
+                    .set_delay(std::time::Duration::from_millis(1200)),
+            )
+            .mount(&server)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", server.uri()),
+            format!("{}/dns-query", server.uri()),
+            format!("{}/dns-query", server.uri()),
+            format!("{}/dns-query", server.uri()),
+        ]);
+        let result = pool.doh_txt_lookup_resilient("slowok.example").await;
+        let answer = result.expect(
+            "a fresh pool must not cancel a 1.2s answer: cold-start budgets are the full deadline",
+        );
+        assert_eq!(answer.txt, vec!["slow-but-real".to_string()]);
+    }
+
+    /// Defect A's constant relation: the outer guard is a hang backstop, so it must sit far above
+    /// the deadline the loop owns — never equal to it (the old code's exact bug).
+    #[test]
+    fn the_outer_backstop_is_strictly_larger_than_the_rotation_deadline() {
+        assert!(
+            DOH_WRAPPER_BACKSTOP >= DOH_LOOKUP_DEADLINE.saturating_mul(2),
+            "the backstop ({DOH_WRAPPER_BACKSTOP:?}) must be a multiple of the deadline \
+             ({DOH_LOOKUP_DEADLINE:?}), or it cancels in-flight rotations again"
+        );
+    }
+
+    /// Defect F: an attempt that exceeds its budget is classified DNS_TIMEOUT — typed at the
+    /// source from `reqwest::Error::is_timeout()` — and costs the scan-level counter nothing at
+    /// the choke point. Red on the old code, whose reqwest Display ("error sending request…")
+    /// carried no "timeout" substring for the classifier to find.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn a_timed_out_attempt_is_classified_dns_timeout_and_not_counted_at_the_choke() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"Status": 0, "Answer": []}))
+                    .set_delay(std::time::Duration::from_millis(1500)),
+            )
+            .mount(&server)
+            .await;
+
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![format!("{}/dns-query", server.uri())])
+            .with_failure_counter(std::sync::Arc::clone(&counter));
+        let doh_server = pool.next_doh_server().clone();
+        let result = pool
+            .doh_txt_lookup(
+                "hang.example",
+                0,
+                &doh_server,
+                std::time::Duration::from_millis(80),
+            )
+            .await;
+
+        let err = result.expect_err("an 80ms budget against a 1500ms server must time out");
+        assert!(
+            err.to_string().contains("DNS_TIMEOUT"),
+            "the class must travel in the message, typed at the source: {err}"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "a per-attempt timeout is a provider-tally fact, not a scan-level failure"
+        );
+    }
+
+    /// Defect F, classifier side: DNS_TIMEOUT reads as TimedOut to the governor — and a queried
+    /// NAME containing the word "timeout" no longer reads as congestion.
+    #[test]
+    fn timed_out_is_reported_to_the_governor_as_timed_out_not_rejected() {
+        use crate::dns_governor::DnsOutcome;
+        let timed: std::result::Result<(), String> = Err(
+            "DNS_TIMEOUT: DoH provider X exceeded its 400ms attempt budget for a.example"
+                .to_string(),
+        );
+        let ok: std::result::Result<(), String> = Ok(());
+        assert_eq!(classify_pair(&timed, &timed), DnsOutcome::TimedOut);
+        assert_eq!(classify_pair(&ok, &timed), DnsOutcome::Answered);
+
+        // A name that merely CONTAINS "timeout" is not congestion evidence (the old substring
+        // match read `timeout.example.com`'s unrelated failure as a rejection).
+        let name_shaped: std::result::Result<(), String> =
+            Err("no DoH servers configured for TXT lookup of connect-timeout.example".to_string());
+        assert_eq!(
+            classify_pair(&name_shaped, &name_shaped),
+            DnsOutcome::Unrelated
+        );
+    }
+
+    /// Defect B (Wave-1 half): an all-provider 429 burst is positive transport evidence — the
+    /// providers ANSWERED — so it must clear the breaker streak, never advance it. Phase 1
+    /// measured a 2 s all-429 burst demoting DoH for 30 s (contention-gate profile P4).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn an_all_provider_throttle_burst_does_not_demote_doh() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let p1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p2)
+            .await;
+
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", p1.uri()),
+            format!("{}/dns-query", p2.uri()),
+        ]);
+        // Far more rounds than TRANSPORT_DOWN_THRESHOLD, across every provider.
+        for _ in 0..(TRANSPORT_DOWN_THRESHOLD * 3) {
+            let _ = pool.doh_txt_lookup_resilient("burst.example").await;
+        }
+        let snap = pool.transport_snapshot();
+        assert_eq!(
+            snap.doh.down_transitions, 0,
+            "a throttle burst must never demote the transport that is demonstrably delivering"
+        );
+        assert!(!snap.doh.is_down);
+    }
+
+    /// Defect E, the invariant the 08-19 screenshot violated (66,988 failures > 57,286 queries):
+    /// with logical counting, N unresolved lookup arms count exactly N — one per arm, however
+    /// many provider rotations each burned.
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn dns_failures_counts_logical_arms_not_provider_attempts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let p1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p1)
+            .await;
+        let p2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/dns-query"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&p2)
+            .await;
+
+        let counter = AtomicUsize::new(0);
+        let pool = DnsServerPool::with_test_urls(vec![
+            format!("{}/dns-query", p1.uri()),
+            format!("{}/dns-query", p2.uri()),
+        ]);
+        const DOMAINS: usize = 3;
+        for i in 0..DOMAINS {
+            // Mid-label underscore keeps every name structurally outside the hickory/system
+            // paths, so the test stays hermetic (same trick as the contention gate).
+            let name = format!("all_throttled{i}.example");
+            let (txt, cname) = pool.get_txt_and_cname_fast(&name, &counter).await;
+            assert!(txt.is_empty() && cname.is_empty());
+        }
+        // TXT and CNAME arms each ended unresolved: exactly 2 counts per domain — never
+        // 2 × attempts (the old per-attempt counting would have read ≥ 4 per domain here).
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            DOMAINS * 2,
+            "dns_failures must count logical arms, not provider attempts"
+        );
+    }
+
+    /// Defect E: a negative-memo hit on the root path counts exactly ONE dns failure — through
+    /// the SAME atomic production wires for both the pool counter and the explicit counter (the
+    /// double-increment this test pins was live at dns.rs:2526-2528 until Wave 1).
+    #[tokio::test]
+    #[cfg(not(coverage))]
+    async fn a_negative_memo_hit_counts_exactly_one_dns_failure_on_the_root_path() {
+        let shared = std::sync::Arc::new(AtomicUsize::new(0));
+        let by_name = std::sync::Arc::new(AtomicUsize::new(0));
+        let pool = DnsServerPool::with_test_urls(vec![])
+            .with_failure_counter(std::sync::Arc::clone(&shared))
+            .with_name_failure_counter(std::sync::Arc::clone(&by_name));
+        pool.remember_name_failure(
+            RecordKind::Txt,
+            "broken.example",
+            "DNS_NAME: DoH provider X returned DNS RCODE 2 for broken.example",
+        )
+        .await;
+
+        // Production shape: the explicit counter IS the pool-wired atomic (app.rs wires both to
+        // the logger's counter).
+        let result =
+            get_txt_records_with_rate_limit("broken.example", &pool, None, Some(shared.as_ref()))
+                .await;
+        assert!(result.expect("memo hit degrades to empty").is_empty());
+        assert_eq!(
+            shared.load(Ordering::Relaxed),
+            1,
+            "one negative-memo hit is ONE logical name failure — the old code counted it twice \
+             (name + an extra transport-side increment)"
+        );
+        assert_eq!(by_name.load(Ordering::Relaxed), 1);
     }
 }

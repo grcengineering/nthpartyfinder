@@ -317,10 +317,15 @@ pub enum FailureSite {
     RootNegativeMemoExtra,
     RootAllFailed,
     CnameAllThrottled,
+    /// Root-CNAME terminal for non-throttle unresolved arms (backstop, DNS_TIMEOUT, DNS_NAME,
+    /// DNS_LOCAL, parse) — the silent-empty Wave 1 closed.
+    CnameUnresolvedOther,
+    /// A negative-memo hit counted as one logical name failure (`note_name_failure`).
+    NegativeMemoHit,
 }
 
 impl FailureSite {
-    pub const ALL: [FailureSite; 14] = [
+    pub const ALL: [FailureSite; 16] = [
         FailureSite::DohTxtThrottle,
         FailureSite::DohTxtEndpoint,
         FailureSite::DohTxtNonJson,
@@ -335,6 +340,8 @@ impl FailureSite {
         FailureSite::RootNegativeMemoExtra,
         FailureSite::RootAllFailed,
         FailureSite::CnameAllThrottled,
+        FailureSite::CnameUnresolvedOther,
+        FailureSite::NegativeMemoHit,
     ];
     pub const fn name(self) -> &'static str {
         match self {
@@ -352,6 +359,8 @@ impl FailureSite {
             FailureSite::RootNegativeMemoExtra => "root_negative_memo_extra",
             FailureSite::RootAllFailed => "root_all_failed",
             FailureSite::CnameAllThrottled => "cname_all_throttled",
+            FailureSite::CnameUnresolvedOther => "cname_unresolved_other",
+            FailureSite::NegativeMemoHit => "negative_memo_hit",
         }
     }
     const fn idx(self) -> usize {
@@ -468,7 +477,7 @@ pub struct DnsTelemetry {
     pub doh_ok_at_attempt: [AtomicU64; 4],
     doh_cancelled_at: [[AtomicU64; 4]; 3],
     pub answered_with_sleep: AtomicU64,
-    failure_sites: [AtomicU64; 14],
+    failure_sites: [AtomicU64; 16],
     events: Mutex<Vec<Event>>,
     failed_lookup_seen: AtomicU64,
     failed_names: Mutex<BTreeSet<String>>,
@@ -485,7 +494,7 @@ impl DnsTelemetry {
             doh_ok_at_attempt: [const { AtomicU64::new(0) }; 4],
             doh_cancelled_at: [const { [const { AtomicU64::new(0) }; 4] }; 3],
             answered_with_sleep: AtomicU64::new(0),
-            failure_sites: [const { AtomicU64::new(0) }; 14],
+            failure_sites: [const { AtomicU64::new(0) }; 16],
             events: Mutex::new(Vec::new()),
             failed_lookup_seen: AtomicU64::new(0),
             failed_names: Mutex::new(BTreeSet::new()),
