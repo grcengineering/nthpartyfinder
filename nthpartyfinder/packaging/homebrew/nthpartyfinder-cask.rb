@@ -19,9 +19,9 @@
 cask "nthpartyfinder" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "1.8.0"
-  sha256 arm:   "3f1a0c2d81728cefe286dcb05d9853983294643222ef031fa703734b0c5a049b",
-         intel: "7c80483212125c9451316cc99451e38f5b064978415903b02bc3580c1a9dc924"
+  version "1.8.1"
+  sha256 arm:   "7afba45a85c9ab28479735c922d22df96ee7e2da2bfb4944ccf63a0ee192c40a",
+         intel: "524b45612aa52c674deaa89827339fc9c2f9bcfaff01cccc4e4faa4450eab3e6"
 
   url "https://github.com/grcengineering/nthpartyfinder/releases/download/v#{version}/nthpartyfinder-#{arch}-apple-darwin.tgz",
       verified: "github.com/grcengineering/nthpartyfinder/"
