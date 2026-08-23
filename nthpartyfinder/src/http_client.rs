@@ -313,7 +313,51 @@ where
         .expect("connection semaphore is never closed");
     let wait = t0.elapsed();
     crate::perf::METRICS.conn_permit_wait.record(wait);
+    credit_shared_wait(wait);
     (wait, op.await)
+}
+
+// ── Shared-wait crediting (2026-08-23 lovable.dev RCA) ──────────────────────────────────────────
+//
+// A per-operation time budget that runs on wall clock silently measures CONTENTION instead of
+// work: the subprocessor per-vendor budget credited browser-permit queueing (its known shared
+// wait) but not connection-permit waits — nor, after Wave 3 routed discovery DNS through the
+// governed resolver, DNS-permit waits — so at a depth-1 fan-out dozens of vendors' "working
+// time" clocks climbed in lockstep (20 s → 53 s in ninety seconds, browser queue 0.0 s) while
+// they all drained the same queues, and every one of them was declared budget-starved. This is
+// the same defect class as DNS defect C (a shared semaphore inside a per-attempt timeout) and
+// the 2026-08-17 domain-ceiling incident (uncredited browser waits) — third occurrence, one
+// mechanism now: any task may arm a task-local accumulator around a bounded piece of work, and
+// every shared-permit acquisition credits its wait into it, so budgets can subtract queueing
+// they cannot otherwise see. Un-armed tasks pay nothing (try_with on an unset task-local).
+
+tokio::task_local! {
+    /// The current task's shared-wait accumulator, when armed by [`scope_shared_wait`].
+    static SHARED_WAIT_NANOS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+}
+
+/// Run `op` with `acc` collecting every shared-permit wait (connection semaphore, DNS governor +
+/// rate bucket) incurred on this task. Inherited across `.await`s within the task; NOT across
+/// `tokio::spawn` (a spawned subtask is its own budget domain — the browser render path already
+/// accounts its queueing separately via the browser-wait counter).
+pub async fn scope_shared_wait<F: std::future::Future>(
+    acc: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    op: F,
+) -> F::Output {
+    SHARED_WAIT_NANOS.scope(acc, op).await
+}
+
+/// Credit one shared-permit wait to the current task's accumulator, if one is armed.
+pub(crate) fn credit_shared_wait(wait: Duration) {
+    if wait.is_zero() {
+        return;
+    }
+    let _ = SHARED_WAIT_NANOS.try_with(|acc| {
+        acc.fetch_add(
+            u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    });
 }
 
 /// Send a `reqwest` request under the global connection ceiling.

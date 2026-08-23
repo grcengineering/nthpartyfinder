@@ -2167,8 +2167,16 @@ impl DnsServerPool {
         // keeps the governor's in-flight count a true measure of network work, not of queueing
         // behind our own token bucket.
         let _wait_timer = crate::perf::scoped(&crate::perf::METRICS.dns_governor_acquire_wait);
+        let t0 = std::time::Instant::now();
         self.dns_limiter.acquire().await;
-        self.governor.acquire().await
+        let permit = self.governor.acquire().await;
+        // Shared-wait credit: DNS admission (token bucket + governor slot) is queueing on a
+        // process-wide resource, not this caller's own work — a budgeted task that armed the
+        // accumulator (subprocessor per-vendor analysis) must not be charged for it. Covers the
+        // GovernedResolver's address lookups, which since Wave 3 put every discovery client's
+        // hostname resolution behind this permit.
+        crate::http_client::credit_shared_wait(t0.elapsed());
+        permit
     }
 
     /// Snapshot of the adaptive DNS controller, for the end-of-scan summary.

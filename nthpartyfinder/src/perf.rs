@@ -299,6 +299,10 @@ pub struct Metrics {
     /// Governed address resolutions that fell back to getaddrinfo on DoH transport failure —
     /// the canary's health signal (≈0 on a healthy run).
     pub dns_addr_gai_fallback: Metric,
+    /// Shared-permit queue time (connection semaphore + DNS admission) credited back to
+    /// budget-exhausted subprocessor vendors — the observable for the 2026-08-23 lockstep-starvation
+    /// RCA. Count = starved vendors that carried a credit; total = the queueing they were absolved of.
+    pub subproc_shared_wait: Metric,
     /// A lookup descended from DoH into the DoT/UDP ladder.
     pub dns_ladder_entered: Metric,
     /// DoH skipped because its breaker was open.
@@ -412,6 +416,7 @@ impl Metrics {
             dns_addr_lookup: Metric::new(),
             dns_addr_memo: Metric::new(),
             dns_addr_gai_fallback: Metric::new(),
+            subproc_shared_wait: Metric::new(),
             dns_ladder_entered: Metric::new(),
             dns_doh_skipped_breaker: Metric::new(),
             dns_dot_skipped_breaker: Metric::new(),
@@ -447,7 +452,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 96] {
+    fn all(&self) -> [(&'static str, &Metric); 97] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -561,6 +566,7 @@ impl Metrics {
             ("dns.addr_lookup", &self.dns_addr_lookup),
             ("dns.addr_memo", &self.dns_addr_memo),
             ("dns.addr_gai_fallback", &self.dns_addr_gai_fallback),
+            ("subproc.shared_wait", &self.subproc_shared_wait),
             ("dns.ladder_entered", &self.dns_ladder_entered),
             ("dns.doh_skipped_breaker", &self.dns_doh_skipped_breaker),
             ("dns.dot_skipped_breaker", &self.dns_dot_skipped_breaker),
@@ -1148,6 +1154,7 @@ mod tests {
             "dns.addr_lookup",
             "dns.addr_memo",
             "dns.addr_gai_fallback",
+            "subproc.shared_wait",
             "dns.ladder_entered",
             "dns.doh_skipped_breaker",
             "dns.dot_skipped_breaker",
@@ -1165,7 +1172,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 96);
+        assert_eq!(snap.rows.len(), 97);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed
