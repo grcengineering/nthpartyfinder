@@ -404,29 +404,50 @@ struct UrlWorkEnvelope<'a> {
     started: std::time::Instant,
     browser_wait: Option<&'a std::sync::atomic::AtomicU64>,
     browser_wait_at_start: u64,
+    /// Shared-permit waits (connection semaphore + DNS admission) credited by
+    /// `http_client::scope_shared_wait` — the 2026-08-23 lovable.dev RCA's second uncredited
+    /// queue. Snapshot-delta semantics identical to `browser_wait`.
+    shared_wait: Option<&'a std::sync::atomic::AtomicU64>,
+    shared_wait_at_start: u64,
     limit: Duration,
 }
 
 impl<'a> UrlWorkEnvelope<'a> {
-    fn start(browser_wait: Option<&'a std::sync::atomic::AtomicU64>, limit: Duration) -> Self {
+    fn start(
+        browser_wait: Option<&'a std::sync::atomic::AtomicU64>,
+        shared_wait: Option<&'a std::sync::atomic::AtomicU64>,
+        limit: Duration,
+    ) -> Self {
         let browser_wait_at_start = browser_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let shared_wait_at_start = shared_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
         Self {
             started: std::time::Instant::now(),
             browser_wait,
             browser_wait_at_start,
+            shared_wait,
+            shared_wait_at_start,
             limit,
         }
     }
 
-    /// Permit-queue time accumulated since this URL started — never the vendor-wide total.
+    /// Queue time (browser permits + shared permits) accumulated since this URL started —
+    /// never the vendor-wide total.
     fn queued(&self) -> Duration {
-        let now = self
+        let browser = self
             .browser_wait
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0);
-        Duration::from_nanos(now.saturating_sub(self.browser_wait_at_start))
+            .unwrap_or(0)
+            .saturating_sub(self.browser_wait_at_start);
+        let shared = self
+            .shared_wait
+            .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0)
+            .saturating_sub(self.shared_wait_at_start);
+        Duration::from_nanos(browser.saturating_add(shared))
     }
 
     fn working_elapsed(&self) -> Duration {
@@ -1444,6 +1465,12 @@ pub struct SubprocessorAnalyzer {
     pending_mappings: Arc<RwLock<Vec<PendingOrgMapping>>>,
 }
 
+/// Scan-wide "the Vanta GraphQL fast path is dead" latch — see `try_vanta_graphql_from_html`.
+/// Process-global like the perf counters: one scan per process, and a canary result is a fact
+/// about Vanta's deployed signature set, not about any one vendor.
+static VANTA_GRAPHQL_DEAD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl SubprocessorAnalyzer {
     /// Create HTTP client with production-ready configuration
     fn create_http_client() -> reqwest::Client {
@@ -1578,6 +1605,20 @@ impl SubprocessorAnalyzer {
     // coverage(off): HTTP-dependent — fetches manifest + GraphQL from Vanta's live API
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub async fn try_vanta_graphql_from_html(&self, html: &str) -> Option<Vec<SubprocessorDomain>> {
+        // Scan-wide canary latch (P1.6 pattern). The 401 this path dies of is signature drift:
+        // Vanta signs each GraphQL DOCUMENT and validates the signature against the exact query
+        // text; ours is hand-written, so the moment Vanta edits the operation every request 401s
+        // — deterministically, for the whole scan (re-verified live 2026-08-23: no persisted-query
+        // mode without a body, and the signed document text ships only in lazy-loaded SPA chunks,
+        // so tracking it would be permanently fragile). Vanta hosts trust centres for MANY vendors,
+        // and before this latch a depth-3 scan re-paid two dead round trips plus a WARN per Vanta
+        // trust centre (a dozen in the first two minutes of the 2026-08-23 lovable.dev run). One
+        // 401 proves the drift for every subsequent vendor; a success never latches; a fresh scan
+        // re-probes, so a Vanta-side fix re-enables the fast path automatically.
+        if VANTA_GRAPHQL_DEAD.load(std::sync::atomic::Ordering::Relaxed) {
+            debug!("Vanta: GraphQL fast path latched off for this scan (signature drift) — using the render path");
+            return None;
+        }
         // Extract slugId from <head data-slugid="...">
         let slug_id = {
             let doc = Html::parse_document(html);
@@ -1661,11 +1702,21 @@ impl SubprocessorAnalyzer {
                 // Vanta's own valid signature and the interceptors read the reply. Warn rather than
                 // debug so a dead fast path is visible instead of silently costing two round trips
                 // per Vanta trust centre.
-                tracing::warn!(
-                    "Vanta: trust-centre GraphQL fast path rejected with {} — falling back to \
-                     headless rendering for this trust centre",
-                    gql_resp.status()
-                );
+                let first = !VANTA_GRAPHQL_DEAD.swap(true, std::sync::atomic::Ordering::Relaxed);
+                if first {
+                    tracing::warn!(
+                        "Vanta: trust-centre GraphQL fast path rejected with {} — signature drift; \
+                         disabling the fast path for the rest of this scan (every Vanta-hosted \
+                         trust centre uses the render path, which is unaffected). A fresh scan \
+                         re-probes automatically.",
+                        gql_resp.status()
+                    );
+                } else {
+                    debug!(
+                        "Vanta: GraphQL fast path rejected with {} (already latched)",
+                        gql_resp.status()
+                    );
+                }
                 return None;
             }
 
@@ -1993,6 +2044,13 @@ impl SubprocessorAnalyzer {
         // browser pool is, so a vendor whose trust center needs rendering silently yields zero
         // subprocessors whenever the scan is busy. Recall must not depend on scan concurrency.
         let browser_wait_nanos = std::sync::atomic::AtomicU64::new(0);
+        // Shared-permit waits (connection semaphore + DNS admission) this vendor's probes spend
+        // queueing on process-wide resources, credited via `http_client::scope_shared_wait` and
+        // subtracted from the budget exactly like browser waits. Without it the 2026-08-23
+        // lovable.dev run declared a dozen depth-1 vendors budget-starved inside ninety seconds,
+        // their "working time" clocks climbing in lockstep (20 s → 53 s, browser queue 0.0 s) —
+        // they were all draining the same startup queues, not working.
+        let shared_wait_nanos = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut per_source: Vec<(String, Vec<SubprocessorDomain>)> = Vec::new();
         let mut working_urls: Vec<String> = Vec::new();
         let mut categories_done: std::collections::HashSet<SubprocessorSourceCategory> =
@@ -2032,6 +2090,9 @@ impl SubprocessorAnalyzer {
                 .elapsed()
                 .saturating_sub(Duration::from_nanos(
                     browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                ))
+                .saturating_sub(Duration::from_nanos(
+                    shared_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
                 ));
             if working_elapsed > MAX_ANALYSIS_TIME {
                 // Classify + count, never silently truncate. This mirrors the DNS
@@ -2043,6 +2104,12 @@ impl SubprocessorAnalyzer {
                 let queued = Duration::from_nanos(
                     browser_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
                 );
+                let shared_queued = Duration::from_nanos(
+                    shared_wait_nanos.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                crate::perf::METRICS
+                    .subproc_shared_wait
+                    .record(shared_queued);
                 if per_source.is_empty() {
                     crate::perf::METRICS.subproc_zero_yield.hit();
                     // Mark the phase degraded for the scan-health summary: this vendor's recall was
@@ -2051,11 +2118,13 @@ impl SubprocessorAnalyzer {
                     crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
                     tracing::warn!(
                         "SUBPROC_BUDGET_EXHAUSTED: {} yielded no subprocessors after {:.1}s of \
-                         working time ({:.1}s queued for a browser, excluded). Recall for this \
-                         vendor is incomplete — it was starved, not empty.",
+                         working time ({:.1}s browser queue + {:.1}s shared-permit queue \
+                         excluded). Recall for this vendor is incomplete — it was starved, not \
+                         empty.",
                         domain,
                         working_elapsed.as_secs_f64(),
-                        queued.as_secs_f64()
+                        queued.as_secs_f64(),
+                        shared_queued.as_secs_f64()
                     );
                 } else {
                     // Deliberately NOT a coverage failure. The budget bounds a *guess list* — 25
@@ -2112,7 +2181,19 @@ impl SubprocessorAnalyzer {
                 ));
             }
             if let Some(ctx) = rate_limit_ctx {
+                // Self-imposed pacing, credited like every other non-work wait (2026-08-23 RCA,
+                // iteration 2): the per-domain HTTP token bucket spaces candidate probes of the
+                // SAME domain, so at ~25 candidates a vendor pays double-digit seconds of pure
+                // pacing — deterministically, every scan — and the budget read it as work.
+                let pace_t0 = std::time::Instant::now();
                 ctx.http_limiter.acquire(domain).await;
+                let paced = pace_t0.elapsed();
+                if !paced.is_zero() {
+                    shared_wait_nanos.fetch_add(
+                        u64::try_from(paced.as_nanos()).unwrap_or(u64::MAX),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
             }
             let request_start = std::time::Instant::now();
             // P2.6: this candidate's own share of the budget, restarted per URL. The outer budget
@@ -2120,18 +2201,23 @@ impl SubprocessorAnalyzer {
             // stops a single futile SPA from spending that budget before the vendor's real page at
             // position 2+ has been probed even once. The two are independent by design — neither
             // relaxes the other.
-            let url_envelope =
-                UrlWorkEnvelope::start(Some(&browser_wait_nanos), MAX_URL_WORKING_TIME);
-            match self
-                .scrape_subprocessor_page_within_envelope(
+            let url_envelope = UrlWorkEnvelope::start(
+                Some(&browser_wait_nanos),
+                Some(&shared_wait_nanos),
+                MAX_URL_WORKING_TIME,
+            );
+            match crate::http_client::scope_shared_wait(
+                std::sync::Arc::clone(&shared_wait_nanos),
+                self.scrape_subprocessor_page_within_envelope(
                     url,
                     logger,
                     domain,
                     None,
                     Some(&browser_wait_nanos),
                     Some(&url_envelope),
-                )
-                .await
+                ),
+            )
+            .await
             {
                 Ok(subprocessors) => {
                     let elapsed = request_start.elapsed();
@@ -8024,6 +8110,8 @@ mod tests {
             started: std::time::Instant::now() - age,
             browser_wait,
             browser_wait_at_start,
+            shared_wait: None,
+            shared_wait_at_start: 0,
             limit,
         }
     }
@@ -8159,10 +8247,47 @@ mod tests {
         let vendor_wide = std::sync::atomic::AtomicU64::new(
             u64::try_from(Duration::from_secs(90).as_nanos()).unwrap(),
         );
-        let just_started = UrlWorkEnvelope::start(Some(&vendor_wide), MAX_URL_WORKING_TIME);
+        let just_started = UrlWorkEnvelope::start(Some(&vendor_wide), None, MAX_URL_WORKING_TIME);
         assert_eq!(just_started.queued(), Duration::ZERO);
         assert!(!just_started.overrun());
         assert!(check_url_envelope(Some(&just_started), "https://acme.com/y", "render").is_ok());
+    }
+
+    /// 2026-08-23 lovable.dev falsifier: shared-permit queueing must be excluded from a URL's
+    /// working time exactly like browser queueing — a candidate that spent its whole envelope
+    /// waiting on the connection semaphore or DNS admission has done no work yet.
+    #[test]
+    fn shared_permit_queueing_is_excluded_from_the_url_envelope() {
+        let browser = std::sync::atomic::AtomicU64::new(0);
+        let shared = std::sync::atomic::AtomicU64::new(0);
+        let env = UrlWorkEnvelope::start(Some(&browser), Some(&shared), MAX_URL_WORKING_TIME);
+        // Simulate the envelope's whole limit spent queueing on shared permits.
+        shared.store(
+            u64::try_from(MAX_URL_WORKING_TIME.as_nanos()).unwrap(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert_eq!(env.queued(), MAX_URL_WORKING_TIME);
+        assert!(
+            !env.overrun(),
+            "an envelope whose elapsed time is all shared-permit queueing has not overrun"
+        );
+    }
+
+    /// The task-local credit seam end-to-end: a connection-permit wait inside a scoped future
+    /// lands in the armed accumulator; an un-scoped wait credits nothing.
+    #[tokio::test]
+    async fn connection_permit_waits_credit_the_armed_accumulator() {
+        use std::sync::atomic::Ordering;
+        let acc = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Un-armed: nothing credited.
+        crate::http_client::credit_shared_wait(std::time::Duration::from_millis(5));
+        assert_eq!(acc.load(Ordering::Relaxed), 0);
+        // Armed: the credit lands.
+        crate::http_client::scope_shared_wait(std::sync::Arc::clone(&acc), async {
+            crate::http_client::credit_shared_wait(std::time::Duration::from_millis(7));
+        })
+        .await;
+        assert_eq!(acc.load(Ordering::Relaxed), 7_000_000);
     }
 
     #[test]
