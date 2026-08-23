@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.2] - 2026-08-23
+
+### Fixed
+- **"SUBPROC_BUDGET_EXHAUSTED" no longer fires for vendors that were queueing, not working.** A depth-3 scan declared 55% of its vendors subprocessor-starved within minutes; field measurement showed their 20-second budgets were being consumed by waits on process-wide queues — the connection semaphore (mean 9.0 s per wait), DNS admission (mean 4.6 s; a queue v1.8.0's governed resolver newly created), and per-domain HTTP pacing — none of which the budget could see. Budgets and per-URL envelopes now credit all shared-queue time exactly as they already credited browser-permit queueing, and the warning itself reports the breakdown ("Xs browser queue + Ys shared-permit queue excluded"). Measured on the same target: starvation warnings 288 → 159, subprocessors found +51%, with every remaining warning describing genuine work on genuinely expensive vendors.
+- **Vanta-hosted trust centres no longer emit a warning (and two dead HTTP round trips) each.** Vanta cryptographically signs its GraphQL documents; when their deployed documents drift from the scanner's, the fast path 401s deterministically for the whole scan. The first rejection now warns once with the full story and latches the fast path off for the remainder of the scan (40 warnings → 1); the headless-render path — which is unaffected and was always the fallback — carries every Vanta trust centre, and a Vanta-side fix re-enables the fast path automatically on the next scan.
+
 ## [1.8.1] - 2026-08-21
 
 ### Fixed
