@@ -864,14 +864,16 @@ pub(crate) fn render_retry_permitted() -> bool {
         .unwrap_or(true)
 }
 
-/// Credit a render permit-queue wait to the armed sink (no-op when unarmed) and record it on the
-/// perf table so a scan summary shows how much queue the render paths credited back.
+/// Credit a render permit-queue wait to the armed sink and record it on the perf table so a scan
+/// summary shows how much queue the render paths credited back. A full no-op when unarmed: the
+/// `subproc.render_credit` row means "queue ABSOLVED against a vendor budget", so an unbudgeted
+/// caller's wait (tests, one-off scrapes) must not inflate it (independent review, 2026-08-24).
 pub(crate) fn credit_render_wait(
     sink: &Option<Arc<std::sync::atomic::AtomicU64>>,
     waited: std::time::Duration,
 ) {
-    crate::perf::METRICS.subproc_render_credit.record(waited);
     if let Some(sink) = sink {
+        crate::perf::METRICS.subproc_render_credit.record(waited);
         let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
         sink.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
     }

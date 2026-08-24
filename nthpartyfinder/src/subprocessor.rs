@@ -3299,11 +3299,12 @@ impl SubprocessorAnalyzer {
         // everything below can start a trust-center strategy, an auto-discovery pass or a headless
         // render, which is where the minutes go.
         //
-        // The retry loop above is deliberately NOT gated. Abandoning between HTTP attempts would
-        // return this envelope error instead of the "All N HTTP attempts failed" message P2.5 keys
-        // its dead-host skip on, so the host would never be marked dead and every later candidate
-        // on it would re-pay the full connect timeout — the envelope is per-URL and restarts, so
-        // that cost would be paid again and again. A transport failure must be allowed to classify
+        // The retry loop above never exits through THIS error. It does stop starting new
+        // attempts once the envelope is spent (residual-159), but that early exit still flows
+        // through the "All N HTTP attempts failed" message P2.5 keys its dead-host skip on —
+        // returning the envelope error between attempts instead would mean the host is never
+        // marked dead and every later candidate on it re-pays the full connect timeout (the
+        // envelope is per-URL and restarts). A transport failure must be allowed to classify
         // itself.
         check_url_envelope(envelope, url, "trust-center analysis")?;
 
@@ -8362,9 +8363,11 @@ mod tests {
 
     // ── Residual-159 render-budget falsifiers (2026-08-23) ─────────────
 
-    /// The task-local render budget: the wait sink is reachable from the armed task (and credits
-    /// land in the vendor counter), and is absent outside it. If someone removes the arming in
-    /// the candidate loop, or the credit helper stops writing the sink, this reds.
+    /// The task-local render budget MECHANISM: the wait sink is reachable from an armed task
+    /// (and credits land in the vendor counter), and is absent outside any scope. Honest limit
+    /// (independent review, 2026-08-24): this cannot see the production candidate-loop ARMING —
+    /// that wiring is `cfg(all(not(test), not(coverage)))` and its test of record is the
+    /// pre-merge validation scan (the `subproc.render_credit` row + per-warn queue breakdowns).
     #[tokio::test]
     async fn the_render_budget_sink_is_reachable_from_the_armed_task_and_absent_outside() {
         use std::sync::atomic::Ordering;
