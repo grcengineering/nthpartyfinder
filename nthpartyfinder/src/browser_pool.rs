@@ -812,6 +812,71 @@ fn take_pooled(force_fresh: bool) -> Option<PooledBrowser> {
     take_from_pool(force_fresh, &mut lock_idle())
 }
 
+/// Per-candidate render budget context, carried on a task-local so every render site reachable
+/// from one subprocessor candidate — however deep the call chain (executor → trust-center
+/// discovery → `capture_network_json_responses`) — can credit its permit-queue wait and consult
+/// the candidate's envelope WITHOUT threading parameters through every intermediate signature.
+///
+/// Why this exists (2026-08-23 residual-159 RCA): the trust-center render-capture path acquired
+/// its render permit inside `spawn_blocking` and discarded the measured wait — under depth-3
+/// contention (permit waits averaging 155–201s) one candidate booked hundreds of queued seconds
+/// as "working time" and was budget-exhausted having done almost no work. The other two render
+/// paths credited their waits via return-value plumbing, which is exactly why the un-plumbed one
+/// leaked — and why the mechanism is now a scope, not a parameter.
+///
+/// The task-local does NOT cross `tokio::spawn`/`spawn_blocking` by itself; render sites read it
+/// on the armed task BEFORE spawning and move the clone into the closure.
+#[derive(Clone)]
+pub(crate) struct RenderBudgetCtx {
+    /// Sink for render permit-queue waits, in nanoseconds — the vendor's `browser_wait_nanos`.
+    pub(crate) wait_sink: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Returns false once the candidate's working-time envelope is spent; optional second render
+    /// attempts (the capture retry) consult it before burning another permit queue + render.
+    pub(crate) retry_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+tokio::task_local! {
+    static RENDER_BUDGET: RenderBudgetCtx;
+}
+
+/// Run `op` with `ctx` armed as the current render budget. See [`RenderBudgetCtx`].
+pub(crate) async fn with_render_budget<F: std::future::Future>(
+    ctx: RenderBudgetCtx,
+    op: F,
+) -> F::Output {
+    RENDER_BUDGET.scope(ctx, op).await
+}
+
+/// The armed wait sink, if any. Read this on the async task BEFORE `spawn_blocking` and move the
+/// clone into the closure; inside the closure the task-local is unreachable.
+pub(crate) fn current_render_wait_sink() -> Option<Arc<std::sync::atomic::AtomicU64>> {
+    RENDER_BUDGET
+        .try_with(|ctx| ctx.wait_sink.clone())
+        .ok()
+        .flatten()
+}
+
+/// Whether an OPTIONAL second render (the capture retry) may still start under the armed budget.
+/// Unarmed callers (tests, one-off scrapes with no envelope) are unbounded, exactly as before.
+pub(crate) fn render_retry_permitted() -> bool {
+    RENDER_BUDGET
+        .try_with(|ctx| ctx.retry_gate.as_ref().map(|g| g()).unwrap_or(true))
+        .unwrap_or(true)
+}
+
+/// Credit a render permit-queue wait to the armed sink (no-op when unarmed) and record it on the
+/// perf table so a scan summary shows how much queue the render paths credited back.
+pub(crate) fn credit_render_wait(
+    sink: &Option<Arc<std::sync::atomic::AtomicU64>>,
+    waited: std::time::Duration,
+) {
+    crate::perf::METRICS.subproc_render_credit.record(waited);
+    if let Some(sink) = sink {
+        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
+        sink.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Synchronous [`acquire_tab_with_permit`], for render sites that have not yet been converted to
 /// take their permit in async context.
 ///

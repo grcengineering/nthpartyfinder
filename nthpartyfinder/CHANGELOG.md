@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.3] - 2026-08-24
+
+### Fixed
+- **The last uncredited queue in the subprocessor budget — trust-center render-capture permit waits — is closed, so the residual starvation tail is gone at the mechanism level.** A hypothesis-driven audit of the 159 remaining `SUBPROC_BUDGET_EXHAUSTED` warnings split them into 64 genuinely-working vendors, 56 single-request-scale cases, and 39 vendors whose "working time" was one silent 60–527-second stretch inside a single candidate URL. Idle re-runs proved the stretch was not the vendor (amplitude.com: 527 s in-scan, 17 s at idle, same code path, host answering in 0.7 s): the trust-center render-capture path acquired its browser permit inside its blocking closure and *discarded* the measured wait — under depth-3 contention (permit waits averaging 155–201 s, up to twice per candidate via the capture retry) hundreds of queued seconds were billed as that vendor's work. All three render paths now credit their permit wait the moment the permit is held, inside the closure, so success *and* failure paths credit (the two paths that already credited did so only on success); the credit is observable as the new `subproc.render_credit` performance counter.
+- **A candidate URL can no longer stack un-preempted timeout ladders once its working-time envelope is spent.** The static-fetch retry ladder (up to 3 × 30 s, deliberately envelope-exempt so transport failures can classify dead hosts) now stops starting *new* attempts when the envelope is gone — still exiting through the transport-classified message (with the honest attempt count) so the dead-host skip keeps firing — and the capture retry's optional second full render consults the candidate's envelope before burning another permit queue.
+- **A vendor's subprocessor pass is no longer a log black box.** At `-v`, 37 of the 39 worst starvation cases logged *nothing* between their DNS lookups and their warning. Every candidate that consumes more than 10 s of working time now logs one line naming the URL, its working time, and its excluded queue time.
+
+### Changed
+- **The per-vendor subprocessor budget default is now 60 s (was 20 s).** Field-sized from the credited distribution: once every queue class was credited back, the median honestly-starved vendor sat at 20–25 s and 114 of 159 under 60 s — 20 s was cutting genuinely productive vendors mid-probe (an idle amplitude.com pass needs ~30 s of real work). Working time only, as before: browser, connection, and DNS queueing never count against it.
+
 ## [1.8.2] - 2026-08-23
 
 ### Fixed
