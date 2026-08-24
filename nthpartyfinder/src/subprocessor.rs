@@ -366,7 +366,7 @@ fn should_reuse_settled_dom(settled_dom_len: usize, static_html_len: usize) -> b
 
 /// P2.6: how much of the per-vendor budget a SINGLE candidate URL may spend on its own work.
 ///
-/// `MAX_ANALYSIS_TIME` (20s) is checked only at the top of the candidate loop, so once a URL had
+/// `MAX_ANALYSIS_TIME` (60s) is checked only at the top of the candidate loop, so once a URL had
 /// been entered it ran to completion however long that took. One futile SPA that chained a
 /// trust-center strategy, an auto-discovery pass and a headless render overshot the whole vendor
 /// budget by itself, and the loop then broke at the first candidate — so the vendor's real
@@ -374,7 +374,7 @@ fn should_reuse_settled_dom(settled_dom_len: usize, static_html_len: usize) -> b
 /// truncation itself has been classified and counted since 1.6.1 (SUBPROC_BUDGET_EXHAUSTED); the
 /// rows were still gone.
 ///
-/// Twelve seconds against a twenty-second budget: room for one page that needs a render to finish
+/// Twelve seconds against a sixty-second budget: room for one page that needs a render to finish
 /// and answer, while a URL that has already spent that long cannot go on to *begin* another render
 /// stage on top of it. This is an INNER bound only — the vendor budget, its break, and its
 /// classification are untouched, and nothing here ever extends them.
@@ -400,28 +400,33 @@ fn url_envelope_overrun(elapsed: Duration, browser_wait: Duration, envelope: Dur
 /// every later candidate a credit earned by an earlier one — a vendor whose first candidate queued
 /// 40s for Chrome would then have granted candidates two onward an unbounded envelope, which is
 /// the opposite of what this bound exists to do.
-struct UrlWorkEnvelope<'a> {
+/// Owned `Arc` counters (not borrows): the envelope is cloned into the render-budget retry gate
+/// (`browser_pool::RenderBudgetCtx`), a `'static` closure that must outlive this stack frame.
+#[derive(Clone)]
+struct UrlWorkEnvelope {
     started: std::time::Instant,
-    browser_wait: Option<&'a std::sync::atomic::AtomicU64>,
+    browser_wait: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     browser_wait_at_start: u64,
     /// Shared-permit waits (connection semaphore + DNS admission) credited by
     /// `http_client::scope_shared_wait` — the 2026-08-23 lovable.dev RCA's second uncredited
     /// queue. Snapshot-delta semantics identical to `browser_wait`.
-    shared_wait: Option<&'a std::sync::atomic::AtomicU64>,
+    shared_wait: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     shared_wait_at_start: u64,
     limit: Duration,
 }
 
-impl<'a> UrlWorkEnvelope<'a> {
+impl UrlWorkEnvelope {
     fn start(
-        browser_wait: Option<&'a std::sync::atomic::AtomicU64>,
-        shared_wait: Option<&'a std::sync::atomic::AtomicU64>,
+        browser_wait: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+        shared_wait: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
         limit: Duration,
     ) -> Self {
         let browser_wait_at_start = browser_wait
+            .as_deref()
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
         let shared_wait_at_start = shared_wait
+            .as_deref()
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
         Self {
@@ -439,11 +444,13 @@ impl<'a> UrlWorkEnvelope<'a> {
     fn queued(&self) -> Duration {
         let browser = self
             .browser_wait
+            .as_deref()
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0)
             .saturating_sub(self.browser_wait_at_start);
         let shared = self
             .shared_wait
+            .as_deref()
             .map(|w| w.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0)
             .saturating_sub(self.shared_wait_at_start);
@@ -478,7 +485,7 @@ fn is_url_envelope_error(e: &anyhow::Error) -> bool {
 /// `Ok(())` when there is no envelope at all — every non-production caller (tests, one-off scrapes,
 /// the wrapper below) passes `None` and is bounded by nothing, exactly as before.
 fn check_url_envelope(
-    envelope: Option<&UrlWorkEnvelope<'_>>,
+    envelope: Option<&UrlWorkEnvelope>,
     url: &str,
     next_stage: &str,
 ) -> Result<()> {
@@ -2010,8 +2017,16 @@ impl SubprocessorAnalyzer {
         // Limit URL testing to prevent performance degradation. The time budget is
         // a little wider than a single-source scan because we may render a trust
         // center AND fetch a bespoke page.
+        //
+        // 60s (was 20s), owner-directed 2026-08-23 and field-sized by the residual-159 analysis:
+        // with every queue class credited, the honest working-time distribution of starved
+        // vendors put the median at 20-25s and 114/159 under 60s — 20s was cutting genuinely
+        // productive vendors mid-probe (an idle amplitude.com pass needs ~30s of real work), while
+        // 60s clears the measured genuine population and still bounds a pathological candidate
+        // list. Working time only: browser-permit, connection-permit and DNS-admission queueing is
+        // credited back, so this bounds the vendor's own work, not scan contention.
         const MAX_URLS_TO_TEST: usize = 25;
-        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+        const MAX_ANALYSIS_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
         let urls_to_test = if subprocessor_urls.len() > MAX_URLS_TO_TEST {
             debug!(
@@ -2043,7 +2058,9 @@ impl SubprocessorAnalyzer {
         // the analysis budget below: without it, MAX_ANALYSIS_TIME measures how contended the
         // browser pool is, so a vendor whose trust center needs rendering silently yields zero
         // subprocessors whenever the scan is busy. Recall must not depend on scan concurrency.
-        let browser_wait_nanos = std::sync::atomic::AtomicU64::new(0);
+        // Arc, not a stack atomic: the render paths credit it from inside `spawn_blocking`
+        // closures (via `browser_pool::RenderBudgetCtx`), which need `'static` ownership.
+        let browser_wait_nanos = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Shared-permit waits (connection semaphore + DNS admission) this vendor's probes spend
         // queueing on process-wide resources, credited via `http_client::scope_shared_wait` and
         // subtracted from the budget exactly like browser waits. Without it the 2026-08-23
@@ -2202,19 +2219,32 @@ impl SubprocessorAnalyzer {
             // position 2+ has been probed even once. The two are independent by design — neither
             // relaxes the other.
             let url_envelope = UrlWorkEnvelope::start(
-                Some(&browser_wait_nanos),
-                Some(&shared_wait_nanos),
+                Some(std::sync::Arc::clone(&browser_wait_nanos)),
+                Some(std::sync::Arc::clone(&shared_wait_nanos)),
                 MAX_URL_WORKING_TIME,
             );
-            match crate::http_client::scope_shared_wait(
-                std::sync::Arc::clone(&shared_wait_nanos),
-                self.scrape_subprocessor_page_within_envelope(
-                    url,
-                    logger,
-                    domain,
-                    None,
-                    Some(&browser_wait_nanos),
-                    Some(&url_envelope),
+            // Arm the render budget for every render this candidate can reach, however deep
+            // (SPA fallback, headless fallback, trust-center capture via executor/discovery):
+            // permit-queue waits credit back to `browser_wait_nanos`, and the optional capture
+            // retry consults this candidate's envelope before burning a second render.
+            let render_budget = crate::browser_pool::RenderBudgetCtx {
+                wait_sink: Some(std::sync::Arc::clone(&browser_wait_nanos)),
+                retry_gate: Some(std::sync::Arc::new({
+                    let env = url_envelope.clone();
+                    move || !env.overrun()
+                })),
+            };
+            match crate::browser_pool::with_render_budget(
+                render_budget,
+                crate::http_client::scope_shared_wait(
+                    std::sync::Arc::clone(&shared_wait_nanos),
+                    self.scrape_subprocessor_page_within_envelope(
+                        url,
+                        logger,
+                        domain,
+                        None,
+                        Some(&url_envelope),
+                    ),
                 ),
             )
             .await
@@ -2281,6 +2311,21 @@ impl SubprocessorAnalyzer {
                         );
                     }
                 }
+            }
+            // Residual-159 observability: at -v an entire vendor pass used to log NOTHING between
+            // its DNS lookups and its budget warn — 37 of the 39 worst starvation cases could not
+            // be stage-attributed from the log at all. One INFO line per costly candidate turns
+            // the black box into an attributable timeline without flooding the healthy path.
+            let candidate_working = url_envelope.working_elapsed();
+            if candidate_working > Duration::from_secs(10) {
+                tracing::info!(
+                    "Candidate {} for {} consumed {:.1}s of working time ({:.1}s queued for \
+                     permits, excluded)",
+                    url,
+                    domain,
+                    candidate_working.as_secs_f64(),
+                    url_envelope.queued().as_secs_f64()
+                );
             }
         }
 
@@ -2366,7 +2411,7 @@ impl SubprocessorAnalyzer {
                 continue;
             }
             if let Ok(subprocessors) = self
-                .scrape_subprocessor_page_with_retry(url, logger, domain, None, None)
+                .scrape_subprocessor_page_with_retry(url, logger, domain, None)
                 .await
             {
                 if !subprocessors.is_empty() {
@@ -3066,17 +3111,15 @@ impl SubprocessorAnalyzer {
         logger: Option<&dyn LogFailure>,
         source_domain: &str,
     ) -> Result<Vec<SubprocessorDomain>> {
-        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None, None)
+        self.scrape_subprocessor_page_with_retry(url, logger, source_domain, None)
             .await
     }
 
     /// Scrape a single subprocessor page with configurable retry and backoff
     // coverage(off) justified: thin delegation to the envelope-aware body below
     #[cfg_attr(coverage_nightly, coverage(off))]
-    /// `browser_wait_nanos`, when supplied, accumulates the time this scrape spent blocked in
-    /// the global headless-Chrome permit queue. A caller enforcing a per-vendor time budget
-    /// subtracts it so the budget bounds this vendor's own work rather than how many other
-    /// vendors happened to want a browser at the same moment.
+    /// Render permit-queue crediting rides the task-local render budget
+    /// (`browser_pool::RenderBudgetCtx`) armed by the candidate loop, not a parameter here.
     ///
     /// Unbounded by design: a caller with no candidate list behind it (a one-off scrape, a test)
     /// has nothing to protect from a slow page, so it gets the pre-P2.6 behaviour unchanged.
@@ -3086,14 +3129,12 @@ impl SubprocessorAnalyzer {
         logger: Option<&dyn LogFailure>,
         source_domain: &str,
         rate_limit_ctx: Option<&RateLimitContext>,
-        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<Vec<SubprocessorDomain>> {
         self.scrape_subprocessor_page_within_envelope(
             url,
             logger,
             source_domain,
             rate_limit_ctx,
-            browser_wait_nanos,
             None,
         )
         .await
@@ -3108,18 +3149,21 @@ impl SubprocessorAnalyzer {
     /// work with no cancellation point, so a single render that overruns is still the browser
     /// layer's own timeout to bound (TF-RENDER-DEADLINE). What this does buy is that the render is
     /// then the LAST thing that candidate does, instead of the first of several.
+    ///
+    /// Residual-159 (2026-08-23) additions to that contract: the static-fetch retry ladder stops
+    /// starting NEW attempts once the envelope is spent (still exiting through the
+    /// transport-classified message P2.5 keys on); the trust-center capture's optional second
+    /// render consults the envelope through the armed render budget; and every render path's
+    /// permit-queue wait credits back to the vendor's browser-wait counter from INSIDE its
+    /// blocking closure, so queueing can no longer masquerade as working time on any exit path.
     async fn scrape_subprocessor_page_within_envelope(
         &self,
         url: &str,
         _logger: Option<&dyn LogFailure>,
         source_domain: &str,
         rate_limit_ctx: Option<&RateLimitContext>,
-        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
-        envelope: Option<&UrlWorkEnvelope<'_>>,
+        envelope: Option<&UrlWorkEnvelope>,
     ) -> Result<Vec<SubprocessorDomain>> {
-        // Consumed by the headless-render paths, which are compiled out under cfg(test) and
-        // cfg(coverage) — those builds never launch Chrome, so nothing can be credited.
-        let _ = &browser_wait_nanos;
         debug!("🔥🔥🔥 SCRAPE_SUBPROCESSOR_PAGE CALLED: {}", url);
         debug!(
             "🚀🚀🚀 STARTING DETAILED SCRAPE of subprocessor page: {}",
@@ -3141,12 +3185,14 @@ impl SubprocessorAnalyzer {
         let _probe_timer = crate::perf::scoped(&crate::perf::METRICS.subproc_probe);
         let mut last_error = None;
         let mut response = None;
+        let mut attempts_made = 0u32;
 
         for attempt in 1..=max_retries {
             debug!(
                 "HTTP request attempt {}/{} for URL: {}",
                 attempt, max_retries, url
             );
+            attempts_made = attempt;
             match self.client.get(url)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9")
@@ -3164,6 +3210,19 @@ impl SubprocessorAnalyzer {
                     debug!("HTTP request attempt {}/{} failed for URL {}: {}", attempt, max_retries, url, e);
                     last_error = Some(e);
                     if attempt < max_retries {
+                        // Residual-159 RCA: a further attempt is only worth its up-to-30s request
+                        // timeout while this candidate still has envelope left. Breaking HERE —
+                        // after a failed attempt, before starting another — keeps the promise the
+                        // comment below makes to P2.5: the ladder still exits through the
+                        // "HTTP attempts failed" transport message (with the honest attempt
+                        // count), never the envelope marker, so a dead host is still marked dead.
+                        if envelope.is_some_and(UrlWorkEnvelope::overrun) {
+                            debug!(
+                                "Envelope spent after attempt {}/{} for {} — not starting another",
+                                attempt, max_retries, url
+                            );
+                            break;
+                        }
                         // Calculate backoff delay using config or default
                         let delay = if let Some(config) = backoff_config {
                             config.calculate_backoff_delay(attempt)
@@ -3186,7 +3245,7 @@ impl SubprocessorAnalyzer {
             match last_error {
                 Some(e) => anyhow::anyhow!(
                     "All {} HTTP attempts failed for URL {}: {}",
-                    max_retries,
+                    attempts_made,
                     url,
                     e
                 ),
@@ -3240,11 +3299,12 @@ impl SubprocessorAnalyzer {
         // everything below can start a trust-center strategy, an auto-discovery pass or a headless
         // render, which is where the minutes go.
         //
-        // The retry loop above is deliberately NOT gated. Abandoning between HTTP attempts would
-        // return this envelope error instead of the "All N HTTP attempts failed" message P2.5 keys
-        // its dead-host skip on, so the host would never be marked dead and every later candidate
-        // on it would re-pay the full connect timeout — the envelope is per-URL and restarts, so
-        // that cost would be paid again and again. A transport failure must be allowed to classify
+        // The retry loop above never exits through THIS error. It does stop starting new
+        // attempts once the envelope is spent (residual-159), but that early exit still flows
+        // through the "All N HTTP attempts failed" message P2.5 keys its dead-host skip on —
+        // returning the envelope error between attempts instead would mean the host is never
+        // marked dead and every later candidate on it re-pays the full connect timeout (the
+        // envelope is per-URL and restarts). A transport failure must be allowed to classify
         // itself.
         check_url_envelope(envelope, url, "trust-center analysis")?;
 
@@ -3492,7 +3552,12 @@ impl SubprocessorAnalyzer {
                 check_url_envelope(envelope, url, "SPA fallback render")?;
                 let url_for_browser = url.to_string();
                 crate::perf::METRICS.subproc_spa_render.hit();
-                match tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
+                // Read the armed sink BEFORE spawning — task-locals don't cross spawn_blocking.
+                // Crediting happens INSIDE the closure, immediately after the permit is held, so
+                // a render that later fails (navigation error, panic) still returns its queue
+                // time — the 2026-08-23 RCA found the old success-arm-only plumbing lost it.
+                let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+                match tokio::task::spawn_blocking(move || -> Result<String> {
                     // Records `render.total` on drop — failures counted too. Before the guard,
                     // so tab close and Chrome recycling are inside the measurement.
                     let mut render_timer = crate::perf::RenderTimer::start()
@@ -3500,6 +3565,7 @@ impl SubprocessorAnalyzer {
                     let guard = crate::browser_pool::acquire_tab()?;
                     let permit_wait = guard.permit_wait();
                     render_timer.exclude(permit_wait);
+                    crate::browser_pool::credit_render_wait(&render_wait_sink, permit_wait);
                     let tab = guard.tab();
                     let nav_started = std::time::Instant::now();
                     tab.navigate_to(&url_for_browser)
@@ -3517,12 +3583,11 @@ impl SubprocessorAnalyzer {
                         tab.get_content()
                     })
                     .map_err(|e| anyhow::anyhow!("Failed to get rendered content: {}", e))?;
-                    Ok((rendered, permit_wait))
+                    Ok(rendered)
                 })
                 .await
                 {
-                    Ok(Ok((rendered, permit_wait))) if rendered.len() > content.len() => {
-                        credit_browser_wait(browser_wait_nanos, permit_wait);
+                    Ok(Ok(rendered)) if rendered.len() > content.len() => {
                         debug!(
                             "Browser rendered {} chars (was {} static) for {}",
                             rendered.len(),
@@ -3531,8 +3596,7 @@ impl SubprocessorAnalyzer {
                         );
                         rendered
                     }
-                    Ok(Ok((_rendered, permit_wait))) => {
-                        credit_browser_wait(browser_wait_nanos, permit_wait);
+                    Ok(Ok(_rendered)) => {
                         debug!(
                             "Browser rendering didn't produce larger content for {}, using static HTML",
                             source_domain
@@ -3896,7 +3960,7 @@ impl SubprocessorAnalyzer {
 
             // Try headless browser scraping as final fallback
             match self
-                .scrape_with_headless_browser(url, _logger, source_domain, browser_wait_nanos)
+                .scrape_with_headless_browser(url, _logger, source_domain)
                 .await
             {
                 Ok(headless_vendors) => {
@@ -4611,7 +4675,6 @@ impl SubprocessorAnalyzer {
         url: &str,
         _logger: Option<&dyn LogFailure>,
         source_domain: &str,
-        browser_wait_nanos: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<Vec<SubprocessorDomain>> {
         debug!(
             "🔥🔥🔥 HEADLESS BROWSER: Starting JavaScript rendering for: {}",
@@ -4623,9 +4686,7 @@ impl SubprocessorAnalyzer {
         // on the blocking pool (see `render_html_in_browser`). Same navigation and same
         // 2s settle wait as before; only the thread it occupies has changed.
         debug!("🔥🔥🔥 HEADLESS BROWSER: Navigating to {}", url);
-        let (html_content, permit_wait) =
-            render_html_in_browser(url, Duration::from_millis(2000)).await?;
-        credit_browser_wait(browser_wait_nanos, permit_wait);
+        let html_content = render_html_in_browser(url, Duration::from_millis(2000)).await?;
         debug!("🔥🔥🔥 HEADLESS BROWSER: Page loaded, extracting content");
 
         debug!(
@@ -7114,23 +7175,14 @@ impl SubprocessorAnalyzer {
 // coverage(off): requires headless Chrome process; not available in test
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[cfg(all(not(test), not(coverage)))]
-/// Add a browser-pool queue wait to a vendor's credit sink, saturating rather than wrapping.
-///
-/// The sink is `None` for callers that have no time budget (tests, one-off scrapes); those
-/// simply discard the measurement.
-fn credit_browser_wait(sink: Option<&std::sync::atomic::AtomicU64>, waited: Duration) {
-    if let Some(sink) = sink {
-        let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
-        sink.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Render `url` in headless Chrome and return the settled DOM plus how long the render
-/// blocked waiting for a pool permit. Callers with a time budget must subtract that wait —
-/// see `analyze_domain_with_full_options`.
-async fn render_html_in_browser(url: &str, settle: Duration) -> Result<(String, Duration)> {
+/// Render `url` in headless Chrome and return the settled DOM. The permit-queue wait is credited
+/// INSIDE the blocking closure via the armed render budget (`browser_pool::RenderBudgetCtx`), so
+/// it reaches the vendor's counter on every exit path — success, error, or panic-adjacent — not
+/// only the success arm the old return-value plumbing covered.
+async fn render_html_in_browser(url: &str, settle: Duration) -> Result<String> {
     let url = url.to_string();
-    tokio::task::spawn_blocking(move || -> Result<(String, Duration)> {
+    let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+    tokio::task::spawn_blocking(move || -> Result<String> {
         // Records `render.total` on drop, so a render that fails partway is still counted.
         // Otherwise the table's denominator would silently exclude the slow failures — the
         // renders most likely to be the problem. Declared before the guard so that tab close
@@ -7140,6 +7192,7 @@ async fn render_html_in_browser(url: &str, settle: Duration) -> Result<(String, 
         let guard = crate::browser_pool::acquire_tab()?;
         let permit_wait = guard.permit_wait();
         render_timer.exclude(permit_wait);
+        crate::browser_pool::credit_render_wait(&render_wait_sink, permit_wait);
         let tab = guard.tab();
 
         let nav_started = std::time::Instant::now();
@@ -7160,7 +7213,7 @@ async fn render_html_in_browser(url: &str, settle: Duration) -> Result<(String, 
         let html = crate::perf::timed(&crate::perf::METRICS.render_capture, || tab.get_content())
             .map_err(|e| anyhow::anyhow!("Failed to get page content: {}", e))?;
 
-        Ok((html, permit_wait))
+        Ok(html)
     })
     .await
     .map_err(|e| anyhow::anyhow!("Headless render task failed to join: {}", e))?
@@ -8103,9 +8156,9 @@ mod tests {
     fn envelope_aged(
         age: Duration,
         limit: Duration,
-        browser_wait: Option<&std::sync::atomic::AtomicU64>,
+        browser_wait: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
         browser_wait_at_start: u64,
-    ) -> UrlWorkEnvelope<'_> {
+    ) -> UrlWorkEnvelope {
         UrlWorkEnvelope {
             started: std::time::Instant::now() - age,
             browser_wait,
@@ -8178,13 +8231,13 @@ mod tests {
         // hold a minute of queueing earned by candidates 1-3. Reading the raw total would hand
         // this URL that whole minute as credit and leave it effectively unbounded — the exact
         // opposite of what the envelope exists to do.
-        let vendor_wide = std::sync::atomic::AtomicU64::new(
+        let vendor_wide = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             u64::try_from(Duration::from_secs(60).as_nanos()).unwrap(),
-        );
+        ));
         let inherited = envelope_aged(
             Duration::from_secs(30),
             limit,
-            Some(&vendor_wide),
+            Some(std::sync::Arc::clone(&vendor_wide)),
             u64::try_from(Duration::from_secs(60).as_nanos()).unwrap(),
         );
         assert_eq!(
@@ -8244,10 +8297,10 @@ mod tests {
         // A candidate the loop has only just entered gets its whole envelope, however long the
         // vendor has already spent queueing for browsers — `start` snapshots both clocks at entry
         // precisely so an earlier candidate's 90s in the permit queue carries no credit into it.
-        let vendor_wide = std::sync::atomic::AtomicU64::new(
+        let vendor_wide = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
             u64::try_from(Duration::from_secs(90).as_nanos()).unwrap(),
-        );
-        let just_started = UrlWorkEnvelope::start(Some(&vendor_wide), None, MAX_URL_WORKING_TIME);
+        ));
+        let just_started = UrlWorkEnvelope::start(Some(vendor_wide), None, MAX_URL_WORKING_TIME);
         assert_eq!(just_started.queued(), Duration::ZERO);
         assert!(!just_started.overrun());
         assert!(check_url_envelope(Some(&just_started), "https://acme.com/y", "render").is_ok());
@@ -8258,9 +8311,13 @@ mod tests {
     /// waiting on the connection semaphore or DNS admission has done no work yet.
     #[test]
     fn shared_permit_queueing_is_excluded_from_the_url_envelope() {
-        let browser = std::sync::atomic::AtomicU64::new(0);
-        let shared = std::sync::atomic::AtomicU64::new(0);
-        let env = UrlWorkEnvelope::start(Some(&browser), Some(&shared), MAX_URL_WORKING_TIME);
+        let browser = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let env = UrlWorkEnvelope::start(
+            Some(std::sync::Arc::clone(&browser)),
+            Some(std::sync::Arc::clone(&shared)),
+            MAX_URL_WORKING_TIME,
+        );
         // Simulate the envelope's whole limit spent queueing on shared permits.
         shared.store(
             u64::try_from(MAX_URL_WORKING_TIME.as_nanos()).unwrap(),
@@ -8294,11 +8351,113 @@ mod tests {
     fn the_url_envelope_stays_inside_the_vendor_budget_it_subdivides() {
         // The envelope is an INNER bound: a value at or above the vendor budget would make it
         // decorative, and one at or below zero would abandon every candidate before it started.
+        // The vendor budget itself is 60s (owner-directed 2026-08-23, field-sized: median honest
+        // starvation sat at 20-25s and 114/159 under 60s once every queue class was credited).
         assert!(MAX_URL_WORKING_TIME > Duration::ZERO);
         assert!(
-            MAX_URL_WORKING_TIME < Duration::from_secs(20),
-            "the per-URL envelope must be strictly smaller than MAX_ANALYSIS_TIME (20s), or it can \
+            MAX_URL_WORKING_TIME < Duration::from_secs(60),
+            "the per-URL envelope must be strictly smaller than MAX_ANALYSIS_TIME, or it can \
              never bind before the vendor budget does"
+        );
+    }
+
+    // ── Residual-159 render-budget falsifiers (2026-08-23) ─────────────
+
+    /// The task-local render budget MECHANISM: the wait sink is reachable from an armed task
+    /// (and credits land in the vendor counter), and is absent outside any scope. Honest limit
+    /// (independent review, 2026-08-24): this cannot see the production candidate-loop ARMING —
+    /// that wiring is `cfg(all(not(test), not(coverage)))` and its test of record is the
+    /// pre-merge validation scan (the `subproc.render_credit` row + per-warn queue breakdowns).
+    #[tokio::test]
+    async fn the_render_budget_sink_is_reachable_from_the_armed_task_and_absent_outside() {
+        use std::sync::atomic::Ordering;
+        assert!(crate::browser_pool::current_render_wait_sink().is_none());
+        let vendor = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ctx = crate::browser_pool::RenderBudgetCtx {
+            wait_sink: Some(std::sync::Arc::clone(&vendor)),
+            retry_gate: None,
+        };
+        crate::browser_pool::with_render_budget(ctx, async {
+            let sink = crate::browser_pool::current_render_wait_sink();
+            assert!(sink.is_some(), "the armed sink must be visible in-scope");
+            crate::browser_pool::credit_render_wait(&sink, Duration::from_millis(9));
+        })
+        .await;
+        assert_eq!(
+            vendor.load(Ordering::Relaxed),
+            9_000_000,
+            "a credited render wait must land in the vendor's browser-wait counter"
+        );
+        assert!(crate::browser_pool::current_render_wait_sink().is_none());
+    }
+
+    /// The capture-retry gate: open by default (unarmed callers stay unbounded), closed once the
+    /// armed candidate envelope is spent — the check that stops a second multi-minute render.
+    #[tokio::test]
+    async fn the_capture_retry_gate_defaults_open_and_closes_with_a_spent_envelope() {
+        assert!(crate::browser_pool::render_retry_permitted());
+
+        let spent = envelope_aged(Duration::from_secs(30), Duration::from_secs(12), None, 0);
+        let ctx = crate::browser_pool::RenderBudgetCtx {
+            wait_sink: None,
+            retry_gate: Some(std::sync::Arc::new(move || !spent.overrun())),
+        };
+        crate::browser_pool::with_render_budget(ctx, async {
+            assert!(
+                !crate::browser_pool::render_retry_permitted(),
+                "a spent envelope must refuse the optional second render"
+            );
+        })
+        .await;
+
+        let fresh = envelope_aged(Duration::from_secs(1), Duration::from_secs(12), None, 0);
+        let ctx = crate::browser_pool::RenderBudgetCtx {
+            wait_sink: None,
+            retry_gate: Some(std::sync::Arc::new(move || !fresh.overrun())),
+        };
+        crate::browser_pool::with_render_budget(ctx, async {
+            assert!(crate::browser_pool::render_retry_permitted());
+        })
+        .await;
+    }
+
+    /// A spent envelope stops the static-fetch retry ladder after the failed attempt — and exits
+    /// through the TRANSPORT-classified message with the honest attempt count, never the envelope
+    /// marker, so P2.5's dead-host skip still fires. This is the deliberate 3243-comment contract
+    /// plus the residual-159 bound: the ladder may not start attempt 2 with no envelope left.
+    #[tokio::test]
+    async fn a_spent_envelope_stops_the_retry_ladder_with_a_transport_classified_error() {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let cache = SubprocessorCache::new_temp().await;
+        let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
+        // 127.0.0.1:1 refuses instantly — a pure transport failure with no time cost.
+        let spent = envelope_aged(Duration::from_secs(30), Duration::from_secs(12), None, 0);
+        let err = analyzer
+            .scrape_subprocessor_page_within_envelope(
+                "http://127.0.0.1:1/subprocessors",
+                None,
+                "refused.test",
+                None,
+                Some(&spent),
+            )
+            .await
+            .expect_err("a refused connection must error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("All 1 HTTP attempts failed"),
+            "the ladder must stop after ONE attempt under a spent envelope and say so \
+             honestly; got: {msg}"
+        );
+        assert!(
+            is_transport_dead_error(&err),
+            "the early exit must stay transport-classified so the dead-host skip fires"
+        );
+        assert!(
+            !is_url_envelope_error(&err),
+            "the early exit must NOT surface as an envelope abandonment"
         );
     }
 
@@ -14699,7 +14858,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
             .await;
         assert!(result.is_ok());
     }
@@ -14719,7 +14878,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
             .await;
         assert!(result.is_err(), "Non-HTML/PDF content type should error");
         let err_msg = result.unwrap_err().to_string();
@@ -14743,7 +14902,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
             .await;
         assert!(result.is_err(), "HTTP 500 should error");
     }
@@ -14789,7 +14948,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
             .await;
         assert!(result.is_ok(), "PDF content type should be processed");
     }
@@ -15973,7 +16132,7 @@ mod tests {
         let url = server.uri();
         // This exercises the Vanta detection branch (line 2060) within scrape_subprocessor_page_with_retry
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", None)
             .await;
         // Vanta GraphQL call will fail (external URL), so it falls through to generic extraction
         assert!(result.is_ok());
@@ -16006,7 +16165,7 @@ mod tests {
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let url = server.uri();
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None, None)
+            .scrape_subprocessor_page_with_retry(&url, None, "tabletest.com", None)
             .await;
         assert!(result.is_ok());
         // Exercises the full table extraction + pattern generation code path (lines 2411-2478)
@@ -16028,7 +16187,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None, None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "empty.com", None)
             .await;
         assert!(result.is_ok());
         assert!(
@@ -16599,7 +16758,7 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(cache)),
         );
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "customrules.com", None, None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "customrules.com", None)
             .await;
         assert!(result.is_ok());
     }
@@ -16625,7 +16784,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "listtest.com", None, None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "listtest.com", None)
             .await;
         assert!(result.is_ok(), "List extraction path should work");
     }
@@ -16756,7 +16915,7 @@ mod tests {
         let cache = SubprocessorCache::new_temp().await;
         let analyzer = SubprocessorAnalyzer::with_client_and_cache(client, cache);
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&server.uri(), None, "pdftest.com", None, None)
+            .scrape_subprocessor_page_with_retry(&server.uri(), None, "pdftest.com", None)
             .await;
         assert!(result.is_ok());
     }
@@ -27528,7 +27687,7 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let ctx = RateLimitContext::from_config(&config);
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx), None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx))
             .await;
         // Should succeed or fail gracefully with rate limit context
         let _ = result;
@@ -27566,7 +27725,7 @@ San Francisco, CA 94102</td><td>Analytics</td></tr>
         let ctx = RateLimitContext::from_config(&config);
         let url = format!("{}/subprocessors", mock_server.uri());
         let result = analyzer
-            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx), None)
+            .scrape_subprocessor_page_with_retry(&url, None, "example.com", Some(&ctx))
             .await;
         let _ = result;
     }
@@ -28684,7 +28843,6 @@ New York, NY 10018</td><td>Monitoring</td></tr>
                 None,
                 "test-429.example",
                 Some(&ctx),
-                None,
             )
             .await;
         let _ = result;

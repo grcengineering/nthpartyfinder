@@ -303,6 +303,10 @@ pub struct Metrics {
     /// budget-exhausted subprocessor vendors — the observable for the 2026-08-23 lockstep-starvation
     /// RCA. Count = starved vendors that carried a credit; total = the queueing they were absolved of.
     pub subproc_shared_wait: Metric,
+    /// Render permit-queue time credited back through the task-local render budget (all three
+    /// subprocessor render paths, including the trust-center capture whose discarded wait was the
+    /// 2026-08-23 residual-159 tail). Count = credited renders; total = queue absolved.
+    pub subproc_render_credit: Metric,
     /// A lookup descended from DoH into the DoT/UDP ladder.
     pub dns_ladder_entered: Metric,
     /// DoH skipped because its breaker was open.
@@ -417,6 +421,7 @@ impl Metrics {
             dns_addr_memo: Metric::new(),
             dns_addr_gai_fallback: Metric::new(),
             subproc_shared_wait: Metric::new(),
+            subproc_render_credit: Metric::new(),
             dns_ladder_entered: Metric::new(),
             dns_doh_skipped_breaker: Metric::new(),
             dns_dot_skipped_breaker: Metric::new(),
@@ -452,7 +457,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 97] {
+    fn all(&self) -> [(&'static str, &Metric); 98] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -567,6 +572,7 @@ impl Metrics {
             ("dns.addr_memo", &self.dns_addr_memo),
             ("dns.addr_gai_fallback", &self.dns_addr_gai_fallback),
             ("subproc.shared_wait", &self.subproc_shared_wait),
+            ("subproc.render_credit", &self.subproc_render_credit),
             ("dns.ladder_entered", &self.dns_ladder_entered),
             ("dns.doh_skipped_breaker", &self.dns_doh_skipped_breaker),
             ("dns.dot_skipped_breaker", &self.dns_dot_skipped_breaker),
@@ -1155,6 +1161,7 @@ mod tests {
             "dns.addr_memo",
             "dns.addr_gai_fallback",
             "subproc.shared_wait",
+            "subproc.render_credit",
             "dns.ladder_entered",
             "dns.doh_skipped_breaker",
             "dns.dot_skipped_breaker",
@@ -1172,7 +1179,7 @@ mod tests {
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 97);
+        assert_eq!(snap.rows.len(), 98);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed

@@ -429,6 +429,15 @@ async fn capture_network_json_responses(url: &str) -> Result<RenderCapture> {
     let body_fetches_handler = body_fetches.clone();
     let last_activity_handler = last_activity.clone();
 
+    // Residual-159 RCA (2026-08-23, the dominant tail mechanism): this was the ONE render path
+    // whose permit-queue wait never reached the vendor's budget counters — it was excluded from
+    // the perf timer and then discarded, so under depth-3 contention (permit waits averaging
+    // 155-201s) one candidate booked hundreds of queued seconds as "working time" and was
+    // budget-exhausted having done almost no work. Read the armed sink BEFORE spawning
+    // (task-locals don't cross spawn_blocking) and credit INSIDE the closure, immediately after
+    // the permit is held, so every exit path returns its queue time.
+    let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+
     // headless_chrome operations are blocking, run in a blocking thread
     let handle = tokio::task::spawn_blocking(move || -> Result<RenderCapture> {
         // Declared before the guard so tab close and Chrome recycling are measured.
@@ -436,6 +445,7 @@ async fn capture_network_json_responses(url: &str) -> Result<RenderCapture> {
             crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_trustcenter);
         let guard = crate::browser_pool::acquire_tab()?;
         render_timer.exclude(guard.permit_wait());
+        crate::browser_pool::credit_render_wait(&render_wait_sink, guard.permit_wait());
         let tab = guard.tab();
 
         // Capture JSON API responses (GraphQL/REST/XHR) as the page loads.
@@ -844,6 +854,18 @@ async fn capture_with_retry(url: &str) -> Result<RenderCapture> {
         had_subs,
         responses_look_truncated(&capture.responses),
     ) {
+        return Ok(capture);
+    }
+
+    // Residual-159: the retry is an OPTIONAL second full render (permit queue included). Under
+    // an armed render budget it may only start while the candidate's envelope has time left —
+    // without this gate, capture_with_retry could burn two multi-minute permit queues
+    // back-to-back with no check between them. Unarmed callers stay unbounded, as before.
+    if !crate::browser_pool::render_retry_permitted() {
+        debug!(
+            "Skipping capture retry for {} — the candidate's working-time envelope is spent",
+            url
+        );
         return Ok(capture);
     }
 
