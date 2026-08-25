@@ -163,6 +163,14 @@ fn classify_capture_error(
     }
 }
 
+/// A capture failure whose cause is the CDP connection itself dying (tab or Chrome went away
+/// under the capture) — the one class where a single retry runs on genuinely different
+/// machinery, because the pool recycles the browser. Stable `headless_chrome` transport wording.
+fn is_dead_browser_connection(chain: &str) -> bool {
+    chain.contains("underlying connection is closed")
+        || chain.contains("Unable to make method calls")
+}
+
 /// The main web traffic discovery struct.
 pub struct WebTrafficDiscovery {
     client: reqwest::Client,
@@ -250,8 +258,24 @@ impl WebTrafficDiscovery {
             }
         }
 
-        // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
-        match self.analyze_network_traffic(url, target_base_domain).await {
+        // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs).
+        // One bounded retry when the CDP connection itself died mid-capture (tab/Chrome went
+        // away under it): the pool hands the retry a recycled browser, so this is the one
+        // failure class where a second attempt runs on genuinely different machinery. The
+        // 2026-08-25 round-3 census: the ONLY residual tool-class events were exactly these
+        // (7 of 711 domains). A retry that fails again stays honestly tool-classed.
+        let phase2 = match self.analyze_network_traffic(url, target_base_domain).await {
+            Err(e) if is_dead_browser_connection(&format!("{e:#}")) => {
+                tracing::info!(
+                    "Web traffic: browser connection died mid-capture for {} — one retry on a \
+                     recycled browser",
+                    domain
+                );
+                self.analyze_network_traffic(url, target_base_domain).await
+            }
+            other => other,
+        };
+        match phase2 {
             Ok(results) => {
                 CAPTURE_WITNESS.note_ok();
                 debug!(
