@@ -663,7 +663,13 @@ const WORK_DEADLINE_MIN_TICK: Duration = Duration::from_millis(50);
 /// being spent by it.
 pub struct DomainWorkClock {
     started: std::time::Instant,
-    queued_nanos: std::sync::atomic::AtomicU64,
+    /// Shared with the phase futures via [`Self::queue_sink`]: the phase wrapper arms this sink
+    /// as both a shared-wait scope and the domain queue channel, so every credited queue —
+    /// connection permits, DNS admission, HTTP pacing, the subfinder semaphore, render permits —
+    /// lands here LIVE, and `await_work_deadline`'s re-read extends the deadline instead of
+    /// letting queueing spend the budget (the 2026-08-25 census: 849/1,057 subfinder phases cut
+    /// with ~98% of their billed time being the 3-permit semaphore queue).
+    queued_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl DomainWorkClock {
@@ -671,8 +677,14 @@ impl DomainWorkClock {
     pub fn start() -> Self {
         Self {
             started: std::time::Instant::now(),
-            queued_nanos: std::sync::atomic::AtomicU64::new(0),
+            queued_nanos: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// The live queue-credit sink, for arming `http_client::scope_shared_wait` /
+    /// `scope_domain_queue` around this domain's phase futures.
+    pub fn queue_sink(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        std::sync::Arc::clone(&self.queued_nanos)
     }
 
     /// Credit time this domain spent waiting in a queue rather than working. Mirrors
@@ -796,7 +808,11 @@ pub async fn subprocessor_analysis_with_logging(
             // found nothing" — the analyzer's Err would otherwise be laundered into an empty Vec and
             // vanish (the RC-5 silent-failure hole). The Vec stays empty (nothing to merge); the
             // degradation now lives in SCAN_COVERAGE instead of being lost.
-            crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+            let (origin, reason) =
+                crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
+            crate::coverage::SCAN_COVERAGE
+                .subprocessor
+                .record_attributed(origin, domain, reason);
             Ok(Vec::new())
         }
     }
@@ -906,11 +922,18 @@ async fn run_subprocessor_phase(
             Vec::new()
         }
         Err(e) => {
+            let (origin, reason) =
+                crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
             logger.warn(&format!(
-                "Subprocessor analysis failed for {}: {}",
-                domain, e
+                "Subprocessor analysis failed for {}: {} [origin={} reason={}]",
+                domain,
+                e,
+                origin.as_str(),
+                reason
             ));
-            crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+            crate::coverage::SCAN_COVERAGE
+                .subprocessor
+                .record_attributed(origin, domain, reason);
             Vec::new()
         }
     }
@@ -935,8 +958,17 @@ async fn run_subfinder_phase(
     let subdomains = match subfinder.discover(domain).await {
         Ok(s) => s,
         Err(e) => {
-            logger.warn(&format!("Subdomain discovery failed for {}: {}", domain, e));
-            crate::coverage::SCAN_COVERAGE.subfinder.record_failure();
+            // `discover`'s Err surface is the subprocess itself (spawn failure, missing stdout
+            // pipe) — our side of the line, not the target's and not the passive sources'.
+            logger.warn(&format!(
+                "Subdomain discovery failed for {}: {} [origin=tool reason=subfinder_spawn_failed]",
+                domain, e
+            ));
+            crate::coverage::SCAN_COVERAGE.subfinder.record_attributed(
+                crate::coverage::Origin::Tool,
+                domain,
+                "subfinder_spawn_failed",
+            );
             return Vec::new();
         }
     };
@@ -1042,17 +1074,37 @@ async fn run_saas_phase(
                     domain
                 ));
             }
+            if tenant_vendors.is_empty() {
+                // A completed probe sweep with zero tenants is a verified target no-op — the
+                // NXDOMAIN answers ARE the mechanism working, not failures.
+                crate::coverage::SCAN_COVERAGE.saas.record_attributed(
+                    crate::coverage::Origin::TargetNoop,
+                    domain,
+                    "no_tenants_found",
+                );
+            }
             crate::coverage::SCAN_COVERAGE
                 .saas
                 .record_found(tenant_vendors.len());
             tenant_vendors
         }
         Err(e) => {
+            // Tenant probes ride the governed DoH lane — the remote parties are the SaaS
+            // providers' DNS via our resolvers, an intermediary path, never the target itself.
+            let (origin, reason) = crate::coverage::classify_fetch_error(
+                &e,
+                crate::coverage::RemoteParty::Intermediary,
+            );
             logger.warn(&format!(
-                "SaaS tenant discovery failed for {}: {}",
-                domain, e
+                "SaaS tenant discovery failed for {}: {} [origin={} reason={}]",
+                domain,
+                e,
+                origin.as_str(),
+                reason
             ));
-            crate::coverage::SCAN_COVERAGE.saas.record_failure();
+            crate::coverage::SCAN_COVERAGE
+                .saas
+                .record_attributed(origin, domain, reason);
             Vec::new()
         }
     }
@@ -1086,8 +1138,22 @@ async fn run_ct_phase(
         }
         Ok(_) => Vec::new(),
         Err(e) => {
-            logger.warn(&format!("CT log discovery failed for {}: {}", domain, e));
-            crate::coverage::SCAN_COVERAGE.ct.record_failure();
+            // crt.sh is an intermediary service: its transport failures are upstream, never the
+            // scan target's fault.
+            let (origin, reason) = crate::coverage::classify_fetch_error(
+                &e,
+                crate::coverage::RemoteParty::Intermediary,
+            );
+            logger.warn(&format!(
+                "CT log discovery failed for {}: {} [origin={} reason={}]",
+                domain,
+                e,
+                origin.as_str(),
+                reason
+            ));
+            crate::coverage::SCAN_COVERAGE
+                .ct
+                .record_attributed(origin, domain, reason);
             Vec::new()
         }
     }
@@ -1178,22 +1244,38 @@ where
     let Some((clock, current_depth, ceiling)) = budget else {
         return phase.await;
     };
+    // Arm the domain clock's queue sink around the phase, on BOTH credit channels: the shared
+    // stack (connection permits, DNS admission, pacing, the subfinder semaphore) and the
+    // domain-only channel (render-permit waits, which vendor budgets already subtract through
+    // their own plumbing). Every credited wait now extends the deadline live, so the ceiling cuts
+    // genuine work only — before this, `phase.subfinder` billed 528,754s across 1,057 domains
+    // while the actual subprocesses did 8,744s, and the ceiling cut the queueing (2026-08-25).
+    let phase = crate::http_client::scope_domain_queue(
+        clock.queue_sink(),
+        crate::http_client::scope_shared_wait(clock.queue_sink(), phase),
+    );
     tokio::select! {
         biased;
         found = phase => found,
         _ = await_work_deadline(clock, current_depth, ceiling) => {
             crate::perf::METRICS.domain_budget_cut.hit();
-            // Classified, not silently truncated. `record_failure` is the same call every phase
-            // error path makes, and it is the difference that matters here: an empty Vec from a
-            // cut phase is byte-identical to "this domain genuinely has nothing", and without
-            // this the scan summary would print SUCCESS over the loss — the RC-1 collapse that
-            // cost chargify.com all 28 of its rows while the scan-wide total went UP.
-            coverage.record_failure();
+            // Classified, not silently truncated. The attributed record is the same call every
+            // phase error path makes, and it is the difference that matters here: an empty Vec
+            // from a cut phase is byte-identical to "this domain genuinely has nothing", and
+            // without this the scan summary would print SUCCESS over the loss — the RC-1 collapse
+            // that cost chargify.com all 28 of its rows while the scan-wide total went UP. The
+            // ceiling is a designed bound doing its job on genuine work: origin `policy`.
+            coverage.record_attributed(
+                crate::coverage::Origin::Policy,
+                domain,
+                "domain_budget_exhausted",
+            );
             let queued = clock.queued();
             logger.warn(&format!(
                 "DOMAIN_BUDGET_EXHAUSTED: cut {} discovery for {} after {:.1}s of working time \
                  ({:.1}s queued for permits, excluded) — this method was starved, not empty. \
-                 The domain's other methods keep everything they already returned.",
+                 The domain's other methods keep everything they already returned. \
+                 [origin=policy reason=domain_budget_exhausted]",
                 method,
                 domain,
                 clock.elapsed().saturating_sub(queued).as_secs_f64(),
@@ -4197,6 +4279,68 @@ mod tests {
         )
         .await;
         assert_eq!(kept.len(), 2, "a ready phase must keep everything it found");
+    }
+
+    #[tokio::test]
+    async fn a_phase_whose_wall_is_credited_queue_is_not_cut_by_the_ceiling() {
+        // The 2026-08-25 census falsifier: 849 of 1,057 subfinder phases were cut with ~98% of
+        // their billed time being the 3-permit semaphore queue (`phase.subfinder` 528,754s vs
+        // `subfinder.proc` 8,744s). A phase whose wall time is CREDITED queueing must run to
+        // completion — the deadline re-reads the clock, so live credits extend it. Before the
+        // phase wrapper armed the clock's sink, this test failed with the phase cut and an
+        // empty Vec returned (verified red on the pre-fix wiring).
+        let clock = DomainWorkClock::start();
+        let coverage = crate::coverage::PhaseCoverage::default();
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+        let ceiling = Duration::from_millis(150);
+
+        let kept = phase_within_domain_budget(
+            async {
+                // Simulate a shared-permit wait: real wall time, credited through the same
+                // channel the connection semaphore / DNS admission / subfinder semaphore use.
+                for _ in 0..4 {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                    crate::http_client::credit_shared_wait(Duration::from_millis(60));
+                }
+                make_vendor_domains(2)
+            },
+            Some((&clock, 3, ceiling)),
+            &coverage,
+            "test",
+            "queued.example.com",
+            &logger,
+        )
+        .await;
+        assert_eq!(
+            kept.len(),
+            2,
+            "a queue-starved (not work-starved) phase must not be cut: its wall was credited"
+        );
+        assert!(
+            clock.queued() >= Duration::from_millis(240),
+            "the credits must have reached the domain clock live, not at phase end"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_shared_wait_scopes_credit_every_armed_sink() {
+        // The stacking falsifier: a vendor budget armed INSIDE a domain scope must not shadow
+        // it — before the stack, the inner scope swallowed every credit and the outer budget
+        // (the domain clock) starved blind, which is exactly how 849 domains were cut.
+        use std::sync::atomic::Ordering;
+        let outer = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let inner = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        crate::http_client::scope_shared_wait(std::sync::Arc::clone(&outer), async {
+            crate::http_client::scope_shared_wait(std::sync::Arc::clone(&inner), async {
+                crate::http_client::credit_shared_wait(Duration::from_millis(11));
+            })
+            .await;
+            // After the inner scope ends, credits land only in the outer again.
+            crate::http_client::credit_shared_wait(Duration::from_millis(5));
+        })
+        .await;
+        assert_eq!(inner.load(Ordering::Relaxed), 11_000_000);
+        assert_eq!(outer.load(Ordering::Relaxed), 16_000_000);
     }
 
     #[tokio::test]

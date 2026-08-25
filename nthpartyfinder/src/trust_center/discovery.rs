@@ -437,6 +437,7 @@ async fn capture_network_json_responses(url: &str) -> Result<RenderCapture> {
     // (task-locals don't cross spawn_blocking) and credit INSIDE the closure, immediately after
     // the permit is held, so every exit path returns its queue time.
     let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+    let render_domain_sink = crate::browser_pool::current_render_domain_sink();
 
     // headless_chrome operations are blocking, run in a blocking thread
     let handle = tokio::task::spawn_blocking(move || -> Result<RenderCapture> {
@@ -445,7 +446,11 @@ async fn capture_network_json_responses(url: &str) -> Result<RenderCapture> {
             crate::perf::RenderTimer::start().with_source(&crate::perf::METRICS.render_trustcenter);
         let guard = crate::browser_pool::acquire_tab()?;
         render_timer.exclude(guard.permit_wait());
-        crate::browser_pool::credit_render_wait(&render_wait_sink, guard.permit_wait());
+        crate::browser_pool::credit_render_wait(
+            &render_wait_sink,
+            &render_domain_sink,
+            guard.permit_wait(),
+        );
         let tab = guard.tab();
 
         // Capture JSON API responses (GraphQL/REST/XHR) as the page loads.

@@ -513,7 +513,15 @@ pub async fn acquire_render_permit() -> anyhow::Result<RenderPermit> {
         // Unreachable in practice: nothing ever closes a process-global `Lazy` semaphore. Reported
         // rather than unwrapped so a future edit that does close it degrades instead of panicking.
         .map_err(|e| anyhow::anyhow!("render-slot semaphore closed: {e}"))?;
-    Ok(into_render_permit(permit, started.elapsed()))
+    let permit = into_render_permit(permit, started.elapsed());
+    // Unarmed async acquirers still queue behind every other render in the scan; the domain work
+    // ceiling is the only budget watching them, so the wait credits it here. Armed paths credit
+    // through `credit_render_wait` instead — the partition keeps any one wait from reaching the
+    // domain clock twice.
+    if !render_budget_armed() {
+        crate::http_client::credit_domain_queue(permit.waited());
+    }
+    Ok(permit)
 }
 
 /// How a *synchronous* caller must wait for a render slot.
@@ -830,6 +838,11 @@ fn take_pooled(force_fresh: bool) -> Option<PooledBrowser> {
 pub(crate) struct RenderBudgetCtx {
     /// Sink for render permit-queue waits, in nanoseconds — the vendor's `browser_wait_nanos`.
     pub(crate) wait_sink: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// The domain work ceiling's queue sink, captured from the armed task at construction
+    /// (`http_client::current_domain_queue_sink`) so a render wait can credit the DOMAIN clock
+    /// from inside the blocking closure, where task-locals are unreachable. Separate from
+    /// `wait_sink` because the two budgets subtract independently from independent wall clocks.
+    pub(crate) domain_sink: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// Returns false once the candidate's working-time envelope is spent; optional second render
     /// attempts (the capture retry) consult it before burning another permit queue + render.
     pub(crate) retry_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -856,6 +869,24 @@ pub(crate) fn current_render_wait_sink() -> Option<Arc<std::sync::atomic::Atomic
         .flatten()
 }
 
+/// The armed domain queue sink, if any — same read-before-spawn contract as
+/// [`current_render_wait_sink`]. Falls back to the task-local domain sink directly, so a render
+/// site armed with a domain ceiling but no vendor budget still credits the domain clock.
+pub(crate) fn current_render_domain_sink() -> Option<Arc<std::sync::atomic::AtomicU64>> {
+    RENDER_BUDGET
+        .try_with(|ctx| ctx.domain_sink.clone())
+        .ok()
+        .flatten()
+        .or_else(crate::http_client::current_domain_queue_sink)
+}
+
+/// Whether a `RenderBudgetCtx` is armed on the current task (used to partition domain-queue
+/// crediting between [`credit_render_wait`] and [`acquire_render_permit`], so a wait is never
+/// credited to the domain clock twice).
+fn render_budget_armed() -> bool {
+    RENDER_BUDGET.try_with(|_| ()).is_ok()
+}
+
 /// Whether an OPTIONAL second render (the capture retry) may still start under the armed budget.
 /// Unarmed callers (tests, one-off scrapes with no envelope) are unbounded, exactly as before.
 pub(crate) fn render_retry_permitted() -> bool {
@@ -870,6 +901,7 @@ pub(crate) fn render_retry_permitted() -> bool {
 /// caller's wait (tests, one-off scrapes) must not inflate it (independent review, 2026-08-24).
 pub(crate) fn credit_render_wait(
     sink: &Option<Arc<std::sync::atomic::AtomicU64>>,
+    domain_sink: &Option<Arc<std::sync::atomic::AtomicU64>>,
     waited: std::time::Duration,
 ) {
     if let Some(sink) = sink {
@@ -877,6 +909,10 @@ pub(crate) fn credit_render_wait(
         let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
         sink.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
     }
+    // The domain work ceiling watches the same wall this wait sat on (2026-08-25 census: 103
+    // web-traffic + 123 subprocessor domain cuts under uncredited render queue), so the wait
+    // credits the domain clock too — through the carried sink, never the vendor sink.
+    crate::http_client::credit_carried_sink(domain_sink, waited);
 }
 
 /// Synchronous [`acquire_tab_with_permit`], for render sites that have not yet been converted to

@@ -332,32 +332,91 @@ where
 // they cannot otherwise see. Un-armed tasks pay nothing (try_with on an unset task-local).
 
 tokio::task_local! {
-    /// The current task's shared-wait accumulator, when armed by [`scope_shared_wait`].
-    static SHARED_WAIT_NANOS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+    /// The current task's shared-wait sink STACK, when armed by [`scope_shared_wait`]. A stack,
+    /// not a single cell: budgets nest — a vendor budget runs inside a domain work ceiling — and
+    /// a nested scope that SHADOWED its outer sink would silently stop crediting the outer
+    /// budget, which is the exact uncredited-queue class this mechanism exists to kill (the
+    /// 2026-08-25 domain-ceiling census: 849 subfinder phases cut with queue billed as work).
+    static SHARED_WAIT_SINKS: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>;
+
+    /// The current domain's queue sink (its `DomainWorkClock` counter), when a phase runs under
+    /// a domain work ceiling. A separate channel from `SHARED_WAIT_SINKS` for the waits that
+    /// must credit the DOMAIN clock only: render-permit waits are subtracted from vendor budgets
+    /// through their own explicit plumbing (`browser_pool::RenderBudgetCtx`), so crediting them
+    /// into the shared stack too would subtract the same wait twice from the vendor budget.
+    static DOMAIN_QUEUE_SINK: std::sync::Arc<std::sync::atomic::AtomicU64>;
 }
 
 /// Run `op` with `acc` collecting every shared-permit wait (connection semaphore, DNS governor +
-/// rate bucket) incurred on this task. Inherited across `.await`s within the task; NOT across
-/// `tokio::spawn` (a spawned subtask is its own budget domain — the browser render path already
-/// accounts its queueing separately via the browser-wait counter).
+/// rate bucket) incurred on this task, in addition to any outer scopes already armed. Inherited
+/// across `.await`s within the task; NOT across `tokio::spawn` (a spawned subtask is its own
+/// budget domain — the browser render path already accounts its queueing separately via the
+/// browser-wait counter).
 pub async fn scope_shared_wait<F: std::future::Future>(
     acc: std::sync::Arc<std::sync::atomic::AtomicU64>,
     op: F,
 ) -> F::Output {
-    SHARED_WAIT_NANOS.scope(acc, op).await
+    let mut stack = SHARED_WAIT_SINKS.try_with(Clone::clone).unwrap_or_default();
+    stack.push(acc);
+    SHARED_WAIT_SINKS.scope(stack, op).await
 }
 
-/// Credit one shared-permit wait to the current task's accumulator, if one is armed.
+/// Run `op` with `sink` armed as the current domain's queue sink (see [`DOMAIN_QUEUE_SINK`]).
+pub async fn scope_domain_queue<F: std::future::Future>(
+    sink: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    op: F,
+) -> F::Output {
+    DOMAIN_QUEUE_SINK.scope(sink, op).await
+}
+
+/// Credit one shared-permit wait to every armed accumulator scope, if any.
 pub(crate) fn credit_shared_wait(wait: Duration) {
     if wait.is_zero() {
         return;
     }
-    let _ = SHARED_WAIT_NANOS.try_with(|acc| {
+    let nanos = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+    let _ = SHARED_WAIT_SINKS.try_with(|sinks| {
+        for acc in sinks {
+            acc.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// Credit a wait to the current domain's queue sink only (see [`DOMAIN_QUEUE_SINK`] for why this
+/// channel exists apart from the shared stack).
+pub(crate) fn credit_domain_queue(wait: Duration) {
+    if wait.is_zero() {
+        return;
+    }
+    let _ = DOMAIN_QUEUE_SINK.try_with(|acc| {
         acc.fetch_add(
             u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
     });
+}
+
+/// The armed domain queue sink, for contexts that must carry it across a spawn seam (the render
+/// paths read it on the async task and move the clone into their blocking closure).
+pub(crate) fn current_domain_queue_sink() -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+    DOMAIN_QUEUE_SINK.try_with(Clone::clone).ok()
+}
+
+/// Credit `wait` into a carried sink, if present — the blocking-thread counterpart of
+/// [`credit_domain_queue`] for closures that captured the sink before the spawn seam.
+pub(crate) fn credit_carried_sink(
+    sink: &Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    wait: Duration,
+) {
+    if wait.is_zero() {
+        return;
+    }
+    if let Some(sink) = sink {
+        sink.fetch_add(
+            u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 /// Send a `reqwest` request under the global connection ceiling.

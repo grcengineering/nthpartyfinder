@@ -16,7 +16,13 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 /// Bump when a field is renamed/removed or its meaning changes; additive fields do not require it.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 (2026-08-25, failure-vs-no-op attribution): `coverage.phases.*.failed` narrowed its meaning
+/// — it now counts only upstream/tool/policy-attributed failures; target-attributed outcomes
+/// (verified no-ops, target-limited coverage) moved to the new `origins` counts and are not
+/// failures. Additive: `coverage.phases.*.origins`, `coverage.target_outcomes`,
+/// `coverage.samples`.
+pub const SCHEMA_VERSION: u32 = 2;
 
 const FINAL_FILENAME: &str = "scan-summary.json";
 const PARTIAL_FILENAME: &str = "scan-summary.partial.json";
@@ -112,6 +118,11 @@ pub struct CoverageSection {
     pub features: Vec<crate::coverage::FeatureStatus>,
     pub phases: crate::coverage::CoverageSnapshot,
     pub any_degraded: bool,
+    /// `coverage::target_outcomes_summary` for this scan — the target-side outcomes (verified
+    /// no-ops, target-limited coverage) that are NOT failures; `None` when none were recorded.
+    pub target_outcomes: Option<String>,
+    /// Bounded per-phase attribution evidence: which domain, whose fault, what reason code.
+    pub samples: crate::coverage::CoverageSamples,
 }
 
 /// One perf counter row (`perf::METRICS`), duration flattened to seconds for JSON consumers.
@@ -288,6 +299,8 @@ impl ScanSummaryContext {
                 features: self.features.clone(),
                 phases: cov,
                 any_degraded: cov.any_degraded(),
+                target_outcomes: crate::coverage::target_outcomes_summary(&cov),
+                samples: crate::coverage::SCAN_COVERAGE.samples_snapshot(),
             },
             perf,
             http: HttpSection {
@@ -414,7 +427,7 @@ mod tests {
         let s = sample_summary("Analysis completed successfully! Found 37 vendor relationships.");
         let json = serde_json::to_string_pretty(&s).expect("summary serializes");
         let v: serde_json::Value = serde_json::from_str(&json).expect("round-trips");
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
         // Every top-level section the schema promises is present.
         for key in [
             "meta",
@@ -445,7 +458,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).expect("final file readable");
         let v: serde_json::Value = serde_json::from_str(&content).expect("file is valid JSON");
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
 
         let tmp = dir.path().join("scan-summary.json.tmp");
         assert!(!tmp.exists(), "temp file must be renamed away");

@@ -187,7 +187,16 @@ impl WebTrafficDiscovery {
                 // Phase-2 render/capture failed → only static Phase-1 domains are returned. Record
                 // the degradation so a browser/network hiccup that thins web-traffic recall shows up
                 // in the scan-health summary instead of silently under-counting (RC-2).
-                crate::coverage::SCAN_COVERAGE.webtraffic.record_failure();
+                let (origin, mut reason) =
+                    crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
+                if reason == "unclassified" {
+                    // The phase-2 chain is browser/CDP work, not a reqwest fetch — an unrecognized
+                    // chain here is the capture machinery, our side of the line.
+                    reason = "browser_capture_failed";
+                }
+                crate::coverage::SCAN_COVERAGE
+                    .webtraffic
+                    .record_attributed(origin, domain, reason);
             }
         }
 
@@ -231,6 +240,11 @@ impl WebTrafficDiscovery {
         let url_owned = url.to_string();
         let wait_ms = self.network_wait_ms;
 
+        // Captured before the spawn seam: web-traffic renders queue on the same permit pool as
+        // every other render, and that wait must credit the domain work ceiling (2026-08-25
+        // census: 103 web-traffic domain cuts under uncredited queue) — inside the closure the
+        // task-local is unreachable.
+        let domain_queue_sink = crate::http_client::current_domain_queue_sink();
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             use std::sync::atomic::Ordering;
             // Declared before the guard so tab close and Chrome recycling are measured.
@@ -238,6 +252,7 @@ impl WebTrafficDiscovery {
                 .with_source(&crate::perf::METRICS.render_webtraffic);
             let guard = crate::browser_pool::acquire_tab()?;
             render_timer.exclude(guard.permit_wait());
+            crate::http_client::credit_carried_sink(&domain_queue_sink, guard.permit_wait());
             let tab = guard.tab();
 
             // Intercept ALL network responses (not just JSON like trust_center does).

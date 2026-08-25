@@ -851,6 +851,15 @@ impl AnalysisLogger {
                 "{}",
                 render_verdict_colored(&verdict, metadata.total_vendor_relationships)
             );
+            // The target-side story — verified no-ops and target-limited coverage — printed under
+            // whatever the verdict was: these are results, not failures, and hiding them is the
+            // failure-vs-no-op ambiguity the attribution layer exists to kill. Unstyled on
+            // purpose: identical bytes in both console paths and the file mirror.
+            if let Some(outcomes) =
+                crate::coverage::target_outcomes_summary(&crate::coverage::SCAN_COVERAGE.snapshot())
+            {
+                println!("{outcomes}");
+            }
         } else {
             println!("\n=== ANALYSIS SUMMARY ===");
 
@@ -885,6 +894,12 @@ impl AnalysisLogger {
             // byte-identical to the pre-refactor literals by the `verdict_rendering_*` tests.
             let (verdict, degradation) = self.compute_verdict(metadata.total_vendor_relationships);
             println!("{}", render_verdict_plain(&verdict));
+            let target_outcomes = crate::coverage::target_outcomes_summary(
+                &crate::coverage::SCAN_COVERAGE.snapshot(),
+            );
+            if let Some(outcomes) = &target_outcomes {
+                println!("{outcomes}");
+            }
 
             // Mirror the key summary facts into scan.log (the --log-file sink), which the raw
             // println! summary above never reaches — a --log-file run's scan.log otherwise stops at
@@ -919,6 +934,10 @@ impl AnalysisLogger {
             // sees a starved/failed phase — not just DNS failures — instead of a silent undercount.
             if let Some(detail) = &degradation {
                 self.log_summary_to_file("WARN", &format!("Coverage degraded — {}", detail));
+            }
+            // And the target-side outcomes, at INFO: not failures, but part of the scan's story.
+            if let Some(outcomes) = &target_outcomes {
+                self.log_summary_to_file("INFO", outcomes);
             }
         }
     }
@@ -2340,7 +2359,11 @@ mod tests {
         // SUCCESS — in both the colored and plain summary branches (the scan-health visibility fix
         // for the "subprocessor collapsed but the summary still said SUCCESS" pathology).
         crate::coverage::SCAN_COVERAGE.reset();
-        crate::coverage::SCAN_COVERAGE.subfinder.record_failure();
+        crate::coverage::SCAN_COVERAGE.subfinder.record_attributed(
+            crate::coverage::Origin::Tool,
+            "t.example",
+            "subfinder_spawn_failed",
+        );
 
         let colored = AnalysisLogger::new_forced_color(VerbosityLevel::Debug);
         colored.record_vendor_relationships(5);
