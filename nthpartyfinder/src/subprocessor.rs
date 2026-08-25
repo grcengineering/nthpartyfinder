@@ -2323,6 +2323,10 @@ impl SubprocessorAnalyzer {
                             &e,
                             crate::coverage::RemoteParty::Target,
                         ) {
+                            // Authoritative no-such-host: the candidate URL provably does not
+                            // exist — a definitive miss like a 404, not an obstacle to the
+                            // no-disclosure verdict. Sets neither flag.
+                            (crate::coverage::Origin::TargetNoop, _) => {}
                             (crate::coverage::Origin::TargetLimited, _) => {
                                 candidate_transport_target = true;
                             }

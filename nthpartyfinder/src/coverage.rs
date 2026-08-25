@@ -78,6 +78,18 @@ pub fn classify_fetch_error(e: &anyhow::Error, remote: RemoteParty) -> (Origin, 
     let mut saw_connect = false;
     let mut saw_status = false;
     for cause in e.chain() {
+        // Strongest evidence first: the governed resolver's typed authoritative-empty. The host
+        // does not resolve by its OWN authoritative DNS — a definitive statement about the
+        // target, reproducible with `dig`, and never a failure of this scan.
+        if cause
+            .downcast_ref::<crate::dns::AuthoritativeNoAddress>()
+            .is_some()
+        {
+            return match remote {
+                RemoteParty::Target => (Origin::TargetNoop, "no_dns_records"),
+                RemoteParty::Intermediary => (Origin::Upstream, "provider_no_dns"),
+            };
+        }
         if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
             saw_timeout |= re.is_timeout();
             saw_connect |= re.is_connect();
@@ -808,6 +820,58 @@ mod tests {
         let s = degradation_summary(&legacy, 0, 0, 0).unwrap();
         assert!(s.contains("CT-log discovery failed on 1 domain(s)"), "{s}");
         assert!(!s.contains('['), "{s}");
+    }
+
+    #[test]
+    fn classifier_reads_authoritative_no_address_through_a_context_chain() {
+        // The governed resolver's typed evidence must survive anyhow context wrapping (the retry
+        // ladder's terminal message) and classify as target-side — the definitive "this host does
+        // not resolve" that turns a candidate probe failure into a definitive miss.
+        let e = anyhow::Error::new(crate::dns::AuthoritativeNoAddress {
+            host: "gone.example".into(),
+        })
+        .context("All 1 HTTP attempts failed for URL http://gone.example/subprocessors");
+        assert_eq!(
+            classify_fetch_error(&e, RemoteParty::Target),
+            (Origin::TargetNoop, "no_dns_records")
+        );
+        assert_eq!(
+            classify_fetch_error(&e, RemoteParty::Intermediary),
+            (Origin::Upstream, "provider_no_dns")
+        );
+    }
+
+    #[test]
+    fn classifier_splits_refusal_timeout_and_silence_conservatively() {
+        // A refusal is the remote answering → target evidence.
+        let refused = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert_eq!(
+            classify_fetch_error(&refused, RemoteParty::Target),
+            (Origin::TargetLimited, "connect_refused")
+        );
+        // A timeout is silence → NEVER target evidence (anti-laundering): failure side for a
+        // target remote, intermediary-attributed for an intermediary remote.
+        let timed_out = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert_eq!(
+            classify_fetch_error(&timed_out, RemoteParty::Target),
+            (Origin::Tool, "unattributed_timeout")
+        );
+        assert_eq!(
+            classify_fetch_error(&timed_out, RemoteParty::Intermediary),
+            (Origin::Upstream, "provider_timeout")
+        );
+        // Unrecognized chains stay on the failure side.
+        let opaque = anyhow::anyhow!("some renderer exploded");
+        assert_eq!(
+            classify_fetch_error(&opaque, RemoteParty::Target),
+            (Origin::Tool, "unclassified")
+        );
     }
 
     #[test]

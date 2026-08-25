@@ -3097,6 +3097,30 @@ impl DnsServerPool {
     }
 }
 
+/// Typed evidence that a hostname has NO address records by its own authoritative DNS — the
+/// governed resolver answered (trusted, no GAI re-ask per Wave 3's contract), and the answer was
+/// empty. Carried as the resolver error so it survives boxed inside `reqwest`'s connect-error
+/// chain, where `coverage::classify_fetch_error` downcasts it back into target-side attribution:
+/// a candidate URL on a host that does not exist is a definitive miss, and a domain with no
+/// address records has no web presence — neither is a failure of this scan. An out-of-band
+/// `dig` reproduces the evidence, which is what the anti-laundering invariant requires.
+#[derive(Debug, Clone)]
+pub struct AuthoritativeNoAddress {
+    pub host: String,
+}
+
+impl std::fmt::Display for AuthoritativeNoAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no address records for {} (authoritative answer — the host does not resolve)",
+            self.host
+        )
+    }
+}
+
+impl std::error::Error for AuthoritativeNoAddress {}
+
 /// A `reqwest` DNS resolver that routes the discovery clients' address lookups through the
 /// governed DoH path (Wave 3, 6b) — memoized, permit-bounded, breaker-aware — with getaddrinfo
 /// kept only as a COUNTED fallback on transport failure. Installed by app startup via
@@ -3120,6 +3144,15 @@ impl reqwest::dns::Resolve for GovernedResolver {
         let pool = std::sync::Arc::clone(&self.pool);
         Box::pin(async move {
             match pool.addr_lookup_governed(name.as_str()).await {
+                // Authoritative empty: a trusted answer that the host has no addresses. Returned
+                // as the TYPED error (not an empty iterator, which hyper would blur into a generic
+                // connect failure) so the attribution layer can prove "the target does not
+                // resolve" from the error chain. Deliberately NOT the GAI-fallback arm below —
+                // Wave 3's contract trusts the authoritative empty and never re-asks getaddrinfo.
+                Ok(ips) if ips.is_empty() => Err(Box::new(AuthoritativeNoAddress {
+                    host: name.as_str().to_string(),
+                })
+                    as Box<dyn std::error::Error + Send + Sync>),
                 Ok(ips) => {
                     let addrs: Box<dyn Iterator<Item = std::net::SocketAddr> + Send> = Box::new(
                         ips.into_iter()
