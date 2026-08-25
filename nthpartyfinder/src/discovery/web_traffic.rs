@@ -163,6 +163,33 @@ impl WebTrafficDiscovery {
                 }
             }
             Err(e) => {
+                // Typed no-web-presence evidence from the governed resolver: this domain has NO
+                // address records by its own authoritative DNS (dig-reproducible). Phase 2's
+                // render cannot succeed either — same records, any resolver — so record the
+                // verified no-op and skip the render. On the 2026-08-25 validation scan the
+                // "tool" web-traffic bucket sampled as exactly these (demdex.net, omtrdc.net,
+                // azurefd.net, … — all dig-confirmed zero A/AAAA), each misattributed as a
+                // browser failure and each burning a render slot to fail.
+                if e.chain().any(|c| {
+                    c.downcast_ref::<crate::dns::AuthoritativeNoAddress>()
+                        .is_some()
+                }) {
+                    crate::coverage::SCAN_COVERAGE
+                        .webtraffic
+                        .record_attributed_detail(
+                            crate::coverage::Origin::TargetNoop,
+                            domain,
+                            "no_web_presence",
+                            format!("{e:#}"),
+                        );
+                    tracing::info!(
+                        "No web presence for {} — verified no-op (no address records at its own \
+                         authoritative DNS); skipping render \
+                         [origin=target_noop reason=no_web_presence]",
+                        domain
+                    );
+                    return all_results.into_values().collect();
+                }
                 debug!("Web traffic: static analysis failed for {}: {}", domain, e);
             }
         }
@@ -180,23 +207,41 @@ impl WebTrafficDiscovery {
                 }
             }
             Err(e) => {
-                debug!(
-                    "Web traffic: network analysis failed for {}: {:#}",
-                    domain, e
+                // Phase-2 render/capture failed → only static Phase-1 domains are returned.
+                // Record the degradation, attributed, with the error chain carried into the
+                // sample so the next census can read WHY without a debug-level rerun (the
+                // 2026-08-25 validation's 203 "tool" events were reason-opaque). Chromium's
+                // net-error enum tokens are a stable machine vocabulary inside the CDP error
+                // strings: name-not-resolved is target evidence Chrome's own resolver produced;
+                // connection-refused is the target answering.
+                let chain = format!("{e:#}");
+                let (origin, reason) = {
+                    let (o, r) = crate::coverage::classify_fetch_error(
+                        &e,
+                        crate::coverage::RemoteParty::Target,
+                    );
+                    if chain.contains("net::ERR_NAME_NOT_RESOLVED") {
+                        (crate::coverage::Origin::TargetNoop, "no_web_presence")
+                    } else if chain.contains("net::ERR_CONNECTION_REFUSED") {
+                        (crate::coverage::Origin::TargetLimited, "connect_refused")
+                    } else if r == "unclassified" {
+                        // Browser/CDP work, not a reqwest fetch — an unrecognized chain is the
+                        // capture machinery, our side of the line.
+                        (o, "browser_capture_failed")
+                    } else {
+                        (o, r)
+                    }
+                };
+                tracing::info!(
+                    "Web traffic: network analysis failed for {}: {:#} [origin={} reason={}]",
+                    domain,
+                    e,
+                    origin.as_str(),
+                    reason
                 );
-                // Phase-2 render/capture failed → only static Phase-1 domains are returned. Record
-                // the degradation so a browser/network hiccup that thins web-traffic recall shows up
-                // in the scan-health summary instead of silently under-counting (RC-2).
-                let (origin, mut reason) =
-                    crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
-                if reason == "unclassified" {
-                    // The phase-2 chain is browser/CDP work, not a reqwest fetch — an unrecognized
-                    // chain here is the capture machinery, our side of the line.
-                    reason = "browser_capture_failed";
-                }
                 crate::coverage::SCAN_COVERAGE
                     .webtraffic
-                    .record_attributed(origin, domain, reason);
+                    .record_attributed_detail(origin, domain, reason, chain);
             }
         }
 

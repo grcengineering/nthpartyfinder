@@ -639,6 +639,22 @@ pub fn should_gate_infra_enumeration(current_depth: u32, base_domain: &str) -> b
 /// on a full depth-3 scan — not a judgement call (TF-DOMAIN-CEILING-SIZING).
 pub const DOMAIN_WORK_CEILING: Duration = Duration::from_secs(600);
 
+/// P3.6 wall arm: cut a phase when the domain's WALL time reaches this bound, whatever the
+/// working/queued split — with the split deciding only the ATTRIBUTION (genuine work exhausted
+/// the window vs. the phase was shed while queued at scan capacity).
+///
+/// Field-sized by an A/B pair on the same target, same depth, same machine (2026-08-25,
+/// vanta.com depth 3): the wall-cut regime (v1.8.3 behaviour, where uncredited queue made every
+/// cut a de-facto wall cut at ~600s) finished in 49.7 min with 15,918 relationships; the
+/// unbounded-completion regime (working-clock only, queue credited) ran 5.2 h and DROPPED to
+/// 12,236 relationships — completing the subfinder fan-out (133,748 subdomains, 923k DNS
+/// queries) consumed the shared domain clock and starved the higher-yield web-traffic and
+/// subprocessor phases. Cutting at the wall is load-shedding the scan needs; the defect was
+/// never the shedding, it was BILLING the shed as "working time" and reporting it as failure.
+/// 600s is deliberately the same figure as the working ceiling: it reproduces the measured
+/// throughput shape exactly and introduces no new model-sized constant.
+pub const DOMAIN_WALL_CEILING: Duration = Duration::from_secs(600);
+
 /// P3.6: how long the [`await_work_deadline`] watchdog waits before re-reading the clock when
 /// the remaining budget rounds to almost nothing. Without a floor, a domain whose queue time is
 /// growing at wall-clock rate (every permit taken, nothing progressing) would re-arm a
@@ -666,10 +682,13 @@ pub struct DomainWorkClock {
     /// Shared with the phase futures via [`Self::queue_sink`]: the phase wrapper arms this sink
     /// as both a shared-wait scope and the domain queue channel, so every credited queue —
     /// connection permits, DNS admission, HTTP pacing, the subfinder semaphore, render permits —
-    /// lands here LIVE, and `await_work_deadline`'s re-read extends the deadline instead of
+    /// lands here LIVE, and `await_work_deadline`'s re-read extends the WORK deadline instead of
     /// letting queueing spend the budget (the 2026-08-25 census: 849/1,057 subfinder phases cut
-    /// with ~98% of their billed time being the 3-permit semaphore queue).
+    /// with ~98% of their billed time being the 3-permit semaphore queue). The wall arm is the
+    /// bound the credits cannot extend; they decide only how a wall cut is attributed.
     queued_nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The wall arm's bound ([`DOMAIN_WALL_CEILING`] in production; tests shrink it).
+    wall_ceiling: Duration,
 }
 
 impl DomainWorkClock {
@@ -678,6 +697,17 @@ impl DomainWorkClock {
         Self {
             started: std::time::Instant::now(),
             queued_nanos: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wall_ceiling: DOMAIN_WALL_CEILING,
+        }
+    }
+
+    /// Test-support: a clock whose wall arm fires quickly.
+    #[cfg(test)]
+    pub fn start_with_wall(wall_ceiling: Duration) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            queued_nanos: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            wall_ceiling,
         }
     }
 
@@ -1201,17 +1231,41 @@ async fn run_webtraffic_phase(
 /// today, so this normally costs exactly one sleep — the loop is what makes it stay correct when
 /// something does.
 async fn await_work_deadline(clock: &DomainWorkClock, current_depth: u32, ceiling: Duration) {
-    loop {
-        match clock.decide(current_depth, ceiling) {
-            DomainCeiling::Within(remaining) => {
-                tokio::time::sleep(remaining.max(WORK_DEADLINE_MIN_TICK)).await;
+    // Exemption is depth-static: resolve it once, and never let the wall arm fire for an exempt
+    // unit — the scan root must not be truncated by any clock.
+    if matches!(clock.decide(current_depth, ceiling), DomainCeiling::Exempt) {
+        return std::future::pending::<()>().await;
+    }
+    let work_arm = async {
+        loop {
+            match clock.decide(current_depth, ceiling) {
+                DomainCeiling::Within(remaining) => {
+                    tokio::time::sleep(remaining.max(WORK_DEADLINE_MIN_TICK)).await;
+                }
+                // Unreachable (checked above), but resolve to "never fire" rather than "fire
+                // now" so a future refactor cannot silently truncate the scan root.
+                DomainCeiling::Exempt => std::future::pending::<()>().await,
+                DomainCeiling::Exhausted => return,
             }
-            // Unreachable from the join (an exempt unit is given no budget at all), but resolve
-            // to "never fire" rather than "fire now" so a future caller that hands this an exempt
-            // depth cannot silently truncate the scan root.
-            DomainCeiling::Exempt => std::future::pending::<()>().await,
-            DomainCeiling::Exhausted => return,
         }
+    };
+    // The wall arm: fires at wall-clock `wall_ceiling` regardless of what was credited. Queue
+    // credits extend the WORK deadline above (truthful accounting), never the wall — the
+    // 2026-08-25 A/B measured what removing the wall costs: 49.7 min/15,918 relationships with
+    // it vs 5.2 h/12,236 without, because unbounded phase completion let the low-marginal-yield
+    // subfinder fan-out starve the high-yield phases. The split decides attribution at the cut.
+    let wall_arm = async {
+        loop {
+            let elapsed = clock.elapsed();
+            if elapsed >= clock.wall_ceiling {
+                return;
+            }
+            tokio::time::sleep((clock.wall_ceiling - elapsed).max(WORK_DEADLINE_MIN_TICK)).await;
+        }
+    };
+    tokio::select! {
+        _ = work_arm => {}
+        _ = wall_arm => {}
     }
 }
 
@@ -1259,27 +1313,37 @@ where
         found = phase => found,
         _ = await_work_deadline(clock, current_depth, ceiling) => {
             crate::perf::METRICS.domain_budget_cut.hit();
-            // Classified, not silently truncated. The attributed record is the same call every
-            // phase error path makes, and it is the difference that matters here: an empty Vec
-            // from a cut phase is byte-identical to "this domain genuinely has nothing", and
-            // without this the scan summary would print SUCCESS over the loss — the RC-1 collapse
-            // that cost chargify.com all 28 of its rows while the scan-wide total went UP. The
-            // ceiling is a designed bound doing its job on genuine work: origin `policy`.
-            coverage.record_attributed(
-                crate::coverage::Origin::Policy,
-                domain,
-                "domain_budget_exhausted",
-            );
+            // Classified, not silently truncated. An empty Vec from a cut phase is byte-identical
+            // to "this domain genuinely has nothing", and without the record the scan summary
+            // would print SUCCESS over the loss — the RC-1 collapse that cost chargify.com all 28
+            // of its rows while the scan-wide total went UP. Both cuts are origin `policy` (a
+            // designed bound doing its job); the working/queued split names WHICH bound: genuine
+            // work filled the window, or the phase sat queued at scan capacity and was shed.
             let queued = clock.queued();
+            let working = clock.elapsed().saturating_sub(queued);
+            let (reason, story) = if working >= queued {
+                (
+                    "domain_budget_exhausted",
+                    "this method was starved, not empty",
+                )
+            } else {
+                (
+                    "scan_capacity_shed",
+                    "this method was shed while queued at the scan's designed capacity ceilings \
+                     — not a fault of the target or of the tool",
+                )
+            };
+            coverage.record_attributed(crate::coverage::Origin::Policy, domain, reason);
             logger.warn(&format!(
                 "DOMAIN_BUDGET_EXHAUSTED: cut {} discovery for {} after {:.1}s of working time \
-                 ({:.1}s queued for permits, excluded) — this method was starved, not empty. \
-                 The domain's other methods keep everything they already returned. \
-                 [origin=policy reason=domain_budget_exhausted]",
+                 ({:.1}s queued for permits, excluded) — {}. The domain's other methods keep \
+                 everything they already returned. [origin=policy reason={}]",
                 method,
                 domain,
-                clock.elapsed().saturating_sub(queued).as_secs_f64(),
+                working.as_secs_f64(),
                 queued.as_secs_f64(),
+                story,
+                reason,
             ));
             Vec::new()
         }
@@ -4319,6 +4383,48 @@ mod tests {
         assert!(
             clock.queued() >= Duration::from_millis(240),
             "the credits must have reached the domain clock live, not at phase end"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_dominated_phase_is_cut_at_the_wall_and_attributed_as_shed() {
+        // The wall arm's contract (2026-08-25 A/B): credits extend the WORK deadline, never the
+        // wall. A phase whose time is overwhelmingly credited queue still gets cut at the wall —
+        // that is the load-shedding the scan's throughput depends on — and the cut is attributed
+        // `scan_capacity_shed`, never billed as the target's or the tool's failure, and never as
+        // work. Without the wall arm this phase would run forever (the work clock never advances).
+        let clock = DomainWorkClock::start_with_wall(Duration::from_millis(200));
+        let coverage = crate::coverage::PhaseCoverage::default();
+        let logger = Arc::new(AnalysisLogger::new(crate::logger::VerbosityLevel::Silent));
+
+        let cut = phase_within_domain_budget(
+            async {
+                loop {
+                    // Pure simulated queueing: every wall millisecond is credited.
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    crate::http_client::credit_shared_wait(Duration::from_millis(40));
+                }
+                #[allow(unreachable_code)]
+                Vec::new()
+            },
+            Some((&clock, 3, Duration::from_secs(600))),
+            &coverage,
+            "test",
+            "shed.example.com",
+            &logger,
+        )
+        .await;
+        assert!(cut.is_empty(), "the wall arm must cut a queue-parked phase");
+        let snap_samples = coverage.samples();
+        assert_eq!(snap_samples.len(), 1);
+        assert_eq!(
+            snap_samples[0].reason, "scan_capacity_shed",
+            "queue-dominated wall cut must be attributed as shed, not as exhausted work"
+        );
+        assert_eq!(
+            snap_samples[0].origin,
+            crate::coverage::Origin::Policy,
+            "a designed-capacity shed is policy, never tool/target"
         );
     }
 
