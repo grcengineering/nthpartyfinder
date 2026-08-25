@@ -107,6 +107,62 @@ static INLINE_URL_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("INLINE_URL_RE is a valid compile-time regex literal")
 });
 
+/// The browser-capture witness: every successful phase-2 capture notes it, and a
+/// navigation-timeout failure consults it as differential evidence — see
+/// [`classify_capture_error`].
+static CAPTURE_WITNESS: crate::http_client::HealthWitness =
+    crate::http_client::HealthWitness::new();
+
+/// Pure classification of a phase-2 capture failure from its rendered error chain.
+///
+/// Chromium's `net::ERR_*` enum tokens are a stable machine vocabulary, not prose: each mapped
+/// token is the remote demonstrably ANSWERING (reset, redirect loop, protocol/TLS violation) or
+/// Chrome's own resolver finding no name — target evidence in the anti-laundering sense. A
+/// navigation that never completed is silence, so it may classify target-side only on the
+/// differential witness: another capture succeeded within one window, proving the machinery
+/// works and making the hang this host's behaviour (the 2026-08-25 round-2 census: the "tool"
+/// bucket was infra apexes — en25.com, jsdelivr.net, mktoweb.com — hanging on purpose-empty
+/// apex pages while thousands of sibling captures succeeded).
+fn classify_capture_error(
+    chain: &str,
+    base: (crate::coverage::Origin, &'static str),
+    capture_healthy_within_window: bool,
+) -> (crate::coverage::Origin, &'static str) {
+    use crate::coverage::Origin;
+    if chain.contains("net::ERR_NAME_NOT_RESOLVED") {
+        return (Origin::TargetNoop, "no_web_presence");
+    }
+    if chain.contains("net::ERR_CONNECTION_REFUSED") {
+        return (Origin::TargetLimited, "connect_refused");
+    }
+    if chain.contains("net::ERR_CONNECTION_RESET") || chain.contains("net::ERR_CONNECTION_CLOSED") {
+        return (Origin::TargetLimited, "connection_reset");
+    }
+    if chain.contains("net::ERR_TOO_MANY_REDIRECTS") {
+        return (Origin::TargetLimited, "redirect_loop");
+    }
+    if chain.contains("net::ERR_HTTP2_PROTOCOL_ERROR")
+        || chain.contains("net::ERR_SSL_")
+        || chain.contains("net::ERR_CERT_")
+    {
+        return (Origin::TargetLimited, "protocol_or_tls_error");
+    }
+    // headless_chrome's stable navigation-timeout message: the page never finished loading.
+    if chain.contains("The event waited for never came") {
+        return if capture_healthy_within_window {
+            (Origin::TargetLimited, "navigation_never_completed")
+        } else {
+            (Origin::Tool, "browser_capture_failed")
+        };
+    }
+    let (o, r) = base;
+    if r == "unclassified" {
+        (o, "browser_capture_failed")
+    } else {
+        (o, r)
+    }
+}
+
 /// The main web traffic discovery struct.
 pub struct WebTrafficDiscovery {
     client: reqwest::Client,
@@ -197,6 +253,7 @@ impl WebTrafficDiscovery {
         // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
         match self.analyze_network_traffic(url, target_base_domain).await {
             Ok(results) => {
+                CAPTURE_WITNESS.note_ok();
                 debug!(
                     "Web traffic: network analysis of {} found {} external domains",
                     domain,
@@ -215,23 +272,13 @@ impl WebTrafficDiscovery {
                 // strings: name-not-resolved is target evidence Chrome's own resolver produced;
                 // connection-refused is the target answering.
                 let chain = format!("{e:#}");
-                let (origin, reason) = {
-                    let (o, r) = crate::coverage::classify_fetch_error(
-                        &e,
-                        crate::coverage::RemoteParty::Target,
-                    );
-                    if chain.contains("net::ERR_NAME_NOT_RESOLVED") {
-                        (crate::coverage::Origin::TargetNoop, "no_web_presence")
-                    } else if chain.contains("net::ERR_CONNECTION_REFUSED") {
-                        (crate::coverage::Origin::TargetLimited, "connect_refused")
-                    } else if r == "unclassified" {
-                        // Browser/CDP work, not a reqwest fetch — an unrecognized chain is the
-                        // capture machinery, our side of the line.
-                        (o, "browser_capture_failed")
-                    } else {
-                        (o, r)
-                    }
-                };
+                let base =
+                    crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
+                // The witness window: twice this phase's own per-operation timeout — "the
+                // machinery succeeded elsewhere within two operation-generations of this
+                // failure". Anchored to the existing timeout, not a new constant.
+                let healthy = CAPTURE_WITNESS.ok_within(self.timeout * 2);
+                let (origin, reason) = classify_capture_error(&chain, base, healthy);
                 tracing::info!(
                     "Web traffic: network analysis failed for {}: {:#} [origin={} reason={}]",
                     domain,
@@ -585,6 +632,64 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_error_classification_maps_tokens_and_gates_silence_on_the_witness() {
+        use crate::coverage::Origin;
+        let base_tool = (Origin::Tool, "unclassified");
+        // Chromium net-error tokens: the remote answering → target evidence, witness-independent.
+        for (chain, want_reason) in [
+            (
+                "Navigation failed: net::ERR_NAME_NOT_RESOLVED",
+                "no_web_presence",
+            ),
+            (
+                "Navigation failed: net::ERR_CONNECTION_REFUSED",
+                "connect_refused",
+            ),
+            (
+                "Navigation failed: net::ERR_CONNECTION_RESET",
+                "connection_reset",
+            ),
+            (
+                "Navigation failed: net::ERR_TOO_MANY_REDIRECTS",
+                "redirect_loop",
+            ),
+            (
+                "Navigation failed: net::ERR_HTTP2_PROTOCOL_ERROR",
+                "protocol_or_tls_error",
+            ),
+            (
+                "Navigation failed: net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH",
+                "protocol_or_tls_error",
+            ),
+        ] {
+            let (origin, reason) = classify_capture_error(chain, base_tool, false);
+            assert_ne!(origin, Origin::Tool, "{chain} must be target-attributed");
+            assert_eq!(reason, want_reason, "{chain}");
+        }
+        // A navigation that never completed is SILENCE: target-side only on the differential
+        // witness, tool-side without it (anti-laundering).
+        let hang = "Navigation failed: The event waited for never came";
+        assert_eq!(
+            classify_capture_error(hang, base_tool, true),
+            (Origin::TargetLimited, "navigation_never_completed")
+        );
+        assert_eq!(
+            classify_capture_error(hang, base_tool, false),
+            (Origin::Tool, "browser_capture_failed")
+        );
+        // Unrecognized chains keep the conservative base, renamed for the render context.
+        assert_eq!(
+            classify_capture_error("some CDP explosion", base_tool, true),
+            (Origin::Tool, "browser_capture_failed")
+        );
+        // A base already classified (e.g. typed DNS evidence upstream) passes through.
+        assert_eq!(
+            classify_capture_error("whatever", (Origin::TargetNoop, "no_dns_records"), false),
+            (Origin::TargetNoop, "no_dns_records")
+        );
+    }
 
     // P2.2/P2.3: the pure adaptive-idle decision.
     #[test]

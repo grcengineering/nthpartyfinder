@@ -2377,17 +2377,38 @@ impl SubprocessorAnalyzer {
             // Truncated passes (budget, envelope) keep their policy records.
             if !budget_exhausted && !envelope_abandoned {
                 if candidate_transport_unattributed {
-                    crate::coverage::SCAN_COVERAGE
-                        .subprocessor
-                        .record_attributed_detail(
-                            crate::coverage::Origin::Tool,
-                            domain,
-                            "candidate_probe_failed",
-                            format!(
-                                "{} candidate(s); unattributed transport failure(s) present",
-                                urls_to_test.len()
-                            ),
-                        );
+                    // Differential evidence for candidate-host silence (the DNS name-vs-transport
+                    // move): if the scan's HTTP transport demonstrably succeeded elsewhere within
+                    // two request-generations of this pass ending, the silence is these hosts'
+                    // behaviour (WAF blackhole, dead endpoint), not our link — target-limited.
+                    // With no such witness, it stays conservatively on the tool side.
+                    if crate::http_client::TRANSPORT_WITNESS.ok_within(Duration::from_secs(60)) {
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed_detail(
+                                crate::coverage::Origin::TargetLimited,
+                                domain,
+                                "candidates_unreachable",
+                                format!(
+                                    "{} candidate(s); host(s) silent while scan transport was \
+                                     healthy within the last 60s (differential)",
+                                    urls_to_test.len()
+                                ),
+                            );
+                    } else {
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed_detail(
+                                crate::coverage::Origin::Tool,
+                                domain,
+                                "candidate_probe_failed",
+                                format!(
+                                    "{} candidate(s); unattributed transport failure(s) present \
+                                     and no recent transport success to differentiate",
+                                    urls_to_test.len()
+                                ),
+                            );
+                    }
                 } else if candidate_transport_target {
                     crate::coverage::SCAN_COVERAGE
                         .subprocessor

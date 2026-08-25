@@ -402,6 +402,54 @@ pub(crate) fn current_domain_queue_sink() -> Option<std::sync::Arc<std::sync::at
     DOMAIN_QUEUE_SINK.try_with(Clone::clone).ok()
 }
 
+/// A monotonic "the machinery worked recently" witness — the differential-evidence primitive.
+///
+/// The DNS layer's name-vs-transport split generalized: silence from ONE remote is never, by
+/// itself, evidence about who failed — but silence from one remote while the same machinery
+/// demonstrably succeeded elsewhere within the same timeout-length IS host-specific, the way an
+/// authoritative SERVFAIL is name-specific. One witness instance per machinery class (HTTP
+/// transport, browser capture); `note_ok` on every success, `ok_within(window)` at a failure's
+/// classification site with the operation's own timeout as the window.
+pub(crate) struct HealthWitness {
+    anchor: OnceLock<Instant>,
+    /// Nanos-since-anchor of the last success, +1 so `0` means "never".
+    last_ok: std::sync::atomic::AtomicU64,
+}
+
+impl HealthWitness {
+    pub(crate) const fn new() -> Self {
+        Self {
+            anchor: OnceLock::new(),
+            last_ok: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn now_nanos(&self) -> u64 {
+        let anchor = self.anchor.get_or_init(Instant::now);
+        u64::try_from(anchor.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Record one success of this machinery class.
+    pub(crate) fn note_ok(&self) {
+        let stamp = self.now_nanos().saturating_add(1);
+        self.last_ok
+            .store(stamp, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this machinery class succeeded within the last `window`.
+    pub(crate) fn ok_within(&self, window: Duration) -> bool {
+        let last = self.last_ok.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let elapsed_since = self.now_nanos().saturating_sub(last - 1);
+        u128::from(elapsed_since) <= window.as_nanos()
+    }
+}
+
+/// The HTTP-transport witness: any successful gated send notes it.
+pub(crate) static TRANSPORT_WITNESS: HealthWitness = HealthWitness::new();
+
 /// Credit `wait` into a carried sink, if present — the blocking-thread counterpart of
 /// [`credit_domain_queue`] for closures that captured the sink before the spawn seam.
 pub(crate) fn credit_carried_sink(
@@ -450,7 +498,14 @@ impl GatedSend for reqwest::RequestBuilder {
     fn send_gated(
         self,
     ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send {
-        gated(connection_semaphore(), self.send())
+        let fut = gated(connection_semaphore(), self.send());
+        async move {
+            let result = fut.await;
+            if result.is_ok() {
+                TRANSPORT_WITNESS.note_ok();
+            }
+            result
+        }
     }
 
     async fn send_gated_timed(self) -> (Duration, reqwest::Result<reqwest::Response>) {
@@ -467,7 +522,11 @@ impl GatedSend for reqwest::RequestBuilder {
                 // the per-request timeout at call time, matching `send_gated`'s eager
                 // `self.send()` argument. Phase 0 measures that inversion; it must not fix it.
                 let fut = client.execute(req);
-                gated_timed(connection_semaphore(), fut).await
+                let (wait, result) = gated_timed(connection_semaphore(), fut).await;
+                if result.is_ok() {
+                    TRANSPORT_WITNESS.note_ok();
+                }
+                (wait, result)
             }
             Err(e) => (Duration::ZERO, Err(e)),
         }
@@ -569,6 +628,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn health_witness_reports_recent_success_and_never_before_any() {
+        // A fresh witness has no evidence: silence must not classify as target-side.
+        let w = HealthWitness::new();
+        assert!(!w.ok_within(Duration::from_secs(3600)));
+        // After a success it is evidence within the window…
+        w.note_ok();
+        assert!(w.ok_within(Duration::from_secs(60)));
+        // …but not within a window that has already passed (zero-length window: the elapsed
+        // nanos since note_ok are strictly positive by the time we re-read).
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!w.ok_within(Duration::from_millis(1)));
+    }
 
     /// The hardened builder must still produce a working client after a caller layers on the
     /// per-request timeout and user agent it always sets.
