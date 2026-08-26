@@ -129,8 +129,14 @@ fn classify_capture_error(
     capture_healthy_within_window: bool,
 ) -> (crate::coverage::Origin, &'static str) {
     use crate::coverage::Origin;
+    // Chrome's OWN resolver finding no name is an answer from A resolver, but not an
+    // authoritative one — and phase 2 is only reached when the governed DoH lane did NOT produce
+    // typed no-address evidence in phase 1, so this token specifically can signal system-DNS
+    // filtering (Pi-hole/VPN split DNS) disagreeing with the governed lane (second-look F2,
+    // 2026-08-26). It therefore classifies target_limited — never a VERIFIED no-op; the verified
+    // class stays reserved for the typed `AuthoritativeNoAddress` pre-render skip.
     if chain.contains("net::ERR_NAME_NOT_RESOLVED") {
-        return (Origin::TargetNoop, "no_web_presence");
+        return (Origin::TargetLimited, "name_not_resolved_by_browser");
     }
     if chain.contains("net::ERR_CONNECTION_REFUSED") {
         return (Origin::TargetLimited, "connect_refused");
@@ -677,7 +683,7 @@ mod tests {
         for (chain, want_reason) in [
             (
                 "Navigation failed: net::ERR_NAME_NOT_RESOLVED",
-                "no_web_presence",
+                "name_not_resolved_by_browser",
             ),
             (
                 "Navigation failed: net::ERR_CONNECTION_REFUSED",

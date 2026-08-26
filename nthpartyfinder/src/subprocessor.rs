@@ -77,9 +77,35 @@ fn subproc_url_host(url: &str) -> Option<String> {
 /// PATH-level failure (a 404/415 on one URL, which says nothing about sibling paths).
 /// Keyed on the exact message `scrape_subprocessor_page_with_retry` emits when all attempts
 /// fail transport; an "HTTP error: <status>" or content-type rejection is path-level.
+/// The per-request HTTP timeout for candidate probes, named so the differential witness window
+/// derives from it (2× = "two request-generations") instead of restating the magnitude.
+const SUBPROC_REQUEST_TIMEOUT_SECS: u64 = 30;
+
 fn is_transport_dead_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     msg.contains("HTTP attempts failed") || msg.contains("No HTTP attempt was made")
+}
+
+/// A path-level `HTTP error: <status>` whose status is a REFUSAL class — the host answering with
+/// denial (auth walls, bot blocks, rate limits, server errors), not a definitive miss. Only 404
+/// and 410 prove a candidate path absent; every other error status leaves absence UNPROVEN, so
+/// the empty-pass verdict must not claim a verified no-op over it and the negative cache must not
+/// memoize absence (second-look F1, 2026-08-26: a Cloudflare-403-fronted vendor with a real
+/// disclosure would otherwise read "verified no-op" and be memoized proven-absent for 10 days).
+fn is_refusal_status_error(e: &anyhow::Error) -> bool {
+    // Walk the whole chain: a context layer above the ladder's message must not hide the marker.
+    e.chain().any(|cause| {
+        let msg = cause.to_string();
+        let Some(idx) = msg.find("HTTP error: ") else {
+            return false;
+        };
+        let code: u16 = msg[idx + "HTTP error: ".len()..]
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        code >= 400 && !matches!(code, 404 | 410)
+    })
 }
 
 fn insert_org_key(
@@ -546,8 +572,13 @@ pub(crate) fn may_record_subprocessor_absence(
     budget_exhausted: bool,
     any_transport_error: bool,
     envelope_abandoned: bool,
+    any_refusal_status: bool,
 ) -> bool {
-    !yielded_any && !budget_exhausted && !any_transport_error && !envelope_abandoned
+    !yielded_any
+        && !budget_exhausted
+        && !any_transport_error
+        && !envelope_abandoned
+        && !any_refusal_status
 }
 
 /// P2.7 read gate: is a stored negative-cache entry still authoritative for skipping the probe?
@@ -1489,7 +1520,7 @@ impl SubprocessorAnalyzer {
         // we cannot connect to yields nothing either way, and a responsive-but-slow server still
         // gets the full 30s to send its body.
         crate::http_client::hardened_builder()
-            .timeout(Duration::from_secs(30)) // Increased timeout for slower servers
+            .timeout(Duration::from_secs(SUBPROC_REQUEST_TIMEOUT_SECS)) // Increased timeout for slower servers
             .user_agent(crate::http_client::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false) // Security: reject invalid certificates
@@ -2093,6 +2124,10 @@ impl SubprocessorAnalyzer {
         // target evidence).
         let mut candidate_transport_target = false;
         let mut candidate_transport_unattributed = false;
+        // F1 (second look, 2026-08-26): a refusal-class HTTP status (403/429/5xx…) is path-level
+        // — it never enters `is_transport_dead_error` — but it is NOT a definitive miss, so it
+        // must block both the verified-no-op verdict and the negative-cache absence memo.
+        let mut any_refusal_status = false;
 
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Stop once every source category has yielded a result.
@@ -2310,6 +2345,10 @@ impl SubprocessorAnalyzer {
                     if is_url_envelope_error(&e) {
                         envelope_abandoned = true;
                     }
+                    if is_refusal_status_error(&e) {
+                        any_refusal_status = true;
+                        candidate_transport_target = true;
+                    }
                     // P2.5: a transport-level failure means the host is unreachable, not that
                     // this path is missing — mark the host so its remaining candidates are skipped.
                     if is_transport_dead_error(&e) {
@@ -2382,7 +2421,9 @@ impl SubprocessorAnalyzer {
                     // two request-generations of this pass ending, the silence is these hosts'
                     // behaviour (WAF blackhole, dead endpoint), not our link — target-limited.
                     // With no such witness, it stays conservatively on the tool side.
-                    if crate::http_client::TRANSPORT_WITNESS.ok_within(Duration::from_secs(60)) {
+                    if crate::http_client::TRANSPORT_WITNESS
+                        .ok_within(Duration::from_secs(SUBPROC_REQUEST_TIMEOUT_SECS * 2))
+                    {
                         crate::coverage::SCAN_COVERAGE
                             .subprocessor
                             .record_attributed_detail(
@@ -2390,10 +2431,11 @@ impl SubprocessorAnalyzer {
                                 domain,
                                 "candidates_unreachable",
                                 format!(
-                                    "{} candidate(s); host(s) silent while scan transport was \
-                                     healthy within the last 60s (differential)",
-                                    urls_to_test.len()
-                                ),
+                                "{} candidate URL(s) in the probe set; host(s) silent while scan \
+                                     transport was healthy within two request-generations \
+                                     (differential)",
+                                urls_to_test.len()
+                            ),
                             );
                     } else {
                         crate::coverage::SCAN_COVERAGE
@@ -2403,7 +2445,7 @@ impl SubprocessorAnalyzer {
                                 domain,
                                 "candidate_probe_failed",
                                 format!(
-                                    "{} candidate(s); unattributed transport failure(s) present \
+                                    "{} candidate URL(s) in the probe set; unattributed transport failure(s) present \
                                      and no recent transport success to differentiate",
                                     urls_to_test.len()
                                 ),
@@ -2417,7 +2459,7 @@ impl SubprocessorAnalyzer {
                             domain,
                             "candidates_unreachable",
                             format!(
-                                "{} candidate(s); host(s) answered with refusal/reset/error status",
+                                "{} candidate URL(s) in the probe set; host(s) answered with refusal/reset/error status",
                                 urls_to_test.len()
                             ),
                         );
@@ -2429,12 +2471,12 @@ impl SubprocessorAnalyzer {
                             domain,
                             "no_disclosure_found",
                             format!(
-                                "{} candidate(s) probed, all definitive misses",
+                                "{} candidate URL(s) in the probe set, all entered candidates definitive misses",
                                 urls_to_test.len()
                             ),
                         );
                     tracing::info!(
-                        "No subprocessor disclosure found for {} — verified no-op: {} candidate(s) \
+                        "No subprocessor disclosure found for {} — verified no-op: {} candidate URL(s) \
                          probed, all definitive misses [origin=target_noop reason=no_disclosure_found]",
                         domain,
                         urls_to_test.len()
@@ -2472,6 +2514,7 @@ impl SubprocessorAnalyzer {
                 budget_exhausted,
                 any_transport_error,
                 envelope_abandoned,
+                any_refusal_status,
             ) {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -8199,6 +8242,41 @@ mod tests {
     }
 
     #[test]
+    fn refusal_status_split_only_404_and_410_prove_absence() {
+        // F1 (second look, 2026-08-26): the falsifier for the all-403 laundering path. A refusal
+        // status is the host DENYING the look; only 404/410 are definitive misses.
+        for denied in [
+            "HTTP error: 401 Unauthorized",
+            "HTTP error: 403 Forbidden",
+            "HTTP error: 429 Too Many Requests",
+            "HTTP error: 500 Internal Server Error",
+            "HTTP error: 503 Service Unavailable",
+        ] {
+            assert!(
+                is_refusal_status_error(&anyhow::anyhow!("{denied}")),
+                "{denied} must block the verified-no-op verdict"
+            );
+        }
+        for miss in ["HTTP error: 404 Not Found", "HTTP error: 410 Gone"] {
+            assert!(
+                !is_refusal_status_error(&anyhow::anyhow!("{miss}")),
+                "{miss} is a definitive miss, not a refusal"
+            );
+        }
+        // Context wrapping must not hide the marker — the detector walks the chain.
+        let wrapped = anyhow::anyhow!("HTTP error: 403 Forbidden")
+            .context("while probing https://trust.example.com/subprocessors");
+        assert!(
+            is_refusal_status_error(&wrapped),
+            "a context layer above the status error must not hide the refusal"
+        );
+        // Non-status errors are untouched.
+        assert!(!is_refusal_status_error(&anyhow::anyhow!(
+            "All 3 HTTP attempts failed for URL https://x/y"
+        )));
+    }
+
+    #[test]
     fn a_transient_source_error_never_licenses_deleting_the_learned_cache() {
         // The cache entry carries the `trust_center_strategy` a full headless render worked out.
         // Clearing it costs the next scan that whole rediscovery, so an empty result only justifies
@@ -8253,26 +8331,28 @@ mod tests {
         // every candidate it entered was finished, and nothing came back. Only then may a warm
         // rescan trust "no page here" and skip probing.
         assert!(
-            may_record_subprocessor_absence(false, false, false, false),
+            may_record_subprocessor_absence(false, false, false, false, false),
             "a full loop that reached every candidate and found nothing proves absence"
         );
 
         // Any success means there IS a page — never record absence.
-        assert!(!may_record_subprocessor_absence(true, false, false, false));
+        assert!(!may_record_subprocessor_absence(
+            true, false, false, false, false
+        ));
 
         // Budget-truncated: the loop looked at only a prefix of the candidates, so the vendor's
         // real page could sit in the unprobed tail. Recording absence here would cache a false
         // "nothing" that a warm rescan then trusts — exactly the recall trap the budget guard warns
         // about elsewhere. Must fall through and re-probe.
         assert!(
-            !may_record_subprocessor_absence(false, true, false, false),
+            !may_record_subprocessor_absence(false, true, false, false, false),
             "a budget-truncated pass examined only a prefix — absence is unproven"
         );
 
         // Transport failure: a host was unreachable (blackhole / browser outage). An outage must
         // never memoize as absence — the same discipline as the positive cache's stale-clear guard.
         assert!(
-            !may_record_subprocessor_absence(false, false, true, false),
+            !may_record_subprocessor_absence(false, false, true, false, false),
             "an unreachable host means we could not look, not that there is nothing"
         );
 
@@ -8281,14 +8361,28 @@ mod tests {
         // that candidate was ever decided — caching absence from it would memoize our own
         // impatience as a fact about the vendor.
         assert!(
-            !may_record_subprocessor_absence(false, false, false, true),
+            !may_record_subprocessor_absence(false, false, false, true, false),
             "a candidate abandoned mid-probe is an unfinished look, not a proven absence"
         );
 
+        // F1 (second look, 2026-08-26): a refusal-class status (403/429/5xx) is the host DENYING
+        // the look, not answering "nothing here" — a WAF-fronted vendor with a real disclosure
+        // must never be memoized proven-absent off its refusals.
+        assert!(
+            !may_record_subprocessor_absence(false, false, false, false, true),
+            "a refusal-status pass proves denial, not absence"
+        );
+
         // Belt-and-suspenders: any blocking condition suppresses the write.
-        assert!(!may_record_subprocessor_absence(false, true, true, false));
-        assert!(!may_record_subprocessor_absence(false, true, false, true));
-        assert!(!may_record_subprocessor_absence(true, true, true, true));
+        assert!(!may_record_subprocessor_absence(
+            false, true, true, false, false
+        ));
+        assert!(!may_record_subprocessor_absence(
+            false, true, false, true, false
+        ));
+        assert!(!may_record_subprocessor_absence(
+            true, true, true, true, true
+        ));
     }
 
     // ── P2.6 per-URL working-time envelope ─────────────────────────────

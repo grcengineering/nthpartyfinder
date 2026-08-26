@@ -643,13 +643,15 @@ pub const DOMAIN_WORK_CEILING: Duration = Duration::from_secs(600);
 /// working/queued split — with the split deciding only the ATTRIBUTION (genuine work exhausted
 /// the window vs. the phase was shed while queued at scan capacity).
 ///
-/// Field-sized by an A/B pair on the same target, same depth, same machine (2026-08-25,
-/// vanta.com depth 3): the wall-cut regime (v1.8.3 behaviour, where uncredited queue made every
-/// cut a de-facto wall cut at ~600s) finished in 49.7 min with 15,918 relationships; the
-/// unbounded-completion regime (working-clock only, queue credited) ran 5.2 h and DROPPED to
-/// 12,236 relationships — completing the subfinder fan-out (133,748 subdomains, 923k DNS
-/// queries) consumed the shared domain clock and starved the higher-yield web-traffic and
-/// subprocessor phases. Cutting at the wall is load-shedding the scan needs; the defect was
+/// Field-sized by a single-variable A/B on the SAME binary lineage, same target, same depth,
+/// same machine (2026-08-25, vanta.com depth 3, candidate validation rounds 1→2 where the wall
+/// arm is the only delta): unbounded completion (working-clock only, queue credited) ran 5.2 h
+/// and produced 12,236 relationships — completing the subfinder fan-out (133,748 subdomains,
+/// 923k DNS queries) consumed the shared domain clock and starved the higher-yield web-traffic
+/// and subprocessor phases — while the wall-restored build finished in 43.8 min with 15,406.
+/// (The v1.8.3 baseline, whose uncredited queue made every cut a de-facto wall cut at ~600s,
+/// showed the same shape: 49.7 min / 15,918 — corroborating, but it differs in more than the
+/// wall, so the candidate r1-vs-r2 pair is the load-bearing evidence.) Cutting at the wall is load-shedding the scan needs; the defect was
 /// never the shedding, it was BILLING the shed as "working time" and reporting it as failure.
 /// 600s is deliberately the same figure as the working ceiling: it reproduces the measured
 /// throughput shape exactly and introduces no new model-sized constant.
@@ -1336,8 +1338,9 @@ where
             coverage.record_attributed(crate::coverage::Origin::Policy, domain, reason);
             logger.warn(&format!(
                 "DOMAIN_BUDGET_EXHAUSTED: cut {} discovery for {} after {:.1}s of working time \
-                 ({:.1}s queued for permits, excluded) — {}. The domain's other methods keep \
-                 everything they already returned. [origin=policy reason={}]",
+                 ({:.1}s queued for permits, excluded; both figures are the DOMAIN's shared \
+                 clock, summed across its concurrent phases) — {}. The domain's other methods \
+                 keep everything they already returned. [origin=policy reason={}]",
                 method,
                 domain,
                 working.as_secs_f64(),

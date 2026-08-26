@@ -3071,8 +3071,13 @@ impl DnsServerPool {
             crate::perf::METRICS.dns_addr_memo.hit();
             return match entry {
                 MemoEntry::Answer(records) => Ok(parse(&records)),
-                // A remembered DNS_NAME verdict is an authoritative negative for this scan.
-                MemoEntry::NameFailure(_) => Ok(Vec::new()),
+                // A remembered DNS_NAME verdict (SERVFAIL/REFUSED at the name's own servers) is
+                // returned as the SAME classified error a fresh attempt would produce — never as
+                // an empty answer, which the governed reqwest resolver would then wrap in typed
+                // `AuthoritativeNoAddress` claiming a NOERROR-empty that `dig` would contradict
+                // (second-look F3, 2026-08-26). The resolver's transport-fallback arm treats it
+                // exactly like the fresh failure it memoizes.
+                MemoEntry::NameFailure(msg) => Err(anyhow::anyhow!("{msg}")),
             };
         }
         let _timer = crate::perf::scoped(&crate::perf::METRICS.dns_addr_lookup);
@@ -3113,7 +3118,7 @@ impl std::fmt::Display for AuthoritativeNoAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "no address records for {} (authoritative answer — the host does not resolve)",
+            "no A records for {} (authoritative answer to the address lookup this scan performs)",
             self.host
         )
     }
