@@ -141,6 +141,12 @@ fn classify_capture_error(
     if chain.contains("net::ERR_TOO_MANY_REDIRECTS") {
         return (Origin::TargetLimited, "redirect_loop");
     }
+    // Chrome refusing to render a main document that answered with an error status: the target's
+    // server speaking (script CDNs that 403/404 bare document requests — aplo-evnt.com,
+    // clearbitscripts.com in the 2026-08-26 pair census).
+    if chain.contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE") {
+        return (Origin::TargetLimited, "http_error_status");
+    }
     if chain.contains("net::ERR_HTTP2_PROTOCOL_ERROR")
         || chain.contains("net::ERR_SSL_")
         || chain.contains("net::ERR_CERT_")
@@ -678,6 +684,10 @@ mod tests {
             (
                 "Navigation failed: net::ERR_TOO_MANY_REDIRECTS",
                 "redirect_loop",
+            ),
+            (
+                "Navigation failed: Navigate failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+                "http_error_status",
             ),
             (
                 "Navigation failed: net::ERR_HTTP2_PROTOCOL_ERROR",
