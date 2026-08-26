@@ -147,6 +147,12 @@ fn classify_capture_error(
     if chain.contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE") {
         return (Origin::TargetLimited, "http_error_status");
     }
+    // The target demanding credentials for its document (auth-walled endpoint — the server
+    // answering with an auth challenge; dmarc.mailjet.tech in the 2026-08-26 lovable census).
+    // ERR_ABORTED is deliberately NOT mapped: an aborted navigation has no attributable side.
+    if chain.contains("net::ERR_INVALID_AUTH_CREDENTIALS") {
+        return (Origin::TargetLimited, "auth_required");
+    }
     if chain.contains("net::ERR_HTTP2_PROTOCOL_ERROR")
         || chain.contains("net::ERR_SSL_")
         || chain.contains("net::ERR_CERT_")
@@ -688,6 +694,10 @@ mod tests {
             (
                 "Navigation failed: Navigate failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE",
                 "http_error_status",
+            ),
+            (
+                "Navigation failed: Navigate failed: net::ERR_INVALID_AUTH_CREDENTIALS",
+                "auth_required",
             ),
             (
                 "Navigation failed: net::ERR_HTTP2_PROTOCOL_ERROR",
