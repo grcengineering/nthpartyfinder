@@ -57,18 +57,43 @@ jobs:
               '[.[] | select(.author.is_bot == true and .createdAt < $cutoff)]')"
           STALE_COUNT="$(printf '%s' "$STALE_PRS" | jq 'length')"
 
-          ALERTS="$(gh api "repos/${GH_REPO}/dependabot/alerts" --paginate \
-            --jq '[.[] | select(.state == "open")]' 2>/dev/null || echo '[]')"
+          # Two constraints shape the alert fetches below:
+          #   * On HTTP errors `gh api` copies the JSON error body to STDOUT (only the summary
+          #     goes to stderr), so a `|| echo '[]'` INSIDE the command substitution appends to
+          #     the error body instead of replacing it — the concatenated docs then make
+          #     `jq length` multi-line and corrupt $GITHUB_OUTPUT ("Invalid format" — the exact
+          #     failure this workflow shipped with). The fallback must sit OUTSIDE the
+          #     substitution, where the assignment's exit status can drive it.
+          #   * `--paginate` with an array-shaped --jq emits one array per page; streaming
+          #     elements (`.[]`) and re-slurping with `jq -s` keeps the result a single array
+          #     however many pages exist.
+          # The Actions GITHUB_TOKEN has no Dependabot-alerts scope at all (the permissions
+          # schema simply lacks one — security-events covers code/secret scanning only), and a
+          # stored PAT is banned here (CLAUDE.md, 2026-08-02). So that call failing is the
+          # EXPECTED state: record it loudly as "unreadable" instead of faking an empty backlog,
+          # and let the issue gate below treat unreadable as a backlog condition.
+          ALERTS_UNREADABLE=0
+          if ! ALERTS="$(gh api "repos/${GH_REPO}/dependabot/alerts" --paginate \
+              --jq '.[] | select(.state == "open")' 2>/dev/null | jq -s '.')"; then
+            ALERTS='[]'
+            ALERTS_UNREADABLE=1
+          fi
           ALERT_COUNT="$(printf '%s' "$ALERTS" | jq 'length')"
 
-          CODEQL="$(gh api "repos/${GH_REPO}/code-scanning/alerts" --paginate \
-            --jq '[.[] | select(.state == "open")]' 2>/dev/null || echo '[]')"
+          CODEQL_UNREADABLE=0
+          if ! CODEQL="$(gh api "repos/${GH_REPO}/code-scanning/alerts" --paginate \
+              --jq '.[] | select(.state == "open")' 2>/dev/null | jq -s '.')"; then
+            CODEQL='[]'
+            CODEQL_UNREADABLE=1
+          fi
           CODEQL_COUNT="$(printf '%s' "$CODEQL" | jq 'length')"
 
           {
             echo "stale_pr_count=${STALE_COUNT}"
             echo "alert_count=${ALERT_COUNT}"
             echo "codeql_count=${CODEQL_COUNT}"
+            echo "alerts_unreadable=${ALERTS_UNREADABLE}"
+            echo "codeql_unreadable=${CODEQL_UNREADABLE}"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -80,14 +105,18 @@ jobs:
             fi
             echo
             echo '### Open Dependabot security alerts'
-            if [ "$ALERT_COUNT" = "0" ]; then
+            if [ "$ALERTS_UNREADABLE" = "1" ]; then
+              echo '_unreadable with the workflow token — `GITHUB_TOKEN` cannot be granted Dependabot-alerts read and a stored PAT is banned (CLAUDE.md, 2026-08-02). Triage manually: `gh api repos/'"${GH_REPO}"'/dependabot/alerts --jq '"'"'[.[]|select(.state=="open")]'"'"'`_'
+            elif [ "$ALERT_COUNT" = "0" ]; then
               echo '_none_'
             else
               printf '%s' "$ALERTS" | jq -r '.[] | "- **\(.security_advisory.severity)** \(.dependency.package.name) (\(.dependency.package.ecosystem)): \(.security_advisory.summary) — https://github.com/'"${GH_REPO}"'/security/dependabot/\(.number)"'
             fi
             echo
             echo '### Open CodeQL alerts'
-            if [ "$CODEQL_COUNT" = "0" ]; then
+            if [ "$CODEQL_UNREADABLE" = "1" ]; then
+              echo '_unreadable with the workflow token this run — check the code-scanning alerts page directly: https://github.com/'"${GH_REPO}"'/security/code-scanning_'
+            elif [ "$CODEQL_COUNT" = "0" ]; then
               echo '_none_'
             else
               printf '%s' "$CODEQL" | jq -r '.[] | "- **\(.rule.security_severity_level // "unrated")** \(.rule.id) in `\(.most_recent_instance.location.path)` — https://github.com/'"${GH_REPO}"'/security/code-scanning/\(.number)"'
@@ -99,7 +128,9 @@ jobs:
         run: cat body.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Open or refresh the tracking issue
-        if: steps.gather.outputs.stale_pr_count != '0' || steps.gather.outputs.alert_count != '0' || steps.gather.outputs.codeql_count != '0'
+        # An unreadable alert source counts as backlog: the whole point of this workflow is that
+        # the items it cannot see still get human eyes.
+        if: steps.gather.outputs.stale_pr_count != '0' || steps.gather.outputs.alert_count != '0' || steps.gather.outputs.codeql_count != '0' || steps.gather.outputs.alerts_unreadable == '1' || steps.gather.outputs.codeql_unreadable == '1'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -119,7 +150,8 @@ jobs:
           fi
 
       - name: Close the tracking issue when the backlog clears
-        if: steps.gather.outputs.stale_pr_count == '0' && steps.gather.outputs.alert_count == '0' && steps.gather.outputs.codeql_count == '0'
+        # Never close on a run that could not actually see the alert sources.
+        if: steps.gather.outputs.stale_pr_count == '0' && steps.gather.outputs.alert_count == '0' && steps.gather.outputs.codeql_count == '0' && steps.gather.outputs.alerts_unreadable == '0' && steps.gather.outputs.codeql_unreadable == '0'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
