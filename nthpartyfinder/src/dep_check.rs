@@ -1759,6 +1759,10 @@ mod tests {
 
     #[test]
     fn test_check_onnx_runtime_availability_consistent_with_check_onnx_runtime() {
+        // Both calls read the process-global ORT_DYLIB_PATH; without the env lock a
+        // guard-holding sibling can mutate it between them, making the two results
+        // legitimately disagree (observed in CI: coverage job, run 33186367632).
+        let _env_guard = crate::test_support::env_guard();
         let avail = check_onnx_runtime_availability();
         let result = check_onnx_runtime();
         assert_eq!(avail, result.available);
