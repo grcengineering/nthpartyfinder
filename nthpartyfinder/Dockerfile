@@ -43,7 +43,7 @@ RUN strip target/release/nthpartyfinder
 # -----------------------------------------------------------------------------
 # Stage 2: Download ONNX Runtime (Chainguard hardened base)
 # -----------------------------------------------------------------------------
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:ca263a0360cca48e8fe3f86c8af61c6d5b85e484809fe187440a4206a50efc06 AS onnx-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:7e62cecd3c5712dba6e52c5260afb8f9d7a23b9bbcdd26ad7508a811e74b766d AS onnx-dl
 USER root
 RUN apk add curl && \
     curl -fsSL -o /tmp/onnxruntime.tgz \
@@ -53,7 +53,7 @@ RUN apk add curl && \
 # -----------------------------------------------------------------------------
 # Stage 3: Download subfinder (Chainguard hardened base)
 # -----------------------------------------------------------------------------
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:ca263a0360cca48e8fe3f86c8af61c6d5b85e484809fe187440a4206a50efc06 AS subfinder-dl
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:7e62cecd3c5712dba6e52c5260afb8f9d7a23b9bbcdd26ad7508a811e74b766d AS subfinder-dl
 USER root
 RUN apk add curl unzip && \
     curl -fsSL -o /tmp/subfinder.zip \
