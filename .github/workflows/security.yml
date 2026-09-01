@@ -98,10 +98,24 @@ jobs:
       - name: Install cosign (for Opengrep signature verification)
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Install Opengrep (pinned + signature-verified)
+        # Bounded retry, because install.sh validates even an explicitly pinned version by
+        # listing releases via an UNAUTHENTICATED api.github.com call — which shares a
+        # 60-req/hr per-IP limit across every tenant on the runner's IP. When that call is
+        # rate-limited the script dies with "Failed to fetch available versions from GitHub"
+        # (observed: run 33182438381). The retry rides out the transient; the pin,
+        # --verify-signatures, and the hard failure after 3 attempts all stay intact.
         run: |
-          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/v1.21.0/install.sh \
+          curl -fsSL --retry 3 --retry-delay 5 \
+            https://raw.githubusercontent.com/opengrep/opengrep/v1.21.0/install.sh \
             -o install-opengrep.sh
-          bash install-opengrep.sh -v v1.21.0 --verify-signatures
+          for attempt in 1 2 3; do
+            bash install-opengrep.sh -v v1.21.0 --verify-signatures && break
+            if [ "$attempt" -eq 3 ]; then
+              echo "Opengrep install failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 30))
+          done
           echo "$HOME/.opengrep/cli/latest" >> "$GITHUB_PATH"
       - name: Assert local ruleset present (anti empty-ruleset trap)
         run: test -s .opengrep/rules.yml && grep -c '  - id:' .opengrep/rules.yml

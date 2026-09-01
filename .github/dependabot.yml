@@ -32,22 +32,17 @@ updates:
     commit-message:
       prefix: "ci(deps)"
 
-  # npm — two real package.json/package-lock.json pairs existed with no ecosystem entry here, so
-  # neither ever got a Dependabot PR: root (Playwright test tooling) and the Svelte Flow vendor-graph
-  # frontend bundled into every HTML report. GitHub's baseline dependency-graph scan still opened
-  # security ALERTS against them independently of this file (that's how GHSA-r28c-9q8g-f849 in
-  # postcss, a transitive vite dep, was found) — but without an entry here, a version-bump PR never
-  # followed, so the alert just sat open. This closes that gap for both directories.
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      npm-root:
-        patterns: ["*"]
-    commit-message:
-      prefix: "deps"
-
+  # npm — the Svelte Flow vendor-graph frontend bundled into every HTML report. Its
+  # package.json had no ecosystem entry here, so it never got a Dependabot PR: GitHub's baseline
+  # dependency-graph scan still opened security ALERTS against it independently of this file
+  # (that's how GHSA-r28c-9q8g-f849 in postcss, a transitive vite dep, was found) — but without
+  # an entry here, a version-bump PR never followed, so the alert just sat open.
+  #
+  # Only the frontend gets an entry. The root Playwright-tooling package.json is deliberately
+  # NOT tracked (.gitignore: "Rust project, not Node"), so a root npm entry has no manifest to
+  # read — an entry for it fails every weekly cycle with dependency_file_not_found (observed
+  # 4/4 cycles, 2026-08-07..08-28). Dependabot can only update manifests committed to the repo:
+  # either track the root pair or carry no root entry.
   - package-ecosystem: "npm"
     directory: "/nthpartyfinder/frontend"
     schedule:
