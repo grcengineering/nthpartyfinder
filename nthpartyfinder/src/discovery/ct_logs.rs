@@ -862,14 +862,43 @@ impl CtLogDiscovery {
             }
         }
 
-        if classify_ct_outcome(answer.is_some(), any_throttled, transport_err.is_some())
-            == CtOutcome::ThrottledEmpty
-        {
-            // TF-CT-THROTTLE-WORDING: a distinct `SCAN_COVERAGE.ct.record_throttled()` outcome.
-            // `record_failure` marks the phase degraded, which is the load-bearing half, but it
-            // reads in the summary as "CT-log discovery failed" when the truthful sentence is
-            // "CT-log discovery was rate-limited" — a different remedy for the reader.
-            crate::coverage::SCAN_COVERAGE.ct.record_failure();
+        match classify_ct_outcome(answer.is_some(), any_throttled, transport_err.is_some()) {
+            // Closes TF-CT-THROTTLE-WORDING: the attributed record now says WHO failed — the CT
+            // providers rate-limited us (upstream), not the target and not this tool. The phase
+            // still counts as degraded (coverage genuinely thinned), but the summary's origin
+            // decomposition and the sidecar sample carry the truthful remedy.
+            CtOutcome::ThrottledEmpty => {
+                crate::coverage::SCAN_COVERAGE.ct.record_attributed(
+                    crate::coverage::Origin::Upstream,
+                    domain,
+                    "provider_throttled",
+                );
+            }
+            // Every provider responded but unhelpfully (5xx/parse, no throttle) — before the
+            // attribution layer this fell through as a clean empty, indistinguishable from "the
+            // target has no certificates", which is exactly the failure-vs-no-op ambiguity this
+            // layer exists to kill.
+            CtOutcome::UnusableEmpty => {
+                crate::coverage::SCAN_COVERAGE.ct.record_attributed(
+                    crate::coverage::Origin::Upstream,
+                    domain,
+                    "provider_unusable",
+                );
+            }
+            // A provider gave an authoritative answer with zero certificates: a verified target
+            // no-op, recorded positively so the summary can say "nothing to find" with evidence.
+            CtOutcome::Authoritative => {
+                if answer.as_ref().is_some_and(|entries| entries.is_empty()) {
+                    crate::coverage::SCAN_COVERAGE.ct.record_attributed(
+                        crate::coverage::Origin::TargetNoop,
+                        domain,
+                        "no_certificates_found",
+                    );
+                }
+            }
+            // The Err path below carries the real transport error to the caller, which classifies
+            // and records it (intermediary) — recording here too would double-count.
+            CtOutcome::Unreachable => {}
         }
 
         match answer {
@@ -878,7 +907,8 @@ impl CtLogDiscovery {
             None => match transport_err {
                 Some(e) => Err(e),
                 // Every provider responded but unhelpfully (429/5xx/parse) — treat as "no certs",
-                // now with the throttled case recorded as degraded above rather than lost.
+                // with both the throttled and unusable cases recorded as degraded above rather
+                // than lost.
                 None => Ok(Vec::new()),
             },
         }

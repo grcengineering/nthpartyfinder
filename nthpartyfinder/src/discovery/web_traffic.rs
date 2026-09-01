@@ -107,6 +107,88 @@ static INLINE_URL_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("INLINE_URL_RE is a valid compile-time regex literal")
 });
 
+/// The browser-capture witness: every successful phase-2 capture notes it, and a
+/// navigation-timeout failure consults it as differential evidence — see
+/// [`classify_capture_error`].
+static CAPTURE_WITNESS: crate::http_client::HealthWitness =
+    crate::http_client::HealthWitness::new();
+
+/// Pure classification of a phase-2 capture failure from its rendered error chain.
+///
+/// Chromium's `net::ERR_*` enum tokens are a stable machine vocabulary, not prose: each mapped
+/// token is the remote demonstrably ANSWERING (reset, redirect loop, protocol/TLS violation) or
+/// Chrome's own resolver finding no name — target evidence in the anti-laundering sense. A
+/// navigation that never completed is silence, so it may classify target-side only on the
+/// differential witness: another capture succeeded within one window, proving the machinery
+/// works and making the hang this host's behaviour (the 2026-08-25 round-2 census: the "tool"
+/// bucket was infra apexes — en25.com, jsdelivr.net, mktoweb.com — hanging on purpose-empty
+/// apex pages while thousands of sibling captures succeeded).
+fn classify_capture_error(
+    chain: &str,
+    base: (crate::coverage::Origin, &'static str),
+    capture_healthy_within_window: bool,
+) -> (crate::coverage::Origin, &'static str) {
+    use crate::coverage::Origin;
+    // Chrome's OWN resolver finding no name is an answer from A resolver, but not an
+    // authoritative one — and phase 2 is only reached when the governed DoH lane did NOT produce
+    // typed no-address evidence in phase 1, so this token specifically can signal system-DNS
+    // filtering (Pi-hole/VPN split DNS) disagreeing with the governed lane (second-look F2,
+    // 2026-08-26). It therefore classifies target_limited — never a VERIFIED no-op; the verified
+    // class stays reserved for the typed `AuthoritativeNoAddress` pre-render skip.
+    if chain.contains("net::ERR_NAME_NOT_RESOLVED") {
+        return (Origin::TargetLimited, "name_not_resolved_by_browser");
+    }
+    if chain.contains("net::ERR_CONNECTION_REFUSED") {
+        return (Origin::TargetLimited, "connect_refused");
+    }
+    if chain.contains("net::ERR_CONNECTION_RESET") || chain.contains("net::ERR_CONNECTION_CLOSED") {
+        return (Origin::TargetLimited, "connection_reset");
+    }
+    if chain.contains("net::ERR_TOO_MANY_REDIRECTS") {
+        return (Origin::TargetLimited, "redirect_loop");
+    }
+    // Chrome refusing to render a main document that answered with an error status: the target's
+    // server speaking (script CDNs that 403/404 bare document requests — aplo-evnt.com,
+    // clearbitscripts.com in the 2026-08-26 pair census).
+    if chain.contains("net::ERR_HTTP_RESPONSE_CODE_FAILURE") {
+        return (Origin::TargetLimited, "http_error_status");
+    }
+    // The target demanding credentials for its document (auth-walled endpoint — the server
+    // answering with an auth challenge; dmarc.mailjet.tech in the 2026-08-26 lovable census).
+    // ERR_ABORTED is deliberately NOT mapped: an aborted navigation has no attributable side.
+    if chain.contains("net::ERR_INVALID_AUTH_CREDENTIALS") {
+        return (Origin::TargetLimited, "auth_required");
+    }
+    if chain.contains("net::ERR_HTTP2_PROTOCOL_ERROR")
+        || chain.contains("net::ERR_SSL_")
+        || chain.contains("net::ERR_CERT_")
+    {
+        return (Origin::TargetLimited, "protocol_or_tls_error");
+    }
+    // headless_chrome's stable navigation-timeout message: the page never finished loading.
+    if chain.contains("The event waited for never came") {
+        return if capture_healthy_within_window {
+            (Origin::TargetLimited, "navigation_never_completed")
+        } else {
+            (Origin::Tool, "browser_capture_failed")
+        };
+    }
+    let (o, r) = base;
+    if r == "unclassified" {
+        (o, "browser_capture_failed")
+    } else {
+        (o, r)
+    }
+}
+
+/// A capture failure whose cause is the CDP connection itself dying (tab or Chrome went away
+/// under the capture) — the one class where a single retry runs on genuinely different
+/// machinery, because the pool recycles the browser. Stable `headless_chrome` transport wording.
+fn is_dead_browser_connection(chain: &str) -> bool {
+    chain.contains("underlying connection is closed")
+        || chain.contains("Unable to make method calls")
+}
+
 /// The main web traffic discovery struct.
 pub struct WebTrafficDiscovery {
     client: reqwest::Client,
@@ -163,13 +245,57 @@ impl WebTrafficDiscovery {
                 }
             }
             Err(e) => {
+                // Typed no-web-presence evidence from the governed resolver: this domain has NO
+                // address records by its own authoritative DNS (dig-reproducible). Phase 2's
+                // render cannot succeed either — same records, any resolver — so record the
+                // verified no-op and skip the render. On the 2026-08-25 validation scan the
+                // "tool" web-traffic bucket sampled as exactly these (demdex.net, omtrdc.net,
+                // azurefd.net, … — all dig-confirmed zero A/AAAA), each misattributed as a
+                // browser failure and each burning a render slot to fail.
+                if e.chain().any(|c| {
+                    c.downcast_ref::<crate::dns::AuthoritativeNoAddress>()
+                        .is_some()
+                }) {
+                    crate::coverage::SCAN_COVERAGE
+                        .webtraffic
+                        .record_attributed_detail(
+                            crate::coverage::Origin::TargetNoop,
+                            domain,
+                            "no_web_presence",
+                            format!("{e:#}"),
+                        );
+                    tracing::info!(
+                        "No web presence for {} — verified no-op (no address records at its own \
+                         authoritative DNS); skipping render \
+                         [origin=target_noop reason=no_web_presence]",
+                        domain
+                    );
+                    return all_results.into_values().collect();
+                }
                 debug!("Web traffic: static analysis failed for {}: {}", domain, e);
             }
         }
 
-        // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs)
-        match self.analyze_network_traffic(url, target_base_domain).await {
+        // Phase 2: Runtime network traffic analysis (browser-based, catches self-hosted SDKs).
+        // One bounded retry when the CDP connection itself died mid-capture (tab/Chrome went
+        // away under it): the pool hands the retry a recycled browser, so this is the one
+        // failure class where a second attempt runs on genuinely different machinery. The
+        // 2026-08-25 round-3 census: the ONLY residual tool-class events were exactly these
+        // (7 of 711 domains). A retry that fails again stays honestly tool-classed.
+        let phase2 = match self.analyze_network_traffic(url, target_base_domain).await {
+            Err(e) if is_dead_browser_connection(&format!("{e:#}")) => {
+                tracing::info!(
+                    "Web traffic: browser connection died mid-capture for {} — one retry on a \
+                     recycled browser",
+                    domain
+                );
+                self.analyze_network_traffic(url, target_base_domain).await
+            }
+            other => other,
+        };
+        match phase2 {
             Ok(results) => {
+                CAPTURE_WITNESS.note_ok();
                 debug!(
                     "Web traffic: network analysis of {} found {} external domains",
                     domain,
@@ -180,14 +306,31 @@ impl WebTrafficDiscovery {
                 }
             }
             Err(e) => {
-                debug!(
-                    "Web traffic: network analysis failed for {}: {:#}",
-                    domain, e
+                // Phase-2 render/capture failed → only static Phase-1 domains are returned.
+                // Record the degradation, attributed, with the error chain carried into the
+                // sample so the next census can read WHY without a debug-level rerun (the
+                // 2026-08-25 validation's 203 "tool" events were reason-opaque). Chromium's
+                // net-error enum tokens are a stable machine vocabulary inside the CDP error
+                // strings: name-not-resolved is target evidence Chrome's own resolver produced;
+                // connection-refused is the target answering.
+                let chain = format!("{e:#}");
+                let base =
+                    crate::coverage::classify_fetch_error(&e, crate::coverage::RemoteParty::Target);
+                // The witness window: twice this phase's own per-operation timeout — "the
+                // machinery succeeded elsewhere within two operation-generations of this
+                // failure". Anchored to the existing timeout, not a new constant.
+                let healthy = CAPTURE_WITNESS.ok_within(self.timeout * 2);
+                let (origin, reason) = classify_capture_error(&chain, base, healthy);
+                tracing::info!(
+                    "Web traffic: network analysis failed for {}: {:#} [origin={} reason={}]",
+                    domain,
+                    e,
+                    origin.as_str(),
+                    reason
                 );
-                // Phase-2 render/capture failed → only static Phase-1 domains are returned. Record
-                // the degradation so a browser/network hiccup that thins web-traffic recall shows up
-                // in the scan-health summary instead of silently under-counting (RC-2).
-                crate::coverage::SCAN_COVERAGE.webtraffic.record_failure();
+                crate::coverage::SCAN_COVERAGE
+                    .webtraffic
+                    .record_attributed_detail(origin, domain, reason, chain);
             }
         }
 
@@ -231,6 +374,11 @@ impl WebTrafficDiscovery {
         let url_owned = url.to_string();
         let wait_ms = self.network_wait_ms;
 
+        // Captured before the spawn seam: web-traffic renders queue on the same permit pool as
+        // every other render, and that wait must credit the domain work ceiling (2026-08-25
+        // census: 103 web-traffic domain cuts under uncredited queue) — inside the closure the
+        // task-local is unreachable.
+        let domain_queue_sink = crate::http_client::current_domain_queue_sink();
         let handle = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             use std::sync::atomic::Ordering;
             // Declared before the guard so tab close and Chrome recycling are measured.
@@ -238,6 +386,7 @@ impl WebTrafficDiscovery {
                 .with_source(&crate::perf::METRICS.render_webtraffic);
             let guard = crate::browser_pool::acquire_tab()?;
             render_timer.exclude(guard.permit_wait());
+            crate::http_client::credit_carried_sink(&domain_queue_sink, guard.permit_wait());
             let tab = guard.tab();
 
             // Intercept ALL network responses (not just JSON like trust_center does).
@@ -525,6 +674,72 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_error_classification_maps_tokens_and_gates_silence_on_the_witness() {
+        use crate::coverage::Origin;
+        let base_tool = (Origin::Tool, "unclassified");
+        // Chromium net-error tokens: the remote answering → target evidence, witness-independent.
+        for (chain, want_reason) in [
+            (
+                "Navigation failed: net::ERR_NAME_NOT_RESOLVED",
+                "name_not_resolved_by_browser",
+            ),
+            (
+                "Navigation failed: net::ERR_CONNECTION_REFUSED",
+                "connect_refused",
+            ),
+            (
+                "Navigation failed: net::ERR_CONNECTION_RESET",
+                "connection_reset",
+            ),
+            (
+                "Navigation failed: net::ERR_TOO_MANY_REDIRECTS",
+                "redirect_loop",
+            ),
+            (
+                "Navigation failed: Navigate failed: net::ERR_HTTP_RESPONSE_CODE_FAILURE",
+                "http_error_status",
+            ),
+            (
+                "Navigation failed: Navigate failed: net::ERR_INVALID_AUTH_CREDENTIALS",
+                "auth_required",
+            ),
+            (
+                "Navigation failed: net::ERR_HTTP2_PROTOCOL_ERROR",
+                "protocol_or_tls_error",
+            ),
+            (
+                "Navigation failed: net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH",
+                "protocol_or_tls_error",
+            ),
+        ] {
+            let (origin, reason) = classify_capture_error(chain, base_tool, false);
+            assert_ne!(origin, Origin::Tool, "{chain} must be target-attributed");
+            assert_eq!(reason, want_reason, "{chain}");
+        }
+        // A navigation that never completed is SILENCE: target-side only on the differential
+        // witness, tool-side without it (anti-laundering).
+        let hang = "Navigation failed: The event waited for never came";
+        assert_eq!(
+            classify_capture_error(hang, base_tool, true),
+            (Origin::TargetLimited, "navigation_never_completed")
+        );
+        assert_eq!(
+            classify_capture_error(hang, base_tool, false),
+            (Origin::Tool, "browser_capture_failed")
+        );
+        // Unrecognized chains keep the conservative base, renamed for the render context.
+        assert_eq!(
+            classify_capture_error("some CDP explosion", base_tool, true),
+            (Origin::Tool, "browser_capture_failed")
+        );
+        // A base already classified (e.g. typed DNS evidence upstream) passes through.
+        assert_eq!(
+            classify_capture_error("whatever", (Origin::TargetNoop, "no_dns_records"), false),
+            (Origin::TargetNoop, "no_dns_records")
+        );
+    }
 
     // P2.2/P2.3: the pure adaptive-idle decision.
     #[test]

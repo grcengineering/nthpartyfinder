@@ -14,6 +14,154 @@
 //! all formatting is pure over that snapshot, so it is testable without touching the global.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
+
+/// Who is responsible for a discovery phase not returning full results for one unit of work.
+///
+/// The two `Target*` origins are NOT failures: they state, with recorded evidence, that the scan
+/// target itself either has nothing to find (`TargetNoop`) or capped coverage itself
+/// (`TargetLimited`). Only `Upstream`/`Tool`/`Policy` mark the phase degraded — those are the
+/// classes a fix, a re-run, or a budget change on OUR side could improve. Ambiguity never lands in
+/// a `Target*` class: the conservative default is the failure side, so target attribution always
+/// rests on evidence the sidecar records (the anti-laundering invariant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// The target has nothing to find here, and every probe that establishes that answered
+    /// definitively (completeness is part of the evidence, never assumed).
+    TargetNoop,
+    /// The target exists but limited coverage itself — refused connections, blocked or throttled
+    /// the scan, served errors — while the scan's own transport was demonstrably healthy.
+    TargetLimited,
+    /// An intermediary the scan depends on failed: subfinder's passive sources, a DoH provider,
+    /// the CT-log API, WHOIS.
+    Upstream,
+    /// nthpartyfinder itself or its local environment: browser crash/panic, subprocess spawn
+    /// failure, a missing binary.
+    Tool,
+    /// A designed budget or ceiling stopped genuine work early.
+    Policy,
+}
+
+impl Origin {
+    /// The snake_case code used in log lines (matches the serde rename), so a grep over the log
+    /// and a jq over the sidecar see the same vocabulary.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::TargetNoop => "target_noop",
+            Origin::TargetLimited => "target_limited",
+            Origin::Upstream => "upstream",
+            Origin::Tool => "tool",
+            Origin::Policy => "policy",
+        }
+    }
+}
+
+/// Which remote party a phase's failed operation was talking to, for `classify_fetch_error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteParty {
+    /// The scan target's own infrastructure (its web site, its trust center).
+    Target,
+    /// An intermediary service (crt.sh, a DoH provider, subfinder's sources, WHOIS).
+    Intermediary,
+}
+
+/// Best-effort origin classification of a discovery-phase error chain.
+///
+/// Conservative by construction (the anti-laundering invariant): only evidence in which the remote
+/// demonstrably ANSWERED — a TCP reset/refusal, an HTTP error status — may classify a `Target`
+/// remote as `TargetLimited`; silence (timeouts) and anything unrecognized stay on the failure
+/// side. For `Intermediary` remotes there is no laundering risk (both candidate classes are
+/// failures), so transport-shaped errors attribute to the intermediary.
+pub fn classify_fetch_error(e: &anyhow::Error, remote: RemoteParty) -> (Origin, &'static str) {
+    let mut saw_timeout = false;
+    let mut saw_connect = false;
+    let mut saw_status = false;
+    for cause in e.chain() {
+        // Strongest evidence first: the governed resolver's typed authoritative-empty. The host
+        // does not resolve by its OWN authoritative DNS — a definitive statement about the
+        // target, reproducible with `dig`, and never a failure of this scan.
+        if cause
+            .downcast_ref::<crate::dns::AuthoritativeNoAddress>()
+            .is_some()
+        {
+            return match remote {
+                RemoteParty::Target => (Origin::TargetNoop, "no_dns_records"),
+                RemoteParty::Intermediary => (Origin::Upstream, "provider_no_dns"),
+            };
+        }
+        if let Some(re) = cause.downcast_ref::<reqwest::Error>() {
+            saw_timeout |= re.is_timeout();
+            saw_connect |= re.is_connect();
+            saw_status |= re.is_status();
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted => {
+                    // The remote host itself answered (refused/reset the connection): that is the
+                    // remote speaking, not this machine's link failing.
+                    return match remote {
+                        RemoteParty::Target => (Origin::TargetLimited, "connect_refused"),
+                        RemoteParty::Intermediary => (Origin::Upstream, "provider_refused"),
+                    };
+                }
+                std::io::ErrorKind::TimedOut => saw_timeout = true,
+                _ => {}
+            }
+        }
+    }
+    if saw_status {
+        return match remote {
+            RemoteParty::Target => (Origin::TargetLimited, "http_error_status"),
+            RemoteParty::Intermediary => (Origin::Upstream, "provider_error_status"),
+        };
+    }
+    if saw_timeout {
+        return match remote {
+            // Silence is not target evidence: without a differential health signal this stays on
+            // the failure side rather than being laundered into "the target was just slow".
+            RemoteParty::Target => (Origin::Tool, "unattributed_timeout"),
+            RemoteParty::Intermediary => (Origin::Upstream, "provider_timeout"),
+        };
+    }
+    if saw_connect {
+        return match remote {
+            RemoteParty::Target => (Origin::Tool, "connect_failed"),
+            RemoteParty::Intermediary => (Origin::Upstream, "provider_unreachable"),
+        };
+    }
+    match remote {
+        RemoteParty::Target => (Origin::Tool, "unclassified"),
+        RemoteParty::Intermediary => (Origin::Upstream, "provider_error"),
+    }
+}
+
+/// Per-origin event counts for one phase. `Copy` so `PhaseSnapshot` stays cheap to pass around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct OriginCounts {
+    pub target_noop: u64,
+    pub target_limited: u64,
+    pub upstream: u64,
+    pub tool: u64,
+    pub policy: u64,
+}
+
+/// One recorded attribution event: which domain, whose fault, the machine-readable reason code,
+/// and optional human detail. Samples are bounded (`SAMPLE_CAP`); the counters stay exact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttributionSample {
+    pub domain: String,
+    pub origin: Origin,
+    pub reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// Cap on retained per-phase attribution samples. Counts above the cap are still exact; only the
+/// per-event evidence list stops growing, so a pathological scan cannot balloon the sidecar.
+const SAMPLE_CAP: usize = 50;
 
 /// One discovery phase's observed coverage across the whole scan (summed over every depth).
 #[derive(Debug, Default)]
@@ -21,6 +169,12 @@ pub struct PhaseCoverage {
     found: AtomicU64,
     failed: AtomicU64,
     degraded: AtomicBool,
+    target_noop: AtomicU64,
+    target_limited: AtomicU64,
+    upstream: AtomicU64,
+    tool: AtomicU64,
+    policy: AtomicU64,
+    samples: Mutex<Vec<AttributionSample>>,
 }
 
 impl PhaseCoverage {
@@ -29,6 +183,12 @@ impl PhaseCoverage {
             found: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             degraded: AtomicBool::new(false),
+            target_noop: AtomicU64::new(0),
+            target_limited: AtomicU64::new(0),
+            upstream: AtomicU64::new(0),
+            tool: AtomicU64::new(0),
+            policy: AtomicU64::new(0),
+            samples: Mutex::new(Vec::new()),
         }
     }
 
@@ -37,13 +197,55 @@ impl PhaseCoverage {
         self.found.fetch_add(n as u64, Ordering::Relaxed);
     }
 
-    /// Record that the phase failed / timed out / was starved for one unit of work — it did not
-    /// return what it should have. Marks the phase degraded so the summary flags it, and counts the
-    /// failed unit. A failure is NOT the same as an authoritative empty; only real degradation
-    /// (an error, a timeout, a budget starvation) calls this.
-    pub fn record_failure(&self) {
-        self.failed.fetch_add(1, Ordering::Relaxed);
-        self.degraded.store(true, Ordering::Relaxed);
+    /// Record one attributed outcome for one unit of work. `Upstream`/`Tool`/`Policy` count as
+    /// failures and mark the phase degraded — the phase did not return what it should have and the
+    /// cause is on our side of the line. `TargetNoop`/`TargetLimited` count separately and do NOT
+    /// degrade the phase: the target itself had nothing to find or capped coverage itself, which is
+    /// a property of the target, not of this scan.
+    pub fn record_attributed(&self, origin: Origin, domain: &str, reason: &str) {
+        self.record_attributed_detail(origin, domain, reason, String::new());
+    }
+
+    /// `record_attributed` with human-readable evidence detail carried into the sample.
+    pub fn record_attributed_detail(
+        &self,
+        origin: Origin,
+        domain: &str,
+        reason: &str,
+        detail: String,
+    ) {
+        match origin {
+            Origin::TargetNoop => {
+                self.target_noop.fetch_add(1, Ordering::Relaxed);
+            }
+            Origin::TargetLimited => {
+                self.target_limited.fetch_add(1, Ordering::Relaxed);
+            }
+            Origin::Upstream => {
+                self.upstream.fetch_add(1, Ordering::Relaxed);
+                self.failed.fetch_add(1, Ordering::Relaxed);
+                self.degraded.store(true, Ordering::Relaxed);
+            }
+            Origin::Tool => {
+                self.tool.fetch_add(1, Ordering::Relaxed);
+                self.failed.fetch_add(1, Ordering::Relaxed);
+                self.degraded.store(true, Ordering::Relaxed);
+            }
+            Origin::Policy => {
+                self.policy.fetch_add(1, Ordering::Relaxed);
+                self.failed.fetch_add(1, Ordering::Relaxed);
+                self.degraded.store(true, Ordering::Relaxed);
+            }
+        }
+        let mut samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
+        if samples.len() < SAMPLE_CAP {
+            samples.push(AttributionSample {
+                domain: domain.to_string(),
+                origin,
+                reason: reason.to_string(),
+                detail,
+            });
+        }
     }
 
     fn snapshot(&self) -> PhaseSnapshot {
@@ -51,7 +253,22 @@ impl PhaseCoverage {
             found: self.found.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             degraded: self.degraded.load(Ordering::Relaxed),
+            origins: OriginCounts {
+                target_noop: self.target_noop.load(Ordering::Relaxed),
+                target_limited: self.target_limited.load(Ordering::Relaxed),
+                upstream: self.upstream.load(Ordering::Relaxed),
+                tool: self.tool.load(Ordering::Relaxed),
+                policy: self.policy.load(Ordering::Relaxed),
+            },
         }
+    }
+
+    /// The retained attribution samples (bounded by `SAMPLE_CAP`).
+    pub fn samples(&self) -> Vec<AttributionSample> {
+        self.samples
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Zero the counters. Test-support only; a scan never resets mid-flight.
@@ -60,6 +277,15 @@ impl PhaseCoverage {
         self.found.store(0, Ordering::Relaxed);
         self.failed.store(0, Ordering::Relaxed);
         self.degraded.store(false, Ordering::Relaxed);
+        self.target_noop.store(0, Ordering::Relaxed);
+        self.target_limited.store(0, Ordering::Relaxed);
+        self.upstream.store(0, Ordering::Relaxed);
+        self.tool.store(0, Ordering::Relaxed);
+        self.policy.store(0, Ordering::Relaxed);
+        self.samples
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -96,6 +322,17 @@ impl CoverageReport {
         }
     }
 
+    /// Every phase's retained attribution samples, for the sidecar's evidence section.
+    pub fn samples_snapshot(&self) -> CoverageSamples {
+        CoverageSamples {
+            subprocessor: self.subprocessor.samples(),
+            subfinder: self.subfinder.samples(),
+            saas: self.saas.samples(),
+            ct: self.ct.samples(),
+            webtraffic: self.webtraffic.samples(),
+        }
+    }
+
     /// Zero every phase. Test-support only.
     #[cfg(test)]
     pub fn reset(&self) {
@@ -116,6 +353,19 @@ pub struct PhaseSnapshot {
     pub found: u64,
     pub failed: u64,
     pub degraded: bool,
+    /// Per-origin decomposition: `upstream + tool + policy == failed`; the `target_*` counts sit
+    /// outside `failed` because a target-attributed outcome is not a failure of this scan.
+    pub origins: OriginCounts,
+}
+
+/// Every phase's retained attribution samples at reporting time.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct CoverageSamples {
+    pub subprocessor: Vec<AttributionSample>,
+    pub subfinder: Vec<AttributionSample>,
+    pub saas: Vec<AttributionSample>,
+    pub ct: Vec<AttributionSample>,
+    pub webtraffic: Vec<AttributionSample>,
 }
 
 /// Every phase's counts at reporting time.
@@ -217,32 +467,37 @@ pub fn degradation_summary(
         ));
     } else if snap.subprocessor.degraded {
         parts.push(format!(
-            "subprocessor failed on {} domain(s)",
-            snap.subprocessor.failed
+            "subprocessor failed on {} domain(s){}",
+            snap.subprocessor.failed,
+            origin_suffix(&snap.subprocessor.origins)
         ));
     }
     if snap.webtraffic.degraded {
         parts.push(format!(
-            "web-traffic capture failed on {} domain(s)",
-            snap.webtraffic.failed
+            "web-traffic capture failed on {} domain(s){}",
+            snap.webtraffic.failed,
+            origin_suffix(&snap.webtraffic.origins)
         ));
     }
     if snap.subfinder.degraded {
         parts.push(format!(
-            "subdomain discovery failed on {} domain(s)",
-            snap.subfinder.failed
+            "subdomain discovery failed on {} domain(s){}",
+            snap.subfinder.failed,
+            origin_suffix(&snap.subfinder.origins)
         ));
     }
     if snap.saas.degraded {
         parts.push(format!(
-            "SaaS-tenant discovery failed on {} domain(s)",
-            snap.saas.failed
+            "SaaS-tenant discovery failed on {} domain(s){}",
+            snap.saas.failed,
+            origin_suffix(&snap.saas.origins)
         ));
     }
     if snap.ct.degraded {
         parts.push(format!(
-            "CT-log discovery failed on {} domain(s)",
-            snap.ct.failed
+            "CT-log discovery failed on {} domain(s){}",
+            snap.ct.failed,
+            origin_suffix(&snap.ct.origins)
         ));
     }
     // Split by who is actually at fault. A name that answers SERVFAIL/REFUSED from its own
@@ -264,6 +519,65 @@ pub fn degradation_summary(
         None
     } else {
         Some(parts.join("; "))
+    }
+}
+
+/// The bracketed per-origin decomposition appended to a degraded phase's sentence, e.g.
+/// `" [tool 2, upstream 1]"`. Empty when the phase recorded no decomposable failures (a phase
+/// degraded through a legacy path with zero origin counts stays readable rather than showing an
+/// empty bracket). Only the failure origins appear here — `target_*` outcomes are not failures and
+/// render through `target_outcomes_summary` instead.
+fn origin_suffix(o: &OriginCounts) -> String {
+    let mut sub = Vec::new();
+    if o.tool > 0 {
+        sub.push(format!("tool {}", o.tool));
+    }
+    if o.upstream > 0 {
+        sub.push(format!("upstream {}", o.upstream));
+    }
+    if o.policy > 0 {
+        sub.push(format!("budget/policy {}", o.policy));
+    }
+    if sub.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", sub.join(", "))
+    }
+}
+
+/// The target-side story — outcomes that are NOT failures of this scan. `None` when no
+/// target-attributed events were recorded. Rendered under SUCCESS too: a verified no-op is a
+/// result ("this vendor publishes no subprocessor disclosure"), not an absence of one, and hiding
+/// it is exactly the ambiguity that makes an honest empty result read like a silent failure.
+pub fn target_outcomes_summary(snap: &CoverageSnapshot) -> Option<String> {
+    let phases: [(&str, &PhaseSnapshot); 5] = [
+        ("subprocessor", &snap.subprocessor),
+        ("web-traffic", &snap.webtraffic),
+        ("subdomain discovery", &snap.subfinder),
+        ("SaaS-tenant discovery", &snap.saas),
+        ("CT-log discovery", &snap.ct),
+    ];
+    let mut parts = Vec::new();
+    for (name, p) in phases {
+        let mut sub = Vec::new();
+        if p.origins.target_noop > 0 {
+            sub.push(format!("{} verified no-op(s)", p.origins.target_noop));
+        }
+        if p.origins.target_limited > 0 {
+            sub.push(format!("{} target-limited", p.origins.target_limited));
+        }
+        if !sub.is_empty() {
+            parts.push(format!("{name}: {}", sub.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Target-side outcomes (not failures — the target itself had nothing to find, or capped \
+             coverage itself): {}.",
+            parts.join("; ")
+        ))
     }
 }
 
@@ -364,9 +678,19 @@ pub fn render_manifest(features: &[FeatureStatus], snap: &CoverageSnapshot) -> S
         match snap.phase_for(f.name).filter(|_| f.enabled) {
             Some(p) => {
                 let flag = if p.degraded { "  ⚠ degraded" } else { "" };
+                let noop = if p.origins.target_noop > 0 {
+                    format!(", {} no-op", p.origins.target_noop)
+                } else {
+                    String::new()
+                };
+                let limited = if p.origins.target_limited > 0 {
+                    format!(", {} target-limited", p.origins.target_limited)
+                } else {
+                    String::new()
+                };
                 out.push_str(&format!(
-                    "{:<13} {} — {} found, {} failed{}\n",
-                    f.name, f.reason, p.found, p.failed, flag
+                    "{:<13} {} — {} found, {} failed{}{}{}\n",
+                    f.name, f.reason, p.found, p.failed, noop, limited, flag
                 ));
             }
             None => {
@@ -392,16 +716,19 @@ mod tests {
             PhaseSnapshot {
                 found: 8,
                 failed: 0,
-                degraded: false
+                degraded: false,
+                origins: OriginCounts::default()
             }
         );
-        p.record_failure();
+        p.record_attributed(Origin::Tool, "x.example", "browser_crash");
         let s = p.snapshot();
         assert_eq!(s.found, 8);
         assert_eq!(s.failed, 1);
         assert!(s.degraded);
+        assert_eq!(s.origins.tool, 1);
         p.reset();
         assert_eq!(p.snapshot(), PhaseSnapshot::default());
+        assert!(p.samples().is_empty());
     }
 
     #[test]
@@ -410,10 +737,155 @@ mod tests {
         assert!(!r.snapshot().any_degraded());
         r.ct.record_found(34);
         assert!(!r.snapshot().any_degraded());
-        r.subprocessor.record_failure();
+        r.subprocessor
+            .record_attributed(Origin::Tool, "x.example", "browser_crash");
         assert!(r.snapshot().any_degraded());
         r.reset();
         assert!(!r.snapshot().any_degraded());
+    }
+
+    #[test]
+    fn target_attribution_is_not_a_failure_and_never_degrades() {
+        // The whole point of the taxonomy: a target-attributed outcome must not trip the
+        // degradation machinery — it is a property of the target, not of this scan. If either
+        // Target* variant set `degraded` or counted into `failed`, every verified no-op would
+        // resurrect the exact false "DEGRADED" verdict this layer exists to kill.
+        let p = PhaseCoverage::new();
+        p.record_attributed(Origin::TargetNoop, "empty.example", "no_disclosure_found");
+        p.record_attributed(Origin::TargetLimited, "blocked.example", "connect_refused");
+        let s = p.snapshot();
+        assert_eq!(s.failed, 0);
+        assert!(!s.degraded);
+        assert_eq!(s.origins.target_noop, 1);
+        assert_eq!(s.origins.target_limited, 1);
+        // And the failure origins each count into `failed` + degrade.
+        p.record_attributed(Origin::Upstream, "u.example", "provider_throttled");
+        p.record_attributed(Origin::Policy, "p.example", "budget_exhausted");
+        let s = p.snapshot();
+        assert_eq!(s.failed, 2);
+        assert!(s.degraded);
+        assert_eq!(
+            s.origins.upstream + s.origins.tool + s.origins.policy,
+            s.failed
+        );
+        p.reset();
+    }
+
+    #[test]
+    fn attribution_samples_are_capped_but_counts_stay_exact() {
+        let p = PhaseCoverage::new();
+        for i in 0..(SAMPLE_CAP + 10) {
+            p.record_attributed(Origin::Tool, &format!("d{i}.example"), "browser_crash");
+        }
+        assert_eq!(p.samples().len(), SAMPLE_CAP);
+        assert_eq!(p.snapshot().origins.tool, (SAMPLE_CAP + 10) as u64);
+        p.reset();
+    }
+
+    #[test]
+    fn attribution_sample_carries_detail_and_serializes_snake_case() {
+        let p = PhaseCoverage::new();
+        p.record_attributed_detail(
+            Origin::TargetNoop,
+            "empty.example",
+            "no_disclosure_found",
+            "25 candidates, all definitive misses".to_string(),
+        );
+        let s = p.samples();
+        assert_eq!(s.len(), 1);
+        let json = serde_json::to_string(&s[0]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["origin"], "target_noop");
+        assert_eq!(v["reason"], "no_disclosure_found");
+        assert!(v["detail"].as_str().unwrap().contains("25 candidates"));
+        p.reset();
+    }
+
+    #[test]
+    fn degradation_summary_decomposes_failures_by_origin() {
+        let mut snap = CoverageSnapshot::default();
+        snap.webtraffic.degraded = true;
+        snap.webtraffic.failed = 3;
+        snap.webtraffic.origins.tool = 2;
+        snap.webtraffic.origins.upstream = 1;
+        let s = degradation_summary(&snap, 0, 0, 0).unwrap();
+        assert!(
+            s.contains("web-traffic capture failed on 3 domain(s) [tool 2, upstream 1]"),
+            "{s}"
+        );
+        // A legacy-shaped snapshot with zero origin counts renders without an empty bracket.
+        let mut legacy = CoverageSnapshot::default();
+        legacy.ct.degraded = true;
+        legacy.ct.failed = 1;
+        let s = degradation_summary(&legacy, 0, 0, 0).unwrap();
+        assert!(s.contains("CT-log discovery failed on 1 domain(s)"), "{s}");
+        assert!(!s.contains('['), "{s}");
+    }
+
+    #[test]
+    fn classifier_reads_authoritative_no_address_through_a_context_chain() {
+        // The governed resolver's typed evidence must survive anyhow context wrapping (the retry
+        // ladder's terminal message) and classify as target-side — the definitive "this host does
+        // not resolve" that turns a candidate probe failure into a definitive miss.
+        let e = anyhow::Error::new(crate::dns::AuthoritativeNoAddress {
+            host: "gone.example".into(),
+        })
+        .context("All 1 HTTP attempts failed for URL http://gone.example/subprocessors");
+        assert_eq!(
+            classify_fetch_error(&e, RemoteParty::Target),
+            (Origin::TargetNoop, "no_dns_records")
+        );
+        assert_eq!(
+            classify_fetch_error(&e, RemoteParty::Intermediary),
+            (Origin::Upstream, "provider_no_dns")
+        );
+    }
+
+    #[test]
+    fn classifier_splits_refusal_timeout_and_silence_conservatively() {
+        // A refusal is the remote answering → target evidence.
+        let refused = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        assert_eq!(
+            classify_fetch_error(&refused, RemoteParty::Target),
+            (Origin::TargetLimited, "connect_refused")
+        );
+        // A timeout is silence → NEVER target evidence (anti-laundering): failure side for a
+        // target remote, intermediary-attributed for an intermediary remote.
+        let timed_out = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out",
+        ));
+        assert_eq!(
+            classify_fetch_error(&timed_out, RemoteParty::Target),
+            (Origin::Tool, "unattributed_timeout")
+        );
+        assert_eq!(
+            classify_fetch_error(&timed_out, RemoteParty::Intermediary),
+            (Origin::Upstream, "provider_timeout")
+        );
+        // Unrecognized chains stay on the failure side.
+        let opaque = anyhow::anyhow!("some renderer exploded");
+        assert_eq!(
+            classify_fetch_error(&opaque, RemoteParty::Target),
+            (Origin::Tool, "unclassified")
+        );
+    }
+
+    #[test]
+    fn target_outcomes_summary_renders_noops_and_limited_or_none() {
+        assert_eq!(target_outcomes_summary(&CoverageSnapshot::default()), None);
+        let mut snap = CoverageSnapshot::default();
+        snap.subprocessor.origins.target_noop = 12;
+        snap.webtraffic.origins.target_limited = 3;
+        let s = target_outcomes_summary(&snap).unwrap();
+        assert!(s.contains("not failures"), "{s}");
+        assert!(s.contains("subprocessor: 12 verified no-op(s)"), "{s}");
+        assert!(s.contains("web-traffic: 3 target-limited"), "{s}");
+        // Target outcomes alone must never produce a degradation summary (→ verdict stays SUCCESS).
+        assert_eq!(degradation_summary(&snap, 0, 0, 0), None);
     }
 
     #[test]

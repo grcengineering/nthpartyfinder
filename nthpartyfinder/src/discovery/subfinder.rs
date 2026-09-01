@@ -869,7 +869,19 @@ impl SubfinderDiscovery {
         let binary_path = match self.get_resolved_binary_path() {
             Some(path) => path,
             None => {
-                warn!("Subfinder binary not found at {:?}", self.binary_path);
+                // Before the attribution layer this returned a clean empty — the phase silently
+                // did not run at all, indistinguishable from "no subdomains exist". A missing
+                // binary is our environment: origin `tool`.
+                warn!(
+                    "Subfinder binary not found at {:?} — subdomain discovery did not run for {} \
+                     [origin=tool reason=subfinder_missing]",
+                    self.binary_path, domain
+                );
+                crate::coverage::SCAN_COVERAGE.subfinder.record_attributed(
+                    crate::coverage::Origin::Tool,
+                    domain,
+                    "subfinder_missing",
+                );
                 return Ok(vec![]);
             }
         };
@@ -883,10 +895,22 @@ impl SubfinderDiscovery {
 
         // Bound concurrent subfinder subprocesses (see SUBFINDER_SEMAPHORE): extra runs queue
         // rather than opening their sockets all at once. Held only across this one run.
+        //
+        // The wait is measured and CREDITED as queue time (2026-08-25 census): with 3 permits and
+        // hundreds of queued runs, this wait averaged ~480s per phase on a depth-3 scan — ~98% of
+        // what the domain work ceiling was billing as "working time" — and cut subdomain
+        // discovery on 849 of 1,057 domains. Crediting it routes through the shared-wait stack to
+        // every armed budget, the domain clock included.
+        let sem_t0 = std::time::Instant::now();
         let _permit = SUBFINDER_SEMAPHORE
             .acquire()
             .await
             .expect("subfinder semaphore is never closed");
+        let sem_waited = sem_t0.elapsed();
+        crate::perf::METRICS
+            .subfinder_permit_wait
+            .record(sem_waited);
+        crate::http_client::credit_shared_wait(sem_waited);
         // Phase-0 DNS attribution: count + time each subprocess run — subfinder's ~30-40
         // passive-source getaddrinfo resolutions per run are invisible to the DNS governor, so
         // its process count is the denominator for the pcap's wire-truth measurement.
@@ -939,6 +963,31 @@ impl SubfinderDiscovery {
 
         if timed_out {
             let _ = child.kill().await;
+            // The run was cut at its timeout with passive sources still unanswered — the results
+            // are a PARTIAL set, which used to return as a clean `Ok` indistinguishable from a
+            // complete enumeration. The dominant field cause is source APIs hanging or throttling
+            // (subfinder gives us no per-source detail here): origin `upstream`.
+            warn!(
+                "Subfinder timed out for {} — returning {} partial subdomain(s) \
+                 [origin=upstream reason=subfinder_timeout]",
+                domain,
+                results.len()
+            );
+            crate::coverage::SCAN_COVERAGE
+                .subfinder
+                .record_attributed_detail(
+                    crate::coverage::Origin::Upstream,
+                    domain,
+                    "subfinder_timeout",
+                    format!("partial: {} subdomain(s) at cutoff", results.len()),
+                );
+        } else if results.is_empty() {
+            // A complete run that found nothing: a verified target no-op, recorded positively.
+            crate::coverage::SCAN_COVERAGE.subfinder.record_attributed(
+                crate::coverage::Origin::TargetNoop,
+                domain,
+                "no_subdomains_found",
+            );
         }
 
         Ok(results)

@@ -265,6 +265,52 @@ fn find_ort_library(
     }
 }
 
+/// Whether `name` is an acceptable ONNX Runtime library filename for this platform: the exact
+/// unversioned name (`libonnxruntime.dylib` / `libonnxruntime.so` / `onnxruntime.dll`) or the
+/// VERSIONED file the official archives actually ship (`libonnxruntime.1.20.1.dylib`,
+/// `libonnxruntime.so.1.20.1`).
+///
+/// The exact-match-only check this replaces silently broke the env/prefs lane on the STANDARD
+/// install layout (2026-08-25): `ORT_DYLIB_PATH` pointing at the unversioned symlink passed the
+/// first filename check, but the canonical re-check resolved the symlink to the versioned file
+/// and rejected it — so a valid, previously-working, prefs-persisted install dropped NER with
+/// only an eprintln, and the scan silently lost organization-extraction accuracy. Only the
+/// exe-relative directory-scan lane (which never canonicalizes) kept the brew binary working.
+fn is_ort_lib_filename(name: &str, lib_name: &str) -> bool {
+    if name == lib_name {
+        return true;
+    }
+    // Versioned forms: the stem must match exactly and the remainder must be a dotted version
+    // chain around (or after) the platform extension — never an arbitrary suffix, so a
+    // `libonnxruntime.dylib.evil` cannot pass.
+    let (stem, ext) = match lib_name.rsplit_once('.') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    let Some(rest) = name.strip_prefix(stem) else {
+        return false;
+    };
+    // macOS/Windows style: stem + ".<version>." + ext  (libonnxruntime.1.20.1.dylib)
+    if let Some(version) = rest.strip_suffix(&format!(".{ext}")) {
+        return !version.is_empty()
+            && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && version
+                .trim_matches('.')
+                .chars()
+                .any(|c| c.is_ascii_digit());
+    }
+    // Linux style: stem + "." + ext + ".<version>"  (libonnxruntime.so.1.20.1)
+    if let Some(version) = rest.strip_prefix(&format!(".{ext}.")) {
+        return !version.is_empty()
+            && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && version
+                .trim_matches('.')
+                .chars()
+                .any(|c| c.is_ascii_digit());
+    }
+    false
+}
+
 /// Resolve ORT_DYLIB_PATH: handles absolute file paths, relative paths, and directory paths.
 fn resolve_ort_env_path(
     path: &str,
@@ -290,7 +336,7 @@ fn resolve_ort_env_path(
     let filename_matches = resolved
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|n| n == lib_name)
+        .map(|n| is_ort_lib_filename(n, lib_name))
         .unwrap_or(false);
 
     if filename_matches {
@@ -298,7 +344,7 @@ fn resolve_ort_env_path(
             if canonical
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n == lib_name)
+                .map(|n| is_ort_lib_filename(n, lib_name))
                 .unwrap_or(false)
                 && canonical.exists()
             {
@@ -699,6 +745,73 @@ mod tests {
             Some(val) => std::env::set_var(name, val),
             None => std::env::remove_var(name),
         }
+    }
+
+    #[test]
+    fn ort_lib_filename_accepts_versioned_forms_and_rejects_junk() {
+        // Exact platform names.
+        assert!(is_ort_lib_filename(
+            "libonnxruntime.dylib",
+            "libonnxruntime.dylib"
+        ));
+        assert!(is_ort_lib_filename("onnxruntime.dll", "onnxruntime.dll"));
+        // The file the official macOS archive actually SHIPS — and what the standard
+        // `libonnxruntime.dylib` symlink canonicalizes to. Rejecting it broke the env/prefs
+        // lane on a working install and silently dropped NER (2026-08-25).
+        assert!(is_ort_lib_filename(
+            "libonnxruntime.1.20.1.dylib",
+            "libonnxruntime.dylib"
+        ));
+        // Linux versioned form.
+        assert!(is_ort_lib_filename(
+            "libonnxruntime.so.1.20.1",
+            "libonnxruntime.so"
+        ));
+        // Junk stays out: arbitrary suffixes, other libraries, non-numeric versions.
+        assert!(!is_ort_lib_filename(
+            "libonnxruntime.dylib.evil",
+            "libonnxruntime.dylib"
+        ));
+        assert!(!is_ort_lib_filename(
+            "libevil.dylib",
+            "libonnxruntime.dylib"
+        ));
+        assert!(!is_ort_lib_filename(
+            "libonnxruntime_x.dylib",
+            "libonnxruntime.dylib"
+        ));
+        assert!(!is_ort_lib_filename(
+            "libonnxruntime..dylib",
+            "libonnxruntime.dylib"
+        ));
+        assert!(!is_ort_lib_filename(
+            "libonnxruntime.so....",
+            "libonnxruntime.so"
+        ));
+    }
+
+    #[test]
+    fn ort_env_path_accepts_the_standard_symlink_layout() {
+        // The regression that motivated `is_ort_lib_filename`: ORT_DYLIB_PATH points at the
+        // unversioned symlink, which canonicalizes to the VERSIONED file — both hops must pass.
+        let dir = tempdir().unwrap();
+        let versioned = dir.path().join("libonnxruntime.1.20.1.dylib");
+        std::fs::write(&versioned, b"not really a dylib").unwrap();
+        let link = dir.path().join("libonnxruntime.dylib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&versioned, &link).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&versioned, &link).unwrap();
+
+        // Symlink path resolves and is accepted.
+        let res = resolve_ort_env_path(link.to_str().unwrap(), "libonnxruntime.dylib", None);
+        assert!(
+            res.as_ref().is_some_and(|r| r.available),
+            "the standard symlink layout must pass the env-path lane: {res:?}"
+        );
+        // The versioned file directly is accepted too (what prefs persists).
+        let res = resolve_ort_env_path(versioned.to_str().unwrap(), "libonnxruntime.dylib", None);
+        assert!(res.as_ref().is_some_and(|r| r.available));
     }
 
     fn assert_dep_result(result: Result<Vec<DepCheckResult>, String>, expected_name: &str) {

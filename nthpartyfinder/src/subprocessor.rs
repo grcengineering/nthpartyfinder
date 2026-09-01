@@ -77,9 +77,35 @@ fn subproc_url_host(url: &str) -> Option<String> {
 /// PATH-level failure (a 404/415 on one URL, which says nothing about sibling paths).
 /// Keyed on the exact message `scrape_subprocessor_page_with_retry` emits when all attempts
 /// fail transport; an "HTTP error: <status>" or content-type rejection is path-level.
+/// The per-request HTTP timeout for candidate probes, named so the differential witness window
+/// derives from it (2× = "two request-generations") instead of restating the magnitude.
+const SUBPROC_REQUEST_TIMEOUT_SECS: u64 = 30;
+
 fn is_transport_dead_error(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     msg.contains("HTTP attempts failed") || msg.contains("No HTTP attempt was made")
+}
+
+/// A path-level `HTTP error: <status>` whose status is a REFUSAL class — the host answering with
+/// denial (auth walls, bot blocks, rate limits, server errors), not a definitive miss. Only 404
+/// and 410 prove a candidate path absent; every other error status leaves absence UNPROVEN, so
+/// the empty-pass verdict must not claim a verified no-op over it and the negative cache must not
+/// memoize absence (second-look F1, 2026-08-26: a Cloudflare-403-fronted vendor with a real
+/// disclosure would otherwise read "verified no-op" and be memoized proven-absent for 10 days).
+fn is_refusal_status_error(e: &anyhow::Error) -> bool {
+    // Walk the whole chain: a context layer above the ladder's message must not hide the marker.
+    e.chain().any(|cause| {
+        let msg = cause.to_string();
+        let Some(idx) = msg.find("HTTP error: ") else {
+            return false;
+        };
+        let code: u16 = msg[idx + "HTTP error: ".len()..]
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        code >= 400 && !matches!(code, 404 | 410)
+    })
 }
 
 fn insert_org_key(
@@ -546,8 +572,13 @@ pub(crate) fn may_record_subprocessor_absence(
     budget_exhausted: bool,
     any_transport_error: bool,
     envelope_abandoned: bool,
+    any_refusal_status: bool,
 ) -> bool {
-    !yielded_any && !budget_exhausted && !any_transport_error && !envelope_abandoned
+    !yielded_any
+        && !budget_exhausted
+        && !any_transport_error
+        && !envelope_abandoned
+        && !any_refusal_status
 }
 
 /// P2.7 read gate: is a stored negative-cache entry still authoritative for skipping the probe?
@@ -1489,7 +1520,7 @@ impl SubprocessorAnalyzer {
         // we cannot connect to yields nothing either way, and a responsive-but-slow server still
         // gets the full 30s to send its body.
         crate::http_client::hardened_builder()
-            .timeout(Duration::from_secs(30)) // Increased timeout for slower servers
+            .timeout(Duration::from_secs(SUBPROC_REQUEST_TIMEOUT_SECS)) // Increased timeout for slower servers
             .user_agent(crate::http_client::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5))
             .danger_accept_invalid_certs(false) // Security: reject invalid certificates
@@ -2087,6 +2118,16 @@ impl SubprocessorAnalyzer {
         // envelope ran out. Same standing as `any_transport_error` for the negative-cache write:
         // we stopped looking, which is never proof there was nothing to find.
         let mut envelope_abandoned = false;
+        // Attribution evidence for the empty-pass verdict: whether any host-level transport
+        // failure carried the target's own answer (refused/reset/error status) vs. silence or an
+        // unrecognized chain, which stays on the failure side (anti-laundering — silence is never
+        // target evidence).
+        let mut candidate_transport_target = false;
+        let mut candidate_transport_unattributed = false;
+        // F1 (second look, 2026-08-26): a refusal-class HTTP status (403/429/5xx…) is path-level
+        // — it never enters `is_transport_dead_error` — but it is NOT a definitive miss, so it
+        // must block both the verified-no-op verdict and the negative-cache absence memo.
+        let mut any_refusal_status = false;
 
         for (url_index, url) in urls_to_test.iter().enumerate() {
             // Stop once every source category has yielded a result.
@@ -2131,8 +2172,15 @@ impl SubprocessorAnalyzer {
                     crate::perf::METRICS.subproc_zero_yield.hit();
                     // Mark the phase degraded for the scan-health summary: this vendor's recall was
                     // cut short by the time budget, not because it had nothing. Without this the
-                    // aggregate vendor count silently absorbs the loss (the RC-1 collapse).
-                    crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                    // aggregate vendor count silently absorbs the loss (the RC-1 collapse). The
+                    // budget is a designed bound cutting genuine work: origin `policy`.
+                    crate::coverage::SCAN_COVERAGE
+                        .subprocessor
+                        .record_attributed(
+                            crate::coverage::Origin::Policy,
+                            domain,
+                            "budget_exhausted",
+                        );
                     tracing::warn!(
                         "SUBPROC_BUDGET_EXHAUSTED: {} yielded no subprocessors after {:.1}s of \
                          working time ({:.1}s browser queue + {:.1}s shared-permit queue \
@@ -2210,6 +2258,10 @@ impl SubprocessorAnalyzer {
                         u64::try_from(paced.as_nanos()).unwrap_or(u64::MAX),
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                    // The domain work ceiling watches the same wall this pacing sat on; credit it
+                    // through the domain channel (the vendor's counter above is credited directly,
+                    // so the shared stack is deliberately not used here — no double count).
+                    crate::http_client::credit_domain_queue(paced);
                 }
             }
             let request_start = std::time::Instant::now();
@@ -2229,6 +2281,9 @@ impl SubprocessorAnalyzer {
             // retry consults this candidate's envelope before burning a second render.
             let render_budget = crate::browser_pool::RenderBudgetCtx {
                 wait_sink: Some(std::sync::Arc::clone(&browser_wait_nanos)),
+                // Captured on the armed task so renders inside the blocking closure can credit
+                // the domain work ceiling too (task-locals do not cross the spawn seam).
+                domain_sink: crate::http_client::current_domain_queue_sink(),
                 retry_gate: Some(std::sync::Arc::new({
                     let env = url_envelope.clone();
                     move || !env.overrun()
@@ -2283,12 +2338,16 @@ impl SubprocessorAnalyzer {
                     }
                 }
                 Err(e) => {
-                    debug!("Failed to scrape {}: {}", url, e);
+                    debug!("Failed to scrape {}: {:#}", url, e);
                     // P2.6: an abandoned candidate is an unfinished look, not a verdict on the
                     // path. Deliberately NOT a `dead_hosts` entry either — the host answered, we
                     // walked away from it, and its sibling paths are still worth a probe.
                     if is_url_envelope_error(&e) {
                         envelope_abandoned = true;
+                    }
+                    if is_refusal_status_error(&e) {
+                        any_refusal_status = true;
+                        candidate_transport_target = true;
                     }
                     // P2.5: a transport-level failure means the host is unreachable, not that
                     // this path is missing — mark the host so its remaining candidates are skipped.
@@ -2296,6 +2355,24 @@ impl SubprocessorAnalyzer {
                         // P2.7: a host we could not reach means this pass cannot prove absence —
                         // block the negative-cache write regardless of whether the host parsed.
                         any_transport_error = true;
+                        // Attribution evidence for the empty-pass verdict below: a refusal/reset/
+                        // error status is the host itself answering (target evidence); silence
+                        // stays unattributed and lands on the failure side (anti-laundering).
+                        match crate::coverage::classify_fetch_error(
+                            &e,
+                            crate::coverage::RemoteParty::Target,
+                        ) {
+                            // Authoritative no-such-host: the candidate URL provably does not
+                            // exist — a definitive miss like a 404, not an obstacle to the
+                            // no-disclosure verdict. Sets neither flag.
+                            (crate::coverage::Origin::TargetNoop, _) => {}
+                            (crate::coverage::Origin::TargetLimited, _) => {
+                                candidate_transport_target = true;
+                            }
+                            _ => {
+                                candidate_transport_unattributed = true;
+                            }
+                        }
                         if let Some(host) = subproc_url_host(url) {
                             crate::perf::METRICS.subproc_dead_host_skip.hit();
                             dead_hosts.insert(host);
@@ -2331,12 +2408,93 @@ impl SubprocessorAnalyzer {
 
         if per_source.is_empty() {
             debug!("No subprocessor pages found for domain: {}", domain);
+            // The empty-pass verdict, attributed (the owner's failure-vs-no-op question, answered
+            // per vendor): a COMPLETE pass with every candidate definitively answered is a verified
+            // target no-op — the vendor publishes no discoverable subprocessor disclosure — and is
+            // recorded positively instead of vanishing as a silent debug line. A complete pass
+            // with unreachable candidate hosts is attributed to whoever the evidence supports.
+            // Truncated passes (budget, envelope) keep their policy records.
+            if !budget_exhausted && !envelope_abandoned {
+                if candidate_transport_unattributed {
+                    // Differential evidence for candidate-host silence (the DNS name-vs-transport
+                    // move): if the scan's HTTP transport demonstrably succeeded elsewhere within
+                    // two request-generations of this pass ending, the silence is these hosts'
+                    // behaviour (WAF blackhole, dead endpoint), not our link — target-limited.
+                    // With no such witness, it stays conservatively on the tool side.
+                    if crate::http_client::TRANSPORT_WITNESS
+                        .ok_within(Duration::from_secs(SUBPROC_REQUEST_TIMEOUT_SECS * 2))
+                    {
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed_detail(
+                                crate::coverage::Origin::TargetLimited,
+                                domain,
+                                "candidates_unreachable",
+                                format!(
+                                "{} candidate URL(s) in the probe set; host(s) silent while scan \
+                                     transport was healthy within two request-generations \
+                                     (differential)",
+                                urls_to_test.len()
+                            ),
+                            );
+                    } else {
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed_detail(
+                                crate::coverage::Origin::Tool,
+                                domain,
+                                "candidate_probe_failed",
+                                format!(
+                                    "{} candidate URL(s) in the probe set; unattributed transport failure(s) present \
+                                     and no recent transport success to differentiate",
+                                    urls_to_test.len()
+                                ),
+                            );
+                    }
+                } else if candidate_transport_target {
+                    crate::coverage::SCAN_COVERAGE
+                        .subprocessor
+                        .record_attributed_detail(
+                            crate::coverage::Origin::TargetLimited,
+                            domain,
+                            "candidates_unreachable",
+                            format!(
+                                "{} candidate URL(s) in the probe set; host(s) answered with refusal/reset/error status",
+                                urls_to_test.len()
+                            ),
+                        );
+                } else {
+                    crate::coverage::SCAN_COVERAGE
+                        .subprocessor
+                        .record_attributed_detail(
+                            crate::coverage::Origin::TargetNoop,
+                            domain,
+                            "no_disclosure_found",
+                            format!(
+                                "{} candidate URL(s) in the probe set, all entered candidates definitive misses",
+                                urls_to_test.len()
+                            ),
+                        );
+                    tracing::info!(
+                        "No subprocessor disclosure found for {} — verified no-op: {} candidate URL(s) \
+                         probed, all definitive misses [origin=target_noop reason=no_disclosure_found]",
+                        domain,
+                        urls_to_test.len()
+                    );
+                }
+            }
             // P2.6: nothing answered AND we walked away from at least one candidate part-way. The
             // budget branch above already reports its own starved-vendor case, so this only speaks
             // for the passes it never saw — without it, an envelope-shortened vendor reports as a
             // clean empty result, which is the RC-1 collapse in miniature.
             if envelope_abandoned && !budget_exhausted {
-                crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                crate::coverage::SCAN_COVERAGE
+                    .subprocessor
+                    .record_attributed(
+                        crate::coverage::Origin::Policy,
+                        domain,
+                        "envelope_exhausted",
+                    );
                 tracing::warn!(
                     "{}: {} yielded no subprocessors and at least one candidate was abandoned \
                      mid-probe when its {}s working-time envelope ran out. Recall for this vendor \
@@ -2356,6 +2514,7 @@ impl SubprocessorAnalyzer {
                 budget_exhausted,
                 any_transport_error,
                 envelope_abandoned,
+                any_refusal_status,
             ) {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -3243,12 +3402,16 @@ impl SubprocessorAnalyzer {
             // leaving it None. Format defensively instead of unwrapping so a
             // misconfigured retry count can never panic the scan.
             match last_error {
-                Some(e) => anyhow::anyhow!(
-                    "All {} HTTP attempts failed for URL {}: {}",
-                    attempts_made,
-                    url,
-                    e
-                ),
+                // `context` (not a formatted `anyhow!`) so the reqwest error survives as a
+                // downcastable source: the attribution layer classifies the empty-pass outcome
+                // (refused/status = the host answered → target evidence; silence = unattributed)
+                // from this chain, and a stringified error would erase exactly that evidence.
+                // `to_string()` still reads "All N HTTP attempts failed for URL …", so
+                // `is_transport_dead_error`'s message key is unchanged.
+                Some(e) => anyhow::Error::new(e).context(format!(
+                    "All {} HTTP attempts failed for URL {}",
+                    attempts_made, url
+                )),
                 None => anyhow::anyhow!(
                     "No HTTP attempt was made for URL {} (max_retries = {})",
                     url,
@@ -3557,6 +3720,7 @@ impl SubprocessorAnalyzer {
                 // a render that later fails (navigation error, panic) still returns its queue
                 // time — the 2026-08-23 RCA found the old success-arm-only plumbing lost it.
                 let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+                let render_domain_sink = crate::browser_pool::current_render_domain_sink();
                 match tokio::task::spawn_blocking(move || -> Result<String> {
                     // Records `render.total` on drop — failures counted too. Before the guard,
                     // so tab close and Chrome recycling are inside the measurement.
@@ -3565,7 +3729,11 @@ impl SubprocessorAnalyzer {
                     let guard = crate::browser_pool::acquire_tab()?;
                     let permit_wait = guard.permit_wait();
                     render_timer.exclude(permit_wait);
-                    crate::browser_pool::credit_render_wait(&render_wait_sink, permit_wait);
+                    crate::browser_pool::credit_render_wait(
+                        &render_wait_sink,
+                        &render_domain_sink,
+                        permit_wait,
+                    );
                     let tab = guard.tab();
                     let nav_started = std::time::Instant::now();
                     tab.navigate_to(&url_for_browser)
@@ -3612,7 +3780,13 @@ impl SubprocessorAnalyzer {
                     // the whole anyhow chain: the outer context alone ("failed to reset browser
                     // network state") names the symptom but never the failing CDP call.
                     Ok(Err(e)) => {
-                        crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed(
+                                crate::coverage::Origin::Tool,
+                                source_domain,
+                                "browser_render_failed",
+                            );
                         tracing::warn!(
                             "Browser rendering failed for {}: {:#} — falling back to the un-rendered \
                              SPA shell, so subprocessor recall for this source is incomplete",
@@ -3621,7 +3795,13 @@ impl SubprocessorAnalyzer {
                         content
                     }
                     Err(e) => {
-                        crate::coverage::SCAN_COVERAGE.subprocessor.record_failure();
+                        crate::coverage::SCAN_COVERAGE
+                            .subprocessor
+                            .record_attributed(
+                                crate::coverage::Origin::Tool,
+                                source_domain,
+                                "browser_panicked",
+                            );
                         tracing::warn!(
                             "Browser task panicked for {}: {} — falling back to the un-rendered SPA \
                              shell, so subprocessor recall for this source is incomplete",
@@ -7182,6 +7362,7 @@ impl SubprocessorAnalyzer {
 async fn render_html_in_browser(url: &str, settle: Duration) -> Result<String> {
     let url = url.to_string();
     let render_wait_sink = crate::browser_pool::current_render_wait_sink();
+    let render_domain_sink = crate::browser_pool::current_render_domain_sink();
     tokio::task::spawn_blocking(move || -> Result<String> {
         // Records `render.total` on drop, so a render that fails partway is still counted.
         // Otherwise the table's denominator would silently exclude the slow failures — the
@@ -7192,7 +7373,11 @@ async fn render_html_in_browser(url: &str, settle: Duration) -> Result<String> {
         let guard = crate::browser_pool::acquire_tab()?;
         let permit_wait = guard.permit_wait();
         render_timer.exclude(permit_wait);
-        crate::browser_pool::credit_render_wait(&render_wait_sink, permit_wait);
+        crate::browser_pool::credit_render_wait(
+            &render_wait_sink,
+            &render_domain_sink,
+            permit_wait,
+        );
         let tab = guard.tab();
 
         let nav_started = std::time::Instant::now();
@@ -8057,6 +8242,41 @@ mod tests {
     }
 
     #[test]
+    fn refusal_status_split_only_404_and_410_prove_absence() {
+        // F1 (second look, 2026-08-26): the falsifier for the all-403 laundering path. A refusal
+        // status is the host DENYING the look; only 404/410 are definitive misses.
+        for denied in [
+            "HTTP error: 401 Unauthorized",
+            "HTTP error: 403 Forbidden",
+            "HTTP error: 429 Too Many Requests",
+            "HTTP error: 500 Internal Server Error",
+            "HTTP error: 503 Service Unavailable",
+        ] {
+            assert!(
+                is_refusal_status_error(&anyhow::anyhow!("{denied}")),
+                "{denied} must block the verified-no-op verdict"
+            );
+        }
+        for miss in ["HTTP error: 404 Not Found", "HTTP error: 410 Gone"] {
+            assert!(
+                !is_refusal_status_error(&anyhow::anyhow!("{miss}")),
+                "{miss} is a definitive miss, not a refusal"
+            );
+        }
+        // Context wrapping must not hide the marker — the detector walks the chain.
+        let wrapped = anyhow::anyhow!("HTTP error: 403 Forbidden")
+            .context("while probing https://trust.example.com/subprocessors");
+        assert!(
+            is_refusal_status_error(&wrapped),
+            "a context layer above the status error must not hide the refusal"
+        );
+        // Non-status errors are untouched.
+        assert!(!is_refusal_status_error(&anyhow::anyhow!(
+            "All 3 HTTP attempts failed for URL https://x/y"
+        )));
+    }
+
+    #[test]
     fn a_transient_source_error_never_licenses_deleting_the_learned_cache() {
         // The cache entry carries the `trust_center_strategy` a full headless render worked out.
         // Clearing it costs the next scan that whole rediscovery, so an empty result only justifies
@@ -8111,26 +8331,28 @@ mod tests {
         // every candidate it entered was finished, and nothing came back. Only then may a warm
         // rescan trust "no page here" and skip probing.
         assert!(
-            may_record_subprocessor_absence(false, false, false, false),
+            may_record_subprocessor_absence(false, false, false, false, false),
             "a full loop that reached every candidate and found nothing proves absence"
         );
 
         // Any success means there IS a page — never record absence.
-        assert!(!may_record_subprocessor_absence(true, false, false, false));
+        assert!(!may_record_subprocessor_absence(
+            true, false, false, false, false
+        ));
 
         // Budget-truncated: the loop looked at only a prefix of the candidates, so the vendor's
         // real page could sit in the unprobed tail. Recording absence here would cache a false
         // "nothing" that a warm rescan then trusts — exactly the recall trap the budget guard warns
         // about elsewhere. Must fall through and re-probe.
         assert!(
-            !may_record_subprocessor_absence(false, true, false, false),
+            !may_record_subprocessor_absence(false, true, false, false, false),
             "a budget-truncated pass examined only a prefix — absence is unproven"
         );
 
         // Transport failure: a host was unreachable (blackhole / browser outage). An outage must
         // never memoize as absence — the same discipline as the positive cache's stale-clear guard.
         assert!(
-            !may_record_subprocessor_absence(false, false, true, false),
+            !may_record_subprocessor_absence(false, false, true, false, false),
             "an unreachable host means we could not look, not that there is nothing"
         );
 
@@ -8139,14 +8361,28 @@ mod tests {
         // that candidate was ever decided — caching absence from it would memoize our own
         // impatience as a fact about the vendor.
         assert!(
-            !may_record_subprocessor_absence(false, false, false, true),
+            !may_record_subprocessor_absence(false, false, false, true, false),
             "a candidate abandoned mid-probe is an unfinished look, not a proven absence"
         );
 
+        // F1 (second look, 2026-08-26): a refusal-class status (403/429/5xx) is the host DENYING
+        // the look, not answering "nothing here" — a WAF-fronted vendor with a real disclosure
+        // must never be memoized proven-absent off its refusals.
+        assert!(
+            !may_record_subprocessor_absence(false, false, false, false, true),
+            "a refusal-status pass proves denial, not absence"
+        );
+
         // Belt-and-suspenders: any blocking condition suppresses the write.
-        assert!(!may_record_subprocessor_absence(false, true, true, false));
-        assert!(!may_record_subprocessor_absence(false, true, false, true));
-        assert!(!may_record_subprocessor_absence(true, true, true, true));
+        assert!(!may_record_subprocessor_absence(
+            false, true, true, false, false
+        ));
+        assert!(!may_record_subprocessor_absence(
+            false, true, false, true, false
+        ));
+        assert!(!may_record_subprocessor_absence(
+            true, true, true, true, true
+        ));
     }
 
     // ── P2.6 per-URL working-time envelope ─────────────────────────────
@@ -8373,20 +8609,33 @@ mod tests {
         use std::sync::atomic::Ordering;
         assert!(crate::browser_pool::current_render_wait_sink().is_none());
         let vendor = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let domain = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let ctx = crate::browser_pool::RenderBudgetCtx {
             wait_sink: Some(std::sync::Arc::clone(&vendor)),
+            domain_sink: Some(std::sync::Arc::clone(&domain)),
             retry_gate: None,
         };
         crate::browser_pool::with_render_budget(ctx, async {
             let sink = crate::browser_pool::current_render_wait_sink();
+            let domain_sink = crate::browser_pool::current_render_domain_sink();
             assert!(sink.is_some(), "the armed sink must be visible in-scope");
-            crate::browser_pool::credit_render_wait(&sink, Duration::from_millis(9));
+            assert!(
+                domain_sink.is_some(),
+                "the armed domain sink must be visible in-scope"
+            );
+            crate::browser_pool::credit_render_wait(&sink, &domain_sink, Duration::from_millis(9));
         })
         .await;
         assert_eq!(
             vendor.load(Ordering::Relaxed),
             9_000_000,
             "a credited render wait must land in the vendor's browser-wait counter"
+        );
+        assert_eq!(
+            domain.load(Ordering::Relaxed),
+            9_000_000,
+            "the same wait must credit the domain work ceiling's clock (2026-08-25 census: \
+             uncredited render queue was cut as \"work\" by the domain ceiling)"
         );
         assert!(crate::browser_pool::current_render_wait_sink().is_none());
     }
@@ -8400,6 +8649,7 @@ mod tests {
         let spent = envelope_aged(Duration::from_secs(30), Duration::from_secs(12), None, 0);
         let ctx = crate::browser_pool::RenderBudgetCtx {
             wait_sink: None,
+            domain_sink: None,
             retry_gate: Some(std::sync::Arc::new(move || !spent.overrun())),
         };
         crate::browser_pool::with_render_budget(ctx, async {
@@ -8413,6 +8663,7 @@ mod tests {
         let fresh = envelope_aged(Duration::from_secs(1), Duration::from_secs(12), None, 0);
         let ctx = crate::browser_pool::RenderBudgetCtx {
             wait_sink: None,
+            domain_sink: None,
             retry_gate: Some(std::sync::Arc::new(move || !fresh.overrun())),
         };
         crate::browser_pool::with_render_budget(ctx, async {

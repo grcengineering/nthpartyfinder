@@ -332,32 +332,139 @@ where
 // they cannot otherwise see. Un-armed tasks pay nothing (try_with on an unset task-local).
 
 tokio::task_local! {
-    /// The current task's shared-wait accumulator, when armed by [`scope_shared_wait`].
-    static SHARED_WAIT_NANOS: std::sync::Arc<std::sync::atomic::AtomicU64>;
+    /// The current task's shared-wait sink STACK, when armed by [`scope_shared_wait`]. A stack,
+    /// not a single cell: budgets nest — a vendor budget runs inside a domain work ceiling — and
+    /// a nested scope that SHADOWED its outer sink would silently stop crediting the outer
+    /// budget, which is the exact uncredited-queue class this mechanism exists to kill (the
+    /// 2026-08-25 domain-ceiling census: 849 subfinder phases cut with queue billed as work).
+    static SHARED_WAIT_SINKS: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>;
+
+    /// The current domain's queue sink (its `DomainWorkClock` counter), when a phase runs under
+    /// a domain work ceiling. A separate channel from `SHARED_WAIT_SINKS` for the waits that
+    /// must credit the DOMAIN clock only: render-permit waits are subtracted from vendor budgets
+    /// through their own explicit plumbing (`browser_pool::RenderBudgetCtx`), so crediting them
+    /// into the shared stack too would subtract the same wait twice from the vendor budget.
+    static DOMAIN_QUEUE_SINK: std::sync::Arc<std::sync::atomic::AtomicU64>;
 }
 
 /// Run `op` with `acc` collecting every shared-permit wait (connection semaphore, DNS governor +
-/// rate bucket) incurred on this task. Inherited across `.await`s within the task; NOT across
-/// `tokio::spawn` (a spawned subtask is its own budget domain — the browser render path already
-/// accounts its queueing separately via the browser-wait counter).
+/// rate bucket) incurred on this task, in addition to any outer scopes already armed. Inherited
+/// across `.await`s within the task; NOT across `tokio::spawn` (a spawned subtask is its own
+/// budget domain — the browser render path already accounts its queueing separately via the
+/// browser-wait counter).
 pub async fn scope_shared_wait<F: std::future::Future>(
     acc: std::sync::Arc<std::sync::atomic::AtomicU64>,
     op: F,
 ) -> F::Output {
-    SHARED_WAIT_NANOS.scope(acc, op).await
+    let mut stack = SHARED_WAIT_SINKS.try_with(Clone::clone).unwrap_or_default();
+    stack.push(acc);
+    SHARED_WAIT_SINKS.scope(stack, op).await
 }
 
-/// Credit one shared-permit wait to the current task's accumulator, if one is armed.
+/// Run `op` with `sink` armed as the current domain's queue sink (see [`DOMAIN_QUEUE_SINK`]).
+pub async fn scope_domain_queue<F: std::future::Future>(
+    sink: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    op: F,
+) -> F::Output {
+    DOMAIN_QUEUE_SINK.scope(sink, op).await
+}
+
+/// Credit one shared-permit wait to every armed accumulator scope, if any.
 pub(crate) fn credit_shared_wait(wait: Duration) {
     if wait.is_zero() {
         return;
     }
-    let _ = SHARED_WAIT_NANOS.try_with(|acc| {
+    let nanos = u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX);
+    let _ = SHARED_WAIT_SINKS.try_with(|sinks| {
+        for acc in sinks {
+            acc.fetch_add(nanos, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// Credit a wait to the current domain's queue sink only (see [`DOMAIN_QUEUE_SINK`] for why this
+/// channel exists apart from the shared stack).
+pub(crate) fn credit_domain_queue(wait: Duration) {
+    if wait.is_zero() {
+        return;
+    }
+    let _ = DOMAIN_QUEUE_SINK.try_with(|acc| {
         acc.fetch_add(
             u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX),
             std::sync::atomic::Ordering::Relaxed,
         );
     });
+}
+
+/// The armed domain queue sink, for contexts that must carry it across a spawn seam (the render
+/// paths read it on the async task and move the clone into their blocking closure).
+pub(crate) fn current_domain_queue_sink() -> Option<std::sync::Arc<std::sync::atomic::AtomicU64>> {
+    DOMAIN_QUEUE_SINK.try_with(Clone::clone).ok()
+}
+
+/// A monotonic "the machinery worked recently" witness — the differential-evidence primitive.
+///
+/// The DNS layer's name-vs-transport split generalized: silence from ONE remote is never, by
+/// itself, evidence about who failed — but silence from one remote while the same machinery
+/// demonstrably succeeded elsewhere within the same timeout-length IS host-specific, the way an
+/// authoritative SERVFAIL is name-specific. One witness instance per machinery class (HTTP
+/// transport, browser capture); `note_ok` on every success, `ok_within(window)` at a failure's
+/// classification site with the operation's own timeout as the window.
+pub(crate) struct HealthWitness {
+    anchor: OnceLock<Instant>,
+    /// Nanos-since-anchor of the last success, +1 so `0` means "never".
+    last_ok: std::sync::atomic::AtomicU64,
+}
+
+impl HealthWitness {
+    pub(crate) const fn new() -> Self {
+        Self {
+            anchor: OnceLock::new(),
+            last_ok: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn now_nanos(&self) -> u64 {
+        let anchor = self.anchor.get_or_init(Instant::now);
+        u64::try_from(anchor.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Record one success of this machinery class.
+    pub(crate) fn note_ok(&self) {
+        let stamp = self.now_nanos().saturating_add(1);
+        self.last_ok
+            .store(stamp, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether this machinery class succeeded within the last `window`.
+    pub(crate) fn ok_within(&self, window: Duration) -> bool {
+        let last = self.last_ok.load(std::sync::atomic::Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let elapsed_since = self.now_nanos().saturating_sub(last - 1);
+        u128::from(elapsed_since) <= window.as_nanos()
+    }
+}
+
+/// The HTTP-transport witness: any successful gated send notes it.
+pub(crate) static TRANSPORT_WITNESS: HealthWitness = HealthWitness::new();
+
+/// Credit `wait` into a carried sink, if present — the blocking-thread counterpart of
+/// [`credit_domain_queue`] for closures that captured the sink before the spawn seam.
+pub(crate) fn credit_carried_sink(
+    sink: &Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    wait: Duration,
+) {
+    if wait.is_zero() {
+        return;
+    }
+    if let Some(sink) = sink {
+        sink.fetch_add(
+            u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 /// Send a `reqwest` request under the global connection ceiling.
@@ -391,7 +498,14 @@ impl GatedSend for reqwest::RequestBuilder {
     fn send_gated(
         self,
     ) -> impl std::future::Future<Output = reqwest::Result<reqwest::Response>> + Send {
-        gated(connection_semaphore(), self.send())
+        let fut = gated(connection_semaphore(), self.send());
+        async move {
+            let result = fut.await;
+            if result.is_ok() {
+                TRANSPORT_WITNESS.note_ok();
+            }
+            result
+        }
     }
 
     async fn send_gated_timed(self) -> (Duration, reqwest::Result<reqwest::Response>) {
@@ -408,7 +522,11 @@ impl GatedSend for reqwest::RequestBuilder {
                 // the per-request timeout at call time, matching `send_gated`'s eager
                 // `self.send()` argument. Phase 0 measures that inversion; it must not fix it.
                 let fut = client.execute(req);
-                gated_timed(connection_semaphore(), fut).await
+                let (wait, result) = gated_timed(connection_semaphore(), fut).await;
+                if result.is_ok() {
+                    TRANSPORT_WITNESS.note_ok();
+                }
+                (wait, result)
             }
             Err(e) => (Duration::ZERO, Err(e)),
         }
@@ -510,6 +628,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn health_witness_reports_recent_success_and_never_before_any() {
+        // A fresh witness has no evidence: silence must not classify as target-side.
+        let w = HealthWitness::new();
+        assert!(!w.ok_within(Duration::from_secs(3600)));
+        // After a success it is evidence within the window…
+        w.note_ok();
+        assert!(w.ok_within(Duration::from_secs(60)));
+        // …but not within a window that has already passed (zero-length window: the elapsed
+        // nanos since note_ok are strictly positive by the time we re-read).
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!w.ok_within(Duration::from_millis(1)));
+    }
 
     /// The hardened builder must still produce a working client after a caller layers on the
     /// per-request timeout and user agent it always sets.

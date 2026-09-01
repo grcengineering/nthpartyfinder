@@ -330,6 +330,10 @@ pub struct Metrics {
     pub http_getaddrinfo: Metric,
     /// subfinder subprocess invocations (count + wall).
     pub subfinder_proc: Metric,
+    /// Waits for a slot in the 3-permit subfinder pool, credited as queue time to armed budgets
+    /// (the domain work ceiling): ~98% of `phase.subfinder` wall on the 2026-08-25 depth-3 census
+    /// was this queue, billed as work and cut by the ceiling on 849 of 1,057 domains.
+    pub subfinder_permit_wait: Metric,
 }
 
 impl Metrics {
@@ -433,6 +437,7 @@ impl Metrics {
             http_send_ip_host: Metric::new(),
             http_getaddrinfo: Metric::new(),
             subfinder_proc: Metric::new(),
+            subfinder_permit_wait: Metric::new(),
         }
     }
 
@@ -457,7 +462,7 @@ impl Metrics {
         }
     }
 
-    fn all(&self) -> [(&'static str, &Metric); 98] {
+    fn all(&self) -> [(&'static str, &Metric); 99] {
         [
             ("browser.permit_wait", &self.browser_permit_wait),
             ("browser.launch", &self.browser_launch),
@@ -584,6 +589,7 @@ impl Metrics {
             ("http.send_ip_host", &self.http_send_ip_host),
             ("http.getaddrinfo", &self.http_getaddrinfo),
             ("subfinder.proc", &self.subfinder_proc),
+            ("subfinder.permit_wait", &self.subfinder_permit_wait),
         ]
     }
 
@@ -1173,13 +1179,14 @@ mod tests {
             "http.send_ip_host",
             "http.getaddrinfo",
             "subfinder.proc",
+            "subfinder.permit_wait",
         ] {
             assert!(
                 snap.get(expected).is_some(),
                 "counter {expected} missing from snapshot"
             );
         }
-        assert_eq!(snap.rows.len(), 98);
+        assert_eq!(snap.rows.len(), 99);
     }
 
     /// Depth is 1-indexed and everything past 4 folds into one bucket. Depth 0 (the seed
