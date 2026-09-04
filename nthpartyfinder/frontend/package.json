@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@xyflow/svelte": "^1.6.5",
+    "@xyflow/svelte": "^1.6.6",
     "elkjs": "^0.12.0"
   },
   "devDependencies": {
