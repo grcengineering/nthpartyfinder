@@ -71,7 +71,7 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # absent) — and so flate2's zlib-rs backend (Zlib license) is never selected.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Disk-backed result storage with compression (memory efficiency)
-zstd = "0.13"
+zstd = "0.14"
 # System memory monitoring for pressure-based throttling
 sysinfo = "0.39"
 # Raise the process open-file-descriptor soft limit at startup (used only under cfg(unix), in
