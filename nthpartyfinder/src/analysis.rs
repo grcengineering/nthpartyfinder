@@ -727,7 +727,7 @@ impl DomainWorkClock {
     /// opposite of what the subtraction exists to do.
     pub fn credit_queue(&self, waited: Duration) {
         let nanos = u64::try_from(waited.as_nanos()).unwrap_or(u64::MAX);
-        let _ = self.queued_nanos.fetch_update(
+        let _ = self.queued_nanos.try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |current| Some(current.saturating_add(nanos)),
