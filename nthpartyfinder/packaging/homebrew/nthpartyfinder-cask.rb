@@ -23,20 +23,21 @@ cask "nthpartyfinder" do
   sha256 arm:   "ee50de230c607c6cba9106059d30ac16948348e6511bfcfac3562b005fa13a9b",
          intel: "a3377ae60110b524b188ba1354d9e0f9ba35c6dd5e7c45e4135534bd6db47c7a"
 
-  url "https://github.com/grcengineering/nthpartyfinder/releases/download/v#{version}/nthpartyfinder-#{arch}-apple-darwin.tgz",
-      verified: "github.com/grcengineering/nthpartyfinder/"
+  url "https://github.com/grcengineering/nthpartyfinder/releases/download/v#{version}/nthpartyfinder-#{arch}-apple-darwin.tgz"
   name "Nth Party Finder"
   desc "CLI tool for identifying Nth party vendor relationships through DNS analysis"
   homepage "https://grc.engineering/"
 
-  # macOS-only: the artifact is a -apple-darwin binary, so `brew readall --os=all` (run by the
-  # tap's test-bot) requires an explicit macOS declaration — without it the Linux simulation
-  # leaves sha256 nil and the audit fails. Symbol form (`:big_sur`), not the deprecated string
-  # comparison form.
-  depends_on macos: :big_sur
+  # Stanza order is fixed by Homebrew's `Cask/StanzaOrder` cop: cask, then formula, then macos.
+  depends_on cask: "google-chrome"
   depends_on formula: "subfinder"
   depends_on formula: "whois"
-  depends_on cask: "google-chrome"
+  # macOS-only: the artifact is a -apple-darwin binary, so `brew readall --os=all` (run by the
+  # tap's test-bot) requires an explicit macOS declaration — without it the Linux simulation
+  # leaves sha256 nil and the audit fails. Plain `:macos`, not a minimum version: Homebrew's
+  # `Homebrew/OSDependsOn` cop rejects `macos: :big_sur` as redundant: Big Sur is the oldest
+  # macOS Homebrew still recognises, so that minimum excludes nothing.
+  depends_on :macos
 
   binary "nthpartyfinder"
 
