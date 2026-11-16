@@ -420,6 +420,15 @@ impl SubfinderDiscovery {
         None
     }
 
+    fn open_archive<R: std::io::Read + std::io::Seek>(reader: R) -> Result<zip::ZipArchive<R>> {
+        let mut archive = zip::ZipArchive::new(reader)
+            .map_err(|e| anyhow!("Failed to open zip archive: {}", e))?;
+        archive
+            .validate_header_consistency()
+            .map_err(|e| anyhow!("Inconsistent zip archive headers: {}", e))?;
+        Ok(archive)
+    }
+
     /// Download and install subfinder to the bundled location
     #[cfg(not(test))] // real network I/O — downloads binary from GitHub releases and extracts zip
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -519,8 +528,7 @@ impl SubfinderDiscovery {
 
         // Extract the zip file
         let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| anyhow!("Failed to open zip archive: {}", e))?;
+        let mut archive = Self::open_archive(cursor)?;
 
         // Find and extract the subfinder binary
         let binary_name = if cfg!(windows) {
@@ -535,7 +543,10 @@ impl SubfinderDiscovery {
                 .by_index(i)
                 .map_err(|e| anyhow!("Failed to read zip entry: {}", e))?;
 
-            let name = file.name().to_string();
+            let name = file
+                .name()
+                .map_err(|e| anyhow!("Failed to read zip entry name: {}", e))?
+                .into_owned();
             if name.ends_with(binary_name) || name == binary_name {
                 let mut outfile = std::fs::File::create(&install_path)
                     .map_err(|e| anyhow!("Failed to create output file: {}", e))?;
@@ -1042,6 +1053,99 @@ pub fn parse_subfinder_output(output: &str) -> Vec<SubdomainResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn release_archive(names: &[&str]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for name in names {
+            writer
+                .start_file(
+                    *name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(b"subfinder binary").unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_open_archive_accepts_deflated_release_binary_names() {
+        for name in ["subfinder", "subfinder.exe", "release-東京/subfinder"] {
+            let bytes = release_archive(&[name]);
+            let mut archive = SubfinderDiscovery::open_archive(std::io::Cursor::new(bytes))
+                .expect("consistent release archive");
+            let mut entry = archive.by_index(0).unwrap();
+            assert_eq!(entry.name().unwrap(), name);
+            let mut binary = Vec::new();
+            std::io::copy(&mut entry, &mut binary).unwrap();
+            assert_eq!(binary, b"subfinder binary");
+        }
+    }
+
+    #[test]
+    fn test_open_archive_rejects_mismatched_local_name() {
+        let mut bytes = release_archive(&["subfinder"]);
+        // The local header name begins at offset 30; keep its length unchanged
+        // so only its identity differs from the central directory's name.
+        bytes[30..39].copy_from_slice(b"badfinder");
+        let error = SubfinderDiscovery::open_archive(std::io::Cursor::new(bytes))
+            .expect_err("inconsistent local name must be rejected");
+        assert!(error
+            .to_string()
+            .contains("Inconsistent zip archive headers"));
+    }
+
+    #[test]
+    fn test_open_archive_rejects_mismatched_local_compression() {
+        let mut bytes = release_archive(&["subfinder"]);
+        // Claim Stored in the local header while the central directory and
+        // payload still use Deflate.
+        bytes[8..10].copy_from_slice(&0u16.to_le_bytes());
+        assert!(SubfinderDiscovery::open_archive(std::io::Cursor::new(bytes)).is_err());
+    }
+
+    #[test]
+    fn test_open_archive_rejects_malformed_archive() {
+        assert!(SubfinderDiscovery::open_archive(std::io::Cursor::new(b"not a zip")).is_err());
+    }
+
+    #[test]
+    fn test_open_archive_rejects_duplicate_names() {
+        let mut bytes = release_archive(&["subfinder", "altfinder"]);
+        let second_central = bytes
+            .windows(4)
+            .enumerate()
+            .filter(|(_, signature)| *signature == b"PK\x01\x02")
+            .nth(1)
+            .unwrap()
+            .0;
+        let second_local = u32::from_le_bytes(
+            bytes[second_central + 42..second_central + 46]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        bytes[second_central + 46..second_central + 55].copy_from_slice(b"subfinder");
+        bytes[second_local + 30..second_local + 39].copy_from_slice(b"subfinder");
+        assert!(SubfinderDiscovery::open_archive(std::io::Cursor::new(bytes)).is_err());
+    }
+
+    #[test]
+    fn test_open_archive_rejects_overlapping_entry_data() {
+        let mut bytes = release_archive(&["subfinder", "altfinder"]);
+        let first_central = bytes
+            .windows(4)
+            .position(|signature| signature == b"PK\x01\x02")
+            .unwrap();
+        // Agree on the first entry's size in both headers, but extend its data
+        // across the following local header. Header identity alone is not enough.
+        let overlapping_size = (first_central - 39) as u32;
+        bytes[18..22].copy_from_slice(&overlapping_size.to_le_bytes());
+        bytes[first_central + 20..first_central + 24]
+            .copy_from_slice(&overlapping_size.to_le_bytes());
+        assert!(SubfinderDiscovery::open_archive(std::io::Cursor::new(bytes)).is_err());
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // Subprocess resource-bound tests (concurrency cap + interrupt reaper)
