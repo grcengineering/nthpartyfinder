@@ -40,7 +40,9 @@ url = "2.5"
 reqwest = { version = "0.13", features = ["json", "stream", "query"] }
 dirs = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
-askama = "0.16"
+# The report uses Askama's default templates/ directory. Keep rendering features
+# without its optional TOML configuration parser (unmaintained basic-toml).
+askama = { version = "0.16", default-features = false, features = ["derive", "std", "urlencode"] }
 base64 = "0.23"
 futures = "0.3"
 scraper = "0.27"
@@ -65,7 +67,7 @@ which = "8"
 # and use the flate2/miniz_oxide deflate backend (MIT) rather than zip's default
 # zlib-rs backend, so no `Zlib`-licensed crate enters the tree (matches the
 # miniz_oxide backend ort-sys/ureq already use).
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 # Pin flate2's pure-Rust miniz_oxide backend (MIT) so zip's deflate works under
 # `--no-default-features` too (where ort-sys, which otherwise enables it, is
 # absent) — and so flate2's zlib-rs backend (Zlib license) is never selected.
