@@ -7834,11 +7834,7 @@ pub fn is_valid_org_name(org_name: &str) -> bool {
     // "Amazon Web Services, Inc." = 4 words
     // "AI Inference and AI Services United States..." = 10+ words → garbage
     let word_count = name.split_whitespace().count();
-    if word_count > 8 {
-        return false;
-    }
-
-    true
+    word_count <= 8
 }
 
 /// Returns true for patterns that are clearly not real organization names:
@@ -7986,11 +7982,7 @@ pub fn is_ner_false_positive(org_name: &str) -> bool {
         "nl", "no", "pa", "pl", "ps", "pt", "ro", "ru", "si", "sk", "sl", "so", "sq", "sr", "sv",
         "sw", "ta", "te", "th", "tl", "tr", "uk", "ur", "uz", "vi", "zh",
     ];
-    if language_codes.contains(&lower.as_str()) {
-        return true;
-    }
-
-    false
+    language_codes.contains(&lower.as_str())
 }
 
 /// Check if a domain label is a common English word that PDF/HTML extraction
