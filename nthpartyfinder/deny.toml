@@ -44,6 +44,17 @@ ignore = [
     # Accepted: 2026-04-29 by Founding Engineer (agent e8a18920)
     { id = "RUSTSEC-2024-0436", reason = "compile-time proc-macro only, no runtime attack surface; functionally complete, no known CVEs" },
 
+    # RISK ACCEPTANCE: RUSTSEC-2026-0543 (chrono 0.4.x — unmaintained)
+    # Type: unmaintained (informational warning, not a vulnerability)
+    # Impact: direct dependency used for timestamps and date formatting in
+    #   reports and caches. No known vulnerability; advisory lists no patched
+    #   version because the crate itself is no longer maintained.
+    # Root cause: chrono upstream declared unmaintained (advisory dated 2026-09-14).
+    # Remediation plan: migrate to jiff or time (~12 source files touch chrono);
+    #   remove this entry once the migration lands.
+    # Accepted: 2026-11-25 by maintainer (PR #230)
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, not a vulnerability; direct dep pending migration to jiff/time" },
+
     # REMEDIATED 2026-05-30 (GRC-368): RUSTSEC-2026-0118 (hickory-proto NSEC3 unbounded loop)
     #   was CLEARED by bumping hickory-resolver 0.25.2 -> 0.26.1 (pulls hickory-proto 0.26.1).
     #   `cargo deny check advisories` confirms "no crate matched advisory criteria" for it.
