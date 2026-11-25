@@ -245,7 +245,8 @@ fn find_ort_library(
         };
     }
 
-    let (_os_name, _arch, download_url) = get_ort_download_info();
+    let (os_name, arch, download_url) = get_ort_download_info();
+    let rid = ort_nuget_rid(os_name, arch).unwrap_or("<platform>");
 
     DepCheckResult {
         name: "ONNX Runtime",
@@ -256,11 +257,12 @@ fn find_ort_library(
              \n\
              To install:\n\
              1. Download: {}\n\
-             2. Extract and set: export ORT_DYLIB_PATH=/path/to/{}\n\
-             3. Or run: ./scripts/install.sh\n\
+             2. Check its SHA-256 is {}\n\
+             3. Unzip runtimes/{}/native/{} and set: export ORT_DYLIB_PATH=/path/to/{}\n\
+             4. Or run: ./scripts/install.sh\n\
              \n\
              To skip NER, use --disable-slm or build with --no-default-features.",
-            download_url, lib_name
+            download_url, ORT_NUPKG_SHA256, rid, lib_name, lib_name
         )),
     }
 }
@@ -418,14 +420,120 @@ fn find_ort_in_directory(dir: &std::path::Path, lib_name: &str) -> Option<PathBu
     None
 }
 
-/// Get OS-specific ONNX Runtime download URL
+/// ONNX Runtime version the `ort` crate (2.0.0-rc.9) is built against. Must stay 1.20.x.
+const ORT_VERSION: &str = "1.20.1";
+
+/// Microsoft's official `Microsoft.ML.OnnxRuntime` NuGet package. The GitHub release
+/// tarballs (`onnxruntime-<os>-<arch>-1.20.1.tgz`) now return 404, so we fetch the
+/// NuGet package instead. It is a plain ZIP with every platform's native library under
+/// `runtimes/<rid>/native/`, and its digest is fixed, so we pin it.
+const ORT_NUPKG_URL: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.20.1/microsoft.ml.onnxruntime.1.20.1.nupkg";
+
+/// SHA-256 of `microsoft.ml.onnxruntime.1.20.1.nupkg` (108,611,147 bytes). Matches the
+/// SHA-512 NuGet publishes for the package; also pinned in the Dockerfiles and scripts.
+const ORT_NUPKG_SHA256: &str = "9c32108e9a1c78b090a95c2a219f244dd5f067d4caf68fb0f967103f3f20839c";
+
+/// Map our (os, arch) pair to the NuGet runtime identifier used inside the package.
+fn ort_nuget_rid(os_name: &str, arch: &str) -> Option<&'static str> {
+    match (os_name, arch) {
+        ("osx", "arm64") => Some("osx-arm64"),
+        ("osx", "x86_64") => Some("osx-x64"),
+        ("win", "x64") => Some("win-x64"),
+        ("linux", "aarch64") => Some("linux-arm64"),
+        ("linux", "x64") => Some("linux-x64"),
+        _ => None,
+    }
+}
+
+/// Native files to take from the package for this platform: the main library plus,
+/// where the package ships one, the shared execution-provider library it loads.
+fn ort_package_files(lib_name: &str) -> Vec<&'static str> {
+    match lib_name {
+        "onnxruntime.dll" => vec!["onnxruntime.dll", "onnxruntime_providers_shared.dll"],
+        "libonnxruntime.dylib" => vec!["libonnxruntime.dylib"],
+        _ => vec!["libonnxruntime.so", "libonnxruntime_providers_shared.so"],
+    }
+}
+
+/// Get OS-specific ONNX Runtime download info: (os, arch, package URL).
 fn get_ort_download_info() -> (&'static str, &'static str, String) {
     let (os_name, arch) = ort_platform();
-    let url = format!(
-        "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-{}-{}-1.20.1.tgz",
-        os_name, arch
-    );
-    (os_name, arch, url)
+    (os_name, arch, ORT_NUPKG_URL.to_string())
+}
+
+/// Lowercase hex SHA-256 of a file, streamed in chunks (the package is ~104 MB).
+fn ort_sha256_file(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verify a downloaded ONNX Runtime package against the pinned digest, then extract
+/// this platform's native libraries into `<ort_dir>/onnxruntime-<os>-<arch>-<ver>/lib/`
+/// (the layout `find_ort_in_directory` already searches). Only the exact entries
+/// `runtimes/<rid>/native/<file>` are read, and each is written to a fixed file name,
+/// so nothing in the archive can choose where a file lands.
+fn install_ort_from_nupkg(
+    nupkg_path: &std::path::Path,
+    expected_sha256: &str,
+    ort_dir: &std::path::Path,
+    os_name: &str,
+    arch: &str,
+    lib_name: &str,
+) -> Result<PathBuf, String> {
+    let actual = ort_sha256_file(nupkg_path)
+        .map_err(|e| format!("Failed to read downloaded package: {}", e))?;
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!(
+            "ONNX Runtime package SHA-256 mismatch (expected {}, got {}) — refusing to install",
+            expected_sha256, actual
+        ));
+    }
+
+    let rid = ort_nuget_rid(os_name, arch).ok_or_else(|| {
+        format!(
+            "Unsupported platform for ONNX Runtime: {}-{}",
+            os_name, arch
+        )
+    })?;
+
+    let file = std::fs::File::open(nupkg_path)
+        .map_err(|e| format!("Failed to open downloaded package: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("Failed to open package: {}", e))?;
+    archive
+        .validate_header_consistency()
+        .map_err(|e| format!("Inconsistent package headers: {}", e))?;
+
+    let lib_dir = ort_dir
+        .join(format!("onnxruntime-{}-{}-{}", os_name, arch, ORT_VERSION))
+        .join("lib");
+    std::fs::create_dir_all(&lib_dir)
+        .map_err(|e| format!("Failed to create {}: {}", lib_dir.display(), e))?;
+
+    for name in ort_package_files(lib_name) {
+        let entry_name = format!("runtimes/{}/native/{}", rid, name);
+        let mut entry = archive
+            .by_name(&entry_name)
+            .map_err(|e| format!("Package is missing {}: {}", entry_name, e))?;
+        let dest = lib_dir.join(name);
+        let mut out = std::fs::File::create(&dest)
+            .map_err(|e| format!("Failed to write {}: {}", dest.display(), e))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("Failed to extract {}: {}", entry_name, e))?;
+    }
+
+    Ok(lib_dir.join(lib_name))
 }
 
 /// Check if Chrome or Chromium is available
@@ -597,16 +705,19 @@ fn download_non_interactive_error() -> Result<PathBuf, String> {
     let (_, _, download_url) = get_ort_download_info();
     Err(format!(
         "ONNX Runtime not found and running in non-interactive mode.\n\
-         Download manually: {}\n\
-         Then set: export ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib",
-        download_url
+         Download manually: {} (SHA-256 {})\n\
+         Unzip runtimes/<platform>/native/ from it, then set: \
+         export ORT_DYLIB_PATH=/path/to/{}",
+        download_url,
+        ORT_NUPKG_SHA256,
+        ort_lib_name()
     ))
 }
 
 // coverage(off): #[cfg(not(test))] — this entire function is compiled out during tests;
-// interactive I/O (stdin prompt, curl download, tar extraction) is genuinely untestable.
+// interactive I/O (stdin prompt, curl download) is genuinely untestable.
 // All extractable logic (is_download_consent, find_ort_after_download, get_ort_download_info,
-// download_non_interactive_error) is tested independently.
+// install_ort_from_nupkg, download_non_interactive_error) is tested independently.
 #[cfg(not(test))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn download_onnx_runtime_interactive_impl() -> Result<PathBuf, String> {
@@ -624,12 +735,12 @@ fn download_onnx_runtime_interactive_impl() -> Result<PathBuf, String> {
     eprintln!("║           ONNX Runtime Not Found                                 ║");
     eprintln!("╠══════════════════════════════════════════════════════════════════╣");
     eprintln!("║ ONNX Runtime is required for NER organization extraction.        ║");
-    eprintln!("║ It will be downloaded from Microsoft's official GitHub releases.  ║");
+    eprintln!("║ It will be downloaded from Microsoft's official NuGet package.   ║");
     eprintln!("╚══════════════════════════════════════════════════════════════════╝");
     eprintln!();
     eprintln!("  Platform: {}-{}", os_name, arch);
     eprintln!("  URL: {}", download_url);
-    eprintln!("  Size: ~7-15 MB (compressed)");
+    eprintln!("  Size: ~104 MB (all platforms; only this platform's library is kept)");
     eprintln!();
     eprint!("Download ONNX Runtime now? [Y/n] ");
 
@@ -656,36 +767,34 @@ fn download_onnx_runtime_interactive_impl() -> Result<PathBuf, String> {
 
     eprintln!("  Downloading ONNX Runtime...");
 
-    let tgz_path = ort_dir.join("onnxruntime.tgz");
+    let nupkg_path = ort_dir.join("onnxruntime.nupkg");
     let status = std::process::Command::new("curl")
         .args(["-fSL", "--progress-bar", "-o"])
-        .arg(&tgz_path)
+        .arg(&nupkg_path)
         .arg(&download_url)
         .status()
         .map_err(|e| format!("Failed to run curl: {}", e))?;
 
     if !status.success() {
+        let _ = std::fs::remove_file(&nupkg_path);
         return Err(format!(
-            "Download failed. Try manually: curl -fSL -o onnxruntime.tgz {}",
+            "Download failed. Try manually: curl -fSL -o onnxruntime.nupkg {}",
             download_url
         ));
     }
 
-    eprintln!("  Extracting...");
+    eprintln!("  Verifying and extracting...");
 
-    let status = std::process::Command::new("tar")
-        .args(["-xzf"])
-        .arg(&tgz_path)
-        .arg("-C")
-        .arg(&ort_dir)
-        .status()
-        .map_err(|e| format!("Failed to extract: {}", e))?;
-
-    if !status.success() {
-        return Err("Extraction failed.".to_string());
-    }
-
-    let _ = std::fs::remove_file(&tgz_path);
+    let installed = install_ort_from_nupkg(
+        &nupkg_path,
+        ORT_NUPKG_SHA256,
+        &ort_dir,
+        os_name,
+        arch,
+        lib_name,
+    );
+    let _ = std::fs::remove_file(&nupkg_path);
+    installed?;
 
     let abs_path = find_ort_after_download(&ort_dir, lib_name)?;
     std::env::set_var("ORT_DYLIB_PATH", &abs_path);
@@ -832,18 +941,16 @@ mod tests {
         let (os, arch, url) = get_ort_download_info();
         assert!(!os.is_empty());
         assert!(!arch.is_empty());
-        assert!(url.starts_with("https://github.com/microsoft/onnxruntime/releases/"));
+        assert!(url.starts_with("https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/"));
         assert!(url.contains("1.20.1"));
     }
 
     #[test]
-    fn test_get_ort_download_info_contains_platform() {
+    fn test_get_ort_download_info_platform_has_nuget_rid() {
         let (os_name, arch, url) = get_ort_download_info();
-        // URL should contain both os and arch
-        assert!(url.contains(os_name));
-        assert!(url.contains(arch));
-        // URL should end with .tgz
-        assert!(url.ends_with(".tgz"));
+        // Every platform we build for must map to a runtime folder in the package.
+        assert!(ort_nuget_rid(os_name, arch).is_some());
+        assert!(url.ends_with(".nupkg"));
     }
 
     // ── check_whois ───────────────────────────────────────────────────
@@ -1249,19 +1356,24 @@ mod tests {
     // ── get_ort_download_info additional tests ───────────────────────
 
     #[test]
-    fn test_get_ort_download_info_url_is_tgz() {
+    fn test_get_ort_download_info_url_is_nupkg() {
         let (_, _, url) = get_ort_download_info();
-        assert!(url.ends_with(".tgz"), "URL should end with .tgz: {}", url);
+        assert!(
+            url.ends_with(".nupkg"),
+            "URL should end with .nupkg: {}",
+            url
+        );
     }
 
     #[test]
     fn test_get_ort_download_info_version_1_20_1() {
         let (_, _, url) = get_ort_download_info();
         assert!(
-            url.contains("v1.20.1"),
-            "URL should contain v1.20.1: {}",
+            url.contains("/1.20.1/") && url.ends_with("microsoft.ml.onnxruntime.1.20.1.nupkg"),
+            "URL should pin 1.20.1: {}",
             url
         );
+        assert_eq!(ORT_VERSION, "1.20.1");
     }
 
     #[test]
@@ -1487,8 +1599,8 @@ mod tests {
         let err = result.unwrap_err();
         // Error message should contain the download URL
         assert!(
-            err.contains("https://github.com/microsoft/onnxruntime"),
-            "Error should contain download URL: {}",
+            err.contains("https://api.nuget.org/") && err.contains(ORT_NUPKG_SHA256),
+            "Error should contain download URL and checksum: {}",
             err
         );
         assert!(
@@ -1656,15 +1768,178 @@ mod tests {
 
     #[test]
     fn test_get_ort_download_info_format() {
-        let (os_name, arch, url) = get_ort_download_info();
-        // URL format: https://github.com/.../onnxruntime-{os}-{arch}-1.20.1.tgz
-        let expected_suffix = format!("onnxruntime-{}-{}-1.20.1.tgz", os_name, arch);
-        assert!(
-            url.ends_with(&expected_suffix),
-            "URL should end with {}, got {}",
-            expected_suffix,
-            url
+        let (_, _, url) = get_ort_download_info();
+        assert_eq!(
+            url,
+            "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.20.1/microsoft.ml.onnxruntime.1.20.1.nupkg"
         );
+        assert_eq!(ORT_NUPKG_SHA256.len(), 64);
+        assert!(ORT_NUPKG_SHA256.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // --- ort_nuget_rid / ort_package_files ---
+
+    #[test]
+    fn test_ort_nuget_rid_maps_every_platform() {
+        assert_eq!(ort_nuget_rid("osx", "arm64"), Some("osx-arm64"));
+        assert_eq!(ort_nuget_rid("osx", "x86_64"), Some("osx-x64"));
+        assert_eq!(ort_nuget_rid("win", "x64"), Some("win-x64"));
+        assert_eq!(ort_nuget_rid("linux", "aarch64"), Some("linux-arm64"));
+        assert_eq!(ort_nuget_rid("linux", "x64"), Some("linux-x64"));
+        assert_eq!(ort_nuget_rid("freebsd", "x64"), None);
+    }
+
+    #[test]
+    fn test_ort_package_files_per_platform() {
+        assert_eq!(
+            ort_package_files("onnxruntime.dll"),
+            vec!["onnxruntime.dll", "onnxruntime_providers_shared.dll"]
+        );
+        assert_eq!(
+            ort_package_files("libonnxruntime.dylib"),
+            vec!["libonnxruntime.dylib"]
+        );
+        assert_eq!(
+            ort_package_files("libonnxruntime.so"),
+            vec!["libonnxruntime.so", "libonnxruntime_providers_shared.so"]
+        );
+    }
+
+    // --- install_ort_from_nupkg ---
+
+    fn fake_nupkg(dir: &std::path::Path, entries: &[(&str, &[u8])]) -> (PathBuf, String) {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in entries {
+            writer
+                .start_file(
+                    *name,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(body).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        let path = dir.join("pkg.nupkg");
+        std::fs::write(&path, &bytes).unwrap();
+        (path, hex::encode(Sha256::digest(&bytes)))
+    }
+
+    #[test]
+    fn test_install_ort_from_nupkg_extracts_platform_libs() {
+        let dir = tempdir().unwrap();
+        let (pkg, sha) = fake_nupkg(
+            dir.path(),
+            &[
+                ("runtimes/linux-x64/native/libonnxruntime.so", b"x64 lib"),
+                (
+                    "runtimes/linux-x64/native/libonnxruntime_providers_shared.so",
+                    b"x64 shared",
+                ),
+                ("runtimes/linux-arm64/native/libonnxruntime.so", b"arm lib"),
+            ],
+        );
+        let ort_dir = dir.path().join("onnxruntime");
+        let lib = install_ort_from_nupkg(
+            &pkg,
+            &sha.to_uppercase(),
+            &ort_dir,
+            "linux",
+            "x64",
+            "libonnxruntime.so",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&lib).unwrap(), b"x64 lib");
+        assert!(lib.ends_with("onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so"));
+        assert_eq!(
+            std::fs::read(lib.with_file_name("libonnxruntime_providers_shared.so")).unwrap(),
+            b"x64 shared"
+        );
+        // The existing finder locates what we installed.
+        assert!(find_ort_after_download(&ort_dir, "libonnxruntime.so").is_ok());
+    }
+
+    #[test]
+    fn test_install_ort_from_nupkg_rejects_checksum_mismatch() {
+        let dir = tempdir().unwrap();
+        let (pkg, _) = fake_nupkg(
+            dir.path(),
+            &[("runtimes/osx-arm64/native/libonnxruntime.dylib", b"lib")],
+        );
+        let ort_dir = dir.path().join("onnxruntime");
+        let err = install_ort_from_nupkg(
+            &pkg,
+            ORT_NUPKG_SHA256,
+            &ort_dir,
+            "osx",
+            "arm64",
+            "libonnxruntime.dylib",
+        )
+        .unwrap_err();
+        assert!(err.contains("SHA-256 mismatch"), "{}", err);
+        assert!(!ort_dir.exists(), "nothing should be extracted on mismatch");
+    }
+
+    #[test]
+    fn test_install_ort_from_nupkg_reports_missing_entry() {
+        let dir = tempdir().unwrap();
+        let (pkg, sha) = fake_nupkg(
+            dir.path(),
+            &[("runtimes/win-x64/native/onnxruntime.dll", b"dll")],
+        );
+        let err = install_ort_from_nupkg(
+            &pkg,
+            &sha,
+            &dir.path().join("onnxruntime"),
+            "win",
+            "x64",
+            "onnxruntime.dll",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("runtimes/win-x64/native/onnxruntime_providers_shared.dll"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_install_ort_from_nupkg_rejects_unknown_platform_and_bad_files() {
+        let dir = tempdir().unwrap();
+        let (pkg, sha) = fake_nupkg(dir.path(), &[("x", b"y")]);
+        let ort_dir = dir.path().join("onnxruntime");
+        let err =
+            install_ort_from_nupkg(&pkg, &sha, &ort_dir, "plan9", "mips", "libonnxruntime.so")
+                .unwrap_err();
+        assert!(err.contains("Unsupported platform"), "{}", err);
+
+        let missing = dir.path().join("missing.nupkg");
+        let err = install_ort_from_nupkg(
+            &missing,
+            &sha,
+            &ort_dir,
+            "linux",
+            "x64",
+            "libonnxruntime.so",
+        )
+        .unwrap_err();
+        assert!(err.contains("Failed to read downloaded package"), "{}", err);
+
+        let not_zip = dir.path().join("not.zip");
+        std::fs::write(&not_zip, b"not a zip").unwrap();
+        let not_zip_sha = ort_sha256_file(&not_zip).unwrap();
+        let err = install_ort_from_nupkg(
+            &not_zip,
+            &not_zip_sha,
+            &ort_dir,
+            "linux",
+            "x64",
+            "libonnxruntime.so",
+        )
+        .unwrap_err();
+        assert!(err.contains("Failed to open package"), "{}", err);
     }
 
     // --- check_dependencies: edge case combinations ---
