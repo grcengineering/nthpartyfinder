@@ -52,28 +52,66 @@ esac
 ok "Detected platform: $OS_LABEL / $ARCH_LABEL"
 
 # ── 2. Download ONNX Runtime 1.20.1 ─────────────────────────────────────────
+# The GitHub release tarballs for 1.20.1 now return 404, so we use Microsoft's
+# official Microsoft.ML.OnnxRuntime NuGet package. It is a ZIP holding every
+# platform's native library under runtimes/<rid>/native/, and its digest is
+# fixed, so we pin it. Keep 1.20.x: the ort crate is built against that API.
 ONNX_VERSION="1.20.1"
+ORT_NUPKG_SHA256="9c32108e9a1c78b090a95c2a219f244dd5f067d4caf68fb0f967103f3f20839c"
+ORT_URL="https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ONNX_VERSION}/microsoft.ml.onnxruntime.${ONNX_VERSION}.nupkg"
 
 case "$OS" in
   Darwin)
     case "$ARCH" in
-      arm64|aarch64) ORT_SLUG="osx-arm64" ;;
-      x86_64)        ORT_SLUG="osx-x86_64" ;;
+      arm64|aarch64) ORT_RID="osx-arm64" ;;
+      x86_64)        ORT_RID="osx-x64" ;;
     esac
+    ORT_FILES="libonnxruntime.dylib"
     ;;
   Linux)
     case "$ARCH" in
-      aarch64|arm64) ORT_SLUG="linux-aarch64" ;;
-      x86_64)        ORT_SLUG="linux-x64" ;;
+      aarch64|arm64) ORT_RID="linux-arm64" ;;
+      x86_64)        ORT_RID="linux-x64" ;;
     esac
+    ORT_FILES="libonnxruntime.so libonnxruntime_providers_shared.so"
     ;;
 esac
 
-ORT_TARBALL="onnxruntime-${ORT_SLUG}-${ONNX_VERSION}.tgz"
-ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/${ORT_TARBALL}"
 ORT_DEST="${PROJECT_DIR}/onnxruntime"
 
-info "ONNX Runtime v${ONNX_VERSION} (${ORT_SLUG})"
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+install_ort() {
+  local tmp="$1"
+  local pkg="${tmp}/onnxruntime.nupkg"
+  if ! command -v unzip >/dev/null 2>&1; then
+    err "unzip is needed to unpack ONNX Runtime (e.g. sudo apt-get install unzip)"
+    return 1
+  fi
+  curl -fSL --progress-bar -o "$pkg" "$ORT_URL" || { err "Download failed"; return 1; }
+  local actual
+  actual="$(sha256_of "$pkg")" || { err "No sha256sum or shasum found to verify the download"; return 1; }
+  if [ "$actual" != "$ORT_NUPKG_SHA256" ]; then
+    err "Checksum mismatch (expected ${ORT_NUPKG_SHA256}, got ${actual}); not installing"
+    return 1
+  fi
+  local entries=()
+  for f in $ORT_FILES; do entries+=("runtimes/${ORT_RID}/native/${f}"); done
+  mkdir -p "${tmp}/x"
+  unzip -q -j "$pkg" "${entries[@]}" -d "${tmp}/x" || { err "Could not unpack ${ORT_RID} libraries"; return 1; }
+  mkdir -p "${ORT_DEST}/lib"
+  for f in $ORT_FILES; do mv "${tmp}/x/${f}" "${ORT_DEST}/lib/${f}"; done
+}
+
+info "ONNX Runtime v${ONNX_VERSION} (${ORT_RID})"
 
 if [ -d "$ORT_DEST" ] && [ -n "$(ls -A "$ORT_DEST" 2>/dev/null)" ]; then
   ok "ONNX Runtime already present at ${ORT_DEST}"
@@ -81,15 +119,13 @@ if [ -d "$ORT_DEST" ] && [ -n "$(ls -A "$ORT_DEST" 2>/dev/null)" ]; then
 else
   info "Downloading from ${ORT_URL} ..."
   TMPDIR_ORT="$(mktemp -d)"
-  if curl -fSL --progress-bar -o "${TMPDIR_ORT}/${ORT_TARBALL}" "$ORT_URL"; then
-    mkdir -p "$ORT_DEST"
-    tar xzf "${TMPDIR_ORT}/${ORT_TARBALL}" -C "$ORT_DEST" --strip-components=1
+  if install_ort "$TMPDIR_ORT"; then
     rm -rf "$TMPDIR_ORT"
-    ok "ONNX Runtime extracted to ${ORT_DEST}"
+    ok "ONNX Runtime verified and extracted to ${ORT_DEST}"
     SUMMARY_OK+=("ONNX Runtime")
   else
     rm -rf "$TMPDIR_ORT"
-    err "Failed to download ONNX Runtime"
+    err "Failed to install ONNX Runtime"
     SUMMARY_ERR+=("ONNX Runtime download failed")
   fi
 fi
