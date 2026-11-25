@@ -759,6 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn test_read_results_flushed_unfinished_frame() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unfinished.jsonl.zst");
+        let expected = vec![
+            make_test_result("first.example", 1),
+            make_test_result("unicode-例.example", 2),
+        ];
+        let mut sink = ResultSink::with_path(&path).unwrap();
+        sink.append_batch(&expected).unwrap();
+        sink.flush().unwrap();
+
+        // Outstanding references and checkpoint recovery read a flushed sink
+        // before its encoder can be finalized with drain_all().
+        let recovered = ResultSink::read_results(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&recovered).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+    }
+
+    #[test]
     fn test_read_results_truncated_zstd_frame() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("truncated.jsonl.zst");

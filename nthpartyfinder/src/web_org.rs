@@ -1225,11 +1225,7 @@ fn is_valid_org_name(name: &str) -> bool {
     ];
 
     let name_lower = name.to_lowercase();
-    if invalid_names.iter().any(|inv| name_lower == *inv) {
-        return false;
-    }
-
-    true
+    !invalid_names.iter().any(|inv| name_lower == *inv)
 }
 
 /// Check if a string looks like a page name rather than an org name
