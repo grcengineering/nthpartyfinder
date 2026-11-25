@@ -45,10 +45,25 @@ RUN strip target/release/nthpartyfinder
 # -----------------------------------------------------------------------------
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:7e62cecd3c5712dba6e52c5260afb8f9d7a23b9bbcdd26ad7508a811e74b766d AS onnx-dl
 USER root
-RUN apk add curl && \
-    curl -fsSL -o /tmp/onnxruntime.tgz \
-      "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz" && \
-    tar -xzf /tmp/onnxruntime.tgz -C /tmp/
+# The GitHub release tarball for v1.20.1 now returns 404, so pull the same
+# 1.20.1 build from Microsoft's official NuGet package instead, pinned by
+# SHA-256 (matches the SHA-512 NuGet publishes for this package). ort
+# 2.0.0-rc.9 targets the 1.20 API, so the version must stay 1.20.x. Files are
+# laid out exactly as the old tarball did, so the runtime stage is unchanged.
+ARG ORT_VERSION=1.20.1
+ARG ORT_NUPKG_SHA256=9c32108e9a1c78b090a95c2a219f244dd5f067d4caf68fb0f967103f3f20839c
+RUN apk add curl unzip && \
+    curl -fsSL -o /tmp/onnxruntime.nupkg \
+      "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/${ORT_VERSION}/microsoft.ml.onnxruntime.${ORT_VERSION}.nupkg" && \
+    echo "${ORT_NUPKG_SHA256}  /tmp/onnxruntime.nupkg" | sha256sum -c - && \
+    unzip -j /tmp/onnxruntime.nupkg \
+      runtimes/linux-x64/native/libonnxruntime.so \
+      runtimes/linux-x64/native/libonnxruntime_providers_shared.so \
+      -d /tmp/ort && \
+    mkdir -p /tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib && \
+    mv /tmp/ort/libonnxruntime.so /tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} && \
+    mv /tmp/ort/libonnxruntime_providers_shared.so /tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/ && \
+    rm -rf /tmp/onnxruntime.nupkg /tmp/ort
 
 # -----------------------------------------------------------------------------
 # Stage 3: Download subfinder (Chainguard hardened base)
